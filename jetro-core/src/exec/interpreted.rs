@@ -268,7 +268,23 @@ impl ExecCtx<'_> {
                     Ok(None) => return None,
                     Err(err) => return Some(Err(err)),
                 };
-                Some(structural.run(index, bytes))
+                // Only `StructuralPlan::DeepMatch` needs VM access for
+                // per-candidate guard / body programs; for the other
+                // variants we keep the VM-free entry so existing
+                // tests (which assert that `root_val` stays unmaterialised)
+                // are unaffected.
+                if matches!(structural, crate::exec::structural::StructuralPlan::DeepMatch { .. })
+                {
+                    let env = match self.take_env() {
+                        Ok(e) => e,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let result = structural.run_with_vm(index, bytes, &mut self.vm, &env);
+                    self.env = Some(env);
+                    Some(result)
+                } else {
+                    Some(structural.run(index, bytes))
+                }
             }
             (
                 BackendPreference::TapeView

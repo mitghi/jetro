@@ -214,6 +214,22 @@ $.cart.items.filter(qty == 0).delete()
 patch $ { .user.active: true }
 ```
 
+### Pattern Match
+
+```text
+match $.user with {
+    {role: "admin"}                    -> "full",
+    {role: "user", verified: true}     -> "limited",
+    {role: r, ...*rest}                -> {...*rest, role: r},
+    _                                  -> "denied"
+}
+
+$..match {
+    {tag: "click", id: i} -> i,
+    _                     -> false
+}
+```
+
 Full syntax reference: [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md)
 
 ## Examples
@@ -252,6 +268,19 @@ let result = jetro.collect("$..price")?;
 
 ```rust
 let result = jetro.collect("$.user.name.set('Ada')")?;
+```
+
+### Pattern match
+
+```rust
+let result = jetro.collect(r#"
+$.events.map(match @ with {
+    {tag: "view",  path: p}  -> {sort: "view",  v: p},
+    {tag: "click", id: i}    -> {sort: "click", v: i},
+    {tag: "error", code: c}  -> {sort: "error", v: c},
+    _                        -> {sort: "other"}
+})
+"#)?;
 ```
 
 ## Execution Model

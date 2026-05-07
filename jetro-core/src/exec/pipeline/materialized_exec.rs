@@ -22,7 +22,7 @@ use super::{
 };
 
 use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
-use crate::parse::chain_ir::PullDemand;
+use crate::plan::demand::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
 pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {
@@ -225,7 +225,8 @@ where
             }
         }
 
-        if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_)) {
+        if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
+        {
             return Ok(item);
         }
 
@@ -277,7 +278,7 @@ fn apply_adapter_materialized(
             stage,
             strategy,
         };
-        use crate::builtins::{BuiltinMethod as M, builtin::Builtin, defs};
+        use crate::builtins::{builtin::Builtin, defs, BuiltinMethod as M};
         let trait_result = match method {
             M::Reverse => <defs::Reverse as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::Sort => <defs::Sort as Builtin>::apply_barrier(&mut ctx, buf, body),
@@ -301,8 +302,12 @@ fn apply_adapter_materialized(
             M::IndicesWhere => <defs::IndicesWhere as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::MinBy => <defs::MinBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::TransformKeys => <defs::TransformKeys as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::TransformValues => <defs::TransformValues as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::TransformKeys => {
+                <defs::TransformKeys as Builtin>::apply_barrier(&mut ctx, buf, body)
+            }
+            M::TransformValues => {
+                <defs::TransformValues as Builtin>::apply_barrier(&mut ctx, buf, body)
+            }
             M::FilterKeys => <defs::FilterKeys as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::FilterValues => <defs::FilterValues as Builtin>::apply_barrier(&mut ctx, buf, body),
             _ => None,
@@ -314,6 +319,16 @@ fn apply_adapter_materialized(
     // Remaining barrier dispatch by Stage variant — all other variants are handled
     // above by Builtin::apply_barrier trait dispatch and never reach this point.
     match stage {
+        Stage::Builtin(call) if call.method == BuiltinMethod::Compact => {
+            buf.retain(|v| !matches!(v, Val::Null));
+            Some(Ok(()))
+        }
+        Stage::Builtin(call) if call.method == BuiltinMethod::Remove => {
+            if let crate::builtins::BuiltinArgs::Val(target) = &call.args {
+                buf.retain(|v| !crate::util::vals_eq(v, target));
+            }
+            Some(Ok(()))
+        }
         // Element-wise scalar (Slice, Replace, ReplaceAll, BuiltinCall::apply).
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());
@@ -399,7 +414,6 @@ fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
         }
     }
 }
-
 
 impl Iterator for LegacyPreIter {
     type Item = Val;

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step};
+use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step};
 
 use super::{BodyKernel, ReducerOp, Sink, Stage};
 
@@ -545,6 +545,17 @@ fn substitute_current(expr: &Expr, replacement: &Expr) -> Expr {
         | Expr::Root
         | Expr::Ident(_)
         | Expr::DeleteMark => expr.clone(),
+        Expr::Match { scrutinee, arms } => Expr::Match {
+            scrutinee: Box::new(substitute_current(scrutinee, replacement)),
+            arms: arms
+                .iter()
+                .map(|a| MatchArm {
+                    pat: a.pat.clone(),
+                    guard: a.guard.as_ref().map(|g| substitute_current(g, replacement)),
+                    body: substitute_current(&a.body, replacement),
+                })
+                .collect(),
+        },
         Expr::FString(parts) => Expr::FString(
             parts
                 .iter()
@@ -767,6 +778,9 @@ fn substitute_current_path_step(step: &PathStep, replacement: &Expr) -> PathStep
 fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Patch { .. } | Expr::DeleteMark => false,
+        // Match runtime not yet implemented; treat as impure for symbolic purposes
+        // until the dedicated dispatch path lands in P2.
+        Expr::Match { .. } => false,
         Expr::Lambda { body, .. } => is_pure_expr(body),
         Expr::GlobalCall { .. } => false,
         Expr::Chain(base, steps) => {

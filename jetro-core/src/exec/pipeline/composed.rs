@@ -12,12 +12,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
-use crate::parse::chain_ir::PullDemand;
-use crate::exec::composed as cmp;
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
+use crate::exec::composed as cmp;
+use crate::plan::demand::PullDemand;
 use crate::vm::Program;
 
+use super::ir::program_match_only;
 use super::{
     compute_strategies_with_kernels, ordered_by_key_cmp, row_source, BodyKernel, Pipeline, Sink,
     Source, Stage, StageStrategy,
@@ -87,15 +88,49 @@ impl<'a> ComposedStageBuilder<'a> {
             ) => Box::new(cmp::Skip {
                 remaining: Cell::new(*value),
             }),
+            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Compact => {
+                Box::new(cmp::CompactFilterStage)
+            }
+            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Remove => {
+                match &call.args {
+                    crate::builtins::BuiltinArgs::Val(target) => {
+                        Box::new(cmp::RemoveValueFilterStage::new(target.clone()))
+                    }
+                    _ => return None,
+                }
+            }
             (Stage::Builtin(call), _) => Box::new(cmp::BuiltinStage::new(call.clone())),
-            (Stage::Filter(p, _), _) => Box::new(cmp::GenericFilter {
-                prog: Arc::clone(p),
-                ctx: self.vm_ctx(),
-            }),
-            (Stage::Map(p, _), _) => Box::new(cmp::GenericMap {
-                prog: Arc::clone(p),
-                ctx: self.vm_ctx(),
-            }),
+            // When a filter / map body is a single `match` expression we
+            // dispatch directly into the flat-IR runtime, skipping VM
+            // stack and opcode-dispatch overhead per row. The detector
+            // accepts a leading `SetCurrent`/`PushCurrent` from lambda
+            // binding so `.filter(match @ with {...})` matches.
+            (Stage::Filter(p, _), _) => {
+                if let Some(cm) = program_match_only(p) {
+                    Box::new(cmp::MatchFilter {
+                        cm,
+                        ctx: self.vm_ctx(),
+                    })
+                } else {
+                    Box::new(cmp::GenericFilter {
+                        prog: Arc::clone(p),
+                        ctx: self.vm_ctx(),
+                    })
+                }
+            }
+            (Stage::Map(p, _), _) => {
+                if let Some(cm) = program_match_only(p) {
+                    Box::new(cmp::MatchMap {
+                        cm,
+                        ctx: self.vm_ctx(),
+                    })
+                } else {
+                    Box::new(cmp::GenericMap {
+                        prog: Arc::clone(p),
+                        ctx: self.vm_ctx(),
+                    })
+                }
+            }
             (Stage::FlatMap(p, _), _) => Box::new(cmp::GenericFlatMap {
                 prog: Arc::clone(p),
                 ctx: self.vm_ctx(),
@@ -111,7 +146,9 @@ impl<'a> ComposedStageBuilder<'a> {
         kernel: &BodyKernel,
     ) -> Box<dyn cmp::Stage> {
         match kernel {
-            BodyKernel::FieldCmpLit(field, op, lit) if matches!(op, crate::parse::ast::BinOp::Eq) => {
+            BodyKernel::FieldCmpLit(field, op, lit)
+                if matches!(op, crate::parse::ast::BinOp::Eq) =>
+            {
                 Box::new(cmp::FilterFieldEqLit {
                     field: Arc::clone(field),
                     target: lit.clone(),
@@ -319,12 +356,7 @@ macro_rules! run_composed_owned_sink {
 }
 
 /// Runs `chain` over `rows`, collecting into the sink; returns `None` for `ApproxCountDistinct`.
-fn run_sink(
-    sink: &Sink,
-    rows: &[Val],
-    chain: &dyn cmp::Stage,
-    demand: PullDemand,
-) -> Option<Val> {
+fn run_sink(sink: &Sink, rows: &[Val], chain: &dyn cmp::Stage, demand: PullDemand) -> Option<Val> {
     let out = match sink {
         Sink::Collect => cmp::run_pipeline_with_demand::<cmp::CollectSink>(rows, chain, demand),
         Sink::Nth(idx) => cmp::run_pipeline_nth_with_demand(rows, chain, demand, *idx),
@@ -446,7 +478,12 @@ pub(super) fn run(
         last_split = i + 1;
     }
 
-    let chain = build_chain(stages_ref, kernels, last_split..stages_ref.len(), &stage_builder)?;
+    let chain = build_chain(
+        stages_ref,
+        kernels,
+        last_split..stages_ref.len(),
+        &stage_builder,
+    )?;
     let final_demand = Pipeline::segment_source_demand(&stages_ref[last_split..], &eff_sink)
         .chain
         .pull;

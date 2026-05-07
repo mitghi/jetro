@@ -1258,6 +1258,62 @@ impl VM {
                 Opcode::DeleteMarkErr => {
                     return err!("DELETE: only valid inside a patch-field value");
                 }
+                Opcode::DeepMatchAll(cm) => {
+                    let recv = pop!(stack);
+                    let mut all_descendants: Vec<Val> = Vec::new();
+                    collect_all_inclusive(&recv, &mut all_descendants);
+                    let mut out: Vec<Val> = Vec::new();
+                    for desc in &all_descendants {
+                        // Pre-filter via the compile-time shape summary:
+                        // descendants whose runtime kind cannot satisfy
+                        // any arm are skipped without paying for the
+                        // full pattern walk.
+                        if !shape_summary_admits(&cm.shape_summary, desc) {
+                            continue;
+                        }
+                        match self.exec_match(cm, desc, env) {
+                            Ok(v) if crate::util::is_truthy(&v) => out.push(v),
+                            Ok(_) => {}
+                            Err(_) => {}
+                        }
+                    }
+                    stack.push(Val::arr(out));
+                }
+                Opcode::DeepMatchFirst(cm) => {
+                    let recv = pop!(stack);
+                    let mut all_descendants: Vec<Val> = Vec::new();
+                    collect_all_inclusive(&recv, &mut all_descendants);
+                    let mut found: Option<Val> = None;
+                    for desc in &all_descendants {
+                        if !shape_summary_admits(&cm.shape_summary, desc) {
+                            continue;
+                        }
+                        if let Ok(v) = self.exec_match(cm, desc, env) {
+                            if crate::util::is_truthy(&v) {
+                                found = Some(v);
+                                break;
+                            }
+                        }
+                    }
+                    stack.push(found.unwrap_or(Val::Null));
+                }
+                Opcode::Match(cm) => {
+                    // Resolve the scrutinee under whichever strategy the
+                    // compiler chose. `Current` and `Root` skip VM re-entry
+                    // by reading the env directly; `Program` falls back to
+                    // a recursive `exec` call.
+                    let scrutinee_holder;
+                    let scrutinee_ref: &Val = match &cm.scrutinee {
+                        crate::vm::MatchScrutinee::Current => &env.current,
+                        crate::vm::MatchScrutinee::Root => &env.root,
+                        crate::vm::MatchScrutinee::Program(prog) => {
+                            scrutinee_holder = self.exec(prog, env)?;
+                            &scrutinee_holder
+                        }
+                    };
+                    let result = self.exec_match(cm, scrutinee_ref, env)?;
+                    stack.push(result);
+                }
             }
         }
 
@@ -1620,16 +1676,18 @@ impl VM {
         env: &Env,
     ) -> Result<Val, EvalError> {
         let sub = call.sub_progs.first();
-        
-        
+        let sub_kernel = call.sub_kernels.first();
+        let no_op_kernel = crate::exec::pipeline::BodyKernel::Generic;
+        let kernel0 = sub_kernel.unwrap_or(&no_op_kernel);
+
         let lam_param: Option<&str> = match call.orig_args.first() {
             Some(Arg::Pos(Expr::Lambda { params, .. })) if !params.is_empty() => {
                 Some(params[0].as_str())
             }
             _ => None,
         };
-        
-        
+
+
         let mut scratch = env.clone();
 
         match call.method {
@@ -1640,7 +1698,7 @@ impl VM {
                     .ok_or_else(|| EvalError("filter: expected array".into()))?;
                 let out =
                     crate::builtins::filter_apply_bounded(items, call.demand_max_keep, |item| {
-                        self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
+                        self.exec_lam_body_kernel(pred, kernel0, item, lam_param, &mut scratch)
                     })?;
                 Ok(Val::arr(out))
             }
@@ -1651,7 +1709,7 @@ impl VM {
                     .ok_or_else(|| EvalError("map: expected array".into()))?;
                 let out =
                     crate::builtins::map_apply_bounded(items, call.demand_max_keep, |item| {
-                        self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                        self.exec_lam_body_kernel(mapper, kernel0, item, lam_param, &mut scratch)
                     })?;
                 Ok(Val::arr(out))
             }
@@ -1661,7 +1719,7 @@ impl VM {
                     .into_vec()
                     .ok_or_else(|| EvalError("flatMap: expected array".into()))?;
                 let out = crate::builtins::flat_map_apply(items, |item| {
-                    self.exec_lam_body_scratch(mapper, item, lam_param, &mut scratch)
+                    self.exec_lam_body_kernel(mapper, kernel0, item, lam_param, &mut scratch)
                 })?;
                 Ok(Val::arr(out))
             }
@@ -1709,7 +1767,7 @@ impl VM {
                     let pred = sub.ok_or_else(|| EvalError("any: requires predicate".into()))?;
                     for item in a.iter() {
                         if crate::builtins::any_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             return Ok(Val::Bool(true));
                         }
@@ -1727,7 +1785,7 @@ impl VM {
                     let pred = sub.ok_or_else(|| EvalError("all: requires predicate".into()))?;
                     for item in a.iter() {
                         if !crate::builtins::all_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             return Ok(Val::Bool(false));
                         }
@@ -1743,7 +1801,7 @@ impl VM {
                     let mut n: i64 = 0;
                     for item in a.iter() {
                         if crate::builtins::filter_one(item, |v| {
-                            self.exec_lam_body_scratch(pred, v, lam_param, &mut scratch)
+                            self.exec_lam_body_kernel(pred, kernel0, v, lam_param, &mut scratch)
                         })? {
                             n += 1;
                         }
@@ -2626,6 +2684,55 @@ impl VM {
         r
     }
 
+    /// Like `exec_lam_body_scratch` but consults a pre-classified
+    /// `BodyKernel`. When the kernel is non-`Generic` and the lambda
+    /// has no named parameter, the body is evaluated through native
+    /// Rust kernels (no VM stack init, no opcode dispatch). Used by
+    /// the per-element loops of `.any` / `.all` / `.find` / `.count`
+    /// / etc. so simple-predicate lambdas (the common case) avoid
+    /// VM re-entry per iteration.
+    fn exec_lam_body_kernel(
+        &mut self,
+        prog: &Program,
+        kernel: &crate::exec::pipeline::BodyKernel,
+        item: &Val,
+        lam_param: Option<&str>,
+        scratch: &mut Env,
+    ) -> Result<Val, EvalError> {
+        use crate::exec::pipeline::{eval_kernel, BodyKernel};
+        // The kernel path treats `item` as `@` and resolves bare names
+        // as fields on it. That is only safe when:
+        //   - the lambda has no named parameter (the kernel always
+        //     reads `@`, not a per-call binding),
+        //   - the env has no let-bindings (otherwise a let-shadowed
+        //     name would be silently rerouted to a field read), and
+        //   - the program does not begin with `LoadIdent` — that
+        //     opcode dispatches to a no-arg builtin when the current
+        //     value is array/string and the ident matches a builtin
+        //     name (e.g. `.map(len)` invokes `len` as a builtin), a
+        //     dispatch the kernel form drops on the floor.
+        let starts_with_load_ident = matches!(
+            prog.ops.first(),
+            Some(crate::vm::Opcode::LoadIdent(_))
+        );
+        if lam_param.is_none()
+            && scratch.has_no_vars()
+            && !starts_with_load_ident
+            && !matches!(kernel, BodyKernel::Generic)
+        {
+            return eval_kernel(kernel, item, |fallback_item| {
+                let frame = scratch.push_lam(None, fallback_item.clone());
+                let result = self.exec(prog, scratch);
+                scratch.pop_lam(frame);
+                result
+            });
+        }
+        let frame = scratch.push_lam(lam_param, item.clone());
+        let r = self.exec(prog, scratch);
+        scratch.pop_lam(frame);
+        r
+    }
+
     /// Build an object `Val` from a slice of compiled field entries, handling all
     /// variants: `Short`, `Kv`, `KvPath`, `Dynamic`, `Spread`, and `SpreadDeep`.
     fn exec_make_obj(&mut self, entries: &[CompiledObjEntry], env: &Env) -> Result<Val, EvalError> {
@@ -2816,6 +2923,466 @@ impl VM {
             other => Ok(vec![other]),
         }
     }
+
+    /// Evaluate a compiled `match` expression by walking the flat
+    /// `MatchOp` instruction stream produced by the compiler. Slot 0 holds
+    /// the scrutinee; pattern tests project sub-values into successive
+    /// slots, and bindings are accumulated into a per-arm stack until a
+    /// `Body` op terminates the loop. A failed test jumps to the start of
+    /// the next arm; the trailing `Fail` op raises a non-exhaustive error.
+    pub(crate) fn exec_match(
+        &mut self,
+        cm: &CompiledMatch,
+        scrutinee: &Val,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        let total = (cm.max_slots as usize).max(1);
+        let mut slots: SmallVec<[Val; 8]> = SmallVec::with_capacity(total);
+        slots.resize(total, Val::Null);
+        slots[0] = scrutinee.clone();
+        let mut bindings: SmallVec<[(Arc<str>, Val); 8]> = SmallVec::new();
+        let mut pc: u32 = 0;
+        let ops = &cm.ops;
+        loop {
+            let op = &ops[pc as usize];
+            match op {
+                MatchOp::ResetArm {
+                    slots: _,
+                    keep_above,
+                } => {
+                    bindings.clear();
+                    // Preserve slots [0..keep_above); zero everything from
+                    // `keep_above` onwards so residue from a missed arm
+                    // does not leak into this one. `keep_above >= 1`
+                    // always — slot 0 (scrutinee) is invariant. The slot
+                    // vector itself was pre-sized at the top of
+                    // `exec_match` from `cm.max_slots`, so no growth is
+                    // needed here.
+                    let keep = (*keep_above as usize).max(1);
+                    for s in slots.iter_mut().skip(keep) {
+                        *s = Val::Null;
+                    }
+                    pc += 1;
+                }
+                MatchOp::KindCheck { slot, kind, else_pc } => {
+                    if val_matches_kind(&slots[*slot as usize], *kind) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LitEq { slot, lit, else_pc } => {
+                    if match_pat_lit(&cm.lits[*lit as usize], &slots[*slot as usize]) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::RangeCheck {
+                    slot,
+                    lo,
+                    hi,
+                    inclusive,
+                    else_pc,
+                } => {
+                    let ok = val_to_f64(&slots[*slot as usize])
+                        .is_some_and(|n| range_contains(*lo, *hi, *inclusive, n));
+                    if ok {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::ObjCheck { slot, else_pc } => {
+                    if matches!(
+                        &slots[*slot as usize],
+                        Val::Obj(_) | Val::ObjSmall(_)
+                    ) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LoadField {
+                    src,
+                    key,
+                    dst,
+                    else_pc,
+                } => {
+                    match obj_like_get(&slots[*src as usize], key.as_ref()) {
+                        Some(v) => {
+                            slots[*dst as usize] = v;
+                            pc += 1;
+                        }
+                        None => pc = *else_pc,
+                    }
+                }
+                MatchOp::LenCheck {
+                    slot,
+                    len,
+                    exact,
+                    else_pc,
+                } => {
+                    let arr_len = match arr_like_len(&slots[*slot as usize]) {
+                        Some(n) => n,
+                        None => {
+                            pc = *else_pc;
+                            continue;
+                        }
+                    };
+                    let want = *len as usize;
+                    let ok = if *exact { arr_len == want } else { arr_len >= want };
+                    if ok {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::LoadIndex { src, idx, dst } => {
+                    slots[*dst as usize] = arr_like_get(&slots[*src as usize], *idx as usize);
+                    pc += 1;
+                }
+                MatchOp::LoadTail { src, from, dst } => {
+                    let len = arr_like_len(&slots[*src as usize]).unwrap_or(0);
+                    let from_idx = *from as usize;
+                    let mut tail: Vec<Val> = Vec::with_capacity(len.saturating_sub(from_idx));
+                    for i in from_idx..len {
+                        tail.push(arr_like_get(&slots[*src as usize], i));
+                    }
+                    slots[*dst as usize] = Val::arr(tail);
+                    pc += 1;
+                }
+                MatchOp::LoadObjRest {
+                    src,
+                    listed_keys,
+                    dst,
+                } => {
+                    let listed: Vec<&str> = listed_keys.iter().map(|k| k.as_ref()).collect();
+                    slots[*dst as usize] = build_obj_rest(&slots[*src as usize], &listed);
+                    pc += 1;
+                }
+                MatchOp::TestSubPat { slot, subpat, else_pc } => {
+                    let saved = bindings.len();
+                    let mut tmp: Vec<(Arc<str>, Val)> = Vec::new();
+                    let ok = match_pat(
+                        &cm.subpats[*subpat as usize],
+                        &slots[*slot as usize],
+                        &mut tmp,
+                    );
+                    if ok {
+                        for b in tmp {
+                            bindings.push(b);
+                        }
+                        pc += 1;
+                    } else {
+                        bindings.truncate(saved);
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::Bind { name, slot } => {
+                    bindings.push((Arc::clone(name), slots[*slot as usize].clone()));
+                    pc += 1;
+                }
+                MatchOp::Guard { prog, else_pc } => {
+                    let arm_env = build_arm_env(env, &bindings);
+                    let g = self.exec(&cm.guards[*prog as usize], &arm_env)?;
+                    if crate::util::is_truthy(&g) {
+                        pc += 1;
+                    } else {
+                        pc = *else_pc;
+                    }
+                }
+                MatchOp::Body { prog } => {
+                    let arm_env = build_arm_env(env, &bindings);
+                    return self.exec(&cm.bodies[*prog as usize], &arm_env);
+                }
+                MatchOp::Fail => {
+                    return Err(EvalError(format!(
+                        "match: no arm matched {} value {}",
+                        kind_label(scrutinee),
+                        snippet_for_error(scrutinee),
+                    )));
+                }
+                MatchOp::Jump { target_pc } => {
+                    pc = *target_pc;
+                }
+            }
+        }
+    }
+}
+
+/// Build the body / guard environment for a match arm by extending `env`
+/// with every binding the arm has accumulated so far. Bindings later in
+/// the list shadow earlier ones, matching let-style scoping.
+fn build_arm_env(env: &Env, bindings: &[(Arc<str>, Val)]) -> Env {
+    bindings
+        .iter()
+        .fold(env.clone(), |e, (n, v)| e.with_var(n.as_ref(), v.clone()))
+}
+
+/// Render a short, single-line snippet of `val` suitable for inclusion in
+/// a non-exhaustive-match error message. Long compound values are
+/// truncated so the error stays scannable.
+fn snippet_for_error(val: &Val) -> String {
+    const MAX_LEN: usize = 80;
+    let mut s = match val {
+        Val::Null => "null".to_string(),
+        Val::Bool(b) => b.to_string(),
+        Val::Int(n) => n.to_string(),
+        Val::Float(f) => f.to_string(),
+        Val::Str(s) => format!("{:?}", s.as_ref()),
+        Val::StrSlice(r) => format!("{:?}", r.as_ref()),
+        Val::Arr(_)
+        | Val::IntVec(_)
+        | Val::FloatVec(_)
+        | Val::StrVec(_)
+        | Val::StrSliceVec(_)
+        | Val::ObjVec(_) => "[…]".to_string(),
+        Val::Obj(_) | Val::ObjSmall(_) => "{…}".to_string(),
+    };
+    if s.len() > MAX_LEN {
+        s.truncate(MAX_LEN);
+        s.push('…');
+    }
+    s
+}
+
+/// Short type-tag string used in `match` non-exhaustive errors.
+fn kind_label(v: &Val) -> &'static str {
+    match v {
+        Val::Null => "null",
+        Val::Bool(_) => "bool",
+        Val::Int(_) => "int",
+        Val::Float(_) => "float",
+        Val::Str(_) | Val::StrSlice(_) | Val::StrVec(_) | Val::StrSliceVec(_) => "string",
+        Val::Arr(_) | Val::IntVec(_) | Val::FloatVec(_) | Val::ObjVec(_) => "array",
+        Val::Obj(_) | Val::ObjSmall(_) => "object",
+    }
+}
+
+/// Try to match `pat` against `val`, recording any captured names in `out`.
+/// Returns `true` on success and `false` on failure. On failure, callers
+/// must discard `out` (it may contain partial bindings from a sub-pattern
+/// that succeeded before the overall match failed).
+fn match_pat(pat: &Pat, val: &Val, out: &mut Vec<(Arc<str>, Val)>) -> bool {
+    match pat {
+        Pat::Wild => true,
+        Pat::Bind(name) => {
+            out.push((Arc::from(name.as_str()), val.clone()));
+            true
+        }
+        Pat::Lit(lit) => match_pat_lit(lit, val),
+        Pat::Or(alts) => {
+            let saved_len = out.len();
+            for alt in alts {
+                if match_pat(alt, val, out) {
+                    return true;
+                }
+                out.truncate(saved_len);
+            }
+            false
+        }
+        Pat::Range { lo, hi, inclusive } => match val_to_f64(val) {
+            Some(n) if range_contains(*lo, *hi, *inclusive, n) => true,
+            _ => false,
+        },
+        Pat::Kind { name, kind } => {
+            if !val_matches_kind(val, *kind) {
+                return false;
+            }
+            if let Some(n) = name.as_deref() {
+                out.push((Arc::from(n), val.clone()));
+            }
+            true
+        }
+        Pat::Obj { fields, rest } => {
+            if !matches!(val, Val::Obj(_) | Val::ObjSmall(_)) {
+                return false;
+            }
+            let saved_len = out.len();
+            for (key, sub_pat) in fields {
+                let Some(sub_val) = obj_like_get(val, key.as_str()) else {
+                    out.truncate(saved_len);
+                    return false;
+                };
+                if !match_pat(sub_pat, &sub_val, out) {
+                    out.truncate(saved_len);
+                    return false;
+                }
+            }
+            // Named `...rest` rest binding captures every key not
+            // already covered by the explicit field list.
+            if let Some(Some(rest_name)) = rest {
+                let listed: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let rest_obj = build_obj_rest(val, &listed);
+                out.push((Arc::from(rest_name.as_str()), rest_obj));
+            }
+            true
+        }
+        Pat::Arr { elems, rest } => {
+            let Some(arr_len) = arr_like_len(val) else {
+                return false;
+            };
+            let saved_len = out.len();
+            let prefix = elems.len();
+            match rest {
+                Some(_) => {
+                    if arr_len < prefix {
+                        return false;
+                    }
+                }
+                None => {
+                    if arr_len != prefix {
+                        return false;
+                    }
+                }
+            }
+            for (i, sub_pat) in elems.iter().enumerate() {
+                let item = arr_like_get(val, i);
+                if !match_pat(sub_pat, &item, out) {
+                    out.truncate(saved_len);
+                    return false;
+                }
+            }
+            if let Some(rest_name) = rest.as_ref().and_then(|n| n.as_deref()) {
+                let tail: Vec<Val> = (prefix..arr_len).map(|i| arr_like_get(val, i)).collect();
+                out.push((Arc::from(rest_name), Val::arr(tail)));
+            }
+            true
+        }
+    }
+}
+
+/// Return the element count of any array-like `Val` (the materialised
+/// `Arr` form, the columnar primitive vectors, and the row-vector
+/// `ObjVec`), or `None` for non-array values.
+fn arr_like_len(val: &Val) -> Option<usize> {
+    match val {
+        Val::Arr(a) => Some(a.len()),
+        Val::IntVec(v) => Some(v.len()),
+        Val::FloatVec(v) => Some(v.len()),
+        Val::StrVec(v) => Some(v.len()),
+        Val::StrSliceVec(v) => Some(v.len()),
+        Val::ObjVec(d) => Some(d.nrows()),
+        _ => None,
+    }
+}
+
+/// Project the `i`-th element of an array-like `Val` into a freshly
+/// constructed `Val`. Caller must guarantee `i < arr_like_len(val)`.
+fn arr_like_get(val: &Val, i: usize) -> Val {
+    match val {
+        Val::Arr(a) => a[i].clone(),
+        Val::IntVec(v) => Val::Int(v[i]),
+        Val::FloatVec(v) => Val::Float(v[i]),
+        Val::StrVec(v) => Val::Str(v[i].clone()),
+        Val::StrSliceVec(v) => Val::StrSlice(v[i].clone()),
+        Val::ObjVec(d) => d.row_val(i),
+        _ => Val::Null,
+    }
+}
+
+/// Build a fresh `Val::Obj` containing every key/value pair on `val`
+/// whose key is not present in `listed` (used by the `...name` rest
+/// binding in object patterns). Returns `Val::Null` for non-object
+/// scrutinees; callers always guard with `Val::Obj` / `Val::ObjSmall`
+/// before invoking this.
+fn build_obj_rest(val: &Val, listed: &[&str]) -> Val {
+    let mut out: IndexMap<Arc<str>, Val> = IndexMap::new();
+    match val {
+        Val::Obj(m) => {
+            for (k, v) in m.iter() {
+                if !listed.iter().any(|l| *l == k.as_ref()) {
+                    out.insert(Arc::clone(k), v.clone());
+                }
+            }
+        }
+        Val::ObjSmall(pairs) => {
+            for (k, v) in pairs.iter() {
+                if !listed.iter().any(|l| *l == k.as_ref()) {
+                    out.insert(Arc::clone(k), v.clone());
+                }
+            }
+        }
+        _ => return Val::Null,
+    }
+    Val::Obj(Arc::new(out))
+}
+
+/// Look up an object field by string key in `Obj` / `ObjSmall` values.
+/// Returns `None` when the value is not a scalar object or the key is
+/// absent. `ObjVec` is treated as an array of objects, not a single object,
+/// and is excluded here.
+fn obj_like_get(val: &Val, key: &str) -> Option<Val> {
+    match val {
+        Val::Obj(m) => m.get(key).cloned(),
+        Val::ObjSmall(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_ref() == key)
+            .map(|(_, v)| v.clone()),
+        _ => None,
+    }
+}
+
+/// Coerce `Val` to `f64` for range-pattern membership tests. Integer
+/// values widen losslessly; non-numeric values yield `None`.
+fn val_to_f64(val: &Val) -> Option<f64> {
+    match val {
+        Val::Int(n) => Some(*n as f64),
+        Val::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Test whether `n` falls within the half-open or closed range
+/// `[lo, hi)` / `[lo, hi]` defined by `inclusive`.
+fn range_contains(lo: f64, hi: f64, inclusive: bool, n: f64) -> bool {
+    if inclusive {
+        n >= lo && n <= hi
+    } else {
+        n >= lo && n < hi
+    }
+}
+
+/// Compare a `PatLit` against a runtime `Val` for structural equality.
+fn match_pat_lit(lit: &PatLit, val: &Val) -> bool {
+    match (lit, val) {
+        (PatLit::Null, Val::Null) => true,
+        (PatLit::Bool(b), Val::Bool(v)) => b == v,
+        (PatLit::Int(n), Val::Int(v)) => n == v,
+        (PatLit::Int(n), Val::Float(v)) => (*n as f64) == *v,
+        (PatLit::Float(f), Val::Float(v)) => f == v,
+        (PatLit::Float(f), Val::Int(v)) => *f == (*v as f64),
+        (PatLit::Str(s), Val::Str(v)) => s.as_str() == v.as_ref(),
+        (PatLit::Str(s), Val::StrSlice(v)) => s.as_str() == v.as_ref(),
+        _ => false,
+    }
+}
+
+/// Return `true` when `val`'s runtime type matches the `KindType` requested
+/// by a kind-bind or kind-only pattern.
+fn val_matches_kind(val: &Val, kind: KindType) -> bool {
+    match (val, kind) {
+        (Val::Null, KindType::Null) => true,
+        (Val::Bool(_), KindType::Bool) => true,
+        (Val::Int(_) | Val::Float(_), KindType::Number) => true,
+        (Val::Str(_) | Val::StrSlice(_) | Val::StrVec(_) | Val::StrSliceVec(_), KindType::Str) => {
+            // StrVec/StrSliceVec are vector-of-string fast representations;
+            // they do not satisfy a scalar string kind check.
+            matches!(val, Val::Str(_) | Val::StrSlice(_))
+        }
+        (
+            Val::Arr(_)
+            | Val::IntVec(_)
+            | Val::FloatVec(_)
+            | Val::StrVec(_)
+            | Val::StrSliceVec(_)
+            | Val::ObjVec(_),
+            KindType::Array,
+        ) => true,
+        (Val::Obj(_) | Val::ObjSmall(_), KindType::Object) => true,
+        _ => false,
+    }
 }
 
 
@@ -2926,6 +3493,86 @@ fn find_desc_first(v: &Val, name: &str) -> Option<Val> {
             None
         }
         _ => None,
+    }
+}
+
+/// Test whether `val` could match any arm summarised by `summary`. The
+/// check is conservative — when `summary` is `None` (no usable
+/// structural information) every value is admitted and the per-arm
+/// runtime decides. When `summary` is present, values whose runtime
+/// kind is provably outside the summarised set are rejected upfront.
+fn shape_summary_admits(summary: &Option<MatchShapeSummary>, val: &Val) -> bool {
+    let Some(s) = summary.as_ref() else {
+        return true;
+    };
+    match s {
+        MatchShapeSummary::ObjAnyOfKeys(keys) => match val {
+            Val::Obj(m) => keys.iter().any(|k| m.contains_key(k.as_ref())),
+            Val::ObjSmall(pairs) => keys
+                .iter()
+                .any(|k| pairs.iter().any(|(pk, _)| pk.as_ref() == k.as_ref())),
+            _ => false,
+        },
+        MatchShapeSummary::KindOnly(kind) => val_matches_kind(val, *kind),
+        MatchShapeSummary::NumericRange { lo, hi, inclusive } => match val_to_f64(val) {
+            Some(n) => range_contains(*lo, *hi, *inclusive, n),
+            None => false,
+        },
+    }
+}
+
+/// Collect every node in the subtree of `v` (DFS pre-order) into `out`,
+/// including `v` itself and every leaf and compound representation
+/// (`IntVec`, `FloatVec`, `StrVec`, `StrSliceVec`, `ObjVec`, `ObjSmall`).
+/// Used by `DeepMatchAll` to feed the match runtime with every
+/// descendant regardless of how the document was promoted at parse
+/// time. The pre-existing `collect_all` walks only `Obj` / `Arr`
+/// because its callers (`$..**`) operate before columnar promotion.
+fn collect_all_inclusive(v: &Val, out: &mut Vec<Val>) {
+    out.push(v.clone());
+    match v {
+        Val::Obj(m) => {
+            for child in m.values() {
+                collect_all_inclusive(child, out);
+            }
+        }
+        Val::ObjSmall(pairs) => {
+            for (_, child) in pairs.iter() {
+                collect_all_inclusive(child, out);
+            }
+        }
+        Val::ObjVec(data) => {
+            for row in 0..data.nrows() {
+                let row_val = data.row_val(row);
+                collect_all_inclusive(&row_val, out);
+            }
+        }
+        Val::Arr(a) => {
+            for item in a.as_ref() {
+                collect_all_inclusive(item, out);
+            }
+        }
+        Val::IntVec(a) => {
+            for &n in a.iter() {
+                out.push(Val::Int(n));
+            }
+        }
+        Val::FloatVec(a) => {
+            for &f in a.iter() {
+                out.push(Val::Float(f));
+            }
+        }
+        Val::StrVec(a) => {
+            for s in a.iter() {
+                out.push(Val::Str(Arc::clone(s)));
+            }
+        }
+        Val::StrSliceVec(a) => {
+            for s in a.iter() {
+                out.push(Val::StrSlice(s.clone()));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -3245,5 +3892,330 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
                 hash_structure_into(v, h, depth + 1);
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// View-domain match runtime.
+//
+// `exec_match_view` mirrors `VM::exec_match` but operates against a
+// borrowed `ValueView` scrutinee. Slots hold either a borrowed view or
+// an owned `Val` produced by operations that synthesise data
+// (`LoadTail`, `TestSubPat` materialisations). Pattern tests against
+// borrowed scalars avoid the per-row `Val` allocation that the in-memory
+// path performs to project sub-fields.
+//
+// **Semantics of missing keys.** `ValueView::field` returns a null view
+// for both an absent key and an explicitly-null value. The view-domain
+// runtime therefore treats these cases identically: a `Pat::Obj { k: p }`
+// whose sub-pattern accepts null will match an object that lacks `k`.
+// Callers that need strict missing-key rejection should fall back to
+// the `Val`-domain path. Mixing-and-matching the two domains in the
+// same query is supported because the chain IR labels stages with the
+// kind they need (`ChainOp::Match` is domain-agnostic; the executor
+// chooses the runtime).
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::data::view::ValueView;
+use crate::util::JsonView;
+
+/// Evaluate a compiled `match` expression against a borrowed
+/// `ValueView` scrutinee, materialising values only when necessary
+/// (bindings and arm bodies require a real `Val`).
+pub(crate) fn exec_match_view<'a, V>(
+    vm: &mut VM,
+    cm: &CompiledMatch,
+    scrutinee: V,
+    env: &Env,
+) -> Result<Val, EvalError>
+where
+    V: ValueView<'a>,
+{
+    let total = (cm.max_slots as usize).max(1);
+    let mut slots: Vec<SlotView<V>> = (0..total).map(|_| SlotView::Owned(Val::Null)).collect();
+    slots[0] = SlotView::View(scrutinee);
+    let mut bindings: SmallVec<[(Arc<str>, Val); 8]> = SmallVec::new();
+    let mut pc: u32 = 0;
+    let ops = &cm.ops;
+    loop {
+        let op = &ops[pc as usize];
+        match op {
+            MatchOp::ResetArm {
+                slots: _,
+                keep_above,
+            } => {
+                bindings.clear();
+                let keep = (*keep_above as usize).max(1);
+                for s in slots.iter_mut().skip(keep) {
+                    *s = SlotView::Owned(Val::Null);
+                }
+                pc += 1;
+            }
+            MatchOp::KindCheck { slot, kind, else_pc } => {
+                if slot_view_matches_kind(&slots[*slot as usize], *kind) {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::LitEq { slot, lit, else_pc } => {
+                if slot_view_match_lit(&cm.lits[*lit as usize], &slots[*slot as usize]) {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::RangeCheck {
+                slot,
+                lo,
+                hi,
+                inclusive,
+                else_pc,
+            } => {
+                let ok = slot_view_to_f64(&slots[*slot as usize])
+                    .is_some_and(|n| range_contains(*lo, *hi, *inclusive, n));
+                if ok {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::ObjCheck { slot, else_pc } => {
+                if slot_view_is_obj(&slots[*slot as usize]) {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::LoadField {
+                src,
+                key,
+                dst,
+                else_pc,
+            } => match slot_view_field(&slots[*src as usize], key.as_ref()) {
+                Some(child) => {
+                    slots[*dst as usize] = child;
+                    pc += 1;
+                }
+                None => pc = *else_pc,
+            },
+            MatchOp::LenCheck {
+                slot,
+                len,
+                exact,
+                else_pc,
+            } => {
+                let arr_len = match slot_view_arr_len(&slots[*slot as usize]) {
+                    Some(n) => n,
+                    None => {
+                        pc = *else_pc;
+                        continue;
+                    }
+                };
+                let want = *len as usize;
+                let ok = if *exact { arr_len == want } else { arr_len >= want };
+                if ok {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::LoadIndex { src, idx, dst } => {
+                slots[*dst as usize] = slot_view_index(&slots[*src as usize], *idx as i64);
+                pc += 1;
+            }
+            MatchOp::LoadTail { src, from, dst } => {
+                let len = slot_view_arr_len(&slots[*src as usize]).unwrap_or(0);
+                let from_idx = *from as usize;
+                let mut tail: Vec<Val> = Vec::with_capacity(len.saturating_sub(from_idx));
+                for i in from_idx..len {
+                    tail.push(slot_view_index(&slots[*src as usize], i as i64).materialize());
+                }
+                slots[*dst as usize] = SlotView::Owned(Val::arr(tail));
+                pc += 1;
+            }
+            MatchOp::LoadObjRest {
+                src,
+                listed_keys,
+                dst,
+            } => {
+                // Materialise the source view to a `Val::Obj` so we can
+                // walk its keys; the rest object is always owned.
+                let owned = slots[*src as usize].materialize();
+                let listed: Vec<&str> = listed_keys.iter().map(|k| k.as_ref()).collect();
+                slots[*dst as usize] = SlotView::Owned(build_obj_rest(&owned, &listed));
+                pc += 1;
+            }
+            MatchOp::TestSubPat {
+                slot,
+                subpat,
+                else_pc,
+            } => {
+                let saved = bindings.len();
+                let val = slots[*slot as usize].materialize();
+                let mut tmp: Vec<(Arc<str>, Val)> = Vec::new();
+                if match_pat(&cm.subpats[*subpat as usize], &val, &mut tmp) {
+                    for b in tmp {
+                        bindings.push(b);
+                    }
+                    pc += 1;
+                } else {
+                    bindings.truncate(saved);
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::Bind { name, slot } => {
+                bindings.push((Arc::clone(name), slots[*slot as usize].materialize()));
+                pc += 1;
+            }
+            MatchOp::Guard { prog, else_pc } => {
+                let arm_env = build_arm_env(env, &bindings);
+                let g = vm.exec(&cm.guards[*prog as usize], &arm_env)?;
+                if crate::util::is_truthy(&g) {
+                    pc += 1;
+                } else {
+                    pc = *else_pc;
+                }
+            }
+            MatchOp::Body { prog } => {
+                let arm_env = build_arm_env(env, &bindings);
+                return vm.exec(&cm.bodies[*prog as usize], &arm_env);
+            }
+            MatchOp::Fail => {
+                let s = slots[0].materialize();
+                return Err(EvalError(format!(
+                    "match: no arm matched {} value {}",
+                    kind_label(&s),
+                    snippet_for_error(&s),
+                )));
+            }
+            MatchOp::Jump { target_pc } => pc = *target_pc,
+        }
+    }
+}
+
+/// Slot contents in the view-domain match interpreter. `View` retains a
+/// borrow into the source document; `Owned` holds a freshly synthesised
+/// value (used by `LoadTail` and after `TestSubPat` materialisations).
+enum SlotView<V> {
+    /// Borrowed view from the source document.
+    View(V),
+    /// Owned value synthesised during pattern execution.
+    Owned(Val),
+}
+
+impl<'a, V> SlotView<V>
+where
+    V: ValueView<'a>,
+{
+    /// Materialise the slot into an owned `Val`. For `View`, this calls
+    /// the trait's `materialize()`; for `Owned`, a clone bumps the
+    /// underlying `Arc` for compound values.
+    fn materialize(&self) -> Val {
+        match self {
+            SlotView::View(v) => v.materialize(),
+            SlotView::Owned(v) => v.clone(),
+        }
+    }
+}
+
+/// Extract a borrowed scalar view of `slot`'s contents for kind / literal
+/// tests. Falls through to `JsonView::from_val` for the `Owned` arm.
+fn slot_view_scalar<'s, 'a, V>(slot: &'s SlotView<V>) -> JsonView<'s>
+where
+    V: ValueView<'a>,
+{
+    match slot {
+        SlotView::View(v) => v.scalar(),
+        SlotView::Owned(val) => JsonView::from_val(val),
+    }
+}
+
+fn slot_view_matches_kind<'a, V>(slot: &SlotView<V>, kind: KindType) -> bool
+where
+    V: ValueView<'a>,
+{
+    match (slot_view_scalar(slot), kind) {
+        (JsonView::Null, KindType::Null) => true,
+        (JsonView::Bool(_), KindType::Bool) => true,
+        (JsonView::Int(_) | JsonView::UInt(_) | JsonView::Float(_), KindType::Number) => true,
+        (JsonView::Str(_), KindType::Str) => true,
+        (JsonView::ArrayLen(_), KindType::Array) => true,
+        (JsonView::ObjectLen(_), KindType::Object) => true,
+        _ => false,
+    }
+}
+
+fn slot_view_is_obj<'a, V>(slot: &SlotView<V>) -> bool
+where
+    V: ValueView<'a>,
+{
+    matches!(slot_view_scalar(slot), JsonView::ObjectLen(_))
+}
+
+fn slot_view_arr_len<'a, V>(slot: &SlotView<V>) -> Option<usize>
+where
+    V: ValueView<'a>,
+{
+    match slot_view_scalar(slot) {
+        JsonView::ArrayLen(n) => Some(n),
+        _ => None,
+    }
+}
+
+fn slot_view_to_f64<'a, V>(slot: &SlotView<V>) -> Option<f64>
+where
+    V: ValueView<'a>,
+{
+    match slot_view_scalar(slot) {
+        JsonView::Int(n) => Some(n as f64),
+        JsonView::UInt(n) => Some(n as f64),
+        JsonView::Float(f) => Some(f),
+        _ => None,
+    }
+}
+
+fn slot_view_match_lit<'a, V>(lit: &PatLit, slot: &SlotView<V>) -> bool
+where
+    V: ValueView<'a>,
+{
+    match (lit, slot_view_scalar(slot)) {
+        (PatLit::Null, JsonView::Null) => true,
+        (PatLit::Bool(b), JsonView::Bool(v)) => *b == v,
+        (PatLit::Int(n), JsonView::Int(v)) => *n == v,
+        (PatLit::Int(n), JsonView::UInt(v)) => *n >= 0 && (*n as u64) == v,
+        (PatLit::Int(n), JsonView::Float(v)) => (*n as f64) == v,
+        (PatLit::Float(f), JsonView::Float(v)) => *f == v,
+        (PatLit::Float(f), JsonView::Int(v)) => *f == v as f64,
+        (PatLit::Float(f), JsonView::UInt(v)) => *f == v as f64,
+        (PatLit::Str(s), JsonView::Str(v)) => s.as_str() == v,
+        _ => false,
+    }
+}
+
+fn slot_view_field<'a, V>(slot: &SlotView<V>, key: &str) -> Option<SlotView<V>>
+where
+    V: ValueView<'a>,
+{
+    match slot {
+        SlotView::View(v) => {
+            // The view path treats absent keys and explicit `null` values
+            // identically (see module-level docs); both proceed with a
+            // null view. Callers that need strict presence semantics
+            // route through the `Val`-domain path.
+            let child = v.field(key);
+            Some(SlotView::View(child))
+        }
+        SlotView::Owned(val) => obj_like_get(val, key).map(SlotView::Owned),
+    }
+}
+
+fn slot_view_index<'a, V>(slot: &SlotView<V>, idx: i64) -> SlotView<V>
+where
+    V: ValueView<'a>,
+{
+    match slot {
+        SlotView::View(v) => SlotView::View(v.index(idx)),
+        SlotView::Owned(val) => SlotView::Owned(arr_like_get(val, idx as usize)),
     }
 }

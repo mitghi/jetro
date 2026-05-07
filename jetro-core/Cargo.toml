@@ -1,6 +1,6 @@
 [package]
 name = "jetro-core"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"
@@ -39,3 +39,8 @@ fuzz_internal = []
 jaq-core = "3.0"
 jaq-std = "3.0"
 jaq-json = "2.0"
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "match_bench"
+harness = false

@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
     BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
 };
+use crate::parse::ast::Expr;
 use crate::{data::context::EvalError, data::value::Val};
 
 use super::{
@@ -90,7 +90,9 @@ impl Pipeline {
     }
 
     /// Decodes `trailing` steps into stages and a sink, runs rewrite passes, and classifies body kernels.
-    pub(crate) fn lower_body_from_steps(trailing: &[crate::parse::ast::Step]) -> Option<PipelineBody> {
+    pub(crate) fn lower_body_from_steps(
+        trailing: &[crate::parse::ast::Step],
+    ) -> Option<PipelineBody> {
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
         let mut p = PipelineBody {
             stages,
@@ -254,6 +256,15 @@ fn decode_method_chain(
                     continue;
                 }
                 let method = BuiltinMethod::from_name(name.as_str());
+                if matches!(method, BuiltinMethod::Compact | BuiltinMethod::Remove) {
+                    if let Some(call) =
+                        crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args)
+                    {
+                        stages.push(Stage::Builtin(call));
+                        stage_exprs.push(None);
+                        continue;
+                    }
+                }
                 lower_method_from_registry(
                     method,
                     args,
@@ -409,11 +420,15 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
         other => other.clone(),
     };
-    Some(Arc::new(crate::compile::compiler::Compiler::compile(&rooted, "")))
+    Some(Arc::new(crate::compile::compiler::Compiler::compile(
+        &rooted, "",
+    )))
 }
 
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
-pub(super) fn compile_sort_spec(arg: &crate::parse::ast::Arg) -> Option<(SortSpec, Option<Arc<Expr>>)> {
+pub(super) fn compile_sort_spec(
+    arg: &crate::parse::ast::Arg,
+) -> Option<(SortSpec, Option<Arc<Expr>>)> {
     use crate::parse::ast::{Arg, Expr};
     let expr = match arg {
         Arg::Pos(e) => e,
@@ -586,7 +601,10 @@ fn push_expr_stage(
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
     match method {
-        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+        BuiltinMethod::Filter
+        | BuiltinMethod::Find
+        | BuiltinMethod::FindAll
+        | BuiltinMethod::FindFirst => {
             stages.push(Stage::Filter(
                 compile_subexpr(arg)?,
                 BuiltinViewStage::Filter,
@@ -687,7 +705,10 @@ fn string_arg(arg: &crate::parse::ast::Arg) -> Option<Arc<str>> {
 }
 
 // Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
-fn terminal_sink_for_method(method: BuiltinMethod, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
+fn terminal_sink_for_method(
+    method: BuiltinMethod,
+    args: &[crate::parse::ast::Arg],
+) -> Option<Sink> {
     let spec = method.spec();
     match spec.sink?.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {

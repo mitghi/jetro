@@ -45,11 +45,237 @@ impl From<pest::error::Error<Rule>> for ParseError {
 
 /// Parse a Jetro query string into an `Expr` AST. This is the primary public
 /// entry point; all other `parse_*` functions are internal helpers.
+///
+/// In addition to grammar-level parsing, this entry point runs post-parse
+/// semantic validation passes (currently or-pattern linearity for `match`
+/// expressions) so callers see structural errors before the expression
+/// reaches the compiler.
 pub fn parse(input: &str) -> Result<Expr, ParseError> {
     let mut pairs = V2Parser::parse(Rule::program, input)?;
     let program = pairs.next().unwrap();
     let expr_pair = program.into_inner().next().unwrap();
-    Ok(parse_expr(expr_pair))
+    let expr = parse_expr(expr_pair);
+    validate_pattern_linearity(&expr)?;
+    if strict_match_lint_enabled() {
+        validate_match_exhaustiveness(&expr)?;
+    }
+    Ok(expr)
+}
+
+/// Read the `JETRO_STRICT_MATCH` environment variable on every parse.
+/// Toggling the flag at runtime is rare in practice, and reading it per
+/// call lets tooling and tests flip the lint without restarting the
+/// process.
+fn strict_match_lint_enabled() -> bool {
+    std::env::var_os("JETRO_STRICT_MATCH").is_some()
+}
+
+/// Recognise irrefutable patterns — those that match every value
+/// regardless of shape and therefore qualify as a catch-all arm in the
+/// exhaustiveness analysis. Beyond the trivial `Wild` and bare `Bind`
+/// cases, this also accepts `Or` patterns whose alternative list
+/// contains an irrefutable alt (since at least one alt fires for every
+/// value) and `Kind`-bound patterns whose kind covers all runtime
+/// types (currently never, but the structure is in place for future
+/// extension to a `_: any` form).
+fn pat_is_irrefutable(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wild | Pat::Bind(_) => true,
+        Pat::Or(alts) => alts.iter().any(pat_is_irrefutable),
+        _ => false,
+    }
+}
+
+/// Walk the `Expr` tree and reject any `match` whose arms cannot prove
+/// exhaustiveness — that is, when no arm has an unguarded catch-all
+/// (`Pat::Wild`, a bare `Pat::Bind`, or an `Or`-pattern containing one).
+/// Triggered only when the `JETRO_STRICT_MATCH` environment variable
+/// is set; the default behaviour is to surface non-exhaustive matches
+/// as a runtime `EvalError` when no arm fires.
+fn validate_match_exhaustiveness(expr: &Expr) -> Result<(), ParseError> {
+    fn check(e: &Expr) -> Result<(), ParseError> {
+        match e {
+            Expr::Match { scrutinee, arms } => {
+                check(scrutinee)?;
+                let exhaustive = arms
+                    .iter()
+                    .any(|a| a.guard.is_none() && pat_is_irrefutable(&a.pat));
+                if !exhaustive {
+                    return Err(ParseError(
+                        "non-exhaustive match: no unguarded catch-all arm \
+                         (`_`, a bare bind, or an or-pattern containing one)"
+                            .to_string(),
+                    ));
+                }
+                for arm in arms {
+                    if let Some(g) = arm.guard.as_ref() {
+                        check(g)?;
+                    }
+                    check(&arm.body)?;
+                }
+                Ok(())
+            }
+            Expr::Chain(base, _) => check(base),
+            Expr::BinOp(l, _, r) | Expr::Coalesce(l, r) => {
+                check(l)?;
+                check(r)
+            }
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Cast { expr: e, .. } => check(e),
+            Expr::Kind { expr, .. } => check(expr),
+            _ => Ok(()),
+        }
+    }
+    check(expr)
+}
+
+/// Walk the `Expr` tree and validate that every `match` arm's pattern
+/// satisfies the linearity rule for or-patterns: each alternative inside
+/// an `Or` must bind exactly the same set of variable names. This rules
+/// out arms whose body cannot consistently reference a captured value
+/// (e.g. `{a: x} | {b: y} -> x` would be ambiguous).
+fn validate_pattern_linearity(expr: &Expr) -> Result<(), ParseError> {
+    use std::collections::BTreeSet;
+
+    fn collect_binds(pat: &Pat, out: &mut BTreeSet<String>) {
+        match pat {
+            Pat::Wild | Pat::Lit(_) | Pat::Range { .. } => {}
+            Pat::Bind(name) => {
+                out.insert(name.clone());
+            }
+            Pat::Kind { name, .. } => {
+                if let Some(n) = name.as_deref() {
+                    out.insert(n.to_string());
+                }
+            }
+            Pat::Or(alts) => {
+                for alt in alts {
+                    collect_binds(alt, out);
+                }
+            }
+            Pat::Obj { fields, rest } => {
+                for (_, sub) in fields {
+                    collect_binds(sub, out);
+                }
+                if let Some(Some(name)) = rest {
+                    out.insert(name.clone());
+                }
+            }
+            Pat::Arr { elems, rest } => {
+                for sub in elems {
+                    collect_binds(sub, out);
+                }
+                if let Some(Some(name)) = rest {
+                    out.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    fn walk_pat(pat: &Pat) -> Result<(), ParseError> {
+        if let Pat::Or(alts) = pat {
+            let mut first: Option<BTreeSet<String>> = None;
+            for alt in alts {
+                let mut names = BTreeSet::new();
+                collect_binds(alt, &mut names);
+                match &first {
+                    None => first = Some(names),
+                    Some(existing) if existing == &names => {}
+                    Some(existing) => {
+                        return Err(ParseError(format!(
+                            "or-pattern arms must bind the same variables; \
+                             got {{{}}} vs {{{}}}",
+                            existing.iter().cloned().collect::<Vec<_>>().join(", "),
+                            names.iter().cloned().collect::<Vec<_>>().join(", "),
+                        )));
+                    }
+                }
+            }
+        }
+        match pat {
+            Pat::Wild
+            | Pat::Lit(_)
+            | Pat::Bind(_)
+            | Pat::Kind { .. }
+            | Pat::Range { .. } => {}
+            Pat::Or(alts) => {
+                for alt in alts {
+                    walk_pat(alt)?;
+                }
+            }
+            Pat::Obj { fields, .. } => {
+                for (_, sub) in fields {
+                    walk_pat(sub)?;
+                }
+            }
+            Pat::Arr { elems, .. } => {
+                for sub in elems {
+                    walk_pat(sub)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn walk(e: &Expr) -> Result<(), ParseError> {
+        match e {
+            Expr::Match { scrutinee, arms } => {
+                walk(scrutinee)?;
+                for arm in arms {
+                    walk_pat(&arm.pat)?;
+                    if let Some(g) = arm.guard.as_ref() {
+                        walk(g)?;
+                    }
+                    walk(&arm.body)?;
+                }
+            }
+            Expr::Chain(base, steps) => {
+                walk(base)?;
+                for step in steps {
+                    if let Step::DeepMatch { arms, .. } = step {
+                        for arm in arms {
+                            walk_pat(&arm.pat)?;
+                            if let Some(g) = arm.guard.as_ref() {
+                                walk(g)?;
+                            }
+                            walk(&arm.body)?;
+                        }
+                    }
+                }
+            }
+            Expr::BinOp(l, _, r) | Expr::Coalesce(l, r) => {
+                walk(l)?;
+                walk(r)?;
+            }
+            Expr::UnaryNeg(e) | Expr::Not(e) | Expr::Cast { expr: e, .. } => walk(e)?,
+            Expr::Kind { expr, .. } => walk(expr)?,
+            Expr::Object(_)
+            | Expr::Array(_)
+            | Expr::Pipeline { .. }
+            | Expr::ListComp { .. }
+            | Expr::DictComp { .. }
+            | Expr::SetComp { .. }
+            | Expr::GenComp { .. }
+            | Expr::Lambda { .. }
+            | Expr::Let { .. }
+            | Expr::IfElse { .. }
+            | Expr::Try { .. }
+            | Expr::GlobalCall { .. }
+            | Expr::Patch { .. }
+            | Expr::FString(_)
+            | Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Root
+            | Expr::Current
+            | Expr::Ident(_)
+            | Expr::DeleteMark => {}
+        }
+        Ok(())
+    }
+
+    walk(expr)
 }
 
 
@@ -71,6 +297,9 @@ fn is_kw(rule: Rule) -> bool {
             | Rule::kw_is
             | Rule::kw_as
             | Rule::kw_try
+            | Rule::kw_when
+            | Rule::kw_match
+            | Rule::kw_with
     )
 }
 
@@ -660,6 +889,38 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             };
             vec![Step::Method(mapped, args)]
         }
+        Rule::deep_match => {
+            // `$..match { arms }` (collect all) and `$..match! { arms }`
+            // (early-stop on first truthy match) share the parsing path.
+            // The `deep_match_op` token spelling distinguishes the two.
+            let mut arms: Vec<MatchArm> = Vec::new();
+            let mut early_stop = false;
+            for child in inner_pair.into_inner().filter(|p| !is_kw(p.as_rule())) {
+                match child.as_rule() {
+                    Rule::deep_match_op => {
+                        early_stop = child.as_str().ends_with('!');
+                    }
+                    Rule::match_arm => {
+                        let mut ai = child.into_inner().filter(|p| !is_kw(p.as_rule()));
+                        let pat = parse_pat(ai.next().expect("match arm pattern"));
+                        let rest: Vec<_> = ai.collect();
+                        let (guard, body) = match rest.len() {
+                            1 => (None, parse_expr(rest.into_iter().next().unwrap())),
+                            2 => {
+                                let mut it = rest.into_iter();
+                                let g = parse_expr(it.next().unwrap());
+                                let b = parse_expr(it.next().unwrap());
+                                (Some(g), b)
+                            }
+                            _ => panic!("deep_match arm: expected 1 or 2 trailing exprs (guard?, body)"),
+                        };
+                        arms.push(MatchArm { pat, guard, body });
+                    }
+                    _ => {}
+                }
+            }
+            vec![Step::DeepMatch { arms, early_stop }]
+        }
         Rule::inline_filter => {
             let expr = parse_expr(inner_pair.into_inner().next().unwrap());
             vec![Step::InlineFilter(Box::new(expr))]
@@ -768,8 +1029,169 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         Rule::global_call => parse_global_call(inner),
         Rule::expr => parse_expr(inner),
         Rule::patch_block => parse_patch(inner),
+        Rule::match_expr => parse_match_expr(inner),
         Rule::kw_delete => Expr::DeleteMark,
         r => panic!("unexpected primary rule: {:?}", r),
+    }
+}
+
+/// Parse a `match scrutinee { pat when guard -> body, ... }` expression.
+fn parse_match_expr(pair: Pair<Rule>) -> Expr {
+    let mut inner = pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+    let scrutinee = parse_expr(inner.next().expect("match scrutinee"));
+    let mut arms: Vec<MatchArm> = Vec::new();
+    for arm_pair in inner {
+        if arm_pair.as_rule() != Rule::match_arm {
+            continue;
+        }
+        let mut ai = arm_pair.into_inner().filter(|p| !is_kw(p.as_rule()));
+        let pat_pair = ai.next().expect("match arm pattern");
+        let pat = parse_pat(pat_pair);
+        // Remaining: optional guard expr, then body expr.
+        let rest: Vec<_> = ai.collect();
+        let (guard, body) = match rest.len() {
+            1 => (None, parse_expr(rest.into_iter().next().unwrap())),
+            2 => {
+                let mut it = rest.into_iter();
+                let g = parse_expr(it.next().unwrap());
+                let b = parse_expr(it.next().unwrap());
+                (Some(g), b)
+            }
+            _ => panic!("match arm: expected 1 or 2 trailing exprs (guard?, body)"),
+        };
+        arms.push(MatchArm { pat, guard, body });
+    }
+    Expr::Match {
+        scrutinee: Box::new(scrutinee),
+        arms,
+    }
+}
+
+/// Parse a `pat_or` / `pat_atom` rule into a `Pat` AST node.
+fn parse_pat(pair: Pair<Rule>) -> Pat {
+    match pair.as_rule() {
+        Rule::pat_or => {
+            let mut alts: Vec<Pat> = pair.into_inner().map(parse_pat).collect();
+            if alts.len() == 1 {
+                alts.pop().unwrap()
+            } else {
+                Pat::Or(alts)
+            }
+        }
+        Rule::pat_atom => {
+            let inner = pair.into_inner().next().expect("pat_atom inner");
+            parse_pat(inner)
+        }
+        Rule::pat_range => {
+            let mut it = pair.into_inner();
+            let lo_pair = it.next().expect("pat_range: lo");
+            let op_pair = it.next().expect("pat_range: op");
+            let hi_pair = it.next().expect("pat_range: hi");
+            let lo: f64 = lo_pair.as_str().parse().expect("range lo as f64");
+            let hi: f64 = hi_pair.as_str().parse().expect("range hi as f64");
+            let inclusive = op_pair.as_str() == "..=";
+            Pat::Range { lo, hi, inclusive }
+        }
+        Rule::pat_wild => Pat::Wild,
+        Rule::pat_literal => Pat::Lit(parse_pat_literal(pair)),
+        Rule::pat_kind_bind => {
+            let mut it = pair.into_inner();
+            let name = it.next().unwrap().as_str().to_string();
+            let kind = parse_kind_type(it.next().unwrap().as_str());
+            Pat::Kind { name: Some(name), kind }
+        }
+        Rule::pat_kind_only => {
+            let kt = pair.into_inner().next().unwrap().as_str();
+            Pat::Kind { name: None, kind: parse_kind_type(kt) }
+        }
+        Rule::pat_bind => Pat::Bind(pair.as_str().to_string()),
+        Rule::pat_obj => {
+            let mut fields: Vec<(String, Pat)> = Vec::new();
+            let mut rest: Option<Option<String>> = None;
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::pat_obj_field => {
+                        let mut fi = p.into_inner();
+                        let k = fi.next().unwrap().as_str().to_string();
+                        let v = parse_pat(fi.next().unwrap());
+                        fields.push((k, v));
+                    }
+                    Rule::pat_obj_rest => {
+                        let inner = p.into_inner().next().unwrap();
+                        match inner.as_rule() {
+                            Rule::pat_obj_rest_named => {
+                                let nm = inner
+                                    .into_inner()
+                                    .next()
+                                    .unwrap()
+                                    .as_str()
+                                    .to_string();
+                                rest = Some(Some(nm));
+                            }
+                            Rule::pat_obj_rest_anon => rest = Some(None),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Pat::Obj { fields, rest }
+        }
+        Rule::pat_arr => {
+            let mut elems: Vec<Pat> = Vec::new();
+            let mut rest: Option<Option<String>> = None;
+            for p in pair.into_inner() {
+                match p.as_rule() {
+                    Rule::pat_or | Rule::pat_atom => elems.push(parse_pat(p)),
+                    Rule::pat_arr_rest => {
+                        let inner = p.into_inner().next().unwrap();
+                        match inner.as_rule() {
+                            Rule::pat_arr_rest_named => {
+                                let nm = inner.into_inner().next().unwrap().as_str().to_string();
+                                rest = Some(Some(nm));
+                            }
+                            Rule::pat_arr_rest_anon => rest = Some(None),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Pat::Arr { elems, rest }
+        }
+        r => panic!("unexpected pattern rule: {:?}", r),
+    }
+}
+
+/// Decode a `pat_literal` rule into a `PatLit`.
+fn parse_pat_literal(pair: Pair<Rule>) -> PatLit {
+    let inner = pair.into_inner().next().expect("pat_literal inner");
+    match inner.as_rule() {
+        Rule::pat_lit_null => PatLit::Null,
+        Rule::pat_lit_true => PatLit::Bool(true),
+        Rule::pat_lit_false => PatLit::Bool(false),
+        Rule::pat_lit_int => PatLit::Int(inner.as_str().parse().expect("pat int")),
+        Rule::pat_lit_float => PatLit::Float(inner.as_str().parse().expect("pat float")),
+        Rule::pat_lit_str => {
+            let raw = inner.as_str();
+            // Strip surrounding quotes.
+            let stripped = &raw[1..raw.len() - 1];
+            PatLit::Str(stripped.to_string())
+        }
+        r => panic!("unexpected pat literal rule: {:?}", r),
+    }
+}
+
+/// Map a kind type name (`number`, `string`, ...) to `KindType`.
+fn parse_kind_type(name: &str) -> KindType {
+    match name {
+        "number" => KindType::Number,
+        "string" => KindType::Str,
+        "array" => KindType::Array,
+        "object" => KindType::Object,
+        "bool" => KindType::Bool,
+        "null" => KindType::Null,
+        other => panic!("unknown kind type: {other}"),
     }
 }
 
@@ -1075,7 +1497,7 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
                 cond: None,
             }
         }
-        Rule::obj_field_spread => {
+        Rule::obj_field_spread | Rule::obj_field_spread_star => {
             let expr = parse_expr(inner.into_inner().next().unwrap());
             ObjField::Spread(expr)
         }

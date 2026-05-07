@@ -17,6 +17,7 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
         method,
         name: Arc::from(name),
         sub_progs: Arc::from(&[] as &[Arc<Program>]),
+        sub_kernels: Arc::from(&[] as &[crate::exec::pipeline::BodyKernel]),
         orig_args: Arc::from(&[] as &[Arg]),
         demand_max_keep: None,
     }))

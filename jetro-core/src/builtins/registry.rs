@@ -11,7 +11,7 @@ use crate::{
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinStructural,
     },
-    parse::chain_ir::{Demand, PullDemand, ValueNeed},
+    plan::demand::{Demand, PullDemand, ValueNeed},
 };
 
 /// Compact, stable numeric identity for a builtin. One-to-one with
@@ -283,7 +283,6 @@ impl BuiltinId {
 
 // ── Main registry macro ───────────────────────────────────────────────────────
 
-
 // ── Trait-driven name lookup (replaces builtin_registry! macro) ───────────────
 
 #[inline]
@@ -348,15 +347,9 @@ mod tests {
     #[test]
     fn registry_name_lookup_matches_legacy_lookup() {
         for (method, canonical, aliases) in all_method_entries() {
-            assert_eq!(
-                by_name(canonical).and_then(BuiltinId::method),
-                Some(method)
-            );
+            assert_eq!(by_name(canonical).and_then(BuiltinId::method), Some(method));
             for alias in aliases {
-                assert_eq!(
-                    by_name(alias).and_then(BuiltinId::method),
-                    Some(method)
-                );
+                assert_eq!(by_name(alias).and_then(BuiltinId::method), Some(method));
             }
         }
         assert_eq!(by_name("missing_builtin"), None);

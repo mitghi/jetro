@@ -215,6 +215,13 @@ fn eval_compiled_arg_at(
 /// Push `item` as the current value (`@`) into `env`, execute the sub-program
 /// at `arg`'s position, then restore the previous current value. Handles both
 /// named lambda parameters and implicit `@` bindings.
+///
+/// Higher-order builtins (`.filter`, `.map`, `.any`, `.all`, `.find`, ...)
+/// invoke this in a tight per-element loop. When the lambda body has been
+/// classified to a non-`Generic` `BodyKernel` at compile time, we dispatch
+/// through `eval_kernel` for native-speed Rust evaluation; otherwise the
+/// VM runs the program. The kernel form skips the per-iteration VM stack
+/// init and opcode-dispatch loop, which dominates simple predicates.
 fn apply_compiled_item(
     vm: &mut VM,
     call: &CompiledCall,
@@ -222,12 +229,45 @@ fn apply_compiled_item(
     arg: &Arg,
     env: &mut Env,
 ) -> Result<Val, EvalError> {
+    use crate::exec::pipeline::{eval_kernel, BodyKernel};
+
     let idx = arg_index(call.orig_args.as_ref(), arg)
         .ok_or_else(|| EvalError(format!("{}: argument lookup failed", call.name)))?;
     let prog = call
         .sub_progs
         .get(idx)
         .ok_or_else(|| EvalError(format!("{}: missing compiled argument", call.name)))?;
+    let kernel = call.sub_kernels.get(idx);
+
+    // Fast path: when the kernel is a non-`Generic` shape and the lambda
+    // does not introduce a named parameter, evaluate directly against
+    // `item` without entering the VM. The kernel reads `@` semantically
+    // by treating `item` as the current value.
+    if let Some(k) = kernel {
+        if !matches!(k, BodyKernel::Generic) && env.has_no_vars() {
+            let lambda_name = match arg {
+                Arg::Pos(Expr::Lambda { params, .. })
+                | Arg::Named(_, Expr::Lambda { params, .. }) => params.first().map(|s| s.as_str()),
+                _ => None,
+            };
+            // `LoadIdent` at the head of a body program dispatches to
+            // a no-arg builtin when current is array/string and the
+            // ident is a builtin name (e.g. `.map(len)` invokes `len`
+            // as a builtin) — a path the kernel form drops. Skip the
+            // fast path for those programs.
+            let starts_with_load_ident =
+                matches!(prog.ops.first(), Some(crate::vm::Opcode::LoadIdent(_)));
+            if lambda_name.is_none() && !starts_with_load_ident {
+                return eval_kernel(k, &item, |fallback_item| {
+                    let frame = env.push_lam(None, fallback_item.clone());
+                    let result = vm.exec_in_env(prog, env);
+                    env.pop_lam(frame);
+                    result
+                });
+            }
+        }
+    }
+
     match arg {
         Arg::Pos(Expr::Lambda { params, .. }) | Arg::Named(_, Expr::Lambda { params, .. }) => {
             let name = params.first().map(|s| s.as_str());

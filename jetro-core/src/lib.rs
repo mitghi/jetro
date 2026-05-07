@@ -159,6 +159,12 @@ pub struct JetroEngine {
     plan_cache_limit: usize,
     /// The shared `VM` used by all `collect*` calls on this engine instance.
     vm: Mutex<VM>,
+    /// Engine-owned JSON object-key intern cache. Used by [`JetroEngine::parse_value`]
+    /// and [`JetroEngine::parse_bytes`] (and the `collect_*` shortcuts that go through
+    /// them) so each engine instance has an isolated key cache. Documents built via
+    /// the standalone `Jetro::from_bytes`/`From<serde_json::Value>` paths use the
+    /// process-wide [`crate::data::intern::default_cache`] instead.
+    keys: Arc<crate::data::intern::KeyCache>,
 }
 
 /// Error returned by `JetroEngine::collect_bytes` and similar methods that
@@ -223,12 +229,45 @@ impl JetroEngine {
             plan_cache: Mutex::new(HashMap::new()),
             plan_cache_limit,
             vm: Mutex::new(VM::new()),
+            keys: crate::data::intern::KeyCache::new(),
         }
     }
 
-    /// Discard all cached query plans, forcing re-compilation on the next call.
+    /// Borrow this engine's JSON key-intern cache.
+    pub fn keys(&self) -> &Arc<crate::data::intern::KeyCache> {
+        &self.keys
+    }
+
+    /// Discard all cached query plans and the engine's key-intern cache,
+    /// forcing re-compilation and re-interning on the next call.
     pub fn clear_cache(&self) {
         self.plan_cache.lock().expect("plan cache poisoned").clear();
+        self.keys.clear();
+    }
+
+    /// Build a `Jetro` document from a `serde_json::Value` with object keys
+    /// interned into this engine's key cache. Use this in place of
+    /// `Jetro::from(...)` / the `From<serde_json::Value>` impl when
+    /// per-engine key isolation is required.
+    pub fn parse_value(&self, document: Value) -> Jetro {
+        let root = Val::from_value_with(&self.keys, &document);
+        Jetro::from_val_and_value(root, document)
+    }
+
+    /// Parse raw JSON bytes into a `Jetro` document with object keys
+    /// interned into this engine's key cache. With `simd-json`, the tape
+    /// is materialised eagerly so interning happens once at parse time
+    /// (subsequent `collect` calls reuse the cached `Val` tree).
+    pub fn parse_bytes(
+        &self,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<Jetro, JetroEngineError> {
+        let document = Jetro::from_bytes(bytes)?;
+        // Force materialisation so keys are interned through this
+        // engine's cache rather than the default thread-local one when
+        // `collect` later asks for `root_val`.
+        let _ = document.root_val_with(&self.keys)?;
+        Ok(document)
     }
 
     /// Evaluate a Jetro expression against an already-constructed `Jetro` document,
@@ -244,23 +283,27 @@ impl JetroEngine {
     }
 
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
+    /// Routes through [`JetroEngine::parse_value`] so the document's object keys are
+    /// interned into this engine's key cache.
     pub fn collect_value<S: AsRef<str>>(
         &self,
         document: Value,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let document = Jetro::from(document);
+        let document = self.parse_value(document);
         self.collect(&document, expr)
     }
 
     /// Parse raw JSON bytes into a `Jetro` document and evaluate `expr`,
     /// returning a `JetroEngineError` on either parse or evaluation failure.
+    /// Routes through [`JetroEngine::parse_bytes`] so the document's object keys
+    /// are interned into this engine's key cache.
     pub fn collect_bytes<S: AsRef<str>>(
         &self,
         bytes: Vec<u8>,
         expr: S,
     ) -> std::result::Result<Value, JetroEngineError> {
-        let document = Jetro::from_bytes(bytes)?;
+        let document = self.parse_bytes(bytes)?;
         Ok(self.collect(&document, expr)?)
     }
 
@@ -346,6 +389,52 @@ impl Jetro {
             tape: OnceCell::new(),
             structural_index: OnceCell::new(),
         }
+    }
+
+    /// Build a `Jetro` whose `root_val` is pre-cached with `root` (constructed by the
+    /// caller, typically via [`Val::from_value_with`] using an engine-owned key cache).
+    /// `document` is retained for back-compat with non-`simd-json` callers and tests
+    /// that read the original `serde_json::Value`.
+    pub(crate) fn from_val_and_value(root: Val, document: Value) -> Self {
+        let root_val = OnceCell::new();
+        let _ = root_val.set(root);
+        Self {
+            document,
+            root_val,
+            objvec_cache: Default::default(),
+            raw_bytes: None,
+            tape: OnceCell::new(),
+            structural_index: OnceCell::new(),
+        }
+    }
+
+    /// Like [`Jetro::root_val`] but interns object keys through `keys` instead of the
+    /// process-wide default. Used by [`JetroEngine::parse_bytes`] to materialise the
+    /// `Val` tree once at parse time so subsequent `collect` calls find a populated
+    /// `root_val` cache and skip re-interning.
+    pub(crate) fn root_val_with(
+        &self,
+        keys: &crate::data::intern::KeyCache,
+    ) -> std::result::Result<Val, EvalError> {
+        if let Some(root) = self.root_val.get() {
+            return Ok(root.clone());
+        }
+        let root = {
+            #[cfg(feature = "simd-json")]
+            {
+                if let Some(tape) = self.lazy_tape()? {
+                    Val::from_tape_data_with(keys, tape)
+                } else {
+                    Val::from_value_with(keys, &self.document)
+                }
+            }
+            #[cfg(not(feature = "simd-json"))]
+            {
+                Val::from_value_with(keys, &self.document)
+            }
+        };
+        let _ = self.root_val.set(root);
+        Ok(self.root_val.get().expect("root val initialized").clone())
     }
 
     /// Parse raw JSON bytes and build a `Jetro` query handle.

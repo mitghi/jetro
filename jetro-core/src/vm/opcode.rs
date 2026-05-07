@@ -32,6 +32,12 @@ pub struct CompiledCall {
     pub name: Arc<str>,
     /// Pre-compiled sub-programs for each lambda/expression argument; shared via `Arc`.
     pub sub_progs: Arc<[Arc<Program>]>,
+    /// `BodyKernel`-classified form of each sub-program, computed once at
+    /// compile time. Higher-order builtins (`.filter`, `.map`, `.any`,
+    /// `.all`, `.find`, ...) consult this to dispatch the per-element
+    /// hot path through `eval_kernel` for native-speed Rust evaluation,
+    /// falling back to the `Program` arm for `BodyKernel::Generic`.
+    pub sub_kernels: Arc<[crate::exec::pipeline::BodyKernel]>,
     /// Original un-compiled arguments kept for lambda-param introspection at runtime.
     pub orig_args: Arc<[Arg]>,
     /// When set, `filter`/`map` may stop early after collecting this many results.
@@ -332,6 +338,286 @@ pub enum Opcode {
 
     /// Guard that fires when a `DELETE` sentinel reaches execution outside a patch context.
     DeleteMarkErr,
+
+    /// Execute a compiled pattern-match expression: evaluate the scrutinee,
+    /// try each arm's pattern (and optional guard) in order, and run the body
+    /// of the first matching arm with its bindings in scope.
+    Match(Arc<CompiledMatch>),
+
+    /// Walk every descendant of the receiver in DFS pre-order, run the
+    /// compiled match against each, and collect every arm-body result
+    /// that is truthy. Falsy bodies and unmatched values (the trailing
+    /// `Fail`) are silently dropped. Pushes the resulting `Val::Arr`.
+    DeepMatchAll(Arc<CompiledMatch>),
+
+    /// Like `DeepMatchAll` but stops at the first descendant whose
+    /// match produces a truthy arm-body result. Pushes the body
+    /// directly (not wrapped in an array); pushes `Val::Null` when no
+    /// descendant matches.
+    DeepMatchFirst(Arc<CompiledMatch>),
+}
+
+/// Strategy for producing the scrutinee value of a compiled `match`
+/// expression. Most query authors write `match @ with { ... }` (matching
+/// the current row) or `match $.path with { ... }` (matching the
+/// document root or a navigation chain). The first two cases avoid VM
+/// re-entry by reading directly from the runtime environment.
+#[derive(Debug, Clone)]
+pub enum MatchScrutinee {
+    /// Read the current row from `Env::current` (the `@` token).
+    Current,
+    /// Read the document root from `Env::root` (the `$` token).
+    Root,
+    /// Evaluate an arbitrary scrutinee program against the current env.
+    Program(Arc<Program>),
+}
+
+/// Compiled representation of a `match scrutinee with { arms }` expression.
+/// Arms are lowered to a flat `MatchOp` instruction stream with explicit
+/// jumps between arms; each arm starts with `ResetArm`, which initialises
+/// its local slot space and binding cursor. Bodies and guards are stored as
+/// separate `Program` pools indexed from the op stream.
+#[derive(Debug, Clone)]
+pub struct CompiledMatch {
+    /// Strategy for evaluating the value being matched.
+    pub scrutinee: MatchScrutinee,
+    /// Flat instruction stream describing arm tests, captures, guards, and bodies.
+    pub ops: Arc<[MatchOp]>,
+    /// Pool of pattern literals indexed by `MatchOp::LitEq.lit`.
+    pub lits: Arc<[crate::parse::ast::PatLit]>,
+    /// Pool of compiled guard sub-programs indexed by `MatchOp::Guard.prog`.
+    pub guards: Arc<[Arc<Program>]>,
+    /// Pool of compiled body sub-programs indexed by `MatchOp::Body.prog`.
+    pub bodies: Arc<[Arc<Program>]>,
+    /// Pool of free-standing `Pat` nodes referenced from `MatchOp::TestSubPat`,
+    /// used for sub-patterns whose runtime test is more economical to walk
+    /// recursively than to flatten (currently `Pat::Or`).
+    pub subpats: Arc<[crate::parse::ast::Pat]>,
+    /// Maximum number of slots any prelude or arm needs at once. The VM
+    /// pre-sizes its slot vector to this value so that prelude ops (which
+    /// run before the first `ResetArm`) can write into projection slots
+    /// without underflow.
+    pub max_slots: u16,
+    /// `true` when at least one arm has an unconditional catch-all
+    /// pattern (`_` or a bare `Bind`) with no guard. Tooling and
+    /// future analysers consume this flag; the runtime always produces
+    /// the same non-exhaustive error if every arm misses, regardless of
+    /// the flag value.
+    pub is_exhaustive: bool,
+    /// Shape summary describing what the structural backend can serve
+    /// from a bitmap index without touching the document body. `None`
+    /// means the match has no exploitable structure (mixed shapes,
+    /// guard-only arms, etc.) and the runtime walks every descendant
+    /// directly.
+    pub shape_summary: Option<MatchShapeSummary>,
+}
+
+/// Compile-time summary of a `match`'s arm shapes, used by deep-search
+/// (`..match`) dispatch to pre-filter candidates via a structural
+/// bitmap before running the per-arm pattern test.
+#[derive(Debug, Clone)]
+pub enum MatchShapeSummary {
+    /// Every arm is a `Pat::Obj` and the union of leading keys across
+    /// arms is the listed set. A document node qualifies as a candidate
+    /// when it is an object containing *any* of these keys; the per-arm
+    /// runtime then narrows further.
+    ObjAnyOfKeys(Arc<[Arc<str>]>),
+    /// Every arm tests the same scalar kind. Non-matching kinds can
+    /// be skipped entirely.
+    KindOnly(crate::parse::ast::KindType),
+    /// Every arm tests a numeric range. The union range is the smallest
+    /// interval covering all per-arm bounds.
+    NumericRange {
+        /// Lower bound across all arms (inclusive).
+        lo: f64,
+        /// Upper bound across all arms.
+        hi: f64,
+        /// `true` when the upper bound is inclusive (any arm uses `..=`).
+        inclusive: bool,
+    },
+}
+
+/// Slot identifier used by the match instruction stream. Slot 0 always
+/// holds the scrutinee; subsequent slots hold sub-projections produced by
+/// `LoadField` / `LoadIndex` / `LoadTail`. Slot space is reset at the
+/// start of each arm via `ResetArm`.
+pub type MatchSlot = u16;
+
+/// Single instruction of the flat match decision machine.
+///
+/// Execution model: a program counter walks `ops` left to right; each
+/// failing test or load jumps to the start of the next arm (or to the
+/// trailing `Fail` if no arm remains). Successful tests fall through to the
+/// next instruction. `Body` terminates the loop with the body's evaluated
+/// result; `Fail` raises a non-exhaustive-match error.
+#[derive(Debug, Clone)]
+pub enum MatchOp {
+    /// Mark the start of a new arm. Clears the binding stack and grows
+    /// the slot vector to `slots`. Slots in the range `0..keep_above` are
+    /// preserved across arm boundaries; slots at or above `keep_above`
+    /// are zeroed. `keep_above >= 1` always — slot 0 (scrutinee) is
+    /// always preserved. Values greater than 1 are used by cross-arm
+    /// prefix sharing to retain sub-projections (e.g. an object key's
+    /// loaded value) across all arms participating in the shared prefix.
+    ResetArm {
+        /// Number of slots this arm requires (including slot 0).
+        slots: u16,
+        /// Number of leading slots whose contents must be preserved.
+        keep_above: u16,
+    },
+
+    /// Verify the value at `slot` has runtime kind `kind`; jump on miss.
+    KindCheck {
+        /// Slot whose value is being kind-checked.
+        slot: MatchSlot,
+        /// Target kind.
+        kind: crate::parse::ast::KindType,
+        /// PC to jump to when the value is not of `kind`.
+        else_pc: u32,
+    },
+
+    /// Compare the value at `slot` against literal pool entry `lit`; jump on miss.
+    LitEq {
+        /// Slot whose value is being compared.
+        slot: MatchSlot,
+        /// Index into `CompiledMatch::lits`.
+        lit: u16,
+        /// PC to jump to on inequality.
+        else_pc: u32,
+    },
+
+    /// Test that the value at `slot` is a number in the range `[lo, hi)`
+    /// when `inclusive == false`, or `[lo, hi]` when `inclusive == true`.
+    /// Non-numeric values fail and jump to `else_pc`.
+    RangeCheck {
+        /// Slot whose value is being range-tested.
+        slot: MatchSlot,
+        /// Lower bound (inclusive).
+        lo: f64,
+        /// Upper bound (semantics determined by `inclusive`).
+        hi: f64,
+        /// `true` when `hi` is inclusive (`..=` syntax).
+        inclusive: bool,
+        /// PC to jump to when the value is non-numeric or out of range.
+        else_pc: u32,
+    },
+
+    /// Verify the value at `slot` is an object (any object representation); jump on miss.
+    ObjCheck {
+        /// Slot expected to hold an object value.
+        slot: MatchSlot,
+        /// PC to jump to when the value is not an object.
+        else_pc: u32,
+    },
+
+    /// Look up `key` in the object value at `src` and store the result into
+    /// `dst`. On a missing key (any object representation) jump to `else_pc`.
+    LoadField {
+        /// Source slot holding the parent object.
+        src: MatchSlot,
+        /// Object key being projected.
+        key: Arc<str>,
+        /// Destination slot for the projected value.
+        dst: MatchSlot,
+        /// PC to jump to when `key` is absent.
+        else_pc: u32,
+    },
+
+    /// Verify array length at `slot`. When `exact`, must equal `len`;
+    /// otherwise must be `>= len`. Accepts any array-like representation.
+    LenCheck {
+        /// Slot expected to hold an array-like value.
+        slot: MatchSlot,
+        /// Required length / minimum length.
+        len: u32,
+        /// `true` for exact length, `false` for `>=` (used with rest patterns).
+        exact: bool,
+        /// PC to jump to when the length test fails.
+        else_pc: u32,
+    },
+
+    /// Read element at `idx` from the array-like value at `src` and store
+    /// it into `dst`. Caller is responsible for emitting a preceding `LenCheck`.
+    LoadIndex {
+        /// Source slot holding the array-like value.
+        src: MatchSlot,
+        /// Zero-based array index to project.
+        idx: u32,
+        /// Destination slot for the projected element.
+        dst: MatchSlot,
+    },
+
+    /// Capture the array tail starting at `from` from the value at `src`
+    /// into `dst` as a freshly-built `Val::Arr`.
+    LoadTail {
+        /// Source slot holding the array-like value.
+        src: MatchSlot,
+        /// First index included in the captured tail.
+        from: u32,
+        /// Destination slot for the tail array.
+        dst: MatchSlot,
+    },
+
+    /// Capture the object "rest" — every key/value pair on `src` whose
+    /// key is *not* present in `listed_keys` — into `dst` as a freshly
+    /// built `Val::Obj`. Emitted by the compiler when an object pattern
+    /// binds a named rest marker (`{a: x, ...rest}`).
+    LoadObjRest {
+        /// Source slot holding the object value.
+        src: MatchSlot,
+        /// Keys already covered by explicit pattern fields; excluded
+        /// from the captured rest object.
+        listed_keys: Arc<[Arc<str>]>,
+        /// Destination slot for the rest object.
+        dst: MatchSlot,
+    },
+
+    /// Walk a tree-form sub-pattern at `subpat` against the value at `slot`,
+    /// pushing any captured bindings into the arm's binding stack. Used for
+    /// sub-patterns (currently `Or`) whose flat representation would expand
+    /// the op stream more than a recursive walk.
+    TestSubPat {
+        /// Slot whose value is being tested.
+        slot: MatchSlot,
+        /// Index into `CompiledMatch::subpats`.
+        subpat: u16,
+        /// PC to jump to on test failure.
+        else_pc: u32,
+    },
+
+    /// Push a binding onto the arm's binding stack: `name` = value at `slot`.
+    Bind {
+        /// Variable name introduced into the arm body's scope.
+        name: Arc<str>,
+        /// Slot whose value is captured.
+        slot: MatchSlot,
+    },
+
+    /// Run guard sub-program at `prog`; jump on falsy / errored result.
+    Guard {
+        /// Index into `CompiledMatch::guards`.
+        prog: u16,
+        /// PC to jump to when the guard fails.
+        else_pc: u32,
+    },
+
+    /// Run body sub-program at `prog` with the arm's bindings in scope and
+    /// terminate match evaluation with its result.
+    Body {
+        /// Index into `CompiledMatch::bodies`.
+        prog: u16,
+    },
+
+    /// Raise a non-exhaustive-match error. Emitted as the trailing op so a
+    /// failed scan over every arm lands here.
+    Fail,
+
+    /// Unconditional jump to `target_pc`. Used by literal or-pattern
+    /// cascades to skip remaining alternatives once one has matched.
+    Jump {
+        /// Absolute PC to jump to.
+        target_pc: u32,
+    },
 }
 
 

@@ -87,6 +87,15 @@ impl Env {
         self.current = old;
     }
 
+    /// Return `true` when no let-bindings are currently in scope. Used by
+    /// HOF kernel fast paths to detect that a `LoadIdent` cannot resolve
+    /// to a binding and is therefore safe to interpret as a field read on
+    /// the current item.
+    #[inline]
+    pub fn has_no_vars(&self) -> bool {
+        self.vars.is_empty()
+    }
+
     /// Look up a named variable; searches in reverse so the innermost binding wins.
     #[inline]
     pub fn get_var(&self, name: &str) -> Option<&Val> {

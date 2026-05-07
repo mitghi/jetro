@@ -635,6 +635,162 @@ to_tsv    // TAB-separated variant
 
 ---
 
+## 21. Pattern Matching
+
+`match scrutinee with { pat -> body, ... }` evaluates the scrutinee and runs
+each arm's pattern in order. The first arm whose pattern (and optional `when`
+guard) matches has its body evaluated and returned. A non-exhaustive match
+that misses every arm raises a runtime error.
+
+### Basic shape
+
+```
+match $.user with {
+    {role: "admin"}                    -> "full access",
+    {role: "user", verified: true}     -> "limited",
+    {role: "guest"}                    -> "readonly",
+    _                                  -> "denied"
+}
+```
+
+The `with` separator is required; it disambiguates the arm block from the
+postfix inline-filter syntax (`expr { pred }`).
+
+### Pattern forms
+
+| Form | Meaning |
+|------|---------|
+| `_` | Wildcard — always matches, no binding |
+| `null`, `true`, `42`, `3.14`, `"x"` | Literal — matches by structural equality |
+| `name` | Bind — captures the whole value into `name` |
+| `name@pat` *(reserved)* | As-pattern — bind whole value AND match sub-pattern |
+| `{k: pat, ...}` | Object — listed keys must be present and match; extras allowed |
+| `{k: pat, ...*rest}` | Object with rest binding — captures unlisted keys to `rest` |
+| `{k: pat, ...*}` | Object with anonymous rest — informational; same as no marker |
+| `[a, b]` | Array — exact length, element-wise match |
+| `[head, ...tail]` | Array head/tail — captures remainder to `tail` |
+| `[a, ...]` | Array with anonymous rest — accepts any length `>= prefix` |
+| `s: string`, `n: number` | Kind-bind — matches scalar kind, binds the value |
+| `string`, `number` | Kind-only — matches scalar kind, no binding |
+| `1..10`, `0..=100` | Numeric range — exclusive `..` or inclusive `..=`, ints or floats |
+| `a \| b \| c` | Or — first alt that matches wins; alts must bind same names |
+
+### Guards
+
+```
+match $.x with {
+    n when n > 100  -> "big",
+    n when n > 10   -> "medium",
+    _               -> "small"
+}
+```
+
+Guards run after the pattern binds; full expression syntax is allowed.
+Builtins compose naturally:
+
+```
+match $.user with {
+    {email: e} when e.ends_with("@corp.com")    -> "internal",
+    {email: e} when e.contains("admin")          -> "admin-ish",
+    _                                            -> "external"
+}
+```
+
+### Object rest pattern
+
+`{k: v, ...*rest}` captures every key not listed in the pattern into a
+fresh `Val::Obj`. The same `...*expr` sigil is accepted in object body
+position as a shallow-spread synonym, so capture and splat use symmetric
+syntax:
+
+```
+match $.u with {
+    {a: a_old, c: c_old, ...*rest} -> {...*rest, a: "new", c: c_old},
+    _                              -> @
+}
+```
+
+### Range patterns
+
+```
+match $.code with {
+    200..300  -> "ok",
+    400..500  -> "client_error",
+    500..600  -> "server_error",
+    _         -> "unknown"
+}
+```
+
+Bounds may be integer or float; integer scrutinees widen to `f64` for the
+comparison. Negative bounds (`-10..0`) and inclusive upper (`0..=100`)
+are supported.
+
+### Or-patterns
+
+```
+match $.method with {
+    "GET" | "HEAD"                     -> "safe",
+    "POST" | "PUT" | "PATCH"           -> "write",
+    "DELETE"                           -> "destructive"
+}
+```
+
+Every alternative must bind the same set of variable names; the parser
+rejects `{a: x} | {b: y}` because the body cannot consistently reference
+either binding.
+
+### Deep matching
+
+`$..match { arms }` walks every descendant in DFS pre-order, runs the
+arm list against each, and collects truthy arm-body results into an
+array. Falsy bodies and unmatched values are silently dropped.
+
+```
+$..match {
+    {tag: "click", id: i} -> i,
+    _                     -> false
+}
+```
+
+`$..match! { arms }` is the early-stop variant: returns the first truthy
+arm body and aborts the walk. Returns `null` when nothing matches.
+
+```
+$..match! {
+    {role: "admin"} -> @,
+    _               -> false
+}
+```
+
+When every arm shares an object key prefix, the runtime narrows
+candidates via the structural bitmap index before running the per-arm
+match — far cheaper than a full document walk on tape-backed inputs.
+
+### Composition
+
+`match` is an expression and composes with the rest of the language:
+
+```
+$.events.map(match @ with {
+    {tag: "view",  path: p} -> {sort: "view",  v: p},
+    {tag: "click", id: i}   -> {sort: "click", v: i},
+    _                       -> {sort: "other"}
+})
+
+$.reqs.filter(match @ with {
+    {method: "GET" \| "HEAD"} -> true,
+    _                         -> false
+})
+
+$.x | (match @ with { n when n > 5 -> "big", _ -> "small" })
+```
+
+When `.filter(match @ ...)` or `.map(match @ ...)` recognises a single
+match expression as the lambda body, a dedicated stage dispatches into
+the flat-IR runtime directly — no per-row VM stack overhead.
+
+---
+
 ## 22. Reserved Keywords
 
 ```
@@ -644,6 +800,7 @@ for  in  if
 let  lambda
 kind  is  as  when
 patch  DELETE
+match  with  try  has
 ```
 
 Cannot be used as identifiers. `DELETE` must be uppercase and only appears as a patch-field value.
@@ -707,4 +864,30 @@ $.orders.group_by(region).transform_values(lambda v: v.sum(total))
 
 // Cross join via comprehension
 [{u: u.name, p: p.name} for u in $.users for p in $.products if p.owner == u.id]
+
+// Pattern match: tagged-union dispatch
+$.events.map(match @ with {
+    {tag: "view",  path: p}  -> {sort: "view",  v: p},
+    {tag: "click", id: i}    -> {sort: "click", v: i},
+    {tag: "error", code: c}  -> {sort: "error", v: c},
+    _                        -> {sort: "other"}
+})
+
+// Pattern match: object rest capture + splat
+match $.user with {
+    {role: "admin", ...*rest} -> {...*rest, role: "superadmin"},
+    other                     -> other
+}
+
+// Deep match: collect every click event in the tree
+$..match {
+    {tag: "click", id: i} -> i,
+    _                     -> false
+}
+
+// Deep match: return the first admin user found anywhere
+$..match! {
+    {role: "admin", ...*rest} -> rest,
+    _                         -> false
+}
 ```

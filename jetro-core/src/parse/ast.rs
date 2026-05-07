@@ -176,6 +176,85 @@ pub enum Expr {
     /// Sentinel emitted by the parser for `.delete()` / `.unset()` terminals.
     /// Reaching the evaluator is a hard error; the compiler must consume it during patch lowering.
     DeleteMark,
+
+    /// Pattern-match expression `match scrutinee { pat when guard -> body, ... }`.
+    /// Arms are tested top to bottom; first match wins.
+    Match {
+        /// Value being matched against the arm patterns.
+        scrutinee: Box<Expr>,
+        /// Ordered list of `pat -> body` arms with optional guards.
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// One arm of a `Match` expression: a pattern, optional guard, and body.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    /// Pattern that the scrutinee must satisfy.
+    pub pat: Pat,
+    /// Optional `when <expr>` guard evaluated with arm bindings in scope.
+    pub guard: Option<Expr>,
+    /// Body expression evaluated when this arm fires.
+    pub body: Expr,
+}
+
+/// Pattern node used in `Match` arms. Patterns describe the shape of a value
+/// and may bind subterms into the arm's scope.
+#[derive(Debug, Clone)]
+pub enum Pat {
+    /// Wildcard `_` — matches any value, no binding.
+    Wild,
+    /// Literal pattern — matches by structural equality with `Lit`.
+    Lit(PatLit),
+    /// Identifier binding `name` — captures the whole value into `name`.
+    Bind(String),
+    /// Or-pattern `a | b | c` — matches if any sub-pattern matches.
+    Or(Vec<Pat>),
+    /// Object pattern `{k: pat, ...}` — every listed key must match. The
+    /// runtime always permits extra keys; an explicit `...` marker
+    /// signals the source spelled the rest marker, and a named
+    /// `...rest` captures every unlisted key into `rest` as a freshly
+    /// built `Val::Obj`.
+    Obj {
+        /// Listed key/sub-pattern pairs that must all match.
+        fields: Vec<(String, Pat)>,
+        /// Rest behaviour mirrors `Pat::Arr`:
+        /// - `None`             → no rest marker (default; extras silently allowed)
+        /// - `Some(None)`       → anonymous `...` marker; same semantics, explicit
+        /// - `Some(Some(name))` → `...name` capture into a named binding
+        rest: Option<Option<String>>,
+    },
+    /// Array pattern `[a, b, ...rest]` — fixed prefix with optional rest binding.
+    Arr { elems: Vec<Pat>, rest: Option<Option<String>> },
+    /// Type-kind pattern `name: kind` (e.g. `s: str`) — matches a kind, binds the value.
+    Kind { name: Option<String>, kind: KindType },
+    /// Numeric range pattern `lo..hi` (exclusive) or `lo..=hi` (inclusive).
+    /// Both bounds are stored as `f64` and compared as floating-point at
+    /// runtime; integer scrutinees are widened transparently.
+    Range {
+        /// Lower bound (inclusive).
+        lo: f64,
+        /// Upper bound (exclusive when `inclusive == false`, inclusive otherwise).
+        hi: f64,
+        /// Whether the upper bound is inclusive.
+        inclusive: bool,
+    },
+}
+
+/// Literal sub-form of `Pat::Lit`. Restricted to scalar literals; arbitrary
+/// expressions are not allowed in pattern position.
+#[derive(Debug, Clone)]
+pub enum PatLit {
+    /// `null` literal.
+    Null,
+    /// Boolean literal.
+    Bool(bool),
+    /// Integer literal.
+    Int(i64),
+    /// Float literal.
+    Float(f64),
+    /// String literal.
+    Str(String),
 }
 
 
@@ -319,6 +398,16 @@ pub enum Step {
     InlineFilter(Box<Expr>),
     /// `.first` / `.one` — quantifier that collapses an array to a scalar.
     Quantifier(QuantifierKind),
+    /// `..match { arms }` — recursive descent that runs the arm list
+    /// against every descendant and collects truthy arm-body results.
+    /// `early_stop` is `true` for the `..match! { ... }` form, which
+    /// returns the first truthy result and aborts the walk.
+    DeepMatch {
+        /// Arm list applied against every descendant.
+        arms: Vec<MatchArm>,
+        /// `true` for the early-stop `..match!` form.
+        early_stop: bool,
+    },
 }
 
 

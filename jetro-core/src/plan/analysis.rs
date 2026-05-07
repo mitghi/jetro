@@ -387,6 +387,9 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::PipelineRun { .. } => stack.push(AbstractVal::UNKNOWN),
         Opcode::DeleteMarkErr => stack.push(AbstractVal::UNKNOWN),
+        Opcode::Match(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::DeepMatchAll(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::DeepMatchFirst(_) => stack.push(AbstractVal::UNKNOWN),
     }
 }
 
@@ -902,6 +905,13 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             })
         }
         Expr::DeleteMark => false,
+        Expr::Match { scrutinee, arms } => {
+            expr_uses_ident(scrutinee, name)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(|g| expr_uses_ident(g, name))
+                        || expr_uses_ident(&a.body, name)
+                })
+        }
     }
 }
 
@@ -1090,10 +1100,12 @@ fn rewrite_call(
 ) -> Arc<crate::vm::CompiledCall> {
     use crate::vm::CompiledCall;
     let new_subs: Vec<Arc<Program>> = c.sub_progs.iter().map(|p| dedup_rec(p, cache)).collect();
+    let new_kernels = crate::compile::compiler::classify_sub_kernels(&new_subs);
     Arc::new(CompiledCall {
         method: c.method,
         name: c.name.clone(),
         sub_progs: new_subs.into(),
+        sub_kernels: new_kernels,
         orig_args: c.orig_args.clone(),
         demand_max_keep: c.demand_max_keep,
     })
@@ -1192,6 +1204,9 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::CastOp(_) => 2,
         Opcode::PatchEval(_) => 50,
         Opcode::DeleteMarkErr => 1,
+        Opcode::Match(_) => 1,
+        Opcode::DeepMatchAll(_) => 1,
+        Opcode::DeepMatchFirst(_) => 1,
         Opcode::PipelineRun { base, steps } => {
             program_cost(base)
                 + steps

@@ -10,8 +10,8 @@ use smallvec::SmallVec;
 use std::borrow::{Borrow, Cow};
 
 use crate::builtins::BuiltinCall;
-use crate::parse::chain_ir::PullDemand;
 use crate::data::value::Val;
+use crate::plan::demand::PullDemand;
 
 /// Per-element output of a `Stage::apply`. `Pass(Cow::Borrowed)` is the
 /// hot path for filter and field-read (zero clone); `Cow::Owned` for
@@ -87,6 +87,43 @@ impl Stage for BuiltinStage {
         match self.call.apply(x) {
             Some(v) => StageOutput::Pass(Cow::Owned(v)),
             None => StageOutput::Filtered,
+        }
+    }
+}
+
+/// Pipeline-only row filter for `compact()`: drop null rows without applying
+/// the whole-array scalar compact operation to each element.
+pub struct CompactFilterStage;
+
+impl Stage for CompactFilterStage {
+    #[inline]
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if matches!(x, Val::Null) {
+            StageOutput::Filtered
+        } else {
+            StageOutput::Pass(Cow::Borrowed(x))
+        }
+    }
+}
+
+/// Pipeline-only row filter for literal `remove(value)`.
+pub struct RemoveValueFilterStage {
+    target: Val,
+}
+
+impl RemoveValueFilterStage {
+    pub fn new(target: Val) -> Self {
+        Self { target }
+    }
+}
+
+impl Stage for RemoveValueFilterStage {
+    #[inline]
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        if crate::util::vals_eq(x, &self.target) {
+            StageOutput::Filtered
+        } else {
+            StageOutput::Pass(Cow::Borrowed(x))
         }
     }
 }
@@ -234,7 +271,12 @@ where
 }
 
 /// Run `stages` over `arr` and return the nth emitted output.
-pub fn run_pipeline_nth_with_demand(arr: &[Val], stages: &dyn Stage, demand: PullDemand, nth: usize) -> Val {
+pub fn run_pipeline_nth_with_demand(
+    arr: &[Val],
+    stages: &dyn Stage,
+    demand: PullDemand,
+    nth: usize,
+) -> Val {
     match demand {
         PullDemand::NthInput(i) => {
             run_pipeline_nth_iter_with_demand(arr.get(i).into_iter(), stages, PullDemand::All, 0)
@@ -340,7 +382,8 @@ where
                     return cow.into_owned();
                 }
                 emitted_outputs += 1;
-                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
+                {
                     break;
                 }
             }
@@ -351,11 +394,13 @@ where
                         return it.into_owned();
                     }
                     emitted_outputs += 1;
-                    if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
+                    {
                         break;
                     }
                 }
-                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n) {
+                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
+                {
                     break;
                 }
             }
@@ -625,6 +670,65 @@ impl Stage for GenericFilter {
         match kept {
             Ok(true) => StageOutput::Pass(Cow::Borrowed(x)),
             _ => StageOutput::Filtered,
+        }
+    }
+}
+
+/// A pipeline stage that runs a compiled `match` expression as a boolean
+/// predicate against each row, bypassing VM stack/opcode dispatch. The
+/// arm bodies are expected to evaluate to truthy/falsy values; on
+/// match-time error the row is dropped.
+pub struct MatchFilter {
+    /// The compiled flat-IR match program to dispatch into per row.
+    pub cm: std::sync::Arc<crate::vm::CompiledMatch>,
+    /// Shared VM and environment context, wrapped for interior mutability.
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for MatchFilter {
+    /// Set `@` to `x`, evaluate the match flat-IR with `x` as the
+    /// scrutinee via the view-domain runtime so missed-arm pattern
+    /// tests do not materialise sub-`Val`s, and pass the row through
+    /// when the chosen arm body is truthy. Errors and non-exhaustive
+    /// matches degrade to `Filtered`.
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let view = crate::data::view::ValView::new(x);
+        let r = crate::vm::exec::exec_match_view(vm, &self.cm, view, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) if crate::util::is_truthy(&v) => StageOutput::Pass(Cow::Borrowed(x)),
+            _ => StageOutput::Filtered,
+        }
+    }
+}
+
+/// A pipeline stage that runs a compiled `match` expression to project
+/// each row into a new value, bypassing VM stack/opcode dispatch.
+pub struct MatchMap {
+    /// The compiled flat-IR match program to dispatch into per row.
+    pub cm: std::sync::Arc<crate::vm::CompiledMatch>,
+    /// Shared VM and environment context, wrapped for interior mutability.
+    pub ctx: std::rc::Rc<std::cell::RefCell<VmCtx>>,
+}
+
+impl Stage for MatchMap {
+    /// Set `@` to `x`, evaluate the match flat-IR via the view-domain
+    /// runtime so pattern tests against borrowed sub-projections do not
+    /// allocate, and forward the arm-body result. Errors degrade to
+    /// `Filtered`.
+    fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
+        let mut c = self.ctx.borrow_mut();
+        let VmCtx { vm, env } = &mut *c;
+        let prev = env.swap_current(x.clone());
+        let view = crate::data::view::ValView::new(x);
+        let r = crate::vm::exec::exec_match_view(vm, &self.cm, view, env);
+        env.restore_current(prev);
+        match r {
+            Ok(v) => StageOutput::Pass(Cow::Owned(v)),
+            Err(_) => StageOutput::Filtered,
         }
     }
 }
@@ -955,8 +1059,14 @@ fn barrier_top_or_bottom_k(buf: Vec<Val>, key: &KeySource, k: usize, largest: bo
     } else {
         crate::exec::pipeline::StageStrategy::SortTopK(k)
     };
-    crate::exec::pipeline::bounded_sort_by_key_cmp(buf, false, strategy, |v| Ok(key.extract(v)), cmp_val)
-        .unwrap_or_default()
+    crate::exec::pipeline::bounded_sort_by_key_cmp(
+        buf,
+        false,
+        strategy,
+        |v| Ok(key.extract(v)),
+        cmp_val,
+    )
+    .unwrap_or_default()
 }
 
 /// Barrier operation: deduplicate rows, keeping the first occurrence of each
@@ -1499,8 +1609,8 @@ mod tests {
     #[test]
     fn step3d_phase3_filter_reorder() {
         // Two consecutive Filter stages should be fused/reordered into one by the planner.
-        use crate::parse::ast::BinOp;
         use crate::exec::pipeline::{plan_with_kernels, BodyKernel, Sink, Stage};
+        use crate::parse::ast::BinOp;
         use std::sync::Arc;
         let dummy = Arc::new(crate::vm::Program::new(Vec::new(), ""));
         let stages = vec![
@@ -1516,7 +1626,11 @@ mod tests {
             ),
         ];
         let kernels = vec![
-            BodyKernel::FieldCmpLit(Arc::from("price"), BinOp::Lt, crate::data::value::Val::Int(100)),
+            BodyKernel::FieldCmpLit(
+                Arc::from("price"),
+                BinOp::Lt,
+                crate::data::value::Val::Int(100),
+            ),
             BodyKernel::FieldCmpLit(
                 Arc::from("active"),
                 BinOp::Eq,

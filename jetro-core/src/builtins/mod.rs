@@ -1939,6 +1939,15 @@ impl BuiltinCall {
             }
         }
 
+        if method == BuiltinMethod::Remove {
+            return match args {
+                [Arg::Pos(expr)] => {
+                    Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?)))
+                }
+                _ => None,
+            };
+        }
+
         Self::from_static_args(
             method,
             name,

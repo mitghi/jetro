@@ -24,11 +24,14 @@ kw_patch  = @{ "patch"  ~ !ident_char }
 kw_delete = @{ "DELETE" ~ !ident_char }
 kw_try    = @{ "try"    ~ !ident_char }
 kw_has    = @{ "has"    ~ !ident_char }
+kw_match  = @{ "match"  ~ !ident_char }
+kw_with   = @{ "with"   ~ !ident_char }
 
 reserved = _{
     ("true" | "false" | "null" | "and" | "or" | "not"
      | "for" | "in" | "if" | "else" | "let" | "lambda" | "kind"
-     | "is" | "as" | "when" | "patch" | "DELETE" | "try" | "has") ~ !ident_char
+     | "is" | "as" | "when" | "patch" | "DELETE" | "try" | "has"
+     | "match" | "with") ~ !ident_char
 }
 
 ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
@@ -94,7 +97,7 @@ inline_filter  = { "{" ~ expr ~ "}" }
 // (e.g. `..services?.name`, `.a?.b?`).  Still reject `?|` to avoid
 // conflict with pipe, and `??` which is coalesce.
 quantifier     = { ("?" ~ !("|" | "?")) | "!" }
-postfix = { deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
+postfix = { deep_match | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────
 expr = { cond_expr }
@@ -176,10 +179,15 @@ obj_field_dyn    = { "[" ~ expr ~ "]" ~ ":" ~ expr }
 obj_field_opt_v  = { obj_key_expr ~ "?" ~ ":" ~ expr }
 obj_field_opt    = { obj_key_expr ~ "?" }
 obj_field_spread_deep = { "...**" ~ expr }
+// `...*expr` is a shallow spread synonym used by object rest patterns
+// for symmetry with the `{...*rest}` capture form. Same semantics as
+// `...expr`. Listed before `obj_field_spread` so it wins the leading
+// `...*` prefix without backtracking.
+obj_field_spread_star = { "...*" ~ expr }
 obj_field_spread      = { "..." ~ expr }
 obj_field_kv          = { obj_key_expr ~ ":" ~ expr ~ (kw_when ~ expr)? }
 obj_field_short       = { ident }
-obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread | obj_field_kv | obj_field_short }
+obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread_star | obj_field_spread | obj_field_kv | obj_field_short }
 obj_construct    = { "{" ~ (obj_field ~ ("," ~ obj_field)* ~ ","?)? ~ "}" }
 
 // ── Array construction ─────────────────────────────────────────────────────────
@@ -189,6 +197,79 @@ arr_construct = { "[" ~ (arr_elem ~ ("," ~ arr_elem)* ~ ","?)? ~ "]" }
 
 // ── Global function calls ─────────────────────────────────────────────────────
 global_call = { ident ~ "(" ~ arg_list? ~ ")" }
+
+// ── Match expression ──────────────────────────────────────────────────────────
+// Pattern grammar.  Object/array patterns are recognised inside arm heads only,
+// so `{k: pat}` does not collide with `{k: expr}` object literals (those parse
+// as `obj_construct` in expression position).
+//
+// Pattern precedence: `pat_or` > `pat_atom`.  Or-patterns at the top of an
+// arm head; everything else is atom or object/array.
+pat_lit_null  = @{ "null"  ~ !ident_char }
+pat_lit_true  = @{ "true"  ~ !ident_char }
+pat_lit_false = @{ "false" ~ !ident_char }
+pat_lit_float = @{ "-"? ~ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
+pat_lit_int   = @{ "-"? ~ ASCII_DIGIT+ }
+pat_lit_str   = { lit_str_dq | lit_str_sq }
+pat_literal   = { pat_lit_null | pat_lit_true | pat_lit_false | pat_lit_float | pat_lit_int | pat_lit_str }
+
+// Numeric range patterns. `1..10` is half-open `[1, 10)`; `1..=10` is
+// closed `[1, 10]`. Bounds are integer or float literals; mixing the two
+// is allowed (compared as `f64` at runtime). Listed before `pat_literal`
+// in `pat_atom` so the parser does not commit to the leading numeric
+// literal before checking for a range operator.
+pat_range_num    = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+pat_range_op     = @{ "..=" | ".." }
+pat_range        = { pat_range_num ~ pat_range_op ~ pat_range_num }
+
+pat_wild      = @{ "_" ~ !ident_char }
+pat_kind_bind = { ident ~ ":" ~ kind_type }
+pat_kind_only = { kind_type }
+pat_bind      = { ident }
+
+pat_obj_rest_named = { "...*" ~ ident }
+pat_obj_rest_anon  = { "...*" }
+pat_obj_rest       = { pat_obj_rest_named | pat_obj_rest_anon }
+pat_obj_field = { ident ~ ":" ~ pat_or }
+pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_rest)? ~ ","?)? ~ "}" }
+
+pat_arr_rest_named = { "..." ~ ident }
+pat_arr_rest_anon  = { "..." }
+pat_arr_rest       = { pat_arr_rest_named | pat_arr_rest_anon }
+pat_arr            = { "[" ~ (pat_or ~ ("," ~ pat_or)* ~ ("," ~ pat_arr_rest)? ~ ","?)? ~ "]" }
+
+pat_atom = {
+    pat_wild     |
+    pat_range    |
+    pat_literal  |
+    pat_kind_bind|
+    pat_kind_only|
+    pat_obj      |
+    pat_arr      |
+    pat_bind     |
+    "(" ~ pat_or ~ ")"
+}
+pat_or  = { pat_atom ~ ("|" ~ pat_atom)* }
+
+// Guard expression sits below pipe precedence so a trailing `->` belongs to
+// the arm separator rather than being eaten as a `pipe_bind` step inside
+// the guard. Arm bodies use the full `expr` grammar.
+match_arm = { pat_or ~ (kw_when ~ coalesce_expr)? ~ "->" ~ expr }
+// `match scrutinee with { arms }` — `with` separator avoids ambiguity with
+// `expr { inline_filter }` postfix. Without it, `match $.x { v -> v }` parses
+// the `{ v -> v }` as inline_filter (since `v -> v` is a valid pipe-bind expr).
+match_expr = { kw_match ~ expr ~ kw_with ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
+// `..match { arms }` walks every descendant in DFS pre-order, runs the
+// match against each, and collects truthy arm-body results into an
+// array. Falsy bodies and unmatched values are silently dropped — the
+// shape is "find all descendants whose pattern fires non-falsy".
+//
+// The `!` suffix (`..match! { arms }`) selects the early-stop variant:
+// the runtime returns the first truthy arm-body result without walking
+// the rest of the tree. Useful for "find any descendant satisfying the
+// pattern" queries.
+deep_match_op = @{ "..match!" | "..match" }
+deep_match = { deep_match_op ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
 
 // ── Patch block ───────────────────────────────────────────────────────────────
 pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }
@@ -203,6 +284,7 @@ patch_block    = { kw_patch ~ coalesce_expr ~ "{" ~ (patch_field ~ ("," ~ patch_
 
 // ── Primary ───────────────────────────────────────────────────────────────────
 primary = {
+    match_expr    |
     patch_block   |
     let_expr      |
     lambda_expr   |
