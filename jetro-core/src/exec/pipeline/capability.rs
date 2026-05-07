@@ -10,7 +10,7 @@ use crate::builtins::{
 };
 use crate::plan::demand::PullDemand;
 
-use super::{PipelineBody, Stage};
+use super::{PipelineBody, PredicateSinkOp, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +255,13 @@ pub(crate) enum ViewSinkCapability {
         /// Zero-based output index selected by the sink.
         index: usize,
     },
+    /// Predicate terminal sink (`any`, `all`, `find_index`, `indices_where`, `find_one`).
+    Predicate {
+        /// Predicate terminal operation to perform.
+        op: PredicateSinkOp,
+        /// Index of the view-native predicate kernel in `sink_kernels`.
+        predicate_kernel: usize,
+    },
 }
 
 impl ViewSinkCapability {
@@ -280,6 +287,13 @@ impl ViewSinkCapability {
                 materialization, ..
             } => materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
+            Self::Predicate { op, .. } => {
+                if op == PredicateSinkOp::FindOne {
+                    ViewMaterialization::SinkFinalRow
+                } else {
+                    ViewMaterialization::Never
+                }
+            }
         }
     }
 }
@@ -351,8 +365,9 @@ mod tests {
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        BodyKernel, NumOp, PipelineBody, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
-        ViewMaterialization, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+        BodyKernel, NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp,
+        ReducerSpec, Sink, Stage, ViewInputMode, ViewMaterialization, ViewOutputMode,
+        ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -457,6 +472,22 @@ mod tests {
             .materialization(),
             ViewMaterialization::SinkFinalRow
         );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::Any,
+                predicate_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::Never
+        );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::FindOne,
+                predicate_kernel: 0,
+            }
+            .materialization(),
+            ViewMaterialization::SinkFinalRow
+        );
     }
 
     #[test]
@@ -486,6 +517,21 @@ mod tests {
                 predicate_kernel: None,
                 project_kernel: None,
                 materialization: ViewMaterialization::SinkFinalRow,
+            })
+        ));
+        assert!(matches!(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            })
+            .view_capability(&[BodyKernel::FieldCmpLit(
+                Arc::from("score"),
+                BinOp::Gt,
+                Val::Int(10),
+            )]),
+            Some(ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::Any,
+                predicate_kernel: 0,
             })
         ));
     }

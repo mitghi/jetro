@@ -94,7 +94,7 @@ where
         |item| observe_view_sink(item, sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
-    Some(Ok(sink_acc.finish(false)))
+    Some(sink_acc.finish_result(false))
 }
 
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.
@@ -149,6 +149,23 @@ where
                 ViewRowAction::Stop
             } else {
                 ViewRowAction::Emit
+            })
+        }
+        pipeline::ViewSinkCapability::Predicate {
+            op,
+            predicate_kernel,
+        } => {
+            let kernel = sink_kernels.get(predicate_kernel)?;
+            let matched = eval_filter_kernel(item, kernel)?;
+            let sink_done = sink_acc
+                .observe_predicate_lazy(op, matched, || item.materialize())
+                .ok()?;
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else if matched {
+                ViewRowAction::Emit
+            } else {
+                ViewRowAction::Skip
             })
         }
     }
@@ -756,7 +773,7 @@ where
         |item| observe_view_sink(item, suffix.sink, &mut sink_acc, &body.sink_kernels),
     )?;
 
-    Some(Ok(sink_acc.finish(false)))
+    Some(sink_acc.finish_result(false))
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain

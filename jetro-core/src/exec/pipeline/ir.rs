@@ -155,6 +155,15 @@ impl Sink {
         if let Sink::Nth(index) = self {
             return Some(ViewSinkCapability::Nth { index: *index });
         }
+        if let Sink::Predicate(spec) = self {
+            return Some(ViewSinkCapability::Predicate {
+                op: spec.op,
+                predicate_kernel: view_native_sink_kernel(
+                    sink_kernels,
+                    spec.predicate_kernel_index(),
+                )?,
+            });
+        }
 
         let sink_spec = self.builtin_sink_spec()?;
         let reducer = self.reducer_spec();

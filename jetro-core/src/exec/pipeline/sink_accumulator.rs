@@ -230,6 +230,19 @@ impl<'a> SinkAccumulator<'a> {
         matched: bool,
         item: Val,
     ) -> Result<bool, EvalError> {
+        self.observe_predicate_lazy(op, matched, || item)
+    }
+
+    /// Lazy predicate sink variant; materialises the row only for sinks that store it.
+    pub(crate) fn observe_predicate_lazy<F>(
+        &mut self,
+        op: PredicateSinkOp,
+        matched: bool,
+        materialize_item: F,
+    ) -> Result<bool, EvalError>
+    where
+        F: FnOnce() -> Val,
+    {
         match op {
             PredicateSinkOp::Any => {
                 if matched {
@@ -273,7 +286,7 @@ impl<'a> SinkAccumulator<'a> {
                         ));
                     }
                     self.predicate_matched = Some(self.predicate_seen);
-                    self.predicate_value = Some(item);
+                    self.predicate_value = Some(materialize_item());
                 }
                 self.predicate_seen += 1;
                 Ok(false)
