@@ -32,6 +32,12 @@ pub struct CompiledCall {
     pub name: Arc<str>,
     /// Pre-compiled sub-programs for each lambda/expression argument; shared via `Arc`.
     pub sub_progs: Arc<[Arc<Program>]>,
+    /// `BodyKernel`-classified form of each sub-program, computed once at
+    /// compile time. Higher-order builtins (`.filter`, `.map`, `.any`,
+    /// `.all`, `.find`, ...) consult this to dispatch the per-element
+    /// hot path through `eval_kernel` for native-speed Rust evaluation,
+    /// falling back to the `Program` arm for `BodyKernel::Generic`.
+    pub sub_kernels: Arc<[crate::exec::pipeline::BodyKernel]>,
     /// Original un-compiled arguments kept for lambda-param introspection at runtime.
     pub orig_args: Arc<[Arg]>,
     /// When set, `filter`/`map` may stop early after collecting this many results.

@@ -18,6 +18,20 @@ use crate::vm::{
     fresh_ics, disable_opcode_fusion,
 };
 
+/// Classify each pre-compiled sub-program against the `BodyKernel`
+/// fast-path catalog so higher-order builtins (`.filter`, `.map`,
+/// `.any`, ...) can dispatch through `eval_kernel` at native Rust
+/// speed instead of re-entering the VM per element.
+pub(crate) fn classify_sub_kernels(
+    progs: &[Arc<Program>],
+) -> Arc<[crate::exec::pipeline::BodyKernel]> {
+    progs
+        .iter()
+        .map(|p| crate::exec::pipeline::BodyKernel::classify(p))
+        .collect::<Vec<_>>()
+        .into()
+}
+
 /// Compile-time variable scope used by the `Compiler` to decide whether an
 /// identifier refers to a bound variable or a built-in/field name.
 #[derive(Clone, Default)]
@@ -552,10 +566,12 @@ impl Compiler {
                             Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
                         })
                         .collect();
+                    let sub_kernels = classify_sub_kernels(&sub_progs);
                     let call = Arc::new(CompiledCall {
                         method: BuiltinMethod::from_name(name.as_str()),
                         name: Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
+                        sub_kernels,
                         orig_args: rest_args.into(),
                         demand_max_keep: None,
                     });
@@ -568,10 +584,12 @@ impl Compiler {
                             Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
                         })
                         .collect();
+                    let sub_kernels = classify_sub_kernels(&sub_progs);
                     let call = Arc::new(CompiledCall {
                         method: BuiltinMethod::Unknown,
                         name: Arc::from(name.as_str()),
                         sub_progs: sub_progs.into(),
+                        sub_kernels,
                         orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
                         demand_max_keep: None,
                     });
@@ -661,10 +679,12 @@ impl Compiler {
                 Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_lambda_or_expr(e, ctx)),
             })
             .collect();
+        let sub_kernels = classify_sub_kernels(&sub_progs);
         CompiledCall {
             method,
             name: Arc::from(name),
             sub_progs: sub_progs.into(),
+            sub_kernels,
             orig_args: args.iter().cloned().collect::<Vec<_>>().into(),
             demand_max_keep: None,
         }
@@ -847,6 +867,7 @@ impl Compiler {
                     method: BuiltinMethod::from_name(name),
                     name: Arc::from(name.as_str()),
                     sub_progs: Arc::from(&[] as &[Arc<Program>]),
+                    sub_kernels: Arc::from(&[] as &[crate::exec::pipeline::BodyKernel]),
                     orig_args: Arc::from(&[] as &[Arg]),
                     demand_max_keep: None,
                 };
@@ -856,11 +877,14 @@ impl Compiler {
             Expr::Chain(base, steps) if !steps.is_empty() => {
                 if let Expr::Ident(name) = base.as_ref() {
                     if !ctx.has(name) {
-                        
+
                         let call = CompiledCall {
                             method: BuiltinMethod::from_name(name),
                             name: Arc::from(name.as_str()),
                             sub_progs: Arc::from(&[] as &[Arc<Program>]),
+                            sub_kernels: Arc::from(
+                                &[] as &[crate::exec::pipeline::BodyKernel],
+                            ),
                             orig_args: Arc::from(&[] as &[Arg]),
                             demand_max_keep: None,
                         };

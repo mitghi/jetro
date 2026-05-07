@@ -1100,10 +1100,12 @@ fn rewrite_call(
 ) -> Arc<crate::vm::CompiledCall> {
     use crate::vm::CompiledCall;
     let new_subs: Vec<Arc<Program>> = c.sub_progs.iter().map(|p| dedup_rec(p, cache)).collect();
+    let new_kernels = crate::compile::compiler::classify_sub_kernels(&new_subs);
     Arc::new(CompiledCall {
         method: c.method,
         name: c.name.clone(),
         sub_progs: new_subs.into(),
+        sub_kernels: new_kernels,
         orig_args: c.orig_args.clone(),
         demand_max_keep: c.demand_max_keep,
     })

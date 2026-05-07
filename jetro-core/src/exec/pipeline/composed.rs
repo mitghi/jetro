@@ -105,26 +105,32 @@ impl<'a> ComposedStageBuilder<'a> {
             // stack and opcode-dispatch overhead per row. The detector
             // accepts a leading `SetCurrent`/`PushCurrent` from lambda
             // binding so `.filter(match @ with {...})` matches.
-            (Stage::Filter(p, _), _) if let Some(cm) = program_match_only(p) => {
-                Box::new(cmp::MatchFilter {
-                    cm,
-                    ctx: self.vm_ctx(),
-                })
+            (Stage::Filter(p, _), _) => {
+                if let Some(cm) = program_match_only(p) {
+                    Box::new(cmp::MatchFilter {
+                        cm,
+                        ctx: self.vm_ctx(),
+                    })
+                } else {
+                    Box::new(cmp::GenericFilter {
+                        prog: Arc::clone(p),
+                        ctx: self.vm_ctx(),
+                    })
+                }
             }
-            (Stage::Map(p, _), _) if let Some(cm) = program_match_only(p) => {
-                Box::new(cmp::MatchMap {
-                    cm,
-                    ctx: self.vm_ctx(),
-                })
+            (Stage::Map(p, _), _) => {
+                if let Some(cm) = program_match_only(p) {
+                    Box::new(cmp::MatchMap {
+                        cm,
+                        ctx: self.vm_ctx(),
+                    })
+                } else {
+                    Box::new(cmp::GenericMap {
+                        prog: Arc::clone(p),
+                        ctx: self.vm_ctx(),
+                    })
+                }
             }
-            (Stage::Filter(p, _), _) => Box::new(cmp::GenericFilter {
-                prog: Arc::clone(p),
-                ctx: self.vm_ctx(),
-            }),
-            (Stage::Map(p, _), _) => Box::new(cmp::GenericMap {
-                prog: Arc::clone(p),
-                ctx: self.vm_ctx(),
-            }),
             (Stage::FlatMap(p, _), _) => Box::new(cmp::GenericFlatMap {
                 prog: Arc::clone(p),
                 ctx: self.vm_ctx(),
