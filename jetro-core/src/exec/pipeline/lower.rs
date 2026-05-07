@@ -274,10 +274,49 @@ fn decode_method_chain(
                     &mut sink,
                 )?;
             }
+            Step::Slice(start, end) => {
+                push_path_slice_stages(*start, *end, &mut stages, &mut stage_exprs)?;
+            }
             _ => return None,
         }
     }
     Some((stages, stage_exprs, sink))
+}
+
+fn push_path_slice_stages(
+    start: Option<i64>,
+    end: Option<i64>,
+    stages: &mut Vec<Stage>,
+    stage_exprs: &mut Vec<Option<Arc<Expr>>>,
+) -> Option<()> {
+    let start = match start {
+        Some(n) if n < 0 => return None,
+        Some(n) => n as usize,
+        None => 0,
+    };
+    let end = match end {
+        Some(n) if n < 0 => return None,
+        Some(n) => Some(n as usize),
+        None => None,
+    };
+
+    if start > 0 {
+        stages.push(Stage::UsizeBuiltin {
+            method: BuiltinMethod::Skip,
+            value: start,
+        });
+        stage_exprs.push(None);
+    }
+
+    if let Some(end) = end {
+        stages.push(Stage::UsizeBuiltin {
+            method: BuiltinMethod::Take,
+            value: end.saturating_sub(start),
+        });
+        stage_exprs.push(None);
+    }
+
+    Some(())
 }
 
 // Repeatedly applies `rewrite_step` until fixpoint (at most 16 iterations).

@@ -99,6 +99,10 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value.merge(ValueNeed::Whole),
             ..downstream
         },
+        BuiltinDemandLaw::Slice => Demand {
+            value: downstream.value.merge(ValueNeed::Whole),
+            ..downstream
+        },
         BuiltinDemandLaw::FlatMapLike => Demand::all(ValueNeed::Whole),
         BuiltinDemandLaw::Take => match arg {
             BuiltinDemandArg::Usize(n) => Demand {
@@ -405,6 +409,7 @@ mod tests {
         let sort = BuiltinId::from_method(BuiltinMethod::Sort);
         let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
         let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
+        let slice = BuiltinId::from_method(BuiltinMethod::Slice);
 
         let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
@@ -470,6 +475,16 @@ mod tests {
         };
         let demand = propagate_demand(drop_while, BuiltinDemandArg::None, downstream);
         assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Predicate,
+            order: true,
+        };
+        let demand = propagate_demand(slice, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
     }

@@ -655,6 +655,8 @@ pub enum BuiltinDemandLaw {
     UniqueLike,
     /// Like map: the output count equals the input count; passes demand through but requires whole values.
     MapLike,
+    /// Like scalar `slice`: one-to-one and order-preserving, but consumes the whole input value.
+    Slice,
     /// Like `flat_map`: output count is unbounded relative to input, so always requests all input.
     FlatMapLike,
     /// Cap the upstream pull to the provided count argument.

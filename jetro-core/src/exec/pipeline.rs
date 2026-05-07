@@ -1600,4 +1600,41 @@ mod tests {
         let out = p.run(&doc).unwrap();
         assert_eq!(out, Val::Int(50));
     }
+
+    #[test]
+    fn path_slice_lowers_to_bounded_positional_stages() {
+        use serde_json::json;
+        let doc: Val = (&json!({"xs": [10, 20, 30, 40, 50]})).into();
+
+        let p = lower_query("$.xs[0:3].last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(3)
+        );
+        assert_eq!(p.run(&doc).unwrap(), Val::Int(30));
+
+        let p = lower_query("$.xs[2:].take(2)").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([30, 40]));
+
+        assert!(lower_query("$.xs[-2:].first()").is_none());
+    }
+
+    #[test]
+    fn scalar_slice_preserves_pipeline_demand() {
+        use serde_json::json;
+        let doc: Val = (&json!({"rows": ["abc", "def"]})).into();
+
+        let p = lower_query("$.rows.slice(0, 2).last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!("de"));
+    }
 }

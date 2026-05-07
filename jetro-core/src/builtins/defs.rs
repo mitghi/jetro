@@ -2470,6 +2470,7 @@ impl Builtin for Slice {
                 1.0,
             ))
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .demand_law(BuiltinDemandLaw::Slice)
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
     #[inline]
