@@ -121,7 +121,7 @@ assert_eq!(report, json!({
 
 ```toml
 [dependencies]
-jetro = "0.4"
+jetro = "0.5.3"
 ```
 
 ## API
