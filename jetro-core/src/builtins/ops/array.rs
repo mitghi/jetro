@@ -1040,34 +1040,43 @@ where
 /// Returns an array of every key in the object, or an empty array for non-objects.
 #[inline]
 pub fn keys_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| m.keys().map(|k| Val::Str(k.clone())).collect())
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(m.keys().map(|k| Val::Str(k.clone())).collect()),
+        Val::ObjSmall(pairs) => Val::arr(
+            pairs
+                .iter()
+                .map(|(key, _)| Val::Str(key.clone()))
+                .collect(),
+        ),
+        _ => Val::arr(Vec::new()),
+    }
 }
 
 /// Returns an array of every value in the object, or an empty array for non-objects.
 #[inline]
 pub fn values_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(m.values().cloned().collect()),
+        Val::ObjSmall(pairs) => Val::arr(pairs.iter().map(|(_, value)| value.clone()).collect()),
+        _ => Val::arr(Vec::new()),
+    }
 }
 
 /// Returns `[[key, value], ...]` pairs for each entry in the object.
 #[inline]
 pub fn entries_apply(recv: &Val) -> Val {
-    Val::arr(
-        recv.as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    )
+    match recv {
+        Val::Obj(m) => Val::arr(
+            m.iter()
+                .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+                .collect(),
+        ),
+        Val::ObjSmall(pairs) => Val::arr(
+            pairs
+                .iter()
+                .map(|(k, v)| Val::arr(vec![Val::Str(k.clone()), v.clone()]))
+                .collect(),
+        ),
+        _ => Val::arr(Vec::new()),
+    }
 }
-

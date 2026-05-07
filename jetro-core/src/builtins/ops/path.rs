@@ -239,12 +239,24 @@ pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
         Val::obj(out)
     }
 
+    fn pick_small(pairs: &[(Arc<str>, Val)], keys: &[Arc<str>]) -> Val {
+        let mut out = IndexMap::with_capacity(keys.len());
+        for key in keys {
+            if let Some((_, v)) = pairs.iter().find(|(k, _)| k.as_ref() == key.as_ref()) {
+                out.insert(key.clone(), v.clone());
+            }
+        }
+        Val::obj(out)
+    }
+
     match recv {
         Val::Obj(m) => Some(pick_obj(m, keys)),
+        Val::ObjSmall(pairs) => Some(pick_small(pairs, keys)),
         Val::Arr(a) => Some(Val::arr(
             a.iter()
                 .filter_map(|v| match v {
                     Val::Obj(m) => Some(pick_obj(m, keys)),
+                    Val::ObjSmall(pairs) => Some(pick_small(pairs, keys)),
                     _ => None,
                 })
                 .collect(),
@@ -302,12 +314,26 @@ pub fn omit_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
         Val::obj(out)
     }
 
+    fn omit_small(pairs: &[(Arc<str>, Val)], keys: &[Arc<str>]) -> Val {
+        let omitted: std::collections::HashSet<&str> =
+            keys.iter().map(|key| key.as_ref()).collect();
+        Val::obj(
+            pairs
+                .iter()
+                .filter(|(key, _)| !omitted.contains(key.as_ref()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
     match recv {
         Val::Obj(m) => Some(omit_obj(m, keys)),
+        Val::ObjSmall(pairs) => Some(omit_small(pairs, keys)),
         Val::Arr(a) => Some(Val::arr(
             a.iter()
                 .filter_map(|v| match v {
                     Val::Obj(m) => Some(omit_obj(m, keys)),
+                    Val::ObjSmall(pairs) => Some(omit_small(pairs, keys)),
                     _ => None,
                 })
                 .collect(),

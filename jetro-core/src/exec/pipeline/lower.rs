@@ -550,6 +550,12 @@ pub(super) fn lower_method_from_registry(
                     stages.push(Stage::Reverse(cancel));
                 }
                 BuiltinMethod::Unique => stages.push(Stage::UniqueBy(None)),
+                _ if method.is_pipeline_element_method() => {
+                    stages.push(Stage::Builtin(crate::builtins::BuiltinCall::new(
+                        method,
+                        crate::builtins::BuiltinArgs::None,
+                    )));
+                }
                 _ => return None,
             }
             stage_exprs.push(None);

@@ -6,10 +6,11 @@
 //! (simd-json, behind the `simd-json` feature). Paths that need a concrete
 //! `Val` call `materialize()`; structural navigation stays zero-alloc.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::util::JsonView;
 use crate::data::value::Val;
+use crate::util::JsonView;
 
 /// Navigation interface shared by all document representations.
 /// Implementations exist for `ValView` (in-memory `Val` tree) and,
@@ -21,6 +22,16 @@ pub(crate) trait ValueView<'a>: Clone {
     fn field(&self, key: &str) -> Self;
     /// Return whether the current object has `key`, or `None` if the current node is not an object.
     fn has_key(&self, key: &str) -> Option<bool>;
+    /// Return the current object's keys without materialising child values.
+    fn object_keys(&self) -> Option<Val>;
+    /// Return the current object's values, materialising only the values.
+    fn object_values(&self) -> Option<Val>;
+    /// Return the current object's `[key, value]` entries.
+    fn object_entries(&self) -> Option<Val>;
+    /// Keep only `keys` from the current object, materialising selected values only.
+    fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val>;
+    /// Drop `keys` from the current object.
+    fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val>;
     /// Navigate to the element at `idx` (negative indices count from the end),
     /// returning `Null` if out of bounds.
     fn index(&self, idx: i64) -> Self;
@@ -106,6 +117,98 @@ impl<'a> ValueView<'a> for ValView<'a> {
         match self.value() {
             Val::Obj(map) => Some(map.contains_key(key)),
             Val::ObjSmall(pairs) => Some(pairs.iter().any(|(k, _)| k.as_ref() == key)),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn object_keys(&self) -> Option<Val> {
+        match self.value() {
+            Val::Obj(map) => Some(Val::arr(
+                map.keys().cloned().map(Val::Str).collect::<Vec<_>>(),
+            )),
+            Val::ObjSmall(pairs) => Some(Val::arr(
+                pairs
+                    .iter()
+                    .map(|(key, _)| Val::Str(Arc::clone(key)))
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn object_values(&self) -> Option<Val> {
+        match self.value() {
+            Val::Obj(map) => Some(Val::arr(map.values().cloned().collect::<Vec<_>>())),
+            Val::ObjSmall(pairs) => Some(Val::arr(
+                pairs.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn object_entries(&self) -> Option<Val> {
+        match self.value() {
+            Val::Obj(map) => Some(Val::arr(
+                map.iter()
+                    .map(|(key, value)| Val::arr(vec![Val::Str(Arc::clone(key)), value.clone()]))
+                    .collect::<Vec<_>>(),
+            )),
+            Val::ObjSmall(pairs) => Some(Val::arr(
+                pairs
+                    .iter()
+                    .map(|(key, value)| Val::arr(vec![Val::Str(Arc::clone(key)), value.clone()]))
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        match self.value() {
+            Val::Obj(map) => {
+                let mut out = indexmap::IndexMap::with_capacity(keys.len());
+                for key in keys {
+                    if let Some(value) = map.get(key.as_ref()) {
+                        out.insert(Arc::clone(key), value.clone());
+                    }
+                }
+                Some(Val::obj(out))
+            }
+            Val::ObjSmall(pairs) => {
+                let mut out = indexmap::IndexMap::with_capacity(keys.len());
+                for key in keys {
+                    if let Some((_, value)) = pairs.iter().find(|(k, _)| k.as_ref() == key.as_ref())
+                    {
+                        out.insert(Arc::clone(key), value.clone());
+                    }
+                }
+                Some(Val::obj(out))
+            }
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+        match self.value() {
+            Val::Obj(map) => Some(Val::obj(
+                map.iter()
+                    .filter(|(key, _)| !omitted.contains(key.as_ref()))
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect(),
+            )),
+            Val::ObjSmall(pairs) => Some(Val::obj(
+                pairs
+                    .iter()
+                    .filter(|(key, _)| !omitted.contains(key.as_ref()))
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect(),
+            )),
             _ => None,
         }
     }
@@ -351,6 +454,136 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn object_keys(&self) -> Option<Val> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            out.push(Val::Str(Arc::from(tape.str_at(cur))));
+            cur += 1;
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
+    }
+
+    #[inline]
+    fn object_values(&self) -> Option<Val> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            cur += 1;
+            let mut value_idx = cur;
+            out.push(Self::materialize_at(tape, &mut value_idx));
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
+    }
+
+    #[inline]
+    fn object_entries(&self) -> Option<Val> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let key = Arc::from(tape.str_at(cur));
+            cur += 1;
+            let mut value_idx = cur;
+            out.push(Val::arr(vec![
+                Val::Str(key),
+                Self::materialize_at(tape, &mut value_idx),
+            ]));
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
+    }
+
+    #[inline]
+    fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = indexmap::IndexMap::with_capacity(keys.len());
+        let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if remaining.remove(current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    Self::materialize_at(tape, &mut value_idx),
+                );
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+            cur += tape.span(cur);
+        }
+        Some(Val::obj(out))
+    }
+
+    #[inline]
+    fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+        let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if !omitted.contains(current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    Self::materialize_at(tape, &mut value_idx),
+                );
+            }
+            cur += tape.span(cur);
+        }
+        Some(Val::obj(out))
+    }
+
+    #[inline]
     fn index(&self, idx: i64) -> Self {
         use crate::data::tape::TapeNode;
 
@@ -486,6 +719,27 @@ mod tests {
     }
 
     #[test]
+    fn val_view_object_helpers_match_object_semantics() {
+        let value = Val::from(&json!({
+            "book": {"title": "Dune", "score": 901, "debug": true}
+        }));
+        let book = ValView::new(&value).field("book");
+
+        assert_eq!(
+            serde_json::Value::from(book.object_keys().unwrap()),
+            json!(["debug", "score", "title"])
+        );
+        assert_eq!(
+            serde_json::Value::from(book.pick_keys(&[Arc::from("score")]).unwrap()),
+            json!({"score": 901})
+        );
+        assert_eq!(
+            serde_json::Value::from(book.omit_keys(&[Arc::from("debug")]).unwrap()),
+            json!({"score": 901, "title": "Dune"})
+        );
+    }
+
+    #[test]
     fn val_view_indexes_columnar_arrays() {
         let nums = Val::IntVec(Arc::new(vec![10, 20, 30]));
         let view = ValView::new(&nums);
@@ -542,6 +796,35 @@ mod tests {
         assert_eq!(tape_book.has_key("title"), Some(true));
         assert_eq!(tape_book.has_key("missing"), Some(false));
         assert_eq!(tape_book.has_key("title"), val_book.has_key("title"));
+
+        assert_eq!(
+            tape_book.object_keys().map(serde_json::Value::from),
+            val_book.object_keys().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book.object_values().map(serde_json::Value::from),
+            val_book.object_values().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book.object_entries().map(serde_json::Value::from),
+            val_book.object_entries().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book
+                .pick_keys(&[Arc::from("score")])
+                .map(serde_json::Value::from),
+            val_book
+                .pick_keys(&[Arc::from("score")])
+                .map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book
+                .omit_keys(&[Arc::from("title")])
+                .map(serde_json::Value::from),
+            val_book
+                .omit_keys(&[Arc::from("title")])
+                .map(serde_json::Value::from)
+        );
     }
 
     #[cfg(feature = "simd-json")]

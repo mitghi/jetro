@@ -1633,7 +1633,12 @@ impl Builtin for ZipShape {
 
 #[inline]
 fn object_element_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne).element()
+    BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+        .view_scalar()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .lowering(BuiltinPipelineLowering::Nullary)
+        .element()
 }
 
 /// `keys` — extract keys of an object (element-wise).
@@ -1718,7 +1723,13 @@ pub(crate) struct Pick;
 impl Builtin for Pick {
     const METHOD: BuiltinMethod = BuiltinMethod::Pick;
     const NAME: &'static str = "pick";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -1733,7 +1744,13 @@ pub(crate) struct Omit;
 impl Builtin for Omit {
     const METHOD: BuiltinMethod = BuiltinMethod::Omit;
     const NAME: &'static str = "omit";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {

@@ -51,6 +51,9 @@ where
     if let Some(result) = run_terminal_collect(source.clone(), body) {
         return Some(result);
     }
+    if let Some(result) = run_terminal_select_projection(source.clone(), body) {
+        return Some(result);
+    }
     if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env)) {
         return Some(result);
     }
@@ -369,6 +372,45 @@ where
     )?;
 
     Some(Ok(collector.finish()))
+}
+
+/// Optimised path for `map(...).first()` / `map(...).last()` style suffixes
+/// where the trailing projection can run only on the selected view row.
+fn run_terminal_select_projection<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
+    let sink_spec = body.sink.builtin_sink_spec()?;
+    let crate::builtins::BuiltinSinkAccumulator::SelectOne(position) = sink_spec.accumulator else {
+        return None;
+    };
+    let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
+        .chain
+        .pull;
+    let mut selected = Val::Null;
+    let mut seen = false;
+
+    drive_view_frontier(
+        source,
+        &prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            seen = true;
+            Some(match position {
+                crate::builtins::BuiltinSelectionPosition::First => ViewRowAction::Stop,
+                crate::builtins::BuiltinSelectionPosition::Last => ViewRowAction::Emit,
+            })
+        },
+    )?;
+
+    Some(Ok(if seen { selected } else { Val::Null }))
 }
 
 /// Action returned by a sink observer after processing one view row.
@@ -1192,6 +1234,26 @@ mod tests {
         }
 
         fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
             None
         }
 

@@ -1887,6 +1887,13 @@ impl BuiltinCall {
             BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
                 Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
             }
+            BuiltinMethod::Omit => {
+                let mut keys = Vec::with_capacity(arg_len);
+                for idx in 0..arg_len {
+                    keys.push(args.str(idx)?);
+                }
+                Self::new(method, BuiltinArgs::StrVec(keys))
+            }
             BuiltinMethod::Repeat => Self::new(method, BuiltinArgs::Usize(args.usize(0)?)),
             BuiltinMethod::Indent => {
                 let n = if arg_len > 0 { args.usize(0)? } else { 2 };
