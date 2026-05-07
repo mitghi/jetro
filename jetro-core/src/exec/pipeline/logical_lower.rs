@@ -278,6 +278,10 @@ fn build_body(
             .sink_programs()
             .map(|p| BodyKernel::classify(p))
             .collect(),
+        Sink::Membership(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
         Sink::ArgExtreme(spec) => spec
             .sink_programs()
             .map(|p| BodyKernel::classify(p))

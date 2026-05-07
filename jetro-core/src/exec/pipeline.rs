@@ -51,8 +51,8 @@ pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
 pub use operator::{
-    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, PredicateSinkOp, PredicateSinkSpec,
-    ReducerOp, ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
+    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
 };
 #[cfg(test)]
 pub use plan::compute_strategies;
@@ -1757,7 +1757,9 @@ mod tests {
         use serde_json::json;
         let doc = json!({
             "xs": ["a", "urgent", "x", "urgent"],
+            "needle": "urgent",
             "s": "hello",
+            "substring": "ell",
             "obj": {"urgent": true}
         });
 
@@ -1766,8 +1768,13 @@ mod tests {
             "$.xs.contains(\"urgent\")",
             "$.xs.index(\"urgent\")",
             "$.xs.indices_of(\"urgent\")",
+            "$.xs.includes($.needle)",
+            "$.xs.index($.needle)",
+            "$.xs.indices_of($.needle)",
             "$.xs.map(@).includes(\"x\")",
+            "$.xs.map(@).includes($.needle)",
             "$.s.includes(\"ell\")",
+            "$.s.includes($.substring)",
             "$.obj.includes(\"urgent\")",
         ] {
             assert_pipeline_matches_vm(query, doc.clone());
@@ -1795,6 +1802,12 @@ mod tests {
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
             matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
+        );
+
+        let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
+        assert!(
+            matches!(dynamic.sink, Sink::Membership(ref spec)
+                if matches!(spec.target, MembershipSinkTarget::Program(_)))
         );
     }
 

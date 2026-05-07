@@ -115,8 +115,8 @@ impl Sink {
             Sink::Collect
             | Sink::Terminal(_)
             | Sink::Nth(_)
-            | Sink::ApproxCountDistinct
-            | Sink::Membership(_) => true,
+            | Sink::ApproxCountDistinct => true,
+            Sink::Membership(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
             Sink::Predicate(spec) => program_ok(&spec.predicate),
             Sink::ArgExtreme(spec) => program_ok(&spec.key),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),

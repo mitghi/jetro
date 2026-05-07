@@ -456,6 +456,17 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
     )))
 }
 
+fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
+    use crate::parse::ast::Arg;
+    let expr = match arg {
+        Arg::Pos(e) => e,
+        Arg::Named(_, _) => return None,
+    };
+    Some(Arc::new(crate::compile::compiler::Compiler::compile(
+        expr, "",
+    )))
+}
+
 /// Compiles a sort-key argument into a `SortSpec`, interpreting `UnaryNeg`-wrapping as descending order.
 pub(super) fn compile_sort_spec(
     arg: &crate::parse::ast::Arg,
@@ -489,8 +500,8 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // ---------------------------------------------------------------------------
 
 use super::{
-    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, NumOp, PredicateSinkOp,
-    PredicateSinkSpec, ReducerOp, ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
+    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
 };
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
@@ -835,7 +846,9 @@ fn membership_sink_for_method(
     };
     Some(Sink::Membership(MembershipSinkSpec {
         op,
-        target: literal_arg_value(arg)?,
+        target: literal_arg_value(arg)
+            .map(MembershipSinkTarget::Literal)
+            .or_else(|| Some(MembershipSinkTarget::Program(compile_raw_arg_expr(arg)?)))?,
         method,
     }))
 }
@@ -865,6 +878,10 @@ fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
             .map(|p| BodyKernel::classify(p))
             .collect(),
         Sink::Predicate(spec) => spec
+            .sink_programs()
+            .map(|p| BodyKernel::classify(p))
+            .collect(),
+        Sink::Membership(spec) => spec
             .sink_programs()
             .map(|p| BodyKernel::classify(p))
             .collect(),

@@ -39,9 +39,18 @@ pub struct MembershipSinkSpec {
     /// Terminal operation to perform.
     pub op: MembershipSinkOp,
     /// Value compared against each row.
-    pub target: crate::data::value::Val,
+    pub target: MembershipSinkTarget,
     /// Original builtin method used for scalar fallback.
     pub method: BuiltinMethod,
+}
+
+/// Target value source for value-membership terminal sinks.
+#[derive(Debug, Clone)]
+pub enum MembershipSinkTarget {
+    /// Literal known during lowering.
+    Literal(crate::data::value::Val),
+    /// Expression evaluated once before rows are streamed.
+    Program(Arc<Program>),
 }
 
 /// Specification for arg-extreme terminal sinks (`max_by`, `min_by`).
@@ -86,6 +95,17 @@ impl PredicateSinkSpec {
     /// Returns the sink-kernel index for the predicate.
     pub(crate) fn predicate_kernel_index(&self) -> usize {
         0
+    }
+}
+
+impl MembershipSinkSpec {
+    /// Iterates over embedded programs for kernel enumeration.
+    pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
+        match &self.target {
+            MembershipSinkTarget::Literal(_) => None,
+            MembershipSinkTarget::Program(program) => Some(program),
+        }
+        .into_iter()
     }
 }
 
