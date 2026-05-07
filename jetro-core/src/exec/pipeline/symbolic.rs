@@ -60,7 +60,7 @@ fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,
         },
-        Sink::Collect | Sink::Terminal(_) | Sink::Nth(_) => RuntimeDemand {
+        Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => RuntimeDemand {
             value: ValueDemand::Whole,
             order: true,
         },

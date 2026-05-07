@@ -145,6 +145,8 @@ fn sink_name(s: &Sink) -> &'static str {
         Sink::ArgExtreme(_) => "min_by",
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
+        Sink::SelectMany { from_end: false, .. } => "first_n",
+        Sink::SelectMany { from_end: true, .. } => "last_n",
         Sink::Nth(_) => "nth",
         Sink::Terminal(_) => "terminal",
         Sink::ApproxCountDistinct => "approx_count_distinct",
@@ -371,6 +373,13 @@ pub enum Sink {
     ArgExtreme(ArgExtremeSinkSpec),
     /// Delegates to a built-in method that consumes the stream (e.g. `first`, `last`).
     Terminal(BuiltinMethod),
+    /// Selects a bounded prefix or suffix from the stream.
+    SelectMany {
+        /// Number of rows to return.
+        n: usize,
+        /// When true, returns the last `n` rows; otherwise returns the first `n`.
+        from_end: bool,
+    },
     /// Selects the nth emitted row from the stream.
     Nth(usize),
 
@@ -1520,6 +1529,71 @@ mod tests {
         let out = p.run(&doc).unwrap();
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, json!(902));
+    }
+
+    #[test]
+    fn positional_many_terminal_sinks_match_runtime_semantics() {
+        use serde_json::json;
+        let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
+
+        let first_one: serde_json::Value =
+            lower_query("$.xs.first(1)").unwrap().run(&root).unwrap().into();
+        assert_eq!(first_one, json!(1));
+
+        let first_two: serde_json::Value =
+            lower_query("$.xs.first(2)").unwrap().run(&root).unwrap().into();
+        assert_eq!(first_two, json!([1, 2]));
+
+        let last_one: serde_json::Value =
+            lower_query("$.xs.last(1)").unwrap().run(&root).unwrap().into();
+        assert_eq!(last_one, json!(4));
+
+        let last_two: serde_json::Value =
+            lower_query("$.xs.last(2)").unwrap().run(&root).unwrap().into();
+        assert_eq!(last_two, json!([3, 4]));
+
+        let mapped_first: serde_json::Value = lower_query("$.xs.map(@ + 1).first(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
+        assert_eq!(mapped_first, json!([2, 3]));
+
+        let mapped_last: serde_json::Value = lower_query("$.xs.map(@ + 1).last(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
+        assert_eq!(mapped_last, json!([4, 5]));
+    }
+
+    #[test]
+    fn positional_many_terminal_sinks_propagate_bounded_demand() {
+        let first = lower_query("$.xs.first(3)").unwrap();
+        assert!(matches!(
+            first.sink,
+            Sink::SelectMany {
+                n: 3,
+                from_end: false
+            }
+        ));
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(3)
+        );
+
+        let last = lower_query("$.xs.last(3)").unwrap();
+        assert!(matches!(
+            last.sink,
+            Sink::SelectMany {
+                n: 3,
+                from_end: true
+            }
+        ));
+        assert_eq!(
+            last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(3)
+        );
     }
 
     #[test]

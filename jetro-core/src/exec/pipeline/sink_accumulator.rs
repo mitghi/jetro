@@ -3,6 +3,8 @@
 //! Mirrors the composed `Sink` contract but without a generic type parameter, for compatibility
 //! with older execution paths.
 
+use std::collections::VecDeque;
+
 use crate::{
     builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
     data::{context::EvalError, value::Val},
@@ -25,6 +27,7 @@ pub(crate) struct SinkAccumulator<'a> {
     // nth observed item for Sink::Nth
     nth: Option<Val>,
     nth_seen: usize,
+    select_many: VecDeque<Val>,
     predicate_seen: usize,
     predicate_matched: Option<usize>,
     predicate_value: Option<Val>,
@@ -50,6 +53,7 @@ impl<'a> SinkAccumulator<'a> {
             last: None,
             nth: None,
             nth_seen: 0,
+            select_many: VecDeque::new(),
             predicate_seen: 0,
             predicate_matched: None,
             predicate_value: None,
@@ -85,6 +89,7 @@ impl<'a> SinkAccumulator<'a> {
             Sink::Predicate(_) => false,
             Sink::Membership(_) => false,
             Sink::ArgExtreme(_) => false,
+            Sink::SelectMany { n, from_end } => self.observe_select_many(*n, *from_end, item),
             Sink::Nth(idx) => self.observe_nth(*idx, item),
             Sink::Terminal(_) => false,
         }
@@ -197,6 +202,24 @@ impl<'a> SinkAccumulator<'a> {
         } else {
             self.nth_seen += 1;
             false
+        }
+    }
+
+    /// Captures a bounded prefix or suffix. Prefix selection stops once full; suffix selection
+    /// retains only the latest `n` rows.
+    pub(crate) fn observe_select_many(&mut self, n: usize, from_end: bool, item: Val) -> bool {
+        if n == 0 {
+            return true;
+        }
+        if from_end {
+            if self.select_many.len() == n {
+                self.select_many.pop_front();
+            }
+            self.select_many.push_back(item);
+            false
+        } else {
+            self.select_many.push_back(item);
+            self.select_many.len() >= n
         }
     }
 
@@ -369,6 +392,13 @@ impl<'a> SinkAccumulator<'a> {
                 MembershipSinkOp::IndicesOf => Val::int_vec(self.membership_indices),
             },
             Sink::ArgExtreme(_) => self.arg_extreme_value.unwrap_or(Val::Null),
+            Sink::SelectMany { n: 0, .. } => Val::Null,
+            Sink::SelectMany { n, .. } if *n == 1 => self
+                .select_many
+                .into_iter()
+                .next()
+                .unwrap_or(Val::Null),
+            Sink::SelectMany { .. } => Val::arr(self.select_many.into_iter().collect()),
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
         }

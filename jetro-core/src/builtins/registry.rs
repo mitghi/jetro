@@ -300,6 +300,11 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
             }
         }
         BuiltinSinkAccumulator::Numeric => BuiltinPipelineArity::Range { min: 0, max: 1 },
+        BuiltinSinkAccumulator::SelectOne(_)
+            if matches!(method, BuiltinMethod::First | BuiltinMethod::Last) =>
+        {
+            BuiltinPipelineArity::Range { min: 0, max: 1 }
+        }
         BuiltinSinkAccumulator::SelectOne(_) | BuiltinSinkAccumulator::ApproxDistinct => {
             BuiltinPipelineArity::Exact(0)
         }
@@ -699,8 +704,13 @@ mod tests {
             1,
             true
         ));
-        assert!(!pipeline_accepts_arity(
+        assert!(pipeline_accepts_arity(
             BuiltinId::from_method(BuiltinMethod::First),
+            1,
+            true
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Last),
             1,
             true
         ));

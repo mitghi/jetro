@@ -806,6 +806,22 @@ fn terminal_sink_for_method(
                 _ => return None,
             },
         })),
+        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::First => match args {
+            [] => Some(Sink::Terminal(method)),
+            [arg] => Some(Sink::SelectMany {
+                n: usize_arg_at_least(arg, 1)?,
+                from_end: false,
+            }),
+            _ => None,
+        },
+        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::Last => match args {
+            [] => Some(Sink::Terminal(method)),
+            [arg] => Some(Sink::SelectMany {
+                n: usize_arg_at_least(arg, 1)?,
+                from_end: true,
+            }),
+            _ => None,
+        },
         BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
     }

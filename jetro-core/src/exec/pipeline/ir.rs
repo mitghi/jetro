@@ -69,6 +69,20 @@ impl Sink {
                 positional: Some(Position::First),
             };
         }
+        if let Sink::SelectMany { n, from_end } = self {
+            return SinkDemand {
+                chain: ChainDemand {
+                    pull: if *from_end {
+                        PullDemand::LastInput(*n)
+                    } else {
+                        PullDemand::FirstInput(*n)
+                    },
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                positional: None,
+            };
+        }
         if matches!(self, Sink::Predicate(_)) {
             let value = match self {
                 Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne => ValueNeed::Whole,
@@ -119,6 +133,7 @@ impl Sink {
         match self {
             Sink::Collect
             | Sink::Terminal(_)
+            | Sink::SelectMany { .. }
             | Sink::Nth(_)
             | Sink::ApproxCountDistinct => true,
             Sink::Membership(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
@@ -174,6 +189,7 @@ impl Sink {
         match self {
             Sink::Terminal(method) => method.spec().sink,
             Sink::Nth(_) => None,
+            Sink::SelectMany { .. } => None,
             Sink::Predicate(_) => None,
             Sink::Membership(_) => None,
             Sink::ArgExtreme(_) => None,
