@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn find_shallow_multi_pred_and() {
-        
+
         use crate::Jetro;
         let doc = json!({"xs":[
             {"t":"a","v":1},
@@ -207,8 +207,9 @@ mod tests {
             {"t":"b","v":1}
         ]});
         let j = Jetro::new(doc);
+        // `.find` returns the first match (conventional first-match).
         let r = j.collect(r#"$.xs.find(@.t == "a", @.v == 1)"#).unwrap();
-        assert_eq!(r, json!([{"t":"a","v":1}]));
+        assert_eq!(r, json!({"t":"a","v":1}));
     }
 
     #[test]
@@ -217,7 +218,7 @@ mod tests {
         let doc = json!({"xs":[{"v":1},{"v":2}]});
         let j = Jetro::new(doc);
         let r = j.collect(r#"$.xs.find(@.v == 2)"#).unwrap();
-        assert_eq!(r, json!([{"v":2}]));
+        assert_eq!(r, json!({"v":2}));
     }
 
     #[test]

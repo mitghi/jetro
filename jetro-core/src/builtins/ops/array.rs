@@ -268,6 +268,32 @@ where
     Ok(Val::arr(out))
 }
 
+/// Returns the first element for which every predicate is truthy. Distinct
+/// from `find_apply` (which keeps every match): this corresponds to the
+/// conventional `.find(pred)` semantics in JavaScript / Rust / Python
+/// iterators. Returns `Val::Null` when nothing matches.
+#[inline]
+pub fn find_first_apply<F>(recv: Val, pred_count: usize, mut eval: F) -> Result<Val, EvalError>
+where
+    F: FnMut(&Val, usize) -> Result<Val, EvalError>,
+{
+    if pred_count == 0 {
+        return Err(EvalError("find: requires at least one predicate".into()));
+    }
+    let items = recv
+        .into_vec()
+        .ok_or_else(|| EvalError("find: expected array".into()))?;
+    'outer: for item in items {
+        for idx in 0..pred_count {
+            if !is_truthy(&eval(&item, idx)?) {
+                continue 'outer;
+            }
+        }
+        return Ok(item);
+    }
+    Ok(Val::Null)
+}
+
 /// Deduplicates an array by a key expression, keeping the first occurrence of each distinct key.
 #[inline]
 pub fn unique_by_apply<F>(recv: Val, mut eval: F) -> Result<Val, EvalError>

@@ -2361,7 +2361,10 @@ where
             }
             return Ok(Val::Int(n));
         }
-        BuiltinMethod::Find | BuiltinMethod::FindAll => {
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
+            return find_first_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
+        }
+        BuiltinMethod::FindAll => {
             return find_apply(recv, args.len(), |item, idx| eval_item(item, &args[idx]));
         }
         BuiltinMethod::FindIndex => {

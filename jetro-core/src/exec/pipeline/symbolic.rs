@@ -84,7 +84,25 @@ pub(super) fn normalize_symbolic(
     let mut out = SymbolicEmitter::new(demand);
     for idx in 0..in_stages.len() {
         let stage = in_stages[idx].clone();
-        let expr = in_exprs.get(idx).cloned().unwrap_or(None);
+        // Unwrap a single-param `Expr::Lambda` here so the symbolic
+        // substitution operates on the actual body expression rather than
+        // a `Lambda` wrapper (which `substitute_current` passes through
+        // intact and which would otherwise leak into downstream stage
+        // bodies as `Opcode::PushNull`).
+        let expr = in_exprs
+            .get(idx)
+            .cloned()
+            .unwrap_or(None)
+            .map(|e| match e.as_ref() {
+                Expr::Lambda { params, body } if params.len() == 1 => {
+                    let lowered = crate::compile::lambda_lower::substitute_current(
+                        (**body).clone(),
+                        params[0].as_str(),
+                    );
+                    Arc::new(lowered)
+                }
+                _ => e,
+            });
         match stage {
             _ if stage.is_symbolic_map_stage() => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
@@ -253,14 +271,16 @@ fn suffix_consumes_value(stages: &[Stage]) -> bool {
 }
 
 fn compile_stage_expr(expr: &Expr) -> Arc<crate::vm::Program> {
-    // Pipeline-rewritten stage bodies are produced as raw `Expr`. When the
-    // body is a single-param `Expr::Lambda` we apply the same AST-level
-    // substitution that `Compiler::compile_lambda_or_expr` uses for method
-    // arguments — replacing the param identifier with `Expr::Current` —
-    // before compiling. Without this, `Compiler::compile` would emit
-    // `Opcode::PushNull` for a top-level `Expr::Lambda` (per `compile.rs`'s
-    // top-level fallback) and the stage would map every row to `null`.
-    crate::compile::lambda_lower::compile_lambda_arg(expr, "<pipeline-rewrite>")
+    // Pipeline-rewritten stage bodies arrive after `normalize_symbolic`
+    // has already unwrapped any single-param `Expr::Lambda` wrapper, so
+    // compile straight via `Compiler::compile`. Re-applying lambda
+    // unwrapping here would strip a second level for `r => (x => x)`-
+    // style bodies whose value is itself a lambda (no-op runtime value)
+    // and corrupt them.
+    Arc::new(crate::compile::compiler::Compiler::compile(
+        expr,
+        "<pipeline-rewrite>",
+    ))
 }
 
 fn simplify_expr(expr: Expr) -> Expr {

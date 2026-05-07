@@ -366,13 +366,34 @@ fn builtins_filter_named_lambda() {
 
 #[test]
 fn builtins_find_named_lambda() {
-    // `.find` in jetro is an alias of `.filter` — returns every match, not
-    // just the first. Behaviour is unrelated to lambda lowering; verified
-    // here only to confirm the named-form matches the @-form.
-    let doc = xs_scores();
-    let named = run_engine("$.xs.find(r => r.score > 15)", &doc);
-    let at = run_engine("$.xs.find(@.score > 15)", &doc);
-    assert_eq!(named, at);
+    // `.find(pred)` returns the first match (conventional semantics).
+    // Both arrow and `@`-form must agree on this single value.
+    assert_both(
+        "$.xs.find(r => r.score > 15)",
+        &xs_scores(),
+        &json!({"score": 20}),
+    );
+}
+
+#[test]
+fn builtins_find_no_match_returns_null() {
+    let doc = json!({"xs": [{"score": 5}, {"score": 7}]});
+    assert_both(
+        "$.xs.find(r => r.score > 100)",
+        &doc,
+        &json!(null),
+    );
+}
+
+#[test]
+fn builtins_find_all_named_lambda() {
+    // `.find_all(pred)` keeps the filter-alias semantics — returns every
+    // match.
+    assert_both(
+        "$.xs.find_all(r => r.score > 15)",
+        &xs_scores(),
+        &json!([{"score": 20}, {"score": 30}, {"score": 20}]),
+    );
 }
 
 #[test]
@@ -1087,52 +1108,68 @@ fn builtin_index_by_named_lambda() {
 //    without crosstalk.
 // -----------------------------------------------------------------------------
 
-// Mixed-form chains that rely on numeric arithmetic projections expose a
-// pre-existing path-collect divergence between vm and engine paths. The
-// lambda forms must agree with each other on the vm path.
+// Mixed-form chains over arithmetic projections — vm and engine paths
+// must agree. Path-collect wrap divergence fixed by `FilterBeforeMap`
+// optimizer rewriting predicates with `substitute_current_with_expr` and
+// by `normalize_symbolic` unwrapping single-param lambda wrappers
+// before threading them through symbolic substitution.
 
 #[test]
 fn mixed_arrow_then_at_form_chain() {
-    let doc = json!({"xs": [1, 2, 3, 4]});
-    let mixed = vm_query("$.xs.map(r => r * 2).filter(@ > 4)", &doc).unwrap();
-    let pure_at = vm_query("$.xs.map(@ * 2).filter(@ > 4)", &doc).unwrap();
-    assert_eq!(mixed, pure_at);
-    assert_eq!(mixed, json!([6, 8]));
+    assert_both(
+        "$.xs.map(r => r * 2).filter(@ > 4)",
+        &json!({"xs": [1, 2, 3, 4]}),
+        &json!([6, 8]),
+    );
 }
 
 #[test]
 fn mixed_at_form_then_arrow_chain() {
-    let doc = json!({"xs": [1, 2, 3, 4]});
-    let mixed = vm_query("$.xs.filter(@ > 1).map(r => r + 10)", &doc).unwrap();
-    let pure_at = vm_query("$.xs.filter(@ > 1).map(@ + 10)", &doc).unwrap();
-    assert_eq!(mixed, pure_at);
-    assert_eq!(mixed, json!([12, 13, 14]));
+    assert_both(
+        "$.xs.filter(@ > 1).map(r => r + 10)",
+        &json!({"xs": [1, 2, 3, 4]}),
+        &json!([12, 13, 14]),
+    );
 }
 
 #[test]
 fn mixed_lambda_then_arrow_chain() {
-    let doc = json!({"xs": [1, 2, 3]});
-    let mixed = vm_query("$.xs.map(lambda x: x * 3).map(r => r - 1)", &doc).unwrap();
-    let pure_at = vm_query("$.xs.map(@ * 3).map(@ - 1)", &doc).unwrap();
-    assert_eq!(mixed, pure_at);
-    assert_eq!(mixed, json!([2, 5, 8]));
+    assert_both(
+        "$.xs.map(lambda x: x * 3).map(r => r - 1)",
+        &json!({"xs": [1, 2, 3]}),
+        &json!([2, 5, 8]),
+    );
 }
 
 #[test]
 fn mixed_three_forms_in_one_expression() {
-    let doc = json!({"xs": [{"v": 1}, {"v": 2}, {"v": 3}, {"v": 4}]});
-    let mixed = vm_query(
+    assert_both(
         "$.xs.map(@.v).filter(r => r > 1).map(lambda x: x + 100)",
-        &doc,
-    )
-    .unwrap();
-    let pure_at = vm_query(
-        "$.xs.map(@.v).filter(@ > 1).map(@ + 100)",
-        &doc,
-    )
-    .unwrap();
-    assert_eq!(mixed, pure_at);
-    assert_eq!(mixed, json!([102, 103, 104]));
+        &json!({"xs": [{"v": 1}, {"v": 2}, {"v": 3}, {"v": 4}]}),
+        &json!([102, 103, 104]),
+    );
+}
+
+#[test]
+fn map_arith_then_filter_arith_engine_path() {
+    // `.map(...)` followed by `.filter(...)` over arithmetic projections
+    // formerly returned `[]` on the engine path because the filter
+    // pushdown rewrote the predicate without substituting `@` with the
+    // map's projection expression. Both vm and engine must agree now.
+    assert_both(
+        "$.xs.map(@ * 2).filter(@ > 30)",
+        &json!({"xs": [10, 20, 30]}),
+        &json!([40, 60]),
+    );
+}
+
+#[test]
+fn map_field_arith_then_filter() {
+    assert_both(
+        "$.xs.map(r => r.v * 3).filter(@ > 5).map(@ + 1)",
+        &json!({"xs": [{"v": 1}, {"v": 2}, {"v": 3}]}),
+        &json!([7, 10]),
+    );
 }
 
 // -----------------------------------------------------------------------------

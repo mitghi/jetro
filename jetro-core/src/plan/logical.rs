@@ -78,7 +78,7 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
     }
 
     let plan = match method {
-        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+        BuiltinMethod::Filter | BuiltinMethod::FindAll => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::Filter {
                 input: Box::new(input),

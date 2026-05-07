@@ -107,14 +107,22 @@ impl Builtin for Filter {
     }
 }
 
-/// Surface alias of `Filter` (same semantics; user-facing v2 name).
+/// `find(pred)` — returns the first element for which `pred` is truthy,
+/// or `null` when nothing matches. Matches the conventional first-match
+/// semantics found in JavaScript / Rust / Python iterators. Use
+/// `find_all` (filter alias) when every match is desired.
 pub(crate) struct Find;
 impl Builtin for Find {
     const METHOD: BuiltinMethod = BuiltinMethod::Find;
     const NAME: &'static str = "find";
 
     fn spec() -> BuiltinSpec {
-        filter_spec()
+        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FilterLike)
+            .lowering(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
     }
 }
 

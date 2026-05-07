@@ -173,8 +173,16 @@ pub(crate) mod rules {
     impl Rule for FilterBeforeMap {
         fn apply(&self, plan: LogicalPlan) -> Result<LogicalPlan, LogicalPlan> {
             // Filter { input: Map { input: x, projection: f }, predicate: p }
-            // →  Map { input: Filter { input: x, predicate: p }, projection: f }
-            // only when p does not reference the map output
+            // →  Map { input: Filter { input: x, predicate: p' }, projection: f }
+            // where `p' = substitute_current(p, f)` — every `@` in `p` is
+            // replaced by the projection expression `f`, so the swapped
+            // filter sees source rows but tests the same mapped value the
+            // original placement would have observed.
+            //
+            // Rejected when `p` shape would corrupt under substitution
+            // (method calls / lambdas / let / comp / pipeline / match)
+            // or when `f` itself contains a nested `Lambda` body that could
+            // capture an outer `@` (see `is_safe_projection_for_swap`).
             match plan {
                 LogicalPlan::Filter { input, predicate }
                     if matches!(*input, LogicalPlan::Map { .. }) =>
@@ -184,11 +192,24 @@ pub(crate) mod rules {
                         projection,
                     } = *input
                     {
-                        if is_independent_predicate(&predicate) {
+                        // Unwrap a single-param lambda projection to its
+                        // substituted body so the predicate substitution
+                        // sees `Current * 2` (a usable expression) rather
+                        // than `Lambda { params, body }` (which would
+                        // compile to `PushNull` and corrupt the swap).
+                        let projection_for_subst =
+                            crate::compile::lambda_lower::unwrap_single_lambda(&projection);
+                        if is_independent_predicate(&predicate)
+                            && is_safe_projection_for_swap(&projection_for_subst)
+                        {
+                            let new_predicate = substitute_current_with_expr(
+                                predicate,
+                                &projection_for_subst,
+                            );
                             return Ok(LogicalPlan::Map {
                                 input: Box::new(LogicalPlan::Filter {
                                     input: map_input,
-                                    predicate,
+                                    predicate: new_predicate,
                                 }),
                                 projection,
                             });
@@ -209,18 +230,17 @@ pub(crate) mod rules {
     }
 
     /// Returns `true` when `expr` can be safely moved before a `Map` stage —
-    /// it accesses only original source fields, not computed map outputs.
-    ///
-    /// Conservative: only allow literals, root/current references, simple field
-    /// chains, and binary/unary combinations of the above.
+    /// it is a side-effect-free combination of literals, `@`/`$` references,
+    /// simple field/index chains, and binary/unary operations. Method calls,
+    /// lambdas, comprehensions, etc. are conservatively rejected.
     fn is_independent_predicate(expr: &crate::parse::ast::Expr) -> bool {
         use crate::parse::ast::Expr;
         match expr {
             // Literals — always safe
             Expr::Null | Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => true,
-            // Document root and current-item reference — safe to move
+            // Document root and current-item reference — safe
             Expr::Root | Expr::Current => true,
-            // Plain identifier that resolves against the current row — safe
+            // Plain identifier that resolves against the current row
             Expr::Ident(_) => true,
             // Simple field navigation chains (e.g. `@.price`)
             Expr::Chain(base, steps) => {
@@ -240,6 +260,100 @@ pub(crate) mod rules {
             }
             // Anything with method calls, lambdas, let-bindings, comprehensions — conservatively false
             _ => false,
+        }
+    }
+
+    /// Returns `true` when `projection` is shaped so that substituting it
+    /// into a predicate does not corrupt the predicate's `@` semantics.
+    ///
+    /// Reject any projection containing a nested `Lambda` (which would
+    /// rebind `@` and cause the substituted predicate to read the wrong
+    /// `@`), or any projection that materially depends on `$` differently
+    /// from the predicate. Lambda-body method-arg substitution makes
+    /// `Lambda` rare in projection position, but guard explicitly.
+    fn is_safe_projection_for_swap(projection: &crate::parse::ast::Expr) -> bool {
+        use crate::parse::ast::Expr;
+        match projection {
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Root
+            | Expr::Current
+            | Expr::Ident(_) => true,
+            Expr::Chain(base, steps) => {
+                use crate::parse::ast::Step;
+                is_safe_projection_for_swap(base)
+                    && steps
+                        .iter()
+                        .all(|s| matches!(s, Step::Field(_) | Step::Index(_)))
+            }
+            Expr::BinOp(lhs, _, rhs) => {
+                is_safe_projection_for_swap(lhs) && is_safe_projection_for_swap(rhs)
+            }
+            Expr::Not(inner) | Expr::UnaryNeg(inner) => is_safe_projection_for_swap(inner),
+            Expr::Coalesce(lhs, rhs) => {
+                is_safe_projection_for_swap(lhs) && is_safe_projection_for_swap(rhs)
+            }
+            _ => false,
+        }
+    }
+
+    /// Substitutes every `Expr::Current` inside `expr` with `replacement`,
+    /// respecting `Lambda`/`Let`/comprehension/match-arm-bind shadows so
+    /// the replacement is not pushed into a re-bound `@` scope.
+    fn substitute_current_with_expr(
+        expr: crate::parse::ast::Expr,
+        replacement: &crate::parse::ast::Expr,
+    ) -> crate::parse::ast::Expr {
+        use crate::parse::ast::Expr;
+        match expr {
+            Expr::Current => replacement.clone(),
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Root
+            | Expr::Ident(_)
+            | Expr::DeleteMark => expr,
+            Expr::Chain(base, steps) => {
+                use crate::parse::ast::Step;
+                let new_base = substitute_current_with_expr(*base, replacement);
+                let new_steps = steps
+                    .into_iter()
+                    .map(|s| match s {
+                        Step::DynIndex(e) => Step::DynIndex(Box::new(
+                            substitute_current_with_expr(*e, replacement),
+                        )),
+                        Step::InlineFilter(e) => Step::InlineFilter(Box::new(
+                            substitute_current_with_expr(*e, replacement),
+                        )),
+                        other => other,
+                    })
+                    .collect();
+                Expr::Chain(Box::new(new_base), new_steps)
+            }
+            Expr::BinOp(lhs, op, rhs) => Expr::BinOp(
+                Box::new(substitute_current_with_expr(*lhs, replacement)),
+                op,
+                Box::new(substitute_current_with_expr(*rhs, replacement)),
+            ),
+            Expr::UnaryNeg(inner) => Expr::UnaryNeg(Box::new(substitute_current_with_expr(
+                *inner, replacement,
+            ))),
+            Expr::Not(inner) => {
+                Expr::Not(Box::new(substitute_current_with_expr(*inner, replacement)))
+            }
+            Expr::Coalesce(lhs, rhs) => Expr::Coalesce(
+                Box::new(substitute_current_with_expr(*lhs, replacement)),
+                Box::new(substitute_current_with_expr(*rhs, replacement)),
+            ),
+            // Anything else (shouldn't appear under `is_independent_predicate`)
+            // passes through unchanged — substitution under method calls,
+            // lambdas, comprehensions etc. is unsafe in general.
+            other => other,
         }
     }
 }
