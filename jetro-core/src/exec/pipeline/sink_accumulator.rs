@@ -208,8 +208,31 @@ impl<'a> SinkAccumulator<'a> {
     /// Captures a bounded prefix or suffix. Prefix selection stops once full; suffix selection
     /// retains only the latest `n` rows.
     pub(crate) fn observe_select_many(&mut self, n: usize, from_end: bool, item: Val) -> bool {
+        self.observe_select_many_lazy(n, from_end, false, || item)
+    }
+
+    /// Lazy bounded prefix/suffix selector. `prepend` is used when a reverse source is
+    /// satisfying a suffix demand so final output remains in semantic input order.
+    pub(crate) fn observe_select_many_lazy<F>(
+        &mut self,
+        n: usize,
+        from_end: bool,
+        prepend: bool,
+        materialize_item: F,
+    ) -> bool
+    where
+        F: FnOnce() -> Val,
+    {
         if n == 0 {
             return true;
+        }
+        let item = materialize_item();
+        if prepend {
+            if self.select_many.len() == n {
+                self.select_many.pop_back();
+            }
+            self.select_many.push_front(item);
+            return self.select_many.len() >= n;
         }
         if from_end {
             if self.select_many.len() == n {

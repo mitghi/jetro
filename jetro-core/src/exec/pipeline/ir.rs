@@ -152,6 +152,13 @@ impl Sink {
         if matches!(self, Sink::Collect) {
             return Some(ViewSinkCapability::Collect);
         }
+        if let Sink::SelectMany { n, from_end } = self {
+            return Some(ViewSinkCapability::SelectMany {
+                n: *n,
+                from_end: *from_end,
+                source_reversed: false,
+            });
+        }
         if let Sink::Nth(index) = self {
             return Some(ViewSinkCapability::Nth { index: *index });
         }

@@ -262,6 +262,15 @@ pub(crate) enum ViewSinkCapability {
         /// Index of the view-native predicate kernel in `sink_kernels`.
         predicate_kernel: usize,
     },
+    /// Bounded positional selector for terminal `first(n)` / `last(n)`.
+    SelectMany {
+        /// Number of rows requested by the terminal sink.
+        n: usize,
+        /// Whether the semantic selector wants rows from the end.
+        from_end: bool,
+        /// Whether the source iterator is running in reverse physical order.
+        source_reversed: bool,
+    },
 }
 
 impl ViewSinkCapability {
@@ -294,6 +303,7 @@ impl ViewSinkCapability {
                     ViewMaterialization::Never
                 }
             }
+            Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
         }
     }
 }
@@ -488,6 +498,15 @@ mod tests {
             .materialization(),
             ViewMaterialization::SinkFinalRow
         );
+        assert_eq!(
+            ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: true,
+            }
+            .materialization(),
+            ViewMaterialization::SinkOutputRows
+        );
     }
 
     #[test]
@@ -532,6 +551,18 @@ mod tests {
             Some(ViewSinkCapability::Predicate {
                 op: PredicateSinkOp::Any,
                 predicate_kernel: 0,
+            })
+        ));
+        assert!(matches!(
+            Sink::SelectMany {
+                n: 2,
+                from_end: true,
+            }
+            .view_capability(&[]),
+            Some(ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: false,
             })
         ));
     }

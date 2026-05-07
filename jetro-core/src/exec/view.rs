@@ -83,6 +83,14 @@ where
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
             pipeline::ViewSinkCapability::Nth { index: 0 }
         }
+        (
+            PullDemand::LastInput(_),
+            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
+        ) => pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed: true,
+        },
         (_, sink) => sink,
     };
 
@@ -166,6 +174,21 @@ where
                 ViewRowAction::Emit
             } else {
                 ViewRowAction::Skip
+            })
+        }
+        pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed,
+        } => {
+            let sink_done =
+                sink_acc.observe_select_many_lazy(n, from_end, source_reversed, || {
+                    item.materialize()
+                });
+            Some(if sink_done {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
             })
         }
     }
@@ -1054,6 +1077,9 @@ mod tests {
     impl<'a> ValueView<'a> for CountingView {
         fn scalar(&self) -> JsonView<'_> {
             self.scalar_reads.set(self.scalar_reads.get() + 1);
+            if self.idx.is_none() {
+                return JsonView::ArrayLen(self.rows.len());
+            }
             self.idx
                 .and_then(|idx| self.rows.get(idx).copied())
                 .map(JsonView::Int)
@@ -1131,6 +1157,44 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
         assert_eq!(source.scalar_reads(), 2);
+    }
+
+    #[test]
+    fn view_full_runner_handles_select_many_first_and_last() {
+        let first_source = CountingView::root(&[1, 2, 3, 4]);
+        let first_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: false,
+            },
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let first = super::run_full(first_source.clone(), &first_body)
+            .unwrap()
+            .unwrap();
+        let first_json: serde_json::Value = first.into();
+        assert_eq!(first_json, serde_json::json!([1, 2]));
+        assert_eq!(first_source.materialize_reads(), 2);
+
+        let last_source = CountingView::root(&[1, 2, 3, 4]);
+        let last_body = PipelineBody {
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: true,
+            },
+            ..first_body
+        };
+
+        let last = super::run_full(last_source.clone(), &last_body)
+            .unwrap()
+            .unwrap();
+        let last_json: serde_json::Value = last.into();
+        assert_eq!(last_json, serde_json::json!([3, 4]));
+        assert_eq!(last_source.materialize_reads(), 2);
     }
 
     #[test]
