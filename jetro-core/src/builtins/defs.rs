@@ -2827,7 +2827,6 @@ macro_rules! str_arg_scalar_native {
 
 str_arg_scalar_native! {
     Has, "has", has_apply;
-    HasKey, "has_key", has_apply;
     StripPrefix, "strip_prefix", strip_prefix_apply;
     StripSuffix, "strip_suffix", strip_suffix_apply;
     Scan, "scan", scan_apply;
@@ -2835,6 +2834,26 @@ str_arg_scalar_native! {
     ReMatchFirst, "match_first", re_match_first_apply;
     ReMatchAll, "match_all", re_match_all_apply;
     ReCaptures, "captures", re_captures_apply;
+}
+
+/// `has_key(key)` — object key existence test with a view/tape-native backend.
+pub(crate) struct HasKey;
+impl Builtin for HasKey {
+    const METHOD: BuiltinMethod = BuiltinMethod::HasKey;
+    const NAME: &'static str = "has_key";
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec().view_scalar()
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => Some(super::has_apply(recv, p).unwrap_or_else(|| recv.clone())),
+            _ => None,
+        }
+    }
 }
 
 // ── More multi-arg scalar element methods ──

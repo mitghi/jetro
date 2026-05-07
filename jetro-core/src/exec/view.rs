@@ -1191,6 +1191,10 @@ mod tests {
             }
         }
 
+        fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
         fn index(&self, idx: i64) -> Self {
             let idx = if idx >= 0 { Some(idx as usize) } else { None };
             Self {

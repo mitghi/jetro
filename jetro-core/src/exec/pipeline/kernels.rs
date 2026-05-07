@@ -730,9 +730,15 @@ where
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
-            ViewKernelValue::View(view) => call
-                .try_apply_json_view(view.scalar())
-                .map(ViewKernelValue::Owned),
+            ViewKernelValue::View(view) => match (call.method, &call.args) {
+                (
+                    crate::builtins::BuiltinMethod::HasKey,
+                    crate::builtins::BuiltinArgs::Str(key),
+                ) => view.has_key(key.as_ref()).map(Val::Bool).map(ViewKernelValue::Owned),
+                _ => call
+                    .try_apply_json_view(view.scalar())
+                    .map(ViewKernelValue::Owned),
+            },
             ViewKernelValue::Owned(value) => call
                 .try_apply(&value)
                 .ok()

@@ -691,6 +691,7 @@ impl VM {
                     stack.push(match key {
                         Val::Int(i) => v.get_index(i),
                         Val::Str(s) => v.get_field(s.as_ref()),
+                        Val::StrSlice(s) => v.get_field(s.as_str()),
                         _ => Val::Null,
                     });
                 }

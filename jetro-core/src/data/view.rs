@@ -19,6 +19,8 @@ pub(crate) trait ValueView<'a>: Clone {
     fn scalar(&self) -> JsonView<'_>;
     /// Navigate into the named field of an object node, returning `Null` if absent.
     fn field(&self, key: &str) -> Self;
+    /// Return whether the current object has `key`, or `None` if the current node is not an object.
+    fn has_key(&self, key: &str) -> Option<bool>;
     /// Navigate to the element at `idx` (negative indices count from the end),
     /// returning `Null` if out of bounds.
     fn index(&self, idx: i64) -> Self;
@@ -96,6 +98,15 @@ impl<'a> ValueView<'a> for ValView<'a> {
                 .unwrap_or_else(|| Self::Owned(Val::Null)),
             Self::Borrowed(_) => Self::Owned(Val::Null),
             Self::Owned(value) => Self::Owned(value.get_field(key)),
+        }
+    }
+
+    #[inline]
+    fn has_key(&self, key: &str) -> Option<bool> {
+        match self.value() {
+            Val::Obj(map) => Some(map.contains_key(key)),
+            Val::ObjSmall(pairs) => Some(pairs.iter().any(|(k, _)| k.as_ref() == key)),
+            _ => None,
         }
     }
 
@@ -317,6 +328,29 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn has_key(&self, key: &str) -> Option<bool> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if current_key == key {
+                return Some(true);
+            }
+            cur += tape.span(cur);
+        }
+        Some(false)
+    }
+
+    #[inline]
     fn index(&self, idx: i64) -> Self {
         use crate::data::tape::TapeNode;
 
@@ -440,6 +474,18 @@ mod tests {
     }
 
     #[test]
+    fn val_view_checks_object_keys_without_reading_values() {
+        let value = Val::from(&json!({
+            "book": {"title": "Dune", "score": 901}
+        }));
+        let book = ValView::new(&value).field("book");
+
+        assert_eq!(book.has_key("title"), Some(true));
+        assert_eq!(book.has_key("missing"), Some(false));
+        assert_eq!(book.field("title").has_key("x"), None);
+    }
+
+    #[test]
     fn val_view_indexes_columnar_arrays() {
         let nums = Val::IntVec(Arc::new(vec![10, 20, 30]));
         let view = ValView::new(&nums);
@@ -490,6 +536,12 @@ mod tests {
             (tape_score, val_score),
             (JsonView::Int(901), JsonView::Int(901))
         ));
+        let tape_book = TapeView::root(&tape).field("books").index(1);
+        let val_book = ValView::new(&val).field("books").index(1);
+
+        assert_eq!(tape_book.has_key("title"), Some(true));
+        assert_eq!(tape_book.has_key("missing"), Some(false));
+        assert_eq!(tape_book.has_key("title"), val_book.has_key("title"));
     }
 
     #[cfg(feature = "simd-json")]

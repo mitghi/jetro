@@ -216,8 +216,12 @@ pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
 /// Returns `Val::Bool(true)` when the object has a top-level key named `key`.
 #[inline]
 pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
-    let m = recv.as_object()?;
-    Some(Val::Bool(m.contains_key(key)))
+    let found = match recv {
+        Val::Obj(m) => m.contains_key(key),
+        Val::ObjSmall(pairs) => pairs.iter().any(|(k, _)| k.as_ref() == key),
+        _ => return None,
+    };
+    Some(Val::Bool(found))
 }
 
 /// Keeps only the listed `keys` from an object (or each object in an array), dropping all others.
@@ -354,4 +358,3 @@ pub fn unflatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
         None
     }
 }
-
