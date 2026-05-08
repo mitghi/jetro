@@ -639,6 +639,12 @@ pub struct BuiltinSpec {
     pub lowering: Option<BuiltinPipelineLowering>,
     /// Whether the builtin is element-wise vectorisable.
     pub is_element: bool,
+    /// Opt out of the path-receiver scalar-unwrap rewrite. When `true`, the
+    /// planner does **not** lower `$.path.method()` directly to `apply_one`,
+    /// even if `category` and `cardinality` would otherwise allow it. Use for
+    /// methods whose pipeline-streaming behavior is the desired semantic on
+    /// path receivers (e.g. per-element serialization).
+    pub never_unwrap: bool,
 }
 
 /// How a builtin transforms downstream demand into the demand it places on
@@ -1164,7 +1170,19 @@ impl BuiltinSpec {
             order_effect: None,
             lowering: None,
             is_element: false,
+            never_unwrap: false,
         }
+    }
+
+    /// Returns `true` when `$.path.method()` should bypass pipeline streaming
+    /// and dispatch as a direct `apply_one` call on the single value produced
+    /// by the chain. Eligibility is restricted to scalar one-to-one builtins
+    /// (e.g. `upper`, `type`, `ceil`) that have not opted out via
+    /// `never_unwrap`.
+    pub fn dispatches_scalar_direct(&self) -> bool {
+        matches!(self.category, BuiltinCategory::Scalar)
+            && matches!(self.cardinality, BuiltinCardinality::OneToOne)
+            && !self.never_unwrap
     }
 
     /// Marks this builtin as safe for indexed (random-access) evaluation.
@@ -1314,6 +1332,15 @@ impl BuiltinSpec {
     /// Marks this builtin as element-wise vectorisable.
     fn element(mut self) -> Self {
         self.is_element = true;
+        self
+    }
+
+    /// Opts this builtin out of the path-receiver scalar-unwrap rewrite. The
+    /// pipeline-streaming lowering remains the canonical path for
+    /// `$.path.method()`, even when category/cardinality would otherwise be
+    /// eligible for direct dispatch.
+    fn never_unwrap(mut self) -> Self {
+        self.never_unwrap = true;
         self
     }
 }
