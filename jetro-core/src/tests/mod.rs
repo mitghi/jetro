@@ -32,3 +32,5 @@ mod dyn_index_lambda;
 mod lambda_forms;
 #[cfg(test)]
 mod neq_grammar;
+#[cfg(test)]
+mod comprehensions;

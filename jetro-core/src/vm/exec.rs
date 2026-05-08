@@ -2942,17 +2942,21 @@ impl VM {
     /// Evaluate `iter_prog` and expand the result into a `Vec<Val>` suitable for iteration.
     /// Objects are converted to `[{key, value}]` pairs; scalars become single-element vecs.
     fn exec_iter_vals(&mut self, iter_prog: &Program, env: &Env) -> Result<Vec<Val>, EvalError> {
-        match self.exec(iter_prog, env)? {
-            Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
-            Val::Obj(m) => {
-                let entries = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-                Ok(entries
-                    .into_iter()
-                    .map(|(k, v)| obj2("key", Val::Str(k), "value", v))
-                    .collect())
-            }
-            other => Ok(vec![other]),
+        let raw = self.exec(iter_prog, env)?;
+        // Object → entries (key/value record per entry).
+        if let Val::Obj(m) = &raw {
+            let entries = Arc::try_unwrap(m.clone()).unwrap_or_else(|m| (*m).clone());
+            return Ok(entries
+                .into_iter()
+                .map(|(k, v)| obj2("key", Val::Str(k), "value", v))
+                .collect());
         }
+        // Array-shaped sources (Val::Arr, IntVec, FloatVec, StrVec, StrSliceVec,
+        // ObjVec) → per-element iteration via `into_vec`. Scalars fall through.
+        if let Some(v) = raw.clone().into_vec() {
+            return Ok(v);
+        }
+        Ok(vec![raw])
     }
 
     /// Evaluate a compiled `match` expression by walking the flat
@@ -3705,13 +3709,40 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
             e.current = item;
             e
         }
+        // 2-var form binds (a, b) by matching item shape:
+        //   - Array/Vec with ≥ 2 elems: a = item[0], b = item[1] (pair destructure).
+        //     Fits `[(k, v), ...]`-shaped sources, which is the common case
+        //     coming from `.entries()`, `.pairwise()`, `.enumerate()`, etc.
+        //   - Object with `key`/`value` keys: a = key, b = value (also covers
+        //     entries-style records produced by iterating an object directly).
+        //   - Object with `index`/`value` keys: a = index, b = value
+        //     (legacy enumerate shape).
+        //   - Anything else: a = null, b = whole item. Caller should prefer
+        //     a 1-var binding in that case.
         [v1, v2, ..] => {
-            let idx = item.get("index").cloned().unwrap_or(Val::Null);
-            let val = item.get("value").cloned().unwrap_or_else(|| item.clone());
+            let (a, b) = if let Some(elems) = item.clone().into_vec() {
+                let mut it = elems.into_iter();
+                let a = it.next().unwrap_or(Val::Null);
+                let b = it.next().unwrap_or(Val::Null);
+                (a, b)
+            } else if let Val::Obj(m) = &item {
+                let k = m
+                    .get("key")
+                    .or_else(|| m.get("index"))
+                    .cloned()
+                    .unwrap_or(Val::Null);
+                let v = m
+                    .get("value")
+                    .cloned()
+                    .unwrap_or_else(|| item.clone());
+                (k, v)
+            } else {
+                (Val::Null, item.clone())
+            };
             let mut e = env
-                .with_var(v1.as_ref(), idx)
-                .with_var(v2.as_ref(), val.clone());
-            e.current = val;
+                .with_var(v1.as_ref(), a)
+                .with_var(v2.as_ref(), b.clone());
+            e.current = b;
             e
         }
     }

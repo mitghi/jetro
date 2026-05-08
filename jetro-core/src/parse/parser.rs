@@ -1391,14 +1391,27 @@ fn parse_comp_vars(pair: Pair<Rule>) -> Vec<String> {
         .collect()
 }
 
-/// Parse a list comprehension `[expr for vars in iter if cond]` into
-/// `Expr::ListComp`.
+/// Conjoin a sequence of `if` clauses with logical `and`. Returns `None`
+/// when the iterator is empty so callers can keep `cond: None` for the
+/// no-guard case (which lets the runtime skip the predicate check entirely).
+fn collect_comp_conds<'a, I: Iterator<Item = Pair<'a, Rule>>>(rest: I) -> Option<Box<Expr>> {
+    let exprs: Vec<Expr> = rest.map(parse_expr).collect();
+    let mut it = exprs.into_iter();
+    let first = it.next()?;
+    let combined = it.fold(first, |acc, e| {
+        Expr::BinOp(Box::new(acc), BinOp::And, Box::new(e))
+    });
+    Some(Box::new(combined))
+}
+
+/// Parse a list comprehension `[expr for vars in iter if cond ...]` into
+/// `Expr::ListComp`. Multiple `if` clauses are folded together with `and`.
 fn parse_list_comp(pair: Pair<Rule>) -> Expr {
     let mut inner = comp_inner_filter(pair);
     let expr = parse_expr(inner.next().unwrap());
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
-    let cond = inner.next().map(|p| Box::new(parse_expr(p)));
+    let cond = collect_comp_conds(inner);
     Expr::ListComp {
         expr: Box::new(expr),
         vars,
@@ -1407,15 +1420,15 @@ fn parse_list_comp(pair: Pair<Rule>) -> Expr {
     }
 }
 
-/// Parse a dict comprehension `{key: val for vars in iter if cond}` into
-/// `Expr::DictComp`.
+/// Parse a dict comprehension `{key: val for vars in iter if cond ...}` into
+/// `Expr::DictComp`. Multiple `if` clauses are folded together with `and`.
 fn parse_dict_comp(pair: Pair<Rule>) -> Expr {
     let mut inner = comp_inner_filter(pair);
     let key = parse_expr(inner.next().unwrap());
     let val = parse_expr(inner.next().unwrap());
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
-    let cond = inner.next().map(|p| Box::new(parse_expr(p)));
+    let cond = collect_comp_conds(inner);
     Expr::DictComp {
         key: Box::new(key),
         val: Box::new(val),
@@ -1425,14 +1438,14 @@ fn parse_dict_comp(pair: Pair<Rule>) -> Expr {
     }
 }
 
-/// Parse a set comprehension `{expr for vars in iter if cond}` into
-/// `Expr::SetComp`.
+/// Parse a set comprehension `{expr for vars in iter if cond ...}` into
+/// `Expr::SetComp`. Multiple `if` clauses are folded together with `and`.
 fn parse_set_comp(pair: Pair<Rule>) -> Expr {
     let mut inner = comp_inner_filter(pair);
     let expr = parse_expr(inner.next().unwrap());
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
-    let cond = inner.next().map(|p| Box::new(parse_expr(p)));
+    let cond = collect_comp_conds(inner);
     Expr::SetComp {
         expr: Box::new(expr),
         vars,
@@ -1441,14 +1454,15 @@ fn parse_set_comp(pair: Pair<Rule>) -> Expr {
     }
 }
 
-/// Parse a generator comprehension `(expr for vars in iter if cond)` into
+/// Parse a generator comprehension `(expr for vars in iter if cond ...)` into
 /// `Expr::GenComp`. Semantically identical to `ListComp` but distinct in AST.
+/// Multiple `if` clauses are folded together with `and`.
 fn parse_gen_comp(pair: Pair<Rule>) -> Expr {
     let mut inner = comp_inner_filter(pair);
     let expr = parse_expr(inner.next().unwrap());
     let vars = parse_comp_vars(inner.next().unwrap());
     let iter = parse_expr(inner.next().unwrap());
-    let cond = inner.next().map(|p| Box::new(parse_expr(p)));
+    let cond = collect_comp_conds(inner);
     Expr::GenComp {
         expr: Box::new(expr),
         vars,

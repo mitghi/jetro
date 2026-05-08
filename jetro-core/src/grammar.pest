@@ -152,13 +152,18 @@ unary_expr = { unary_neg ~ unary_expr | postfix_expr }
 postfix_expr = { primary ~ postfix* }
 
 // ── Comprehension variables ────────────────────────────────────────────────────
-comp_vars = { ident ~ ("," ~ ident)? }
+// Bare `a` (single var), `a, b` (pair destructure), or `[a, b]`
+// (explicit array-pattern destructure). The pattern form is sugar for the
+// 2-var form and is bound the same way at runtime.
+comp_vars = { ("[" ~ ident ~ ("," ~ ident)+ ~ "]") | (ident ~ ("," ~ ident)?) }
 
 // ── Comprehensions ─────────────────────────────────────────────────────────────
-list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "]" }
-dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
-set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
-gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ ")" }
+// Multiple `if` clauses are conjoined with logical `and` at parse time so the
+// runtime sees a single combined predicate.
+list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "]" }
+dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "}" }
+set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "}" }
+gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ ")" }
 
 // ── Lambda ────────────────────────────────────────────────────────────────────
 lambda_params = { ident ~ ("," ~ ident)* }
