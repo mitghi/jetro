@@ -165,19 +165,22 @@ fn map_split_len_sum_unicode() {
 #[test]
 fn map_str_concat_prefix_suffix() {
     let doc = json!(["a", "bb", ""]);
-    assert!(j(doc).collect(r#"$.map('P-' + @ + '-S')"#).is_err());
+    let out = j(doc).collect(r#"$.map('P-' + @ + '-S')"#).unwrap();
+    assert_eq!(out.to_string(), r#"["P-a-S","P-bb-S","P--S"]"#);
 }
 
 #[test]
 fn map_str_concat_prefix_only() {
     let doc = json!(["a", "bb"]);
-    assert!(j(doc).collect(r#"$.map('P-' + @)"#).is_err());
+    let out = j(doc).collect(r#"$.map('P-' + @)"#).unwrap();
+    assert_eq!(out.to_string(), r#"["P-a","P-bb"]"#);
 }
 
 #[test]
 fn map_str_concat_suffix_only() {
     let doc = json!(["a", "bb"]);
-    assert!(j(doc).collect(r#"$.map(@ + '-S')"#).is_err());
+    let out = j(doc).collect(r#"$.map(@ + '-S')"#).unwrap();
+    assert_eq!(out.to_string(), r#"["a-S","bb-S"]"#);
 }
 
 #[test]
@@ -572,9 +575,10 @@ fn fanout_multiple_views() {
 #[test]
 fn zip_shape_named_and_bare() {
     let doc = json!({"first": "Ada", "last": "Lovelace"});
-    assert!(j(doc)
+    let out = j(doc)
         .collect(r#"$.zip_shape(full: first + " " + last, first)"#)
-        .is_err());
+        .unwrap();
+    assert_eq!(out.to_string(), r#"{"first":"Ada","full":"Ada Lovelace"}"#);
 }
 
 #[test]

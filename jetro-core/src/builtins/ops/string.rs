@@ -615,8 +615,14 @@ pub fn center_apply(recv: &Val, width: usize, fill: char) -> Option<Val> {
 /// Prepends `n` spaces to each line of the string.
 #[inline]
 pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
-    let s = recv.as_str_ref()?;
     let prefix: String = std::iter::repeat(' ').take(n).collect();
+    indent_with_prefix_apply(recv, &prefix)
+}
+
+/// Prepends `prefix` to each line of the string.
+#[inline]
+pub fn indent_with_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
+    let s = recv.as_str_ref()?;
     let out = s
         .lines()
         .map(|l| format!("{}{}", prefix, l))

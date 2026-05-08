@@ -50,8 +50,11 @@ lit_true      = @{ "true"  ~ !ident_char }
 lit_false     = @{ "false" ~ !ident_char }
 lit_float     = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ }
 lit_int       = @{ ASCII_DIGIT+ }
-lit_str_dq    = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
-lit_str_sq    = @{ "'"  ~ (!"'"  ~ ANY)* ~ "'" }
+// Backslash escapes are recognised greedily so embedded `\"` does not
+// terminate a double-quoted literal. The semantic layer (`unescape_str_lit`)
+// decodes the actual character; the grammar only needs to cover the bracket.
+lit_str_dq    = @{ "\"" ~ (("\\" ~ ANY) | (!"\"" ~ ANY))* ~ "\"" }
+lit_str_sq    = @{ "'"  ~ (("\\" ~ ANY) | (!"'"  ~ ANY))* ~ "'" }
 lit_str       = { lit_str_dq | lit_str_sq }
 // f-strings captured raw; inner expressions parsed in Rust
 lit_fstring   = @{ "f\"" ~ (!"\"" ~ ANY)* ~ "\"" }
@@ -190,7 +193,10 @@ gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~
 // `__lampat_N => let k = __lampat_N[0] in let v = __lampat_N[1] in body`.
 // This lets `pairwise().map(([a, b]) => b - a)` and similar idioms work
 // without any runtime support for destructuring beyond array indexing.
-lambda_array_pat = { "[" ~ ident ~ ("," ~ ident)+ ~ "]" }
+// Optional trailing `...rest` captures the remaining tail of the array
+// past the fixed prefix, mirroring `[a, ...rest]` patterns inside `match`.
+lambda_array_rest = { "..." ~ ident }
+lambda_array_pat  = { "[" ~ ident ~ ("," ~ ident)* ~ ("," ~ lambda_array_rest)? ~ "]" }
 lambda_param     = { lambda_array_pat | ident }
 lambda_params    = { lambda_param ~ ("," ~ lambda_param)* }
 lambda_expr      = { kw_lambda ~ lambda_params ~ ":" ~ expr }
@@ -201,7 +207,11 @@ arrow_lambda  = { arrow_params ~ "=>" ~ expr }
 
 // ── Let ───────────────────────────────────────────────────────────────────────
 // Multi-binding: `let a=x, b=y in body` desugars to nested Let in parser.
-let_binding = { ident ~ "=" ~ expr }
+// Tuple binding is parser sugar: `let (a, b) = expr in body` lowers to one
+// synthetic binding plus indexed scalar lets; no runtime tuple-binding opcode.
+let_tuple_target = { "(" ~ ident ~ ("," ~ ident)+ ~ ","? ~ ")" }
+let_target  = { let_tuple_target | ident }
+let_binding = { let_target ~ "=" ~ expr }
 let_expr    = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
 
 // ── Object construction ────────────────────────────────────────────────────────
@@ -261,7 +271,12 @@ pat_bind      = { ident }
 pat_obj_rest_named = { "...*" ~ ident }
 pat_obj_rest_anon  = { "...*" }
 pat_obj_rest       = { pat_obj_rest_named | pat_obj_rest_anon }
-pat_obj_field = { loose_ident ~ ":" ~ pat_or }
+// `{id, name}` is shorthand for `{id: id, name: name}` — binds each key
+// to a same-named local. Listed before the `key: pat` form so the parser
+// commits to shorthand only when the trailing `:` is absent.
+pat_obj_field_short = { loose_ident ~ !":" }
+pat_obj_field_kv    = { loose_ident ~ ":" ~ pat_or }
+pat_obj_field = { pat_obj_field_kv | pat_obj_field_short }
 pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_rest)? ~ ","?)? ~ "}" }
 
 pat_arr_rest_named = { "..." ~ ident }
@@ -314,6 +329,14 @@ patch_field    = { patch_key ~ ":" ~ expr ~ (kw_when ~ expr)? }
 patch_block    = { kw_patch ~ coalesce_expr ~ "{" ~ (patch_field ~ ("," ~ patch_field)* ~ ","?)? ~ "}" }
 
 // ── Primary ───────────────────────────────────────────────────────────────────
+// `.field` at expression start desugars to `@.field`. Useful inside
+// method arguments where the receiver is implicit (`$.users.filter(.active)`
+// ≡ `$.users.filter(@.active)`). Listed before `current` to avoid leading
+// `.` being eaten by the postfix machinery on a missing primary; the rule
+// emits an `Expr::Chain(Current, [Field(name), …])` synthetic expression at
+// parse time.
+bare_leading_field = { "." ~ field_name }
+
 primary = {
     match_expr    |
     patch_block   |
@@ -331,6 +354,7 @@ primary = {
     kw_delete     |
     root          |
     current       |
+    bare_leading_field |
     literal       |
     ident
 }

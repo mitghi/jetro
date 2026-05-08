@@ -335,9 +335,53 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
     }
+    if is_scalar_unwrap_pipeline(&pipeline) {
+        return None;
+    }
     let (source, mut body) = pipeline.into_source_body();
     mask_active_local_stage_kernels(&mut body, builder);
     pipeline_parts_to_plan_node(source, body)
+}
+
+/// Returns `true` for path-receiver pipelines whose every stage is a
+/// scalar-direct-dispatch builtin (e.g. `$.s.upper().lower()`). Rejecting these
+/// from pipeline lowering causes `lower_expr` to fall through to
+/// `try_lower_chain`, which emits direct `apply_one` calls and returns a
+/// scalar — eliminating the legacy one-element array wrap on path receivers.
+fn is_scalar_unwrap_pipeline(pipeline: &Pipeline) -> bool {
+    if !matches!(pipeline.source, Source::FieldChain { .. }) {
+        return false;
+    }
+    is_scalar_unwrap_stages(&pipeline.stages, &pipeline.sink)
+}
+
+fn is_scalar_unwrap_body(body: &crate::exec::pipeline::PipelineBody) -> bool {
+    is_scalar_unwrap_stages(&body.stages, &body.sink)
+}
+
+fn is_scalar_unwrap_stages(
+    stages: &[crate::exec::pipeline::Stage],
+    sink: &crate::exec::pipeline::Sink,
+) -> bool {
+    use crate::exec::pipeline::{Sink, Stage};
+    if !matches!(sink, Sink::Collect) {
+        return false;
+    }
+    if stages.is_empty() {
+        return false;
+    }
+    stages.iter().all(|stage| {
+        let method = match stage {
+            Stage::Builtin(call) => call.method,
+            Stage::UsizeBuiltin { method, .. }
+            | Stage::StringBuiltin { method, .. }
+            | Stage::StringPairBuiltin { method, .. }
+            | Stage::IntRangeBuiltin { method, .. }
+            | Stage::ExprBuiltin { method, .. } => *method,
+            _ => return false,
+        };
+        method.spec().dispatches_scalar_direct()
+    })
 }
 
 /// Runs `expr` through the logical planner, optimizer, and logical lowerer. Returns `None` if
@@ -594,6 +638,9 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         let Some(mut body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
             continue;
         };
+        if is_scalar_unwrap_body(&body) {
+            continue;
+        }
         mask_active_local_stage_kernels(&mut body, builder);
         let source_expr = base
             .as_ref()
@@ -871,11 +918,13 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
         locals: Vec::new(),
     };
     if let Some(pipeline) = lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast)) {
-        let (source, mut body) = pipeline.into_source_body();
-        mask_active_local_stage_kernels(&mut body, &builder);
-        if let Some(node) = pipeline_parts_to_plan_node(source, body) {
-            let root = builder.push(node);
-            return builder.finish(root);
+        if !is_scalar_unwrap_pipeline(&pipeline) {
+            let (source, mut body) = pipeline.into_source_body();
+            mask_active_local_stage_kernels(&mut body, &builder);
+            if let Some(node) = pipeline_parts_to_plan_node(source, body) {
+                let root = builder.push(node);
+                return builder.finish(root);
+            }
         }
     }
     let root = lower_expr(&mut builder, &ast);

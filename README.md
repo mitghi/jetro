@@ -9,6 +9,11 @@
 Jetro is a compact expression engine for JSON. It accepts JSON bytes, evaluates
 a Jetro expression, and returns a `serde_json::Value`.
 
+📖 **[The Jetro Book](https://mitghi.github.io/jetro-book/)** is the best
+place to start — guided tour, full grammar reference, every builtin with
+working examples, recipes, and a known-limitations page. Read it before
+the API docs.
+
 ```rust
 use jetro::Jetro;
 use serde_json::json;
@@ -121,7 +126,7 @@ assert_eq!(report, json!({
 
 ```toml
 [dependencies]
-jetro = "0.5.3"
+jetro = "0.5.6"
 ```
 
 ## API
@@ -305,6 +310,8 @@ For interactive use, see [`jetrocli`](https://github.com/mitghi/jetrocli).
 
 ## Learn More
 
+- **[The Jetro Book](https://mitghi.github.io/jetro-book/)** — the canonical
+  guide; start here.
 - [INDEPTH.md](INDEPTH.md) - API and language examples
 - [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md) - syntax reference
 - [SAFETY.md](SAFETY.md) - unsafe inventory and safety notes
