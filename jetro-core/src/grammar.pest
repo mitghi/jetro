@@ -207,7 +207,11 @@ arrow_lambda  = { arrow_params ~ "=>" ~ expr }
 
 // ── Let ───────────────────────────────────────────────────────────────────────
 // Multi-binding: `let a=x, b=y in body` desugars to nested Let in parser.
-let_binding = { ident ~ "=" ~ expr }
+// Tuple binding is parser sugar: `let (a, b) = expr in body` lowers to one
+// synthetic binding plus indexed scalar lets; no runtime tuple-binding opcode.
+let_tuple_target = { "(" ~ ident ~ ("," ~ ident)+ ~ ","? ~ ")" }
+let_target  = { let_tuple_target | ident }
+let_binding = { let_target ~ "=" ~ expr }
 let_expr    = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
 
 // ── Object construction ────────────────────────────────────────────────────────

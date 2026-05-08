@@ -1848,16 +1848,80 @@ fn parse_let(pair: Pair<Rule>) -> Expr {
         .collect();
     let (bindings, body_pair) = inner.split_at(inner.len() - 1);
     let body = parse_expr(body_pair[0].clone());
+    let mut tuple_counter = 0u32;
     bindings.iter().rev().fold(body, |acc, b| {
         let mut bi = b.clone().into_inner();
-        let name = bi.next().unwrap().as_str().to_string();
+        let target = bi.next().unwrap();
         let init = parse_expr(bi.next().unwrap());
-        Expr::Let {
-            name,
-            init: Box::new(init),
-            body: Box::new(acc),
+        match target.as_rule() {
+            Rule::ident => Expr::Let {
+                name: target.as_str().to_string(),
+                init: Box::new(init),
+                body: Box::new(acc),
+            },
+            Rule::let_target => {
+                let inner = target.into_inner().next().unwrap();
+                match inner.as_rule() {
+                    Rule::ident => Expr::Let {
+                        name: inner.as_str().to_string(),
+                        init: Box::new(init),
+                        body: Box::new(acc),
+                    },
+                    Rule::let_tuple_target => lower_tuple_let_binding(
+                        init,
+                        parse_let_tuple_names(inner),
+                        acc,
+                        &mut tuple_counter,
+                    ),
+                    _ => unreachable!("unexpected let target inner: {:?}", inner.as_rule()),
+                }
+            }
+            Rule::let_tuple_target => lower_tuple_let_binding(
+                init,
+                parse_let_tuple_names(target),
+                acc,
+                &mut tuple_counter,
+            ),
+            _ => unreachable!("unexpected let binding target: {:?}", target.as_rule()),
         }
     })
+}
+
+fn parse_let_tuple_names(pair: Pair<Rule>) -> Vec<String> {
+    pair.into_inner()
+        .filter(|p| matches!(p.as_rule(), Rule::ident))
+        .map(|p| p.as_str().to_string())
+        .collect()
+}
+
+fn lower_tuple_let_binding(init: Expr, names: Vec<String>, body: Expr, counter: &mut u32) -> Expr {
+    let tmp = loop {
+        let candidate = format!("__lettuple_{}", *counter);
+        *counter += 1;
+        if !names.iter().any(|name| name == &candidate) {
+            break candidate;
+        }
+    };
+    let destructured = names
+        .into_iter()
+        .enumerate()
+        .rev()
+        .fold(body, |acc, (i, name)| {
+            let indexed = Expr::Chain(
+                Box::new(Expr::Ident(tmp.clone())),
+                vec![Step::Index(i as i64)],
+            );
+            Expr::Let {
+                name,
+                init: Box::new(indexed),
+                body: Box::new(acc),
+            }
+        });
+    Expr::Let {
+        name: tmp,
+        init: Box::new(init),
+        body: Box::new(destructured),
+    }
 }
 
 /// Parsed lambda parameter: either a single identifier or an `[a, b, ...]`

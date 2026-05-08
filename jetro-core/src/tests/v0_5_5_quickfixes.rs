@@ -349,6 +349,51 @@ fn partition_let_unpacking() {
 }
 
 #[test]
+fn partition_tuple_let_binding() {
+    let doc = json!({
+        "store": {
+            "books": [
+                {"title": "Dune", "active": true},
+                {"title": "Draft", "active": false},
+                {"title": "Foundation", "active": true}
+            ]
+        }
+    });
+    let r = vm_query(
+        "let (active, inactive) = $.store.books.partition(active) in {active: active.map(title), inactive: inactive.map(title)}",
+        &doc,
+    )
+    .unwrap();
+    assert_eq!(
+        r,
+        json!({
+            "active": ["Dune", "Foundation"],
+            "inactive": ["Draft"]
+        })
+    );
+}
+
+#[test]
+fn tuple_let_composes_with_regular_let_binding() {
+    let r = vm_query(
+        "let (lo, hi) = [1, 2], scale = 10 in {lo: lo * scale, hi: hi * scale}",
+        &json!(null),
+    )
+    .unwrap();
+    assert_eq!(r, json!({"lo": 10, "hi": 20}));
+}
+
+#[test]
+fn tuple_let_avoids_synthetic_name_collision() {
+    let r = vm_query(
+        "let (__lettuple_0, b) = [4, 5] in {a: __lettuple_0, b: b}",
+        &json!(null),
+    )
+    .unwrap();
+    assert_eq!(r, json!({"a": 4, "b": 5}));
+}
+
+#[test]
 fn partition_chained_path_source() {
     let doc = json!({"store": {"books": [{"price": 5}, {"price": 15}, {"price": 25}]}});
     let r = vm_query("$.store.books.partition(@.price > 10)", &doc).unwrap();

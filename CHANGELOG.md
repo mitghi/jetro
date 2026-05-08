@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.5.6
+
+### Path-receiver scalar unwrap
+
+- **Scalar method on path no longer wraps**. `$.s.upper()` now returns
+  `"FOO"` instead of `["FOO"]`. The planner detects pipelines whose source
+  is a `FieldChain` and whose every stage is a scalar/object one-to-one
+  builtin and bypasses pipeline lowering, dispatching `apply_one` /
+  `apply_args` directly on the chain's single value. Bonus consequence:
+  `$.users.to_json()` now produces a single JSON document of the array
+  rather than an array of per-element JSON strings.
+- **`BuiltinSpec::never_unwrap()`**. Per-builtin opt-out flag; when set
+  the planner keeps pipeline streaming as the canonical semantic on path
+  receivers regardless of category/cardinality.
+- **`BuiltinSpec::dispatches_scalar_direct()`**. Spec-level helper that
+  decides eligibility (Scalar or Object category, OneToOne cardinality,
+  not opted out). Used by both `try_lower_pipeline` and the top-level
+  fast-path lowering in `plan_query_with_context`.
+
+### `rec` family
+
+- **`rec(fn, cond)` 2-arg form**. Iterates `fn` while `cond(@)` is truthy,
+  capped at 10 000 iterations. Returns the value at the point `cond` first
+  becomes falsy.
+- **Improved 1-arg cap message**. `rec(fn)` now reports
+  `"rec(fn): no fixpoint within 10000 iterations — pass rec(fn, cond) to
+  bound the loop or ensure fn is idempotent"` so non-idempotent steps
+  surface the cap loudly rather than silently spinning.
+
+### Object-shape arg forms
+
+- **`zip_shape({a, b})`**. Object-literal sugar for the multi-arg
+  interleave shape; equivalent to `zip_shape(a, b)`. Mixed shorthand and
+  `name: expr` fields supported.
+- **`group_shape(key)` 1-arg projection**. Single-arg form keys each
+  element by the projected value; bucket value is the original element.
+  Accepts bare ident, named arg, `@`-form, `name => …` arrow, and
+  `lambda x: …` shapes.
+
+### Parser additions
+
+- **Tuple `let` binding**. `let (a, b) = expr in body` desugars at parse
+  time to a synthetic ident plus indexed scalar lets — no runtime tuple
+  binding opcode. Names that collide with the synthetic prefix are
+  skipped via a counter sweep.
+- **Bare-path `.field` in method args**. `$.users.filter(.active)` ≡
+  `(@.active)`. The leading-dot shorthand desugars at parse time to a
+  `Chain(Current, [Field(name)])` so the planner sees identical opcodes.
+- **Object-pattern shorthand `{id, name}` in `match`**. Equivalent to
+  `{id: id, name: name}`; rest-capture stays spelled `...*rest` (object)
+  or `...tail` (array).
+- **Lambda array-destructure with rest**. `([h, ...tail]) => body` lowers
+  to a synthetic ident plus `let h = synth[0] in let tail = synth[1:] in
+  body`, mirroring the `match` rest pattern.
+- **`indent("> ")` string prefix**. The single-arg `indent` builtin now
+  accepts a string-literal prefix in addition to the integer count;
+  `apply_args` dispatches on `BuiltinArgs::Str` vs `BuiltinArgs::Usize`.
+- **Escaped quotes in string literals**. The Pest grammar greedily
+  consumes `\X` escapes so `"{\"a\":1}".from_json()` parses; both
+  double- and single-quoted forms accept the full escape table.
+
+### Tests
+
+- New integration test `jetro-core/tests/builtin_arg_forms.rs` — 80
+  assertions covering every argument-form spelling for builtins that take
+  args or lambdas (predicate forms, projection forms, multi-arg, bare
+  identifiers, positional values, regex, path mutation, chain-write,
+  deep/walk).
+- New unit module `tests/v0_5_5_quickfixes.rs` — coverage for the second
+  batch of v0.5.5 fixes (`.has(v)` boolean return, `.remove(pred)`,
+  `missing(...)`, multi-segment `get_path`, `dedent` common-prefix,
+  `enumerate`/`pairwise` on path sources, no-arg `zip_shape`/
+  `group_shape`, `partition`, `approx_count_distinct`, string-escape
+  table).
+- Flipped four stale negative-invariant tests in `unsafe_invariants.rs`:
+  `map_str_concat_*` and `zip_shape_named_and_bare` now assert correct
+  output rather than `is_err()` (the underlying behavior was fixed in
+  0.5.5).
+
 ## 0.5.5
 
 ### Demand propagation and functional batched updates
