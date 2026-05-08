@@ -1186,13 +1186,17 @@ impl BuiltinSpec {
     }
 
     /// Returns `true` when `$.path.method()` should bypass pipeline streaming
-    /// and dispatch as a direct `apply_one` call on the single value produced
-    /// by the chain. Eligibility is restricted to scalar one-to-one builtins
-    /// (e.g. `upper`, `type`, `ceil`) that have not opted out via
-    /// `never_unwrap`.
+    /// and dispatch as a direct `apply_one` (or `apply_args`) call on the
+    /// single value produced by the chain. Eligibility covers scalar and
+    /// object one-to-one builtins (e.g. `upper`, `type`, `ceil`, `omit`,
+    /// `transform_values`) that have not opted out via `never_unwrap`.
+    /// Streaming and reducing categories keep pipeline lowering — their
+    /// per-element behavior is the canonical semantic on path receivers.
     pub fn dispatches_scalar_direct(&self) -> bool {
-        matches!(self.category, BuiltinCategory::Scalar)
-            && matches!(self.cardinality, BuiltinCardinality::OneToOne)
+        matches!(
+            self.category,
+            BuiltinCategory::Scalar | BuiltinCategory::Object
+        ) && matches!(self.cardinality, BuiltinCardinality::OneToOne)
             && !self.never_unwrap
     }
 

@@ -376,7 +376,8 @@ fn is_scalar_unwrap_stages(
             Stage::UsizeBuiltin { method, .. }
             | Stage::StringBuiltin { method, .. }
             | Stage::StringPairBuiltin { method, .. }
-            | Stage::IntRangeBuiltin { method, .. } => *method,
+            | Stage::IntRangeBuiltin { method, .. }
+            | Stage::ExprBuiltin { method, .. } => *method,
             _ => return false,
         };
         method.spec().dispatches_scalar_direct()
