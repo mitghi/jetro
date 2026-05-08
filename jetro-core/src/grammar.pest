@@ -86,9 +86,10 @@ slice_step    = { idx_val? ~ ":" ~ idx_val? ~ ":" ~ idx_val? }
 slice_full    = { idx_val ~ ":" ~ idx_val }
 slice_from    = { idx_val ~ ":" }
 slice_to      = { ":" ~ idx_val }
+wildcard_filter = { "*" ~ kw_if ~ expr }
 wildcard      = { "*" }
 idx_only      = { idx_val }
-bracket_inner = { slice_step | slice_full | slice_from | slice_to | wildcard | idx_only | expr }
+bracket_inner = { slice_step | slice_full | slice_from | slice_to | wildcard_filter | wildcard | idx_only | expr }
 
 // ── Arguments ─────────────────────────────────────────────────────────────────
 named_arg = { ident ~ ":" ~ expr }

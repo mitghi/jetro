@@ -474,6 +474,45 @@ impl EffectAnalyzer {
                 }
                 s
             }
+
+            // Functional updates are effectful batch boundaries. Keep the
+            // first-class node opaque to patch fusion, but still account for
+            // reads in selector filters/dynamic indexes, guards, and RHS.
+            Expr::UpdateBatch {
+                root,
+                selector,
+                ops,
+            } => {
+                let mut s = self.visit(root);
+                let target = self.canonical_root(root);
+                for op in ops {
+                    s.merge(self.visit(&op.val));
+                    if let Some(c) = &op.cond {
+                        s.merge(self.visit(c));
+                    }
+                    for step in &op.path {
+                        if let PathStep::DynIndex(e) = step {
+                            s.merge(self.visit(e));
+                        }
+                        if let PathStep::WildcardFilter(e) = step {
+                            s.merge(self.visit(e));
+                        }
+                    }
+                }
+                for step in selector {
+                    if let PathStep::DynIndex(e) = step {
+                        s.merge(self.visit(e));
+                    }
+                    if let PathStep::WildcardFilter(e) = step {
+                        s.merge(self.visit(e));
+                    }
+                }
+                if let Some(effects) = update_batch_as_write_effects(target, selector, ops) {
+                    s.writes.extend(effects);
+                }
+                s.has_writes = true;
+                s
+            }
         }
     }
 
@@ -541,6 +580,183 @@ impl EffectAnalyzer {
             ObjField::Spread(e) | ObjField::SpreadDeep(e) => self.visit(e),
         }
     }
+}
+
+fn update_batch_as_write_effects(
+    root: RootRef,
+    selector: &[PathStep],
+    ops: &[PatchOp],
+) -> Option<Vec<WriteEffect>> {
+    let mut effects = Vec::with_capacity(ops.len());
+    for op in ops {
+        if path_reads_update_focus(selector)
+            || path_reads_update_focus(&op.path)
+            || expr_reads_update_focus(&op.val)
+            || op.cond.as_ref().is_some_and(expr_reads_update_focus)
+        {
+            return None;
+        }
+        let mut path = selector.to_vec();
+        path.extend(op.path.iter().cloned());
+        effects.push(WriteEffect {
+            root: root.clone(),
+            op: PatchOp {
+                path,
+                val: op.val.clone(),
+                cond: op.cond.clone(),
+            },
+        });
+    }
+    Some(effects)
+}
+
+fn path_reads_update_focus(path: &[PathStep]) -> bool {
+    path.iter().any(|step| match step {
+        PathStep::DynIndex(expr) => expr_reads_update_focus(expr),
+        PathStep::WildcardFilter(expr) => expr_reads_update_focus(expr),
+        PathStep::Field(_) | PathStep::Index(_) | PathStep::Wildcard | PathStep::Descendant(_) => {
+            false
+        }
+    })
+}
+
+fn expr_reads_update_focus(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(name) => name == crate::plan::update::UPDATE_FOCUS_BINDING,
+        Expr::Chain(base, steps) => {
+            expr_reads_update_focus(base)
+                || steps.iter().any(|step| match step {
+                    Step::DynIndex(expr) | Step::InlineFilter(expr) => expr_reads_update_focus(expr),
+                    Step::Method(_, args) | Step::OptMethod(_, args) => {
+                        args.iter().any(arg_reads_update_focus)
+                    }
+                    Step::DeepMatch { arms, .. } => arms.iter().any(match_arm_reads_update_focus),
+                    Step::Field(_)
+                    | Step::OptField(_)
+                    | Step::Descendant(_)
+                    | Step::DescendAll
+                    | Step::Index(_)
+                    | Step::Slice(_, _, _)
+                    | Step::Wildcard
+                    | Step::Quantifier(_) => false,
+                })
+        }
+        Expr::BinOp(lhs, _, rhs) | Expr::Coalesce(lhs, rhs) => {
+            expr_reads_update_focus(lhs) || expr_reads_update_focus(rhs)
+        }
+        Expr::UnaryNeg(inner)
+        | Expr::Not(inner)
+        | Expr::Kind { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. } => expr_reads_update_focus(inner),
+        Expr::Object(fields) => fields.iter().any(|field| match field {
+            ObjField::Kv { val, cond, .. } => {
+                expr_reads_update_focus(val)
+                    || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+            }
+            ObjField::Dynamic { key, val } => {
+                expr_reads_update_focus(key) || expr_reads_update_focus(val)
+            }
+            ObjField::Spread(expr) | ObjField::SpreadDeep(expr) => expr_reads_update_focus(expr),
+            ObjField::Short(_) => false,
+        }),
+        Expr::Array(items) => items.iter().any(|item| match item {
+            ArrayElem::Expr(expr) | ArrayElem::Spread(expr) => expr_reads_update_focus(expr),
+        }),
+        Expr::Pipeline { base, steps } => {
+            expr_reads_update_focus(base)
+                || steps.iter().any(|step| match step {
+                    PipeStep::Forward(expr) => expr_reads_update_focus(expr),
+                    PipeStep::Bind(_) => false,
+                })
+        }
+        Expr::ListComp {
+            expr, iter, cond, ..
+        }
+        | Expr::SetComp {
+            expr, iter, cond, ..
+        }
+        | Expr::GenComp {
+            expr, iter, cond, ..
+        } => {
+            expr_reads_update_focus(expr)
+                || expr_reads_update_focus(iter)
+                || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+        }
+        Expr::DictComp {
+            key,
+            val,
+            iter,
+            cond,
+            ..
+        } => {
+            expr_reads_update_focus(key)
+                || expr_reads_update_focus(val)
+                || expr_reads_update_focus(iter)
+                || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+        }
+        Expr::Lambda { body, .. } => expr_reads_update_focus(body),
+        Expr::Let { init, body, .. } => {
+            expr_reads_update_focus(init) || expr_reads_update_focus(body)
+        }
+        Expr::IfElse { cond, then_, else_ } => {
+            expr_reads_update_focus(cond)
+                || expr_reads_update_focus(then_)
+                || expr_reads_update_focus(else_)
+        }
+        Expr::Try { body, default } => {
+            expr_reads_update_focus(body) || expr_reads_update_focus(default)
+        }
+        Expr::GlobalCall { args, .. } => args.iter().any(arg_reads_update_focus),
+        Expr::Patch { root, ops } => {
+            expr_reads_update_focus(root)
+                || ops.iter().any(|op| {
+                    path_reads_update_focus(&op.path)
+                        || expr_reads_update_focus(&op.val)
+                        || op.cond.as_ref().is_some_and(expr_reads_update_focus)
+                })
+        }
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => {
+            expr_reads_update_focus(root)
+                || path_reads_update_focus(selector)
+                || ops.iter().any(|op| {
+                    path_reads_update_focus(&op.path)
+                        || expr_reads_update_focus(&op.val)
+                        || op.cond.as_ref().is_some_and(expr_reads_update_focus)
+                })
+        }
+        Expr::FString(parts) => parts.iter().any(|part| match part {
+            FStringPart::Interp { expr, .. } => expr_reads_update_focus(expr),
+            FStringPart::Lit(_) => false,
+        }),
+        Expr::Match { scrutinee, arms } => {
+            expr_reads_update_focus(scrutinee) || arms.iter().any(match_arm_reads_update_focus)
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Root
+        | Expr::Current
+        | Expr::DeleteMark => false,
+    }
+}
+
+fn arg_reads_update_focus(arg: &Arg) -> bool {
+    match arg {
+        Arg::Pos(expr) | Arg::Named(_, expr) => expr_reads_update_focus(expr),
+    }
+}
+
+fn match_arm_reads_update_focus(arm: &crate::parse::ast::MatchArm) -> bool {
+    arm.guard
+        .as_ref()
+        .is_some_and(|expr| expr_reads_update_focus(expr))
+        || expr_reads_update_focus(&arm.body)
 }
 
 // Suppress dead-code lints for the `BindTarget` import that exists
@@ -910,7 +1126,12 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
 
         Expr::Pipeline { base, steps } => fuse_pipeline(*base, steps, ctx),
 
-        Expr::ListComp { expr, vars, iter, cond } => {
+        Expr::ListComp {
+            expr,
+            vars,
+            iter,
+            cond,
+        } => {
             // Phase C: comprehension source runs in the outer scope but
             // each iter step is a new boundary; flush both before / after
             // entering the inner scope so cross-boundary leaks are
@@ -926,7 +1147,12 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
                 cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
-        Expr::SetComp { expr, vars, iter, cond } => {
+        Expr::SetComp {
+            expr,
+            vars,
+            iter,
+            cond,
+        } => {
             let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::SetComp {
                 expr: Box::new(fuse_subtree(*expr, ctx)),
@@ -935,7 +1161,12 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
                 cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
-        Expr::GenComp { expr, vars, iter, cond } => {
+        Expr::GenComp {
+            expr,
+            vars,
+            iter,
+            cond,
+        } => {
             let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::GenComp {
                 expr: Box::new(fuse_subtree(*expr, ctx)),
@@ -944,7 +1175,13 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
                 cond: cond.map(|c| Box::new(fuse_subtree(*c, ctx))),
             })
         }
-        Expr::DictComp { key, val, vars, iter, cond } => {
+        Expr::DictComp {
+            key,
+            val,
+            vars,
+            iter,
+            cond,
+        } => {
             let iter = Box::new(fuse_subtree(*iter, ctx));
             with_lambda_scope(ctx, &vars, |ctx| Expr::DictComp {
                 key: Box::new(fuse_subtree(*key, ctx)),
@@ -998,13 +1235,45 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
 
         Expr::Patch { root, ops } => {
             let root = Box::new(fuse_recursive(*root, ctx));
-            let ops = ops
-                .into_iter()
-                .map(|op| fuse_patch_op(op, ctx))
-                .collect();
+            let ops = ops.into_iter().map(|op| fuse_patch_op(op, ctx)).collect();
             Expr::Patch { root, ops }
         }
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => {
+            let root = Box::new(fuse_recursive(*root, ctx));
+            let selector = selector
+                .into_iter()
+                .map(|step| fuse_path_step(step, ctx))
+                .collect();
+            let ops = ops.into_iter().map(|op| fuse_patch_op(op, ctx)).collect();
+            let update = Expr::UpdateBatch {
+                root,
+                selector,
+                ops,
+            };
+            match update_batch_to_patch(update.clone()) {
+                Some(patch) => patch,
+                None => update,
+            }
+        }
     }
+}
+
+fn update_batch_to_patch(update: Expr) -> Option<Expr> {
+    let Expr::UpdateBatch {
+        root,
+        selector,
+        ops,
+    } = update
+    else {
+        return None;
+    };
+    let effects = update_batch_as_write_effects(RootRef::Root, &selector, &ops)?;
+    let ops = effects.into_iter().map(|effect| effect.op).collect();
+    Some(Expr::Patch { root, ops })
 }
 
 fn fuse_step(step: Step, ctx: &mut FuseCtx) -> Step {
@@ -1035,20 +1304,19 @@ fn fuse_step(step: Step, ctx: &mut FuseCtx) -> Step {
 
 fn fuse_patch_op(op: PatchOp, ctx: &mut FuseCtx) -> PatchOp {
     let PatchOp { path, val, cond } = op;
-    let path = path
-        .into_iter()
-        .map(|s| match s {
-            PathStep::DynIndex(e) => PathStep::DynIndex(fuse_recursive(e, ctx)),
-            PathStep::WildcardFilter(e) => {
-                PathStep::WildcardFilter(Box::new(fuse_recursive(*e, ctx)))
-            }
-            other => other,
-        })
-        .collect();
+    let path = path.into_iter().map(|s| fuse_path_step(s, ctx)).collect();
     PatchOp {
         path,
         val: fuse_recursive(val, ctx),
         cond: cond.map(|c| fuse_recursive(c, ctx)),
+    }
+}
+
+fn fuse_path_step(step: PathStep, ctx: &mut FuseCtx) -> PathStep {
+    match step {
+        PathStep::DynIndex(e) => PathStep::DynIndex(fuse_recursive(e, ctx)),
+        PathStep::WildcardFilter(e) => PathStep::WildcardFilter(Box::new(fuse_recursive(*e, ctx))),
+        other => other,
     }
 }
 
@@ -1153,11 +1421,7 @@ fn steps_to_path(steps: &[Step]) -> Option<Vec<PathStep>> {
 /// already pass through the original parser path when the base is `$`,
 /// and the pipe form `| .merge(x)` is unusual enough that we leave it
 /// alone for now.
-fn build_write_patch_op(
-    name: &str,
-    args: &[Arg],
-    path: Vec<PathStep>,
-) -> Option<PatchOp> {
+fn build_write_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
     match name {
         "set" => {
             let v = arg_expr_owned(args.first()?);
@@ -1404,9 +1668,7 @@ fn try_merge_pipeline_stage(
     // Conditional ops disable trie fusion. Phase F handles them; for
     // now we leave both Patches separate so the trie path keeps its
     // simple invariants.
-    if acc_ops.iter().any(|o| o.cond.is_some())
-        || stage_ops.iter().any(|o| o.cond.is_some())
-    {
+    if acc_ops.iter().any(|o| o.cond.is_some()) || stage_ops.iter().any(|o| o.cond.is_some()) {
         return None;
     }
 
@@ -1423,8 +1685,8 @@ fn try_merge_pipeline_stage(
     // whose head writes to `acc_root` is targeting the same logical
     // document.
     let stage_root_ref = ctx.canonical_root(stage_root);
-    let same_root = stage_root_ref == acc_root_ref
-        || stage_root_ref == RootRef::Current(ctx.current_scope());
+    let same_root =
+        stage_root_ref == acc_root_ref || stage_root_ref == RootRef::Current(ctx.current_scope());
     if !same_root {
         return None;
     }
@@ -1627,8 +1889,7 @@ fn fuse_object(fields: Vec<ObjField>, ctx: &mut FuseCtx) -> Expr {
     // Wrap in `let synth = patch shared_root { merged_ops } in object_expr`.
     // Push the alias so any nested `Ident(synth)` references are visible
     // — in practice we just inserted them, so the alias is conservative.
-    ctx.aliases
-        .push((synth_arc, shared_root.clone()));
+    ctx.aliases.push((synth_arc, shared_root.clone()));
     let body = object_expr;
     ctx.aliases.pop();
 
@@ -1773,12 +2034,7 @@ fn try_let_init_body_fusion(
 /// Resolve `expr` as a canonical root with `name` temporarily aliased to
 /// `alias`. Used in P3 because the body sees the let-bound name and we
 /// need to canonicalise *as if* we were inside the body's lexical scope.
-fn canonical_root_with_alias(
-    expr: &Expr,
-    name: &str,
-    alias: &RootRef,
-    ctx: &FuseCtx,
-) -> RootRef {
+fn canonical_root_with_alias(expr: &Expr, name: &str, alias: &RootRef, ctx: &FuseCtx) -> RootRef {
     match expr {
         Expr::Ident(n) if n == name => alias.clone(),
         Expr::Root => RootRef::Root,
@@ -1967,10 +2223,8 @@ mod tests {
             ctx.aliases.push((name, RootRef::Local(next)));
         }
         // Final hop bottoms out at Root.
-        ctx.aliases.push((
-            Arc::from(format!("n{}", len)),
-            RootRef::Root,
-        ));
+        ctx.aliases
+            .push((Arc::from(format!("n{}", len)), RootRef::Root));
         let r = ctx.canonical_root(&Expr::Ident("n0".to_string()));
         assert_eq!(r, RootRef::Root);
     }
@@ -2025,8 +2279,6 @@ mod tests {
         // Wrapper for Root should be emitted; Local("x") still pending.
         assert!(matches!(body, Expr::Let { .. }));
         assert_eq!(ctx.pending.len(), 1);
-        assert!(ctx
-            .pending
-            .contains_key(&RootRef::Local(Arc::from("x"))));
+        assert!(ctx.pending.contains_key(&RootRef::Local(Arc::from("x"))));
     }
 }

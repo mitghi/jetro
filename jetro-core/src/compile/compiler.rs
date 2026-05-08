@@ -5,17 +5,17 @@
 //! `PassConfig`. Split out of `vm.rs` to keep each file focused.
 
 use smallvec::SmallVec;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
-use crate::parse::ast::*;
 use crate::builtins::BuiltinMethod;
 use crate::data::context::EvalError;
+use crate::parse::ast::*;
 use crate::vm::{
-    Opcode, Program, CompiledCall, CompiledObjEntry, KvStep, CompiledFSPart,
-    BindObjSpec, CompiledPipeStep, CompSpec, DictCompSpec,
-    CompiledMatch, CompiledPatch, CompiledPatchOp, CompiledPatchVal, CompiledPathStep, MatchOp, MatchSlot,
-    fresh_ics, disable_opcode_fusion,
+    disable_opcode_fusion, fresh_ics, BindObjSpec, CompSpec, CompiledCall, CompiledFSPart,
+    CompiledMatch, CompiledObjEntry, CompiledPatch, CompiledPatchOp, CompiledPatchVal,
+    CompiledPathStep, CompiledPipeStep, CompiledUpdateBatch, DictCompSpec, KvStep, MatchOp,
+    MatchSlot, Opcode, Program,
 };
 
 /// Classify each pre-compiled sub-program against the `BodyKernel`
@@ -65,7 +65,6 @@ impl VarCtx {
     }
 }
 
-
 /// Stateless unit struct that compiles an `Expr` AST into a flat `Program`.
 /// All methods are associated functions; no instance state is needed.
 pub struct Compiler;
@@ -83,7 +82,7 @@ impl Compiler {
         let ctx = VarCtx::default();
         let ops = Self::optimize(Self::emit(&e, &ctx));
         let prog = Program::new(ops, source);
-        
+
         let deduped = crate::plan::analysis::dedup_subprograms(&prog);
         let ics = fresh_ics(deduped.ops.len());
         Program {
@@ -122,14 +121,14 @@ impl Compiler {
                 Self::reorder_and_operands(base);
                 for s in steps {
                     match s {
-                        crate::parse::ast::Step::DynIndex(e) | crate::parse::ast::Step::InlineFilter(e) => {
-                            Self::reorder_and_operands(e)
-                        }
+                        crate::parse::ast::Step::DynIndex(e)
+                        | crate::parse::ast::Step::InlineFilter(e) => Self::reorder_and_operands(e),
                         crate::parse::ast::Step::Method(_, args)
                         | crate::parse::ast::Step::OptMethod(_, args) => {
                             for a in args {
                                 match a {
-                                    crate::parse::ast::Arg::Pos(e) | crate::parse::ast::Arg::Named(_, e) => {
+                                    crate::parse::ast::Arg::Pos(e)
+                                    | crate::parse::ast::Arg::Named(_, e) => {
                                         Self::reorder_and_operands(e)
                                     }
                                 }
@@ -154,7 +153,9 @@ impl Compiler {
             Expr::Object(fields) => {
                 for f in fields {
                     match f {
-                        crate::parse::ast::ObjField::Kv { val, .. } => Self::reorder_and_operands(val),
+                        crate::parse::ast::ObjField::Kv { val, .. } => {
+                            Self::reorder_and_operands(val)
+                        }
                         crate::parse::ast::ObjField::Dynamic { key, val } => {
                             Self::reorder_and_operands(key);
                             Self::reorder_and_operands(val);
@@ -167,9 +168,8 @@ impl Compiler {
             Expr::Array(elems) => {
                 for e in elems {
                     match e {
-                        crate::parse::ast::ArrayElem::Expr(e) | crate::parse::ast::ArrayElem::Spread(e) => {
-                            Self::reorder_and_operands(e)
-                        }
+                        crate::parse::ast::ArrayElem::Expr(e)
+                        | crate::parse::ast::ArrayElem::Spread(e) => Self::reorder_and_operands(e),
                     }
                 }
             }
@@ -259,17 +259,61 @@ impl Compiler {
     fn optimize_with(ops: Vec<Opcode>, cfg: PassConfig) -> Vec<Opcode> {
         use crate::compile::passes as cp;
         let no_fusion = disable_opcode_fusion();
-        let ops = if cfg.root_chain && !no_fusion { cp::pass_root_chain(ops) } else { ops };
-        let ops = if cfg.field_chain && !no_fusion { cp::pass_field_chain(ops) } else { ops };
-        let ops = if cfg.filter_fusion { cp::pass_field_specialise(ops) } else { ops };
-        let ops = if !no_fusion { cp::pass_list_comp_specialise(ops) } else { ops };
-        let ops = if cfg.strength_reduce { cp::pass_strength_reduce(ops) } else { ops };
-        let ops = if cfg.redundant_ops { cp::pass_redundant_ops(ops) } else { ops };
-        let ops = if cfg.kind_check_fold { cp::pass_kind_check_fold(ops) } else { ops };
-        let ops = if cfg.method_const { cp::pass_method_const_fold(ops) } else { ops };
-        let ops = if cfg.const_fold { cp::pass_const_fold(ops) } else { ops };
-        let ops = if cfg.nullness { cp::pass_nullness_opt_field(ops) } else { ops };
-        let ops = if !no_fusion { cp::pass_method_demand(ops) } else { ops };
+        let ops = if cfg.root_chain && !no_fusion {
+            cp::pass_root_chain(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.field_chain && !no_fusion {
+            cp::pass_field_chain(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.filter_fusion {
+            cp::pass_field_specialise(ops)
+        } else {
+            ops
+        };
+        let ops = if !no_fusion {
+            cp::pass_list_comp_specialise(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.strength_reduce {
+            cp::pass_strength_reduce(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.redundant_ops {
+            cp::pass_redundant_ops(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.kind_check_fold {
+            cp::pass_kind_check_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.method_const {
+            cp::pass_method_const_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.const_fold {
+            cp::pass_const_fold(ops)
+        } else {
+            ops
+        };
+        let ops = if cfg.nullness {
+            cp::pass_nullness_opt_field(ops)
+        } else {
+            ops
+        };
+        let ops = if !no_fusion {
+            cp::pass_method_demand(ops)
+        } else {
+            ops
+        };
         ops
     }
 
@@ -394,8 +438,6 @@ impl Compiler {
             }
 
             Expr::Array(elems) => {
-                
-                
                 let progs: Vec<(Arc<Program>, bool)> = elems
                     .iter()
                     .map(|e| match e {
@@ -482,13 +524,10 @@ impl Compiler {
             }
 
             Expr::Lambda { .. } => {
-                
                 ops.push(Opcode::PushNull);
             }
 
             Expr::Let { name, init, body } => {
-                
-                
                 if crate::plan::analysis::expr_is_pure(init)
                     && !crate::plan::analysis::expr_uses_ident(body, name)
                 {
@@ -504,57 +543,47 @@ impl Compiler {
                 }
             }
 
-            Expr::IfElse { cond, then_, else_ } => {
-                
-                match cond.as_ref() {
-                    Expr::Bool(true) => {
-                        Self::emit_into(then_, ctx, ops);
-                    }
-                    Expr::Bool(false) => {
-                        Self::emit_into(else_, ctx, ops);
-                    }
-                    _ => {
-                        Self::emit_into(cond, ctx, ops);
-                        let then_prog = Arc::new(Self::compile_sub(then_, ctx));
-                        let else_prog = Arc::new(Self::compile_sub(else_, ctx));
-                        ops.push(Opcode::IfElse {
-                            then_: then_prog,
-                            else_: else_prog,
-                        });
-                    }
+            Expr::IfElse { cond, then_, else_ } => match cond.as_ref() {
+                Expr::Bool(true) => {
+                    Self::emit_into(then_, ctx, ops);
                 }
-            }
+                Expr::Bool(false) => {
+                    Self::emit_into(else_, ctx, ops);
+                }
+                _ => {
+                    Self::emit_into(cond, ctx, ops);
+                    let then_prog = Arc::new(Self::compile_sub(then_, ctx));
+                    let else_prog = Arc::new(Self::compile_sub(else_, ctx));
+                    ops.push(Opcode::IfElse {
+                        then_: then_prog,
+                        else_: else_prog,
+                    });
+                }
+            },
 
-            Expr::Try { body, default } => {
-                
-                
-                match body.as_ref() {
-                    Expr::Null => {
-                        Self::emit_into(default, ctx, ops);
-                    }
-                    Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {
-                        Self::emit_into(body, ctx, ops);
-                    }
-                    _ => {
-                        let body_prog = Arc::new(Self::compile_sub(body, ctx));
-                        let default_prog = Arc::new(Self::compile_sub(default, ctx));
-                        ops.push(Opcode::TryExpr {
-                            body: body_prog,
-                            default: default_prog,
-                        });
-                    }
+            Expr::Try { body, default } => match body.as_ref() {
+                Expr::Null => {
+                    Self::emit_into(default, ctx, ops);
                 }
-            }
+                Expr::Bool(_) | Expr::Int(_) | Expr::Float(_) | Expr::Str(_) => {
+                    Self::emit_into(body, ctx, ops);
+                }
+                _ => {
+                    let body_prog = Arc::new(Self::compile_sub(body, ctx));
+                    let default_prog = Arc::new(Self::compile_sub(default, ctx));
+                    ops.push(Opcode::TryExpr {
+                        body: body_prog,
+                        default: default_prog,
+                    });
+                }
+            },
 
             Expr::GlobalCall { name, args } => {
-                
-                
                 let is_special = matches!(
                     name.as_str(),
                     "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
                 );
                 if !is_special && !args.is_empty() {
-                    
                     let first = match &args[0] {
                         Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
                     };
@@ -577,7 +606,6 @@ impl Compiler {
                     });
                     ops.push(Opcode::CallMethod(call));
                 } else {
-                    
                     let sub_progs: Vec<Arc<Program>> = args
                         .iter()
                         .map(|a| match a {
@@ -607,15 +635,20 @@ impl Compiler {
                 root,
                 ops: patch_ops,
             } => {
-                
-                
                 let compiled = Self::compile_patch(root, patch_ops, ctx);
                 ops.push(Opcode::PatchEval(Arc::new(compiled)));
             }
 
+            Expr::UpdateBatch {
+                root,
+                selector,
+                ops: update_ops,
+            } => {
+                let compiled = Self::compile_update_batch(root, selector, update_ops, ctx);
+                ops.push(Opcode::UpdateBatchEval(Arc::new(compiled)));
+            }
+
             Expr::DeleteMark => {
-
-
                 ops.push(Opcode::DeleteMarkErr);
             }
 
@@ -841,20 +874,15 @@ impl Compiler {
     /// Emit a `PipelineRun` opcode for a `base | step1 | step2 | …` expression,
     /// compiling each forward and bind step while threading the variable context.
     fn emit_pipeline(base: &Expr, steps: &[PipeStep], ctx: &VarCtx, ops: &mut Vec<Opcode>) {
-        
-        
         let base_prog = Arc::new(Self::compile_sub(base, ctx));
         let mut cur_ctx = ctx.clone();
         let mut compiled_steps: Vec<CompiledPipeStep> = Vec::with_capacity(steps.len());
         for step in steps {
             match step {
                 PipeStep::Forward(rhs) => {
-                    
-                    
                     let mut sub_ops: Vec<Opcode> = Vec::new();
                     Self::emit_pipe_forward(rhs, &cur_ctx, &mut sub_ops);
-                    
-                    
+
                     if let Some(Opcode::SetCurrent) = sub_ops.first() {
                         sub_ops.remove(0);
                     }
@@ -906,8 +934,6 @@ impl Compiler {
     fn emit_pipe_forward(rhs: &Expr, ctx: &VarCtx, ops: &mut Vec<Opcode>) {
         match rhs {
             Expr::Ident(name) if !ctx.has(name) => {
-                
-                
                 let call = CompiledCall {
                     method: BuiltinMethod::from_name(name),
                     name: Arc::from(name.as_str()),
@@ -922,14 +948,11 @@ impl Compiler {
             Expr::Chain(base, steps) if !steps.is_empty() => {
                 if let Expr::Ident(name) = base.as_ref() {
                     if !ctx.has(name) {
-
                         let call = CompiledCall {
                             method: BuiltinMethod::from_name(name),
                             name: Arc::from(name.as_str()),
                             sub_progs: Arc::from(&[] as &[Arc<Program>]),
-                            sub_kernels: Arc::from(
-                                &[] as &[crate::exec::pipeline::BodyKernel],
-                            ),
+                            sub_kernels: Arc::from(&[] as &[crate::exec::pipeline::BodyKernel]),
                             orig_args: Arc::from(&[] as &[Arg]),
                             demand_max_keep: None,
                         };
@@ -945,7 +968,6 @@ impl Compiler {
                 Self::emit_into(rhs, ctx, ops);
             }
             _ => {
-                
                 ops.push(Opcode::SetCurrent);
                 Self::emit_into(rhs, ctx, ops);
             }
@@ -967,28 +989,21 @@ impl Compiler {
         ctx: &VarCtx,
     ) -> CompiledPatch {
         let root_prog = Arc::new(Self::compile_sub(root, ctx));
+        let ops = Self::compile_patch_ops(patch_ops, ctx);
+        CompiledPatch {
+            root_prog,
+            ops,
+            trie: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn compile_patch_ops(
+        patch_ops: &[crate::parse::ast::PatchOp],
+        ctx: &VarCtx,
+    ) -> Vec<CompiledPatchOp> {
         let mut ops = Vec::with_capacity(patch_ops.len());
         for po in patch_ops {
-            let path: Vec<CompiledPathStep> = po
-                .path
-                .iter()
-                .map(|s| match s {
-                    crate::parse::ast::PathStep::Field(n) => {
-                        CompiledPathStep::Field(Arc::from(n.as_str()))
-                    }
-                    crate::parse::ast::PathStep::Index(i) => CompiledPathStep::Index(*i),
-                    crate::parse::ast::PathStep::DynIndex(e) => {
-                        CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx)))
-                    }
-                    crate::parse::ast::PathStep::Wildcard => CompiledPathStep::Wildcard,
-                    crate::parse::ast::PathStep::WildcardFilter(p) => {
-                        CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx)))
-                    }
-                    crate::parse::ast::PathStep::Descendant(n) => {
-                        CompiledPathStep::Descendant(Arc::from(n.as_str()))
-                    }
-                })
-                .collect();
+            let path = Self::compile_path_steps(&po.path, ctx);
             let val = if matches!(&po.val, Expr::DeleteMark) {
                 CompiledPatchVal::Delete
             } else {
@@ -1000,9 +1015,45 @@ impl Compiler {
                 .map(|c| Arc::new(Self::compile_sub(c, ctx)));
             ops.push(CompiledPatchOp { path, val, cond });
         }
-        CompiledPatch {
-            root_prog,
-            ops,
+        ops
+    }
+
+    fn compile_path_steps(
+        path: &[crate::parse::ast::PathStep],
+        ctx: &VarCtx,
+    ) -> Vec<CompiledPathStep> {
+        path.iter()
+            .map(|s| match s {
+                crate::parse::ast::PathStep::Field(n) => {
+                    CompiledPathStep::Field(Arc::from(n.as_str()))
+                }
+                crate::parse::ast::PathStep::Index(i) => CompiledPathStep::Index(*i),
+                crate::parse::ast::PathStep::DynIndex(e) => {
+                    CompiledPathStep::DynIndex(Arc::new(Self::compile_sub(e, ctx)))
+                }
+                crate::parse::ast::PathStep::Wildcard => CompiledPathStep::Wildcard,
+                crate::parse::ast::PathStep::WildcardFilter(p) => {
+                    CompiledPathStep::WildcardFilter(Arc::new(Self::compile_sub(p, ctx)))
+                }
+                crate::parse::ast::PathStep::Descendant(n) => {
+                    CompiledPathStep::Descendant(Arc::from(n.as_str()))
+                }
+            })
+            .collect()
+    }
+
+    /// Compile a first-class functional update batch while preserving selector
+    /// and relative write shape for native VM update execution.
+    fn compile_update_batch(
+        root: &Expr,
+        selector: &[crate::parse::ast::PathStep],
+        update_ops: &[crate::parse::ast::PatchOp],
+        ctx: &VarCtx,
+    ) -> CompiledUpdateBatch {
+        CompiledUpdateBatch {
+            root_prog: Arc::new(Self::compile_sub(root, ctx)),
+            selector: Self::compile_path_steps(selector, ctx),
+            ops: Self::compile_patch_ops(update_ops, ctx),
             trie: std::sync::OnceLock::new(),
         }
     }
@@ -1359,9 +1410,9 @@ pub(crate) fn compile_match(
         bodies: Arc::from(b.bodies),
         subpats: Arc::from(b.subpats),
         max_slots,
-        is_exhaustive: arms.iter().any(|a| {
-            a.guard.is_none() && matches!(a.pat, Pat::Wild | Pat::Bind(_))
-        }),
+        is_exhaustive: arms
+            .iter()
+            .any(|a| a.guard.is_none() && matches!(a.pat, Pat::Wild | Pat::Bind(_))),
         shape_summary: derive_shape_summary(arms),
     }
 }
@@ -1507,10 +1558,8 @@ fn compute_max_slots(ops: &[MatchOp]) -> u16 {
                     hi = n;
                 }
             }
-            MatchOp::Guard { .. }
-            | MatchOp::Body { .. }
-            | MatchOp::Fail
-            | MatchOp::Jump { .. } => {}
+            MatchOp::Guard { .. } | MatchOp::Body { .. } | MatchOp::Fail | MatchOp::Jump { .. } => {
+            }
         }
     }
     hi

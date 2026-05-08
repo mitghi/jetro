@@ -1061,6 +1061,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::DictComp(_)
         | Opcode::SetComp(_)
         | Opcode::PatchEval(_)
+        | Opcode::UpdateBatchEval(_)
         | Opcode::Match(_)
         | Opcode::DeepMatchAll(_)
         | Opcode::DeepMatchFirst(_) => false,

@@ -8,10 +8,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::builtins::BuiltinMethod;
 use crate::parse::ast::KindType;
 use crate::vm::{CompiledPipeStep, Opcode, Program};
-use crate::builtins::BuiltinMethod;
-
 
 /// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -75,7 +74,6 @@ impl VType {
     }
 }
 
-
 /// Nullness lattice element tracking whether a value can ever be `null`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nullness {
@@ -96,7 +94,6 @@ impl Nullness {
         Nullness::MaybeNull
     }
 }
-
 
 /// Cardinality lattice element describing how many values a program position produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,7 +126,6 @@ impl Cardinality {
         }
     }
 }
-
 
 /// Product of all three lattice dimensions for a single program point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,7 +185,6 @@ impl AbstractVal {
     }
 }
 
-
 /// Run the forward-flow type analysis over `program` and return the abstract
 /// value at the top of the stack after the last opcode.
 pub fn infer_result_type(program: &Program) -> AbstractVal {
@@ -200,7 +195,6 @@ pub fn infer_result_type(program: &Program) -> AbstractVal {
     }
     stack.pop().unwrap_or(AbstractVal::UNKNOWN)
 }
-
 
 /// Like `infer_result_type` but also returns the variable environment so the
 /// caller can inspect inferred types for named bindings.
@@ -369,7 +363,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         }
         Opcode::ListComp(_) | Opcode::SetComp(_) => stack.push(AbstractVal::array()),
         Opcode::DictComp(_) => stack.push(AbstractVal::object()),
-        Opcode::PatchEval(_) => stack.push(AbstractVal::UNKNOWN),
+        Opcode::PatchEval(_) | Opcode::UpdateBatchEval(_) => stack.push(AbstractVal::UNKNOWN),
         Opcode::CastOp(ty) => {
             pop1!();
             use crate::parse::ast::CastType;
@@ -393,7 +387,6 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
         Opcode::BindLamCurrent { .. } => stack.push(AbstractVal::UNKNOWN),
     }
 }
-
 
 /// Return the statically known result type of a builtin method call.
 /// Grouped by return-type family; methods whose return type is data-dependent
@@ -446,7 +439,6 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         Unknown => AbstractVal::UNKNOWN,
     }
 }
-
 
 /// Count how many times `name` is referenced as `Opcode::LoadIdent` across
 /// `program` and all nested sub-programs; used for inlining decisions.
@@ -532,7 +524,6 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
     }
 }
 
-
 /// Collect every field name statically accessed by `program` (via `GetField`,
 /// `OptField`, `Descendant`, or `RootChain`). De-duplicated; order is discovery order.
 pub fn collect_accessed_fields(program: &Program) -> Vec<Arc<str>> {
@@ -576,7 +567,6 @@ fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
         }
     }
 }
-
 
 /// Compute a structural hash of `program` that identifies its opcode sequence.
 /// Used as a key for CSE deduplication and the compiled-program cache.
@@ -696,7 +686,6 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
     }
 }
 
-
 /// Walk `program` and its nested sub-programs, recording every sub-program
 /// signature and how many times it appears; entries with count ≥ 2 are CSE candidates.
 pub fn find_common_subexprs(program: &Program) -> HashMap<u64, usize> {
@@ -753,11 +742,12 @@ fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
     }
 }
 
-
 /// Return `true` when `expr` contains a free reference to the variable `name`,
 /// respecting lexical scope (bindings introduced inside comprehensions / lambdas / let shadow `name`).
 pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
-    use crate::parse::ast::{Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PipeStep, Step};
+    use crate::parse::ast::{
+        Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PipeStep, Step,
+    };
     match expr {
         Expr::Ident(n) => n == name,
         Expr::Null
@@ -899,6 +889,32 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             }
             ops.iter().any(|op| {
                 op.path.iter().any(|s| match s {
+                    PathStep::DynIndex(e) => expr_uses_ident(e, name),
+                    PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
+                    _ => false,
+                }) || expr_uses_ident(&op.val, name)
+                    || op.cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+            })
+        }
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => {
+            use crate::parse::ast::PathStep;
+            if expr_uses_ident(root, name) {
+                return true;
+            }
+            if selector.iter().any(|s| match s {
+                PathStep::DynIndex(e) => expr_uses_ident(e, name),
+                PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
+                _ => false,
+            }) {
+                return true;
+            }
+            ops.iter().any(|op| {
+                op.path.iter().any(|s| match s {
+                    PathStep::DynIndex(e) => expr_uses_ident(e, name),
                     PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
                     _ => false,
                 }) || expr_uses_ident(&op.val, name)
@@ -915,7 +931,6 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
         }
     }
 }
-
 
 /// Return `true` when `expr` is side-effect-free and may be safely eliminated
 /// or reordered. Conservatively returns `true` for most compound forms.
@@ -950,7 +965,6 @@ pub fn expr_is_pure(expr: &crate::parse::ast::Expr) -> bool {
         _ => true,
     }
 }
-
 
 /// CSE pass over `program`: replace duplicate sub-programs (identified by
 /// `program_signature`) with shared `Arc` pointers, reducing re-compilation and
@@ -1116,7 +1130,6 @@ fn rewrite_call(
     })
 }
 
-
 /// Return an estimated execution cost for a single opcode, used by the planner
 /// to order filter predicates cheapest-first and to guide inlining decisions.
 pub fn opcode_cost(op: &Opcode) -> u32 {
@@ -1207,7 +1220,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::LetExpr { body, .. } => 2 + program_cost(body),
         Opcode::Quantifier(_) => 2,
         Opcode::CastOp(_) => 2,
-        Opcode::PatchEval(_) => 50,
+        Opcode::PatchEval(_) | Opcode::UpdateBatchEval(_) => 50,
         Opcode::DeleteMarkErr => 1,
         Opcode::Match(_) => 1,
         Opcode::DeepMatchAll(_) => 1,
@@ -1226,13 +1239,11 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
     }
 }
 
-
 /// Sum `opcode_cost` over all opcodes in `program`; used as a proxy for execution
 /// time when comparing alternative sub-expressions for predicate reordering.
 pub fn program_cost(program: &Program) -> u32 {
     program.ops.iter().map(opcode_cost).sum()
 }
-
 
 /// Monotonicity of an array-valued program with respect to its natural order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1269,7 +1280,6 @@ impl Monotonicity {
     }
 }
 
-
 /// Infer the output monotonicity of `program` by stepping through each opcode
 /// sequentially from `Unknown`, updating the state with `Monotonicity::after`.
 pub fn infer_monotonicity(program: &Program) -> Monotonicity {
@@ -1279,7 +1289,6 @@ pub fn infer_monotonicity(program: &Program) -> Monotonicity {
     }
     m
 }
-
 
 /// Return `true` when `program` reads from the input document (`PushRoot`,
 /// `PushCurrent`, field/index accesses, descendants). Used to detect programs
@@ -1307,7 +1316,6 @@ pub fn escapes_doc(program: &Program) -> bool {
     false
 }
 
-
 /// Estimate the selectivity of a filter predicate expression; lower scores mean
 /// the predicate eliminates more candidates and should be tested first.
 /// The planner uses this to reorder `And` operands cheapest/most-selective first.
@@ -1330,7 +1338,6 @@ pub fn selectivity_score(expr: &crate::parse::ast::Expr) -> u32 {
         _ => 5,
     }
 }
-
 
 /// Attempt to evaluate a kind-check at compile time given a statically known
 /// `VType`. Returns `Some(bool)` when the result is certain, `None` when

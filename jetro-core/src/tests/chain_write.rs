@@ -5,9 +5,15 @@
 #[cfg(test)]
 mod tests {
     use super::super::common::vm_query;
+    use crate::compile::compiler::Compiler;
+    use crate::data::value::Val;
+    use crate::parse::ast::{Expr, PathStep};
+    use crate::parse::parser::parse;
+    use crate::vm::{Opcode, VM};
+    use indexmap::IndexMap;
     use serde_json::json;
+    use std::sync::Arc;
 
-    
     #[test]
     fn patch_simple_field_replace() {
         let doc = json!({"name": "Alice", "age": 30});
@@ -238,11 +244,7 @@ mod tests {
     fn batched_patch_insert_missing_field() {
         // Trie should synthesise the missing `meta` object.
         let doc = json!({"name": "Alice"});
-        let r = vm_query(
-            r#"patch $ { meta.role: "admin", meta.active: true }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { meta.role: "admin", meta.active: true }"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"name": "Alice", "meta": {"role": "admin", "active": true}})
@@ -270,21 +272,14 @@ mod tests {
             &doc,
         )
         .unwrap();
-        assert_eq!(
-            r,
-            json!({"role": "admin", "id": 7, "active": true})
-        );
+        assert_eq!(r, json!({"role": "admin", "id": 7, "active": true}));
     }
 
     #[test]
     fn trie_handles_single_conditional_op_truthy() {
         // Phase F: single conditional op with truthy guard is applied.
         let doc = json!({"role": "admin", "active": false});
-        let r = vm_query(
-            r#"patch $ { active: true when $.role == "admin" }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { active: true when $.role == "admin" }"#, &doc).unwrap();
         assert_eq!(r, json!({"role": "admin", "active": true}));
     }
 
@@ -293,11 +288,7 @@ mod tests {
         // Phase F: single conditional op with falsy guard is skipped —
         // crucially, no phantom Null field is inserted at the target key.
         let doc = json!({"role": "user", "active": false});
-        let r = vm_query(
-            r#"patch $ { active: true when $.role == "admin" }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { active: true when $.role == "admin" }"#, &doc).unwrap();
         assert_eq!(r, json!({"role": "user", "active": false}));
     }
 
@@ -315,10 +306,7 @@ mod tests {
             &doc,
         )
         .unwrap();
-        assert_eq!(
-            r,
-            json!({"role": "admin", "score": 10, "active": true})
-        );
+        assert_eq!(r, json!({"role": "admin", "score": 10, "active": true}));
     }
 
     #[test]
@@ -356,11 +344,7 @@ mod tests {
         // (pre-batch) and skips. Mirrors `conditional_reads_prebatch_state`
         // but exercises the Phase F trie path explicitly.
         let doc = json!({"id": 0, "flag": false});
-        let r = vm_query(
-            r#"patch $ { id: 7, flag: true when $.id > 5 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { id: 7, flag: true when $.id > 5 }"#, &doc).unwrap();
         assert_eq!(r, json!({"id": 7, "flag": false}));
     }
 
@@ -369,11 +353,7 @@ mod tests {
         // Phase F: a guarded `DELETE` whose guard is false leaves the
         // existing field intact (no parent-level shift_remove fires).
         let doc = json!({"a": 1, "b": 2});
-        let r = vm_query(
-            r#"patch $ { a: DELETE when $.b > 100 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { a: DELETE when $.b > 100 }"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2}));
     }
 
@@ -382,11 +362,7 @@ mod tests {
         // Phase F: a guarded `DELETE` whose guard is true does remove
         // the field, and batches alongside a sibling unconditional write.
         let doc = json!({"a": 1, "b": 2, "c": 3});
-        let r = vm_query(
-            r#"patch $ { a: DELETE when $.b > 1, c: 99 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { a: DELETE when $.b > 1, c: 99 }"#, &doc).unwrap();
         assert_eq!(r, json!({"b": 2, "c": 99}));
     }
 
@@ -395,10 +371,7 @@ mod tests {
         // Wildcard path step is not trie-eligible.
         let doc = json!({"users": [{"n": 1}, {"n": 2}], "tag": "x"});
         let r = vm_query(r#"patch $ { users[*].n: @ + 100, tag: "y" }"#, &doc).unwrap();
-        assert_eq!(
-            r,
-            json!({"users": [{"n": 101}, {"n": 102}], "tag": "y"})
-        );
+        assert_eq!(r, json!({"users": [{"n": 101}, {"n": 102}], "tag": "y"}));
     }
 
     // -----------------------------------------------------------------
@@ -416,11 +389,7 @@ mod tests {
         // against `$` joined by forward pipes; Phase B collapses them
         // to one batched Patch. Result is the doc with all three keys.
         let doc = json!({});
-        let r = vm_query(
-            r#"$.a.set(1) | $.b.set(2) | $.c.set(3)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set(1) | $.b.set(2) | $.c.set(3)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2, "c": 3}));
     }
 
@@ -433,11 +402,7 @@ mod tests {
         // `$.a.set(1)` (because in pipe form `@` is the previous
         // stage's value, which is the patched doc).
         let doc = json!({});
-        let r = vm_query(
-            r#"$.a.set(1) | @.b.set(2) | @.c.set(3)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set(1) | @.b.set(2) | @.c.set(3)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2, "c": 3}));
     }
 
@@ -459,11 +424,7 @@ mod tests {
         // confirms fusion did not turn the middle read into a stale
         // post-batch value.
         let doc = json!({"a": 5});
-        let r = vm_query(
-            r#"$.a.set(10) | $.a + 100 | $.b.set(@)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set(10) | $.a + 100 | $.b.set(@)"#, &doc).unwrap();
         // `b` is null because `@` inside the patch value is the
         // pre-write `.b` value (null). Either evaluation order yields
         // this — fusion doesn't change the soundness here, but we
@@ -477,11 +438,7 @@ mod tests {
         // pure third field. Phase B lifts the fused patch to a `let`
         // binding outside the object so the doc materialises once.
         let doc = json!({"x": 0, "y": 0});
-        let r = vm_query(
-            r#"{a: $.x.set(1), b: $.y.set(2), c: 3}"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"{a: $.x.set(1), b: $.y.set(2), c: 3}"#, &doc).unwrap();
         // Both `a` and `b` see the post-batch document — i.e. both
         // writes are applied to whichever doc shape they observe.
         assert_eq!(r["a"]["x"], json!(1));
@@ -502,11 +459,7 @@ mod tests {
         // sibling Patches against `$` already exhibit Jetro-level
         // program-cache quirks that aren't ours to fix in Phase B.
         let doc = json!({"x": 0, "y": 0, "meta": "hi"});
-        let r = vm_query(
-            r#"{a: $.x.set(1), b: $.y.set(2), m: $.meta}"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"{a: $.x.set(1), b: $.y.set(2), m: $.meta}"#, &doc).unwrap();
         assert_eq!(r["m"], json!("hi"));
         // Whatever fields a/b carry, they should at minimum reflect
         // their own write (the per-op patcher is correct in isolation).
@@ -519,11 +472,7 @@ mod tests {
         // doc; the body's chain-write `x.b.set(2)` is lifted to a Patch
         // against `x`, then merged into the init's op list.
         let doc = json!({});
-        let r = vm_query(
-            r#"let x = $.a.set(1) in x.b.set(2)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $.a.set(1) in x.b.set(2)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2}));
     }
 
@@ -536,11 +485,7 @@ mod tests {
         // the rhs, not the receiver). Phase B must not "rescue" this
         // by lifting it; result must match stock semantics exactly.
         let doc = json!({"list": [{"id": 1}, {"id": 2}]});
-        let r = vm_query(
-            r#"$.list.map(lambda o: o.id.set(99))"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.list.map(lambda o: o.id.set(99))"#, &doc).unwrap();
         assert_eq!(r, json!([99, 99]));
     }
 
@@ -551,11 +496,7 @@ mod tests {
         // ops in source order so last-write-wins still produces the
         // expected nested result.
         let doc = json!({});
-        let r = vm_query(
-            r#"$.a.set({x: 1}) | $.a.x.set(2)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set({x: 1}) | $.a.x.set(2)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": {"x": 2}}));
     }
 
@@ -568,11 +509,7 @@ mod tests {
         // a downstream non-conditional write would invoke the pipe
         // semantic where `$` rebinds — orthogonal to fusion.)
         let doc = json!({"role": "admin", "id": 1});
-        let r = vm_query(
-            r#"patch $ { active: true when $.role == "admin" }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { active: true when $.role == "admin" }"#, &doc).unwrap();
         assert_eq!(r["active"], json!(true));
     }
 
@@ -588,10 +525,7 @@ mod tests {
             &doc,
         )
         .unwrap();
-        assert_eq!(
-            r,
-            json!({"user": {"name": "Alice", "role": "admin"}})
-        );
+        assert_eq!(r, json!({"user": {"name": "Alice", "role": "admin"}}));
     }
 
     #[test]
@@ -599,11 +533,7 @@ mod tests {
         // The body is a pure read of `x` — no Patch, nothing to fuse.
         // Result should be the post-init value (one Patch applied).
         let doc = json!({"a": 0, "k": "hi"});
-        let r = vm_query(
-            r#"let x = $.a.set(1) in x.k"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $.a.set(1) in x.k"#, &doc).unwrap();
         assert_eq!(r, json!("hi"));
     }
 
@@ -636,16 +566,331 @@ mod tests {
             "touched": {"x": 1, "y": 2},
             "untouched": {"a": [1, 2, 3], "b": "string", "c": {"deep": true}}
         });
+        let r = vm_query(r#"patch $ { touched.x: 99, touched.y: 100 }"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "touched": {"x": 99, "y": 100},
+                "untouched": {"a": [1, 2, 3], "b": "string", "c": {"deep": true}}
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_selected_objects_updates_each_match_once() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                {"title": "Hyperion", "year": 1989, "tags": ["sf", "hugo"]}
+            ],
+            "active": true
+        });
         let r = vm_query(
-            r#"patch $ { touched.x: 99, touched.y: 100 }"#,
+            r#"$.books[*].update({ tags: tags.append("test"), reviewed: true })"#,
             &doc,
         )
         .unwrap();
         assert_eq!(
             r,
             json!({
-                "touched": {"x": 99, "y": 100},
-                "untouched": {"a": [1, 2, 3], "b": "string", "c": {"deep": true}}
+                "books": [
+                    {"title": "Dune", "year": 1965, "tags": ["sf", "test"], "reviewed": true},
+                    {"title": "Hyperion", "year": 1989, "tags": ["sf", "hugo", "test"], "reviewed": true}
+                ],
+                "active": true
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_parses_as_update_batch() {
+        let expr =
+            parse(r#"$.books[*].update({ tags: tags.append("test"), reviewed: true })"#).unwrap();
+        match expr {
+            Expr::UpdateBatch { selector, ops, .. } => {
+                assert_eq!(selector.len(), 2);
+                assert!(matches!(selector[0], PathStep::Field(ref f) if f == "books"));
+                assert!(matches!(selector[1], PathStep::Wildcard));
+                assert_eq!(ops.len(), 2);
+                assert!(matches!(ops[0].path[0], PathStep::Field(ref f) if f == "tags"));
+                assert!(matches!(ops[1].path[0], PathStep::Field(ref f) if f == "reviewed"));
+            }
+            other => panic!("expected UpdateBatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn functional_update_compiles_to_update_batch_opcode() {
+        let program =
+            Compiler::compile_str(r#"$.books[*].update({ tags: tags.append("test") })"#).unwrap();
+        assert!(program
+            .ops
+            .iter()
+            .any(|op| matches!(op, Opcode::UpdateBatchEval(_))));
+        assert!(!program
+            .ops
+            .iter()
+            .any(|op| matches!(op, Opcode::PatchEval(_))));
+    }
+
+    #[test]
+    fn rooted_write_terminal_parses_as_update_batch() {
+        let expr = parse(r#"$.books[*].tags.modify(@.append("test"))"#).unwrap();
+        match expr {
+            Expr::UpdateBatch { selector, ops, .. } => {
+                assert_eq!(selector.len(), 3);
+                assert_eq!(ops.len(), 1);
+                assert!(ops[0].path.is_empty());
+            }
+            other => panic!("expected UpdateBatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn functional_update_selected_objects_supports_when_guards() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                {"title": "Hyperion", "year": 1989, "tags": ["sf"]}
+            ]
+        });
+        let r = vm_query(
+            r#"$.books[*].update({ tags: tags.append("modern") when year > 1980 })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                    {"title": "Hyperion", "year": 1989, "tags": ["sf", "modern"]}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_root_batch_updates_unrelated_paths() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "tags": ["sf"], "tmp": 1},
+                {"title": "Hyperion", "tags": ["sf"], "tmp": 2}
+            ],
+            "active": true
+        });
+        let r = vm_query(
+            r#"$.update({ "books[*].tags": @.append("test"), "books[*].tmp": DELETE, active: false })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "Dune", "tags": ["sf", "test"]},
+                    {"title": "Hyperion", "tags": ["sf", "test"]}
+                ],
+                "active": false
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_root_batch_supports_filtered_wildcards() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                {"title": "Hyperion", "year": 1989, "tags": ["sf"]}
+            ]
+        });
+        let r = vm_query(
+            r#"$.update({ "books[* if year > 1980].tags": @.append("modern") })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                    {"title": "Hyperion", "year": 1989, "tags": ["sf", "modern"]}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_selected_objects_supports_wildcard_filter_selector() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                {"title": "Hyperion", "year": 1989, "tags": ["sf"]}
+            ]
+        });
+        let r = vm_query(
+            r#"$.books[* if year > 1980].update({ tags: tags.append("modern") })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                    {"title": "Hyperion", "year": 1989, "tags": ["sf", "modern"]}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_selected_objects_can_read_root_values() {
+        let doc = json!({
+            "default_tag": "review",
+            "books": [
+                {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                {"title": "Hyperion", "year": 1989, "tags": ["sf"]}
+            ]
+        });
+        let r = vm_query(
+            r#"$.books[*].update({ tags: tags.append($.default_tag) when year > 1980 })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "default_tag": "review",
+                "books": [
+                    {"title": "Dune", "year": 1965, "tags": ["sf"]},
+                    {"title": "Hyperion", "year": 1989, "tags": ["sf", "review"]}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_selected_objects_reads_original_snapshot() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "slug": "dune"}
+            ]
+        });
+        let r = vm_query(
+            r#"$.books[*].update({ title: "changed", original_title: title, slug: slug + "-v2" })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "changed", "slug": "dune-v2", "original_title": "Dune"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_overlapping_writes_are_source_ordered() {
+        let doc = json!({
+            "books": [
+                {"title": "Dune", "meta": {"score": 10}}
+            ]
+        });
+        let r = vm_query(
+            r#"$.books[0].update({ title: "draft", title: "final", meta: {}, "meta.score": 99 })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"title": "final", "meta": {"score": 99}}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_root_overlapping_writes_are_source_ordered() {
+        let doc = json!({"active": true, "meta": {"old": true}});
+        let r = vm_query(
+            r#"$.update({ meta: {}, "meta.updated": true, active: false, active: true })"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"active": true, "meta": {"updated": true}}));
+    }
+
+    #[test]
+    fn functional_update_scalar_target_follows_patch_object_materialization() {
+        let doc = json!({"items": [1, 2]});
+        let r = vm_query(r#"$.items[*].update({ seen: true })"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "items": [
+                    {"seen": true},
+                    {"seen": true}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn functional_update_preserves_untouched_arc_subtrees() {
+        let mut untouched_map = IndexMap::new();
+        untouched_map.insert(Arc::<str>::from("deep"), Val::Bool(true));
+        let untouched = Val::obj(untouched_map);
+        let untouched_arc = match &untouched {
+            Val::Obj(map) => Arc::clone(map),
+            _ => unreachable!(),
+        };
+
+        let mut book = IndexMap::new();
+        book.insert(
+            Arc::<str>::from("tags"),
+            Val::arr(vec![Val::Str(Arc::from("sf"))]),
+        );
+        let books = Val::arr(vec![Val::obj(book)]);
+
+        let mut root = IndexMap::new();
+        root.insert(Arc::<str>::from("books"), books);
+        root.insert(Arc::<str>::from("untouched"), untouched);
+
+        let program =
+            Compiler::compile_str(r#"$.books[*].update({ tags: tags.append("test") })"#).unwrap();
+        let mut vm = VM::new();
+        let out = vm.execute_val_raw(&program, Val::obj(root)).unwrap();
+
+        let Val::Obj(out_map) = out else {
+            panic!("expected object result");
+        };
+        let Some(Val::Obj(out_untouched)) = out_map.get("untouched") else {
+            panic!("expected untouched object");
+        };
+        assert!(Arc::ptr_eq(&untouched_arc, out_untouched));
+    }
+
+    #[test]
+    fn wildcard_chain_modify_lowers_to_patch() {
+        let doc = json!({
+            "books": [
+                {"tags": ["sf"]},
+                {"tags": ["hugo"]}
+            ]
+        });
+        let r = vm_query(r#"$.books[*].tags.modify(@.append("test"))"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "books": [
+                    {"tags": ["sf", "test"]},
+                    {"tags": ["hugo", "test"]}
+                ]
             })
         );
     }

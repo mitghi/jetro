@@ -7,17 +7,17 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::BinOp;
 use crate::data::context::{Env, EvalError};
+use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
+use crate::data::value::Val;
+use crate::data::view::{ValView, ValueView};
+use crate::exec::pipeline;
+use crate::exec::view as view_pipeline;
 use crate::ir::physical::{
     BackendPreference, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalObjField,
     PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
-use crate::exec::pipeline;
-use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
-use crate::data::value::Val;
-use crate::data::view::{ValView, ValueView};
-use crate::exec::view as view_pipeline;
+use crate::parse::ast::BinOp;
 use crate::{Jetro, VM};
 
 /// Entry point: constructs an `ExecCtx` and evaluates the plan DAG starting from `root_id`.
@@ -169,6 +169,20 @@ impl ExecCtx<'_> {
                 self.env = outer_env;
                 result
             }
+            PlanNode::UpdateBatch {
+                selector,
+                ops,
+                dependencies,
+                trie,
+                fallback,
+                ..
+            } => {
+                let _ = (selector, ops, dependencies, trie);
+                let mut env = self.take_env()?;
+                let result = self.vm.exec_in_env(fallback, &mut env);
+                self.env = Some(env);
+                result
+            }
             PlanNode::Vm(program) => {
                 let mut env = self.take_env()?;
                 let result = self.vm.exec_in_env(program, &mut env);
@@ -273,8 +287,10 @@ impl ExecCtx<'_> {
                 // variants we keep the VM-free entry so existing
                 // tests (which assert that `root_val` stays unmaterialised)
                 // are unaffected.
-                if matches!(structural, crate::exec::structural::StructuralPlan::DeepMatch { .. })
-                {
+                if matches!(
+                    structural,
+                    crate::exec::structural::StructuralPlan::DeepMatch { .. }
+                ) {
                     let env = match self.take_env() {
                         Ok(e) => e,
                         Err(e) => return Some(Err(e)),

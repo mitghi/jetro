@@ -704,6 +704,29 @@ fn substitute_current(expr: &Expr, replacement: &Expr) -> Expr {
                 })
                 .collect(),
         },
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => Expr::UpdateBatch {
+            root: Box::new(substitute_current(root, replacement)),
+            selector: selector
+                .iter()
+                .map(|step| substitute_current_path_step(step, replacement))
+                .collect(),
+            ops: ops
+                .iter()
+                .map(|op| PatchOp {
+                    path: op
+                        .path
+                        .iter()
+                        .map(|step| substitute_current_path_step(step, replacement))
+                        .collect(),
+                    val: substitute_current(&op.val, replacement),
+                    cond: op.cond.as_ref().map(|c| substitute_current(c, replacement)),
+                })
+                .collect(),
+        },
     }
 }
 
@@ -770,7 +793,7 @@ fn substitute_current_path_step(step: &PathStep, replacement: &Expr) -> PathStep
 // `Patch`, `DeleteMark`, and `GlobalCall` are considered impure.
 fn is_pure_expr(expr: &Expr) -> bool {
     match expr {
-        Expr::Patch { .. } | Expr::DeleteMark => false,
+        Expr::Patch { .. } | Expr::UpdateBatch { .. } | Expr::DeleteMark => false,
         // Match runtime not yet implemented; treat as impure for symbolic purposes
         // until the dedicated dispatch path lands in P2.
         Expr::Match { .. } => false,
