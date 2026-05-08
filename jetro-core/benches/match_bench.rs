@@ -11,6 +11,10 @@
 //! - `demand_map_last`: Large-array late projection into `last()`.
 //! - `demand_filter_last`: Large-array selective scan into `last()`.
 //! - `demand_sort_take_map`: Sort/take/map chain with bounded ordered demand.
+//! - `update_wildcard_batch`: Multi-field functional update over every row.
+//! - `update_filtered_batch`: Functional update over a filtered wildcard selector.
+//! - `update_unrelated_root_batch`: One root-level batch across unrelated paths.
+//! - `update_nested_selected_batch`: Nested selected-object update with shared prefixes.
 //!
 //! Run with `cargo bench -p jetro-core --bench match_bench`. Each
 //! benchmark builds a fresh `Jetro` document per iteration so the
@@ -57,10 +61,10 @@ fn make_books_doc() -> Vec<u8> {
         let price = (i % 50) + 1;
         let score = 20_000 - i;
         buf.push_str(&format!(
-            r#"{{"isbn":"isbn-{i}","price":{price},"score":{score},"name":"book-{i}"}}"#
+            r#"{{"isbn":"isbn-{i}","price":{price},"score":{score},"name":"book-{i}","tags":["sf"],"tmp":true,"meta":{{"seen":false}}}}"#
         ));
     }
-    buf.push_str("]}");
+    buf.push_str(r#"],"active":true,"meta":{"updated_at":0,"source":"bench"}}"#);
     buf.into_bytes()
 }
 
@@ -158,6 +162,82 @@ fn demand_sort_take_map(c: &mut Criterion) {
     });
 }
 
+fn update_wildcard_batch(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("update_wildcard_batch", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect(
+                    r#"$.books[*].update({
+                        tags: tags.append("bench"),
+                        reviewed: true,
+                        tmp: DELETE
+                    })"#,
+                )
+                .expect("eval"),
+            )
+        })
+    });
+}
+
+fn update_filtered_batch(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("update_filtered_batch", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect(
+                    r#"$.books[* if price > 20].update({
+                        tags: tags.append("premium"),
+                        "meta.seen": true
+                    })"#,
+                )
+                .expect("eval"),
+            )
+        })
+    });
+}
+
+fn update_unrelated_root_batch(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("update_unrelated_root_batch", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect(
+                    r#"$.update({
+                        active: false,
+                        "meta.updated_at": 123,
+                        "books[0].tags": @.append("first"),
+                        "books[-1].tmp": DELETE
+                    })"#,
+                )
+                .expect("eval"),
+            )
+        })
+    });
+}
+
+fn update_nested_selected_batch(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("update_nested_selected_batch", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect(
+                    r#"$.books[*].update({
+                        "meta.seen": true,
+                        "meta.score": score,
+                        "meta.label": name
+                    })"#,
+                )
+                .expect("eval"),
+            )
+        })
+    });
+}
+
 criterion_group!(
     match_benches,
     match_filter_take,
@@ -165,6 +245,10 @@ criterion_group!(
     match_range_scan,
     demand_map_last,
     demand_filter_last,
-    demand_sort_take_map
+    demand_sort_take_map,
+    update_wildcard_batch,
+    update_filtered_batch,
+    update_unrelated_root_batch,
+    update_nested_selected_batch
 );
 criterion_main!(match_benches);

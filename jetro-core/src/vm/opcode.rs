@@ -766,7 +766,13 @@ pub enum TrieNode {
     /// Replace this subtree with the result of executing `prog`. The
     /// program is evaluated with `@` bound to the current value at this
     /// position, mirroring the existing `CompiledPatchVal::Replace` semantics.
-    Replace(Arc<Program>),
+    Replace {
+        /// Source op index used by update execution to cache invariant RHS
+        /// values while preserving source-order conflict semantics.
+        op_idx: usize,
+        /// Program that produces the replacement value.
+        prog: Arc<Program>,
+    },
     /// Remove this node from its parent (object field or array element).
     /// Treated as a structural marker; deletion happens in the parent's
     /// `Branch` arm rather than by recursing into this node.
@@ -832,9 +838,12 @@ impl CompiledPatchTrie {
             fields: IndexMap::new(),
             indices: Vec::new(),
         };
-        for op in ops {
+        for (op_idx, op) in ops.iter().enumerate() {
             let leaf = match &op.val {
-                CompiledPatchVal::Replace(prog) => TrieNode::Replace(Arc::clone(prog)),
+                CompiledPatchVal::Replace(prog) => TrieNode::Replace {
+                    op_idx,
+                    prog: Arc::clone(prog),
+                },
                 CompiledPatchVal::Delete => TrieNode::Delete,
             };
             // Phase F: wrap conditional ops so the trie applier evaluates

@@ -3,7 +3,7 @@
 //! `grammar.pest` defines the grammar; `pest_derive` generates `V2Parser`.
 //! `parse()` drives the parser and walks the parse tree into an `Expr` AST.
 //! `classify_chain_write` post-processes rooted chain expressions that end in
-//! `.set` / `.modify` / `.delete` / `.unset` into `Expr::Patch` nodes so the
+//! `.set` / `.modify` / `.delete` / `.unset` into update AST nodes so the
 //! evaluator never needs to special-case the write surface at runtime.
 
 use pest::iterators::Pair;
@@ -909,7 +909,7 @@ fn build_update_ops(args: &[Arg]) -> Option<Vec<PatchOp>> {
     let Expr::Object(fields) = arg_expr(args.first()?) else {
         return None;
     };
-    let focus = "__update_focus".to_string();
+    let focus = crate::plan::update::UPDATE_FOCUS_BINDING.to_string();
     let mut ops = Vec::new();
     for field in fields {
         let ObjField::Kv {

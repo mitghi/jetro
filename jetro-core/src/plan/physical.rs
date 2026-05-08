@@ -198,7 +198,7 @@ impl PlanBuilder {
                 let root = self.node_facts(*root);
                 ExecutionFacts {
                     contains_vm_fallback: true,
-                    may_materialize_source: true,
+                    may_materialize_source: root.may_materialize_source,
                     ..root
                 }
             }
@@ -949,6 +949,9 @@ mod tests {
             plan.backend_preferences(*root),
             &[BackendPreference::Interpreted]
         );
+        let facts = plan.execution_facts(*root);
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.may_materialize_source);
     }
 
     #[test]

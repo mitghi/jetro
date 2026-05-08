@@ -52,6 +52,25 @@ enum PatchResult {
     Delete,
 }
 
+struct UpdateRhsCache {
+    cacheable: Vec<bool>,
+    values: Vec<Option<Val>>,
+}
+
+impl UpdateRhsCache {
+    fn new(ops: &[CompiledPatchOp]) -> Self {
+        let cacheable = ops
+            .iter()
+            .map(|op| match &op.val {
+                CompiledPatchVal::Replace(prog) => program_is_update_invariant(prog),
+                CompiledPatchVal::Delete => false,
+            })
+            .collect::<Vec<_>>();
+        let values = vec![None; ops.len()];
+        Self { cacheable, values }
+    }
+}
+
 /// Resolve a signed index `i` into the range `[0, len]`, clamping out-of-bounds
 /// values. Negative indices count backwards from `len` (Python-style).
 #[inline]
@@ -67,6 +86,130 @@ fn vm_resolve_idx(i: i64, len: i64) -> usize {
     } else {
         r as usize
     }
+}
+
+fn program_is_update_invariant(program: &Program) -> bool {
+    !program_reads_update_target(program)
+}
+
+fn program_reads_update_target(program: &Program) -> bool {
+    program.ops.iter().any(|op| opcode_reads_update_target(op))
+}
+
+fn opcode_reads_update_target(op: &Opcode) -> bool {
+    match op {
+        Opcode::PushCurrent | Opcode::SetCurrent => true,
+        Opcode::LoadIdent(name) => name.as_ref() == crate::plan::update::UPDATE_FOCUS_BINDING,
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_reads_update_target(prog),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .any(|prog| program_reads_update_target(prog)),
+        Opcode::MakeObj(entries) => entries.iter().any(|entry| match entry {
+            CompiledObjEntry::Kv { prog, cond, .. } => {
+                program_reads_update_target(prog)
+                    || cond
+                        .as_ref()
+                        .is_some_and(|prog| program_reads_update_target(prog))
+            }
+            CompiledObjEntry::Dynamic { key, val } => {
+                program_reads_update_target(key) || program_reads_update_target(val)
+            }
+            CompiledObjEntry::Spread(prog) | CompiledObjEntry::SpreadDeep(prog) => {
+                program_reads_update_target(prog)
+            }
+            CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
+        }),
+        Opcode::MakeArr(items) => items
+            .iter()
+            .any(|(prog, _)| program_reads_update_target(prog)),
+        Opcode::FString(parts) => parts.iter().any(|part| match part {
+            CompiledFSPart::Interp { prog, .. } => program_reads_update_target(prog),
+            CompiledFSPart::Lit(_) => false,
+        }),
+        Opcode::BindLamCurrent { .. } => true,
+        Opcode::PipelineRun { base, steps } => {
+            program_reads_update_target(base)
+                || steps.iter().any(|step| match step {
+                    CompiledPipeStep::Forward(prog) => program_reads_update_target(prog),
+                    CompiledPipeStep::BindName(_)
+                    | CompiledPipeStep::BindObj(_)
+                    | CompiledPipeStep::BindArr(_) => true,
+                })
+        }
+        Opcode::LetExpr { body, .. } => program_reads_update_target(body),
+        Opcode::IfElse { then_, else_ } => {
+            program_reads_update_target(then_) || program_reads_update_target(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_reads_update_target(body) || program_reads_update_target(default)
+        }
+        Opcode::ListComp(spec) | Opcode::SetComp(spec) => {
+            program_reads_update_target(&spec.expr)
+                || program_reads_update_target(&spec.iter)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|prog| program_reads_update_target(prog))
+        }
+        Opcode::DictComp(spec) => {
+            program_reads_update_target(&spec.key)
+                || program_reads_update_target(&spec.val)
+                || program_reads_update_target(&spec.iter)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|prog| program_reads_update_target(prog))
+        }
+        Opcode::PatchEval(_) | Opcode::UpdateBatchEval(_) => true,
+        Opcode::Match(m) | Opcode::DeepMatchAll(m) | Opcode::DeepMatchFirst(m) => {
+            (match &m.scrutinee {
+                MatchScrutinee::Current => true,
+                MatchScrutinee::Root => false,
+                MatchScrutinee::Program(prog) => program_reads_update_target(prog),
+            }) || m
+                .guards
+                .iter()
+                .any(|prog| program_reads_update_target(prog))
+                || m.bodies
+                    .iter()
+                    .any(|prog| program_reads_update_target(prog))
+        }
+        _ => false,
+    }
+}
+
+fn normalize_update_object(val: &mut Val) {
+    if matches!(val, Val::Obj(_)) {
+        return;
+    }
+    let map = std::mem::replace(val, Val::Null)
+        .into_map()
+        .unwrap_or_default();
+    *val = Val::obj(map);
+}
+
+fn normalize_update_array(val: &mut Val) {
+    if matches!(val, Val::Arr(_)) {
+        return;
+    }
+    let arr = std::mem::replace(val, Val::Null)
+        .into_vec()
+        .unwrap_or_default();
+    *val = Val::arr(arr);
+}
+
+fn normalize_existing_update_array(val: &mut Val) -> Option<()> {
+    if matches!(val, Val::Arr(_)) {
+        return Some(());
+    }
+    let arr = std::mem::replace(val, Val::Null).into_vec()?;
+    *val = Val::arr(arr);
+    Some(())
 }
 
 /// Look up `key` in the map using the inline-cache `ic` as a fast-path hint.
@@ -2279,7 +2422,7 @@ impl VM {
     /// write path stay `Arc`-shared and are never visited.
     fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
         let doc = self.exec(&cp.root_prog, env)?;
-        self.apply_compiled_patch_ops(doc, &cp.ops, &cp.trie, env)
+        self.apply_compiled_patch_ops(doc, &cp.ops, &cp.trie, env, None)
     }
 
     fn exec_update_batch_compiled(
@@ -2287,16 +2430,18 @@ impl VM {
         batch: &CompiledUpdateBatch,
         env: &Env,
     ) -> Result<Val, EvalError> {
-        let doc = self.exec(&batch.root_prog, env)?;
+        let mut doc = self.exec(&batch.root_prog, env)?;
+        let mut rhs_cache = UpdateRhsCache::new(&batch.ops);
         match self.apply_update_selector_compiled(
-            doc,
+            &mut doc,
             &batch.selector,
             0,
             &batch.ops,
             &batch.trie,
             env,
+            &mut rhs_cache,
         )? {
-            PatchResult::Replace(v) => Ok(v),
+            PatchResult::Replace(_) => Ok(doc),
             PatchResult::Delete => Ok(Val::Null),
         }
     }
@@ -2307,6 +2452,7 @@ impl VM {
         ops: &[CompiledPatchOp],
         trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
         env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
     ) -> Result<Val, EvalError> {
         if ops.len() >= 2 {
             let trie_slot = trie.get_or_init(|| CompiledPatchTrie::from_ops(ops));
@@ -2316,18 +2462,32 @@ impl VM {
                 // (matching invariant 5 / the per-op walker's `$` semantics).
                 // Cloning a `Val` is O(1) — Arc bump only.
                 let pre_batch = doc.clone();
-                self.apply_trie(&mut doc, &trie.root, env, &pre_batch)?;
+                self.apply_trie(
+                    &mut doc,
+                    &trie.root,
+                    env,
+                    &pre_batch,
+                    rhs_cache.as_deref_mut(),
+                )?;
                 return Ok(doc);
             }
         }
-        for op in ops {
+        for (op_idx, op) in ops.iter().enumerate() {
             if let Some(cond) = &op.cond {
                 let cenv = env.with_current(doc.clone());
                 if !is_truthy(&self.exec(cond, &cenv)?) {
                     continue;
                 }
             }
-            match self.apply_patch_step_compiled(doc, &op.path, 0, &op.val, env)? {
+            match self.apply_patch_step_compiled(
+                doc,
+                &op.path,
+                0,
+                &op.val,
+                env,
+                rhs_cache.as_deref_mut(),
+                Some(op_idx),
+            )? {
                 PatchResult::Replace(v) => doc = v,
                 PatchResult::Delete => doc = Val::Null,
             }
@@ -2337,57 +2497,90 @@ impl VM {
 
     fn apply_update_selector_compiled(
         &mut self,
-        v: Val,
+        v: &mut Val,
         selector: &[CompiledPathStep],
         i: usize,
         ops: &[CompiledPatchOp],
         trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
         env: &Env,
+        rhs_cache: &mut UpdateRhsCache,
     ) -> Result<PatchResult, EvalError> {
         if i == selector.len() {
-            let focus = v.clone();
+            if self.selected_node_delete_applies(ops, env, v)? {
+                return Ok(PatchResult::Delete);
+            }
+            let old = std::mem::replace(v, Val::Null);
+            let focus = old.clone();
             let update_env = env.with_var(crate::plan::update::UPDATE_FOCUS_BINDING, focus);
-            let updated = self.apply_compiled_patch_ops(v, ops, trie, &update_env)?;
-            return Ok(PatchResult::Replace(updated));
+            *v = self.apply_compiled_patch_ops(old, ops, trie, &update_env, Some(rhs_cache))?;
+            return Ok(PatchResult::Replace(Val::Null));
         }
         match &selector[i] {
             CompiledPathStep::Field(name) => {
-                let mut m = v.into_map().unwrap_or_default();
-                let existing = if let Some(slot) = m.get_mut(name.as_ref()) {
-                    std::mem::replace(slot, Val::Null)
-                } else {
-                    Val::Null
+                normalize_update_object(v);
+                let Val::Obj(map_arc) = v else {
+                    unreachable!("normalize_update_object always yields object");
                 };
-                let child =
-                    self.apply_update_selector_compiled(existing, selector, i + 1, ops, trie, env)?;
-                match child {
-                    PatchResult::Delete => {
-                        m.shift_remove(name.as_ref());
+                let map = Arc::make_mut(map_arc);
+                if let Some(child) = map.get_mut(name.as_ref()) {
+                    match self.apply_update_selector_compiled(
+                        child,
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {
+                            map.shift_remove(name.as_ref());
+                        }
+                        PatchResult::Replace(_) => {}
                     }
-                    PatchResult::Replace(nv) => {
-                        m.insert(name.clone(), nv);
+                } else {
+                    let mut fresh = Val::Null;
+                    match self.apply_update_selector_compiled(
+                        &mut fresh,
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {}
+                        PatchResult::Replace(_) => {
+                            map.insert(name.clone(), fresh);
+                        }
                     }
                 }
-                Ok(PatchResult::Replace(Val::obj(m)))
+                Ok(PatchResult::Replace(Val::Null))
             }
             CompiledPathStep::Index(idx) => {
-                let mut a = v.into_vec().unwrap_or_default();
-                let resolved = vm_resolve_idx(*idx, a.len() as i64);
-                if resolved >= a.len() {
-                    return Ok(PatchResult::Replace(Val::arr(a)));
+                normalize_update_array(v);
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let resolved = vm_resolve_idx(*idx, arr.len() as i64);
+                if resolved >= arr.len() {
+                    return Ok(PatchResult::Replace(Val::Null));
                 }
-                let existing = std::mem::replace(&mut a[resolved], Val::Null);
-                let child =
-                    self.apply_update_selector_compiled(existing, selector, i + 1, ops, trie, env)?;
-                match child {
+                match self.apply_update_selector_compiled(
+                    &mut arr[resolved],
+                    selector,
+                    i + 1,
+                    ops,
+                    trie,
+                    env,
+                    rhs_cache,
+                )? {
                     PatchResult::Delete => {
-                        a.remove(resolved);
+                        arr.remove(resolved);
                     }
-                    PatchResult::Replace(nv) => {
-                        a[resolved] = nv;
-                    }
+                    PatchResult::Replace(_) => {}
                 }
-                Ok(PatchResult::Replace(Val::arr(a)))
+                Ok(PatchResult::Replace(Val::Null))
             }
             CompiledPathStep::DynIndex(prog) => {
                 let idx_val = self.exec(prog, env)?;
@@ -2397,52 +2590,70 @@ impl VM {
                         idx_val.type_name()
                     ))
                 })?;
-                let mut a = v.into_vec().unwrap_or_default();
-                let resolved = vm_resolve_idx(idx, a.len() as i64);
-                if resolved >= a.len() {
-                    return Ok(PatchResult::Replace(Val::arr(a)));
+                normalize_update_array(v);
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let resolved = vm_resolve_idx(idx, arr.len() as i64);
+                if resolved >= arr.len() {
+                    return Ok(PatchResult::Replace(Val::Null));
                 }
-                let existing = std::mem::replace(&mut a[resolved], Val::Null);
-                let child =
-                    self.apply_update_selector_compiled(existing, selector, i + 1, ops, trie, env)?;
-                match child {
+                match self.apply_update_selector_compiled(
+                    &mut arr[resolved],
+                    selector,
+                    i + 1,
+                    ops,
+                    trie,
+                    env,
+                    rhs_cache,
+                )? {
                     PatchResult::Delete => {
-                        a.remove(resolved);
+                        arr.remove(resolved);
                     }
-                    PatchResult::Replace(nv) => {
-                        a[resolved] = nv;
-                    }
+                    PatchResult::Replace(_) => {}
                 }
-                Ok(PatchResult::Replace(Val::arr(a)))
+                Ok(PatchResult::Replace(Val::Null))
             }
             CompiledPathStep::Wildcard => {
-                let mut arr = v
-                    .into_vec()
+                normalize_existing_update_array(v)
                     .ok_or_else(|| EvalError("update [*]: expected array".into()))?;
-                for slot in arr.iter_mut() {
-                    let item = std::mem::replace(slot, Val::Null);
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_existing_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let mut idx = 0usize;
+                while idx < arr.len() {
                     match self.apply_update_selector_compiled(
-                        item,
+                        &mut arr[idx],
                         selector,
                         i + 1,
                         ops,
                         trie,
                         env,
+                        rhs_cache,
                     )? {
-                        PatchResult::Delete => {}
-                        PatchResult::Replace(nv) => *slot = nv,
+                        PatchResult::Delete => {
+                            arr.remove(idx);
+                        }
+                        PatchResult::Replace(_) => {
+                            idx += 1;
+                        }
                     }
                 }
-                Ok(PatchResult::Replace(Val::arr(arr)))
+                Ok(PatchResult::Replace(Val::Null))
             }
             CompiledPathStep::WildcardFilter(pred) => {
-                let mut arr = v
-                    .into_vec()
+                normalize_existing_update_array(v)
                     .ok_or_else(|| EvalError("update [* if]: expected array".into()))?;
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_existing_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
                 let mut env_mut = env.clone();
-                for slot in arr.iter_mut() {
-                    let item = std::mem::replace(slot, Val::Null);
-                    let frame = env_mut.push_lam(None, item.clone());
+                let mut idx = 0usize;
+                while idx < arr.len() {
+                    let frame = env_mut.push_lam(None, arr[idx].clone());
                     let include = match self.exec(pred, &env_mut) {
                         Ok(v) => is_truthy(&v),
                         Err(e) => {
@@ -2453,28 +2664,80 @@ impl VM {
                     env_mut.pop_lam(frame);
                     if include {
                         match self.apply_update_selector_compiled(
-                            item,
+                            &mut arr[idx],
                             selector,
                             i + 1,
                             ops,
                             trie,
                             env,
+                            rhs_cache,
                         )? {
-                            PatchResult::Delete => {}
-                            PatchResult::Replace(nv) => *slot = nv,
+                            PatchResult::Delete => {
+                                arr.remove(idx);
+                            }
+                            PatchResult::Replace(_) => {
+                                idx += 1;
+                            }
                         }
                     } else {
-                        *slot = item;
+                        idx += 1;
                     }
                 }
-                Ok(PatchResult::Replace(Val::arr(arr)))
+                Ok(PatchResult::Replace(Val::Null))
             }
             CompiledPathStep::Descendant(name) => {
-                let v2 = self
-                    .descend_apply_update_selector_compiled(v, name, selector, i, ops, trie, env)?;
-                Ok(PatchResult::Replace(v2))
+                self.descend_apply_update_selector_compiled(
+                    v, name, selector, i, ops, trie, env, rhs_cache,
+                )?;
+                Ok(PatchResult::Replace(Val::Null))
             }
         }
+    }
+
+    fn selected_node_delete_applies(
+        &mut self,
+        ops: &[CompiledPatchOp],
+        env: &Env,
+        current: &Val,
+    ) -> Result<bool, EvalError> {
+        if ops.len() != 1 || !ops[0].path.is_empty() {
+            return Ok(false);
+        }
+        if !matches!(ops[0].val, CompiledPatchVal::Delete) {
+            return Ok(false);
+        }
+        if let Some(cond) = &ops[0].cond {
+            return Ok(is_truthy(
+                &self.exec(cond, &env.with_current(current.clone()))?,
+            ));
+        }
+        Ok(true)
+    }
+
+    fn eval_patch_replace(
+        &mut self,
+        prog: &Arc<Program>,
+        env: &Env,
+        rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
+    ) -> Result<Val, EvalError> {
+        let Some(cache) = rhs_cache else {
+            return self.exec(prog, env);
+        };
+        let Some(op_idx) = op_idx else {
+            return self.exec(prog, env);
+        };
+        if !cache.cacheable.get(op_idx).copied().unwrap_or(false) {
+            return self.exec(prog, env);
+        }
+        if let Some(val) = cache.values.get(op_idx).and_then(|v| v.as_ref()) {
+            return Ok(val.clone());
+        }
+        let val = self.exec(prog, env)?;
+        if let Some(slot) = cache.values.get_mut(op_idx) {
+            *slot = Some(val.clone());
+        }
+        Ok(val)
     }
 
     /// Apply a `CompiledPatchTrie` node against `val` in place. Uses
@@ -2488,14 +2751,16 @@ impl VM {
         node: &TrieNode,
         env: &Env,
         pre_batch_doc: &Val,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
     ) -> Result<(), EvalError> {
         match node {
-            TrieNode::Replace(prog) => {
+            TrieNode::Replace { op_idx, prog } => {
                 // Bind the existing value to `@` so `Replace` programs that
                 // reference the old value (e.g. `.modify(@ + 1)`) still see it.
                 let old = std::mem::replace(val, Val::Null);
                 let cenv = env.with_current(old);
-                *val = self.exec(prog, &cenv)?;
+                *val =
+                    self.eval_patch_replace(prog, &cenv, rhs_cache.as_deref_mut(), Some(*op_idx))?;
                 Ok(())
             }
             TrieNode::Delete => {
@@ -2514,7 +2779,7 @@ impl VM {
                 // soundness test `conditional_reads_prebatch_state`.
                 let cenv = env.with_current(pre_batch_doc.clone());
                 if is_truthy(&self.exec(cond_prog, &cenv)?) {
-                    self.apply_trie(val, then, env, pre_batch_doc)?;
+                    self.apply_trie(val, then, env, pre_batch_doc, rhs_cache.as_deref_mut())?;
                 }
                 Ok(())
             }
@@ -2555,11 +2820,23 @@ impl VM {
                                 }
                                 ChildEffect::Apply(inner) => {
                                     if let Some(child) = map.get_mut(key.as_ref()) {
-                                        self.apply_trie(child, inner, env, pre_batch_doc)?;
+                                        self.apply_trie(
+                                            child,
+                                            inner,
+                                            env,
+                                            pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
+                                        )?;
                                     } else {
                                         // Path doesn't exist yet — synthesise from Null.
                                         let mut fresh = Val::Null;
-                                        self.apply_trie(&mut fresh, inner, env, pre_batch_doc)?;
+                                        self.apply_trie(
+                                            &mut fresh,
+                                            inner,
+                                            env,
+                                            pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
+                                        )?;
                                         map.insert(Arc::clone(key), fresh);
                                     }
                                 }
@@ -2606,6 +2883,7 @@ impl VM {
                                             inner,
                                             env,
                                             pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
                                         )?;
                                     } else {
                                         // Out-of-bounds index on a `Replace` is
@@ -2626,11 +2904,23 @@ impl VM {
                         }
                         if !fields.is_empty() {
                             let mut fresh = Val::obj(IndexMap::new());
-                            self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
+                            self.apply_trie(
+                                &mut fresh,
+                                node,
+                                env,
+                                pre_batch_doc,
+                                rhs_cache.as_deref_mut(),
+                            )?;
                             *val = fresh;
                         } else {
                             let mut fresh = Val::arr(Vec::new());
-                            self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
+                            self.apply_trie(
+                                &mut fresh,
+                                node,
+                                env,
+                                pre_batch_doc,
+                                rhs_cache.as_deref_mut(),
+                            )?;
                             *val = fresh;
                         }
                         Ok(())
@@ -2681,12 +2971,16 @@ impl VM {
         i: usize,
         val: &CompiledPatchVal,
         env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
     ) -> Result<PatchResult, EvalError> {
         if i == path.len() {
             return Ok(match val {
                 CompiledPatchVal::Delete => PatchResult::Delete,
                 CompiledPatchVal::Replace(prog) => {
-                    let nv = self.exec(prog, &env.with_current(v))?;
+                    let cenv = env.with_current(v);
+                    let nv =
+                        self.eval_patch_replace(prog, &cenv, rhs_cache.as_deref_mut(), op_idx)?;
                     PatchResult::Replace(nv)
                 }
             });
@@ -2699,7 +2993,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         m.shift_remove(name.as_ref());
@@ -2718,7 +3020,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         if resolved < a.len() {
@@ -2748,7 +3058,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         if resolved < a.len() {
@@ -2770,7 +3088,15 @@ impl VM {
                 let mut write_idx = 0usize;
                 for read_idx in 0..arr.len() {
                     let item = std::mem::replace(&mut arr[read_idx], Val::Null);
-                    match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
+                    match self.apply_patch_step_compiled(
+                        item,
+                        path,
+                        i + 1,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )? {
                         PatchResult::Delete => {}
                         PatchResult::Replace(nv) => {
                             arr[write_idx] = nv;
@@ -2799,7 +3125,15 @@ impl VM {
                     };
                     env_mut.pop_lam(frame);
                     if include {
-                        match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
+                        match self.apply_patch_step_compiled(
+                            item,
+                            path,
+                            i + 1,
+                            val,
+                            env,
+                            rhs_cache.as_deref_mut(),
+                            op_idx,
+                        )? {
                             PatchResult::Delete => {}
                             PatchResult::Replace(nv) => {
                                 arr[write_idx] = nv;
@@ -2815,7 +3149,16 @@ impl VM {
                 Ok(PatchResult::Replace(Val::arr(arr)))
             }
             CompiledPathStep::Descendant(name) => {
-                let v2 = self.descend_apply_patch_compiled(v, name, path, i, val, env)?;
+                let v2 = self.descend_apply_patch_compiled(
+                    v,
+                    name,
+                    path,
+                    i,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 Ok(PatchResult::Replace(v2))
             }
         }
@@ -2831,6 +3174,8 @@ impl VM {
         i: usize,
         val: &CompiledPatchVal,
         env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
     ) -> Result<Val, EvalError> {
         match v {
             Val::Obj(m) => {
@@ -2842,15 +3187,31 @@ impl VM {
                     } else {
                         continue;
                     };
-                    let replaced =
-                        self.descend_apply_patch_compiled(child, name, path, i, val, env)?;
+                    let replaced = self.descend_apply_patch_compiled(
+                        child,
+                        name,
+                        path,
+                        i,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                     if let Some((_, slot)) = map.get_index_mut(idx) {
                         *slot = replaced;
                     }
                 }
                 if map.contains_key(name.as_ref()) {
                     let existing = map.get(name.as_ref()).cloned().unwrap_or(Val::Null);
-                    let r = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                    let r = self.apply_patch_step_compiled(
+                        existing,
+                        path,
+                        i + 1,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                     match r {
                         PatchResult::Delete => {
                             map.shift_remove(name.as_ref());
@@ -2866,7 +3227,16 @@ impl VM {
                 let mut vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                 for slot in vec.iter_mut() {
                     let old = std::mem::replace(slot, Val::Null);
-                    *slot = self.descend_apply_patch_compiled(old, name, path, i, val, env)?;
+                    *slot = self.descend_apply_patch_compiled(
+                        old,
+                        name,
+                        path,
+                        i,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                 }
                 Ok(Val::arr(vec))
             }
@@ -2876,63 +3246,55 @@ impl VM {
 
     fn descend_apply_update_selector_compiled(
         &mut self,
-        v: Val,
+        v: &mut Val,
         name: &Arc<str>,
         selector: &[CompiledPathStep],
         i: usize,
         ops: &[CompiledPatchOp],
         trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
         env: &Env,
-    ) -> Result<Val, EvalError> {
+        rhs_cache: &mut UpdateRhsCache,
+    ) -> Result<(), EvalError> {
         match v {
-            Val::Obj(m) => {
-                let mut map = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-                let n = map.len();
-                for idx in 0..n {
-                    let child = if let Some((_, v)) = map.get_index_mut(idx) {
-                        std::mem::replace(v, Val::Null)
-                    } else {
-                        continue;
+            Val::Obj(map_arc) => {
+                let map = Arc::make_mut(map_arc);
+                let mut idx = 0usize;
+                while idx < map.len() {
+                    let Some((_, child)) = map.get_index_mut(idx) else {
+                        break;
                     };
-                    let replaced = self.descend_apply_update_selector_compiled(
-                        child, name, selector, i, ops, trie, env,
+                    self.descend_apply_update_selector_compiled(
+                        child, name, selector, i, ops, trie, env, rhs_cache,
                     )?;
-                    if let Some((_, slot)) = map.get_index_mut(idx) {
-                        *slot = replaced;
-                    }
+                    idx += 1;
                 }
-                if map.contains_key(name.as_ref()) {
-                    let existing = map.get(name.as_ref()).cloned().unwrap_or(Val::Null);
-                    let r = self.apply_update_selector_compiled(
-                        existing,
+                if let Some(child) = map.get_mut(name.as_ref()) {
+                    match self.apply_update_selector_compiled(
+                        child,
                         selector,
                         i + 1,
                         ops,
                         trie,
                         env,
-                    )?;
-                    match r {
+                        rhs_cache,
+                    )? {
                         PatchResult::Delete => {
                             map.shift_remove(name.as_ref());
                         }
-                        PatchResult::Replace(nv) => {
-                            map.insert(name.clone(), nv);
-                        }
+                        PatchResult::Replace(_) => {}
                     }
                 }
-                Ok(Val::obj(map))
+                Ok(())
             }
-            Val::Arr(a) => {
-                let mut vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-                for slot in vec.iter_mut() {
-                    let old = std::mem::replace(slot, Val::Null);
-                    *slot = self.descend_apply_update_selector_compiled(
-                        old, name, selector, i, ops, trie, env,
+            Val::Arr(arr_arc) => {
+                for slot in Arc::make_mut(arr_arc).iter_mut() {
+                    self.descend_apply_update_selector_compiled(
+                        slot, name, selector, i, ops, trie, env, rhs_cache,
                     )?;
                 }
-                Ok(Val::arr(vec))
+                Ok(())
             }
-            other => Ok(other),
+            _ => Ok(()),
         }
     }
 
@@ -4590,5 +4952,33 @@ where
     match slot {
         SlotView::View(v) => SlotView::View(v.index(idx)),
         SlotView::Owned(val) => SlotView::Owned(arr_like_get(val, idx as usize)),
+    }
+}
+
+#[cfg(test)]
+mod update_rhs_cache_tests {
+    use super::program_is_update_invariant;
+    use crate::compile::compiler::Compiler;
+
+    fn compiled(src: &str) -> crate::vm::Program {
+        Compiler::compile_str(src).expect("compile")
+    }
+
+    #[test]
+    fn root_only_update_rhs_is_cacheable() {
+        let program = compiled("$.default_tag");
+        assert!(program_is_update_invariant(&program));
+    }
+
+    #[test]
+    fn current_dependent_update_rhs_is_not_cacheable() {
+        let program = compiled(r#"@.append("x")"#);
+        assert!(!program_is_update_invariant(&program));
+    }
+
+    #[test]
+    fn selected_focus_update_rhs_is_not_cacheable() {
+        let program = compiled(r#"__update_focus.tags.append($.default_tag)"#);
+        assert!(!program_is_update_invariant(&program));
     }
 }

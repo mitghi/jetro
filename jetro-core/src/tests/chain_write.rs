@@ -876,6 +876,76 @@ mod tests {
     }
 
     #[test]
+    fn functional_update_filtered_wildcard_preserves_unselected_object_arc() {
+        let mut first = IndexMap::new();
+        first.insert(Arc::<str>::from("id"), Val::Int(1));
+        first.insert(Arc::<str>::from("keep"), Val::Bool(false));
+        first.insert(
+            Arc::<str>::from("tags"),
+            Val::arr(vec![Val::Str(Arc::from("a"))]),
+        );
+        let first = Val::obj(first);
+        let first_arc = match &first {
+            Val::Obj(map) => Arc::clone(map),
+            _ => unreachable!(),
+        };
+
+        let mut second = IndexMap::new();
+        second.insert(Arc::<str>::from("id"), Val::Int(2));
+        second.insert(Arc::<str>::from("keep"), Val::Bool(true));
+        second.insert(
+            Arc::<str>::from("tags"),
+            Val::arr(vec![Val::Str(Arc::from("b"))]),
+        );
+
+        let mut root = IndexMap::new();
+        root.insert(
+            Arc::<str>::from("books"),
+            Val::arr(vec![first, Val::obj(second)]),
+        );
+
+        let program = Compiler::compile_str(
+            r#"$.books[* if keep].update({ tags: tags.append("x"), reviewed: true })"#,
+        )
+        .unwrap();
+        let mut vm = VM::new();
+        let out = vm.execute_val_raw(&program, Val::obj(root)).unwrap();
+
+        let Val::Obj(out_map) = out else {
+            panic!("expected object result");
+        };
+        let Some(Val::Arr(books)) = out_map.get("books") else {
+            panic!("expected books array");
+        };
+        let Val::Obj(out_first) = &books[0] else {
+            panic!("expected first book object");
+        };
+        assert!(Arc::ptr_eq(&first_arc, out_first));
+        assert!(matches!(books[1].get("reviewed"), Some(Val::Bool(true))));
+    }
+
+    #[test]
+    fn wildcard_filter_chain_delete_removes_selected_elements() {
+        let doc = json!({
+            "items": [
+                {"id": 1, "drop": false},
+                {"id": 2, "drop": true},
+                {"id": 3, "drop": false}
+            ]
+        });
+        let r = vm_query(r#"$.items[* if drop].delete()"#, &doc).unwrap();
+        assert_eq!(
+            r,
+            json!({
+                "items": [
+                    {"id": 1, "drop": false},
+                    {"id": 3, "drop": false}
+                ]
+            })
+        );
+    }
+
+    #[test]
     fn wildcard_chain_modify_lowers_to_patch() {
         let doc = json!({
             "books": [

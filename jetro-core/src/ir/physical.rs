@@ -437,7 +437,7 @@ impl ExecutionFacts {
             },
             PlanNode::UpdateBatch { .. } => Self {
                 contains_vm_fallback: true,
-                may_materialize_source: true,
+                may_materialize_source: false,
                 ..Self::default()
             },
             _ => Self::default(),
