@@ -2,6 +2,35 @@
 
 ## 0.5.5
 
+### Demand propagation and functional batched updates
+
+- **Demand lanes and late projection planning**. Added shared demand models
+  for scan needs and result needs, with physical-plan annotations for delayed
+  one-to-one projections. This lets chains such as
+  `$.books.filter(price > 20).map(isbn).last()` scan for the semantic winner
+  first and project only the selected result.
+- **Indexed and reverse positional demand**. Pipeline planning now propagates
+  first/last/nth/bounded-prefix demand through eligible chains and selects
+  indexed, reverse, bounded, or fallback source access from source
+  capabilities.
+- **Ordering-aware demand paths**. Added lazy ordered suffix handling for
+  safe `sort/filter/take/map/last` shapes while preserving prefix barriers
+  such as `drop_while` / `take_while`.
+- **Functional `.update({...})` batches**. Rooted writes now lower to a
+  first-class `UpdateBatch` AST / physical-plan node instead of materializing
+  one full document per write. Multi-field updates share selector traversal,
+  group static paths into an update trie, and return the full updated root
+  once.
+- **High-performance update execution**. VM update execution mutates selected
+  paths with `Arc::make_mut`, preserving untouched subtree sharing. Wildcard
+  and filtered-wildcard updates compact selected deletes correctly, and
+  invariant RHS expressions are evaluated once per batch when safe.
+- **Functional write examples**:
+  `$.books[*].update({ tags: tags.append("test"), reviewed: true })`,
+  `$.books[* if year > 1980].update({ tags: tags.append("modern") })`,
+  and root batches such as
+  `$.update({ "books[*].tags": @.append("test"), active: false })`.
+
 ### Builtin runtime fixes (limitations.md sweep)
 
 - **`.has(v)` method** — returns boolean. Previously returned the receiver
