@@ -38,13 +38,18 @@
   element by the projected value; bucket value is the original element.
   Accepts bare ident, named arg, `@`-form, `name => …` arrow, and
   `lambda x: …` shapes.
+- **`partition(pred)` tuple workflow**. `partition` returns
+  `[matching, non_matching]` and now pairs naturally with tuple `let`,
+  enabling one-pass splits such as
+  `let (active, inactive) = $.store.books.partition(active) in {...}`.
 
 ### Parser additions
 
 - **Tuple `let` binding**. `let (a, b) = expr in body` desugars at parse
   time to a synthetic ident plus indexed scalar lets — no runtime tuple
-  binding opcode. Names that collide with the synthetic prefix are
-  skipped via a counter sweep.
+  binding opcode. Tuple bindings compose with ordinary multi-let bindings,
+  and names that collide with the synthetic prefix are skipped via a
+  counter sweep.
 - **Bare-path `.field` in method args**. `$.users.filter(.active)` ≡
   `(@.active)`. The leading-dot shorthand desugars at parse time to a
   `Chain(Current, [Field(name)])` so the planner sees identical opcodes.
@@ -73,7 +78,8 @@
   `missing(...)`, multi-segment `get_path`, `dedent` common-prefix,
   `enumerate`/`pairwise` on path sources, no-arg `zip_shape`/
   `group_shape`, `partition`, `approx_count_distinct`, string-escape
-  table).
+  table), plus tuple-let regression coverage for `partition`, mixed
+  tuple/scalar lets, and synthetic-name collision avoidance.
 - Flipped four stale negative-invariant tests in `unsafe_invariants.rs`:
   `map_str_concat_*` and `zip_shape_named_and_bare` now assert correct
   output rather than `is_err()` (the underlying behavior was fixed in
