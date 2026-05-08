@@ -8,7 +8,7 @@ use crate::{
     plan::demand::PullDemand,
 };
 
-use super::{row_source, Pipeline, Position, Stage};
+use super::{row_source, Pipeline, Position, SourceAccessMode, Stage};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
@@ -24,14 +24,21 @@ pub(super) fn run(
         return run_select_many(pipeline, base_env, &recv, len, n, from_end);
     }
 
-    let idx = match demand.chain.pull {
-        PullDemand::NthInput(idx) => idx,
-        PullDemand::FirstInput(_) => 0,
-        PullDemand::LastInput(_) => len.checked_sub(1)?,
-        _ => match demand.positional? {
-            Position::First => 0,
-            Position::Last => len.checked_sub(1)?,
-        },
+    let idx = match pipeline.source_access {
+        SourceAccessMode::Indexed(idx) => idx,
+        SourceAccessMode::ForwardBounded(_) => 0,
+        SourceAccessMode::Reverse { .. } => len.checked_sub(1)?,
+        SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => {
+            match demand.chain.pull {
+                PullDemand::NthInput(idx) => idx,
+                PullDemand::FirstInput(_) => 0,
+                PullDemand::LastInput(_) => len.checked_sub(1)?,
+                _ => match demand.positional? {
+                    Position::First => 0,
+                    Position::Last => len.checked_sub(1)?,
+                },
+            }
+        }
     };
     if idx >= len {
         return Some(Ok(Val::Null));

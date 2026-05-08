@@ -55,6 +55,10 @@ impl BuiltinPipelineArity {
 /// given the `downstream` demand from the next stage and optional numeric `arg`.
 #[inline]
 pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream: Demand) -> Demand {
+    match id.method() {
+        Some(BuiltinMethod::Unknown) | None => return Demand::RESULT,
+        Some(_) => {}
+    }
     match demand_law(id) {
         BuiltinDemandLaw::Identity => downstream,
         BuiltinDemandLaw::FilterLike => Demand {
@@ -151,9 +155,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                         PullDemand::FirstInput(k) | PullDemand::UntilOutput(k) => {
                             PullDemand::FirstInput(width.saturating_add(k.saturating_sub(1)))
                         }
-                        PullDemand::NthInput(i) => {
-                            PullDemand::FirstInput(width.saturating_add(i))
-                        }
+                        PullDemand::NthInput(i) => PullDemand::FirstInput(width.saturating_add(i)),
                         PullDemand::All | PullDemand::LastInput(_) => PullDemand::All,
                     },
                     value: downstream.value.merge(ValueNeed::Whole),
@@ -178,7 +180,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         },
         BuiltinDemandLaw::Count => Demand {
             pull: PullDemand::All,
-            value: ValueNeed::None,
+            value: ValueNeed::CountOnly,
             order: false,
         },
         BuiltinDemandLaw::NumericReducer => Demand {
@@ -284,8 +286,7 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
 #[inline]
 fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
     let spec = method.spec();
-    if spec.sink.is_none() && matches!(spec.lowering, Some(BuiltinPipelineLowering::TerminalSink))
-    {
+    if spec.sink.is_none() && matches!(spec.lowering, Some(BuiltinPipelineLowering::TerminalSink)) {
         return Some(BuiltinPipelineArity::Exact(1));
     }
     let Some(sink) = spec.sink else {
@@ -470,7 +471,7 @@ mod tests {
 
         let demand = propagate_demand(count, BuiltinDemandArg::None, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
-        assert_eq!(demand.value, ValueNeed::None);
+        assert_eq!(demand.value, ValueNeed::CountOnly);
         assert!(!demand.order);
 
         let downstream = Demand {
@@ -777,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_builtin_demand_is_identity() {
+    fn unknown_builtin_demand_is_conservative_barrier() {
         let downstream = Demand {
             pull: PullDemand::FirstInput(7),
             value: ValueNeed::Predicate,
@@ -789,7 +790,7 @@ mod tests {
                 BuiltinDemandArg::None,
                 downstream
             ),
-            downstream
+            Demand::RESULT
         );
     }
 

@@ -216,15 +216,14 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
 
 /// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
 pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
-    let synth = Pipeline {
-        exec_path: super::select_exec_path(&plan.stages, &plan.sink),
-        source: Source::Receiver(Val::arr(vec![seed])),
+    let synth = PipelineBody {
         stages: plan.stages.clone(),
         stage_exprs: Vec::new(),
         sink: plan.sink.clone(),
         stage_kernels: Vec::new(),
         sink_kernels: Vec::new(),
-    };
+    }
+    .with_source(Source::Receiver(Val::arr(vec![seed])));
     synth.run(&Val::Null)
 }
 

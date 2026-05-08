@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use crate::builtins::BuiltinCall;
 use crate::data::context::EvalError;
-use crate::util::JsonView;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::plan::demand::{FieldDemand, FieldSet};
+use crate::util::JsonView;
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
 #[derive(Debug, Clone)]
@@ -159,9 +160,50 @@ impl ObjectKernel {
     pub(crate) fn eval_val(&self, item: &Val) -> Val {
         eval_object_kernel(self, |kernel| eval_native_kernel(kernel, item)).unwrap_or(Val::Null)
     }
+
+    /// Returns the source-row field payload needed to evaluate every value entry.
+    #[allow(dead_code)]
+    pub(crate) fn field_demand(&self) -> FieldDemand {
+        self.entries.iter().fold(FieldDemand::None, |need, entry| {
+            need.merge(entry.value.field_demand())
+        })
+    }
 }
 
 impl BodyKernel {
+    /// Returns the field payload needed from the current row to evaluate this kernel.
+    #[allow(dead_code)]
+    pub(crate) fn field_demand(&self) -> FieldDemand {
+        match self {
+            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) => FieldDemand::Whole,
+            Self::FieldRead(key) | Self::FieldCmpLit(key, _, _) => {
+                FieldDemand::Fields(FieldSet::single(Arc::clone(key)))
+            }
+            Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => {
+                FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
+            }
+            Self::BuiltinCall { receiver, .. } => receiver.field_demand(),
+            Self::Compose { first, then } => first.field_demand().merge(then.field_demand()),
+            Self::CmpLit { lhs, .. } => lhs.field_demand(),
+            Self::And(predicates) => predicates
+                .iter()
+                .fold(FieldDemand::None, |need, predicate| {
+                    need.merge(predicate.field_demand())
+                }),
+            Self::FString(fstring) => {
+                fstring
+                    .parts
+                    .iter()
+                    .fold(FieldDemand::None, |need, part| match part {
+                        FStringKernelPart::Lit(_) => need,
+                        FStringKernelPart::Interp(kernel) => need.merge(kernel.field_demand()),
+                    })
+            }
+            Self::Object(object) => object.field_demand(),
+            Self::ConstBool(_) | Self::Const(_) => FieldDemand::None,
+        }
+    }
+
     /// Returns `true` when this kernel references any name in `names` as a field-like access.
     pub(crate) fn mentions_any_field_like_ident(&self, names: &[Arc<str>]) -> bool {
         fn matches_name(name: &str, names: &[Arc<str>]) -> bool {
@@ -767,7 +809,10 @@ where
                 (
                     crate::builtins::BuiltinMethod::HasKey,
                     crate::builtins::BuiltinArgs::Str(key),
-                ) => view.has_key(key.as_ref()).map(Val::Bool).map(ViewKernelValue::Owned),
+                ) => view
+                    .has_key(key.as_ref())
+                    .map(Val::Bool)
+                    .map(ViewKernelValue::Owned),
                 (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
                     view.object_keys().map(ViewKernelValue::Owned)
                 }

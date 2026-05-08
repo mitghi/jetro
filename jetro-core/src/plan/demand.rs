@@ -6,12 +6,18 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 /// Describes how much of each element's content a pipeline stage actually
 /// needs to read, used to skip deserialisation or evaluation work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
     /// The stage only needs to know the element exists; payload can be skipped.
     None,
+    /// The stage only counts matching elements; payload can be skipped unless predicates need it.
+    CountOnly,
+    /// The stage only needs to know whether at least one element exists.
+    ExistsOnly,
     /// The stage evaluates a predicate and needs enough of the value to test it.
     Predicate,
     /// The stage only needs fields used by a projection.
@@ -23,6 +29,14 @@ pub enum ValueNeed {
 }
 
 impl ValueNeed {
+    /// Returns `true` when satisfying this need requires reading row payload.
+    pub(crate) fn requires_payload(self) -> bool {
+        !matches!(
+            self,
+            ValueNeed::None | ValueNeed::CountOnly | ValueNeed::ExistsOnly
+        )
+    }
+
     /// Return the stricter of two `ValueNeed` values; `Whole` dominates all others.
     pub(crate) fn merge(self, other: Self) -> Self {
         use ValueNeed::*;
@@ -31,8 +45,151 @@ impl ValueNeed {
             (Numeric, _) | (_, Numeric) => Numeric,
             (Projection, _) | (_, Projection) => Projection,
             (Predicate, _) | (_, Predicate) => Predicate,
+            (ExistsOnly, _) | (_, ExistsOnly) => ExistsOnly,
+            (CountOnly, _) | (_, CountOnly) => CountOnly,
             (None, None) => None,
         }
+    }
+}
+
+/// A rooted field path needed from an input row, e.g. `price` or `user.name`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldPath {
+    keys: Arc<[Arc<str>]>,
+}
+
+impl FieldPath {
+    /// Construct a single-key field path.
+    pub fn single(key: Arc<str>) -> Self {
+        Self {
+            keys: Arc::from([key]),
+        }
+    }
+
+    /// Construct a field path from an existing key chain.
+    pub fn chain(keys: Arc<[Arc<str>]>) -> Self {
+        Self { keys }
+    }
+
+    /// Borrow the key chain.
+    pub fn keys(&self) -> &[Arc<str>] {
+        &self.keys
+    }
+}
+
+/// Small ordered set of field paths. Insertion preserves first-seen order so diagnostics
+/// and tests remain deterministic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FieldSet {
+    paths: Vec<FieldPath>,
+}
+
+impl FieldSet {
+    /// Construct an empty field set.
+    pub fn new() -> Self {
+        Self { paths: Vec::new() }
+    }
+
+    /// Construct a field set containing one single-key path.
+    pub fn single(key: Arc<str>) -> Self {
+        let mut out = Self::new();
+        out.insert(FieldPath::single(key));
+        out
+    }
+
+    /// Construct a field set containing one field chain.
+    pub fn chain(keys: Arc<[Arc<str>]>) -> Self {
+        let mut out = Self::new();
+        out.insert(FieldPath::chain(keys));
+        out
+    }
+
+    /// Insert a path if it is not already present.
+    pub fn insert(&mut self, path: FieldPath) {
+        if !self.paths.iter().any(|existing| existing == &path) {
+            self.paths.push(path);
+        }
+    }
+
+    /// Merge all paths from `other` into `self`.
+    pub fn extend(&mut self, other: &FieldSet) {
+        for path in other.paths.iter() {
+            self.insert(path.clone());
+        }
+    }
+
+    /// Borrow all paths in deterministic order.
+    pub fn paths(&self) -> &[FieldPath] {
+        &self.paths
+    }
+
+    /// Returns `true` if the set contains no paths.
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// Precise value payload need for high-performance planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldDemand {
+    /// The row payload is not inspected.
+    None,
+    /// Only the listed field paths are inspected.
+    Fields(FieldSet),
+    /// The whole row may be inspected or materialised.
+    Whole,
+}
+
+impl FieldDemand {
+    /// Merge two field demands. `Whole` dominates; field sets are unioned.
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
+            (Self::None, need) | (need, Self::None) => need,
+            (Self::Fields(mut lhs), Self::Fields(rhs)) => {
+                lhs.extend(&rhs);
+                Self::Fields(lhs)
+            }
+        }
+    }
+
+    /// Returns `true` if no row payload is required.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// Two-lane payload demand: fields needed while scanning versus fields needed only
+/// for rows that survive selection and become output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemandLanes {
+    /// Payload needed before a row is known to be selected, e.g. filter/sort keys.
+    pub scan_need: FieldDemand,
+    /// Payload needed only for selected/emitted rows, e.g. a delayed projection.
+    pub result_need: FieldDemand,
+}
+
+impl DemandLanes {
+    /// No row payload is needed in either lane.
+    pub const NONE: Self = Self {
+        scan_need: FieldDemand::None,
+        result_need: FieldDemand::None,
+    };
+
+    /// Full output-row materialisation, with no scan-time payload requirement.
+    pub const RESULT: Self = Self {
+        scan_need: FieldDemand::None,
+        result_need: FieldDemand::Whole,
+    };
+
+    /// Merge `need` into the scan lane.
+    pub fn merge_scan(&mut self, need: FieldDemand) {
+        self.scan_need = self.scan_need.clone().merge(need);
+    }
+
+    /// Merge `need` into the result lane.
+    pub fn merge_result(&mut self, need: FieldDemand) {
+        self.result_need = self.result_need.clone().merge(need);
     }
 }
 

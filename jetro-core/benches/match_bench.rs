@@ -8,6 +8,9 @@
 //!   optimisation.
 //! - `match_range_scan`: Range-pattern dispatch over an integer array,
 //!   exercising the `RangeCheck` opcode and `val_to_f64` widening.
+//! - `demand_map_last`: Large-array late projection into `last()`.
+//! - `demand_filter_last`: Large-array selective scan into `last()`.
+//! - `demand_sort_take_map`: Sort/take/map chain with bounded ordered demand.
 //!
 //! Run with `cargo bench -p jetro-core --bench match_bench`. Each
 //! benchmark builds a fresh `Jetro` document per iteration so the
@@ -40,6 +43,22 @@ fn make_dispatch_doc() -> Vec<u8> {
         }
         let tag = tags[i % tags.len()];
         buf.push_str(&format!(r#"{{"tag":"{tag}","id":{i}}}"#));
+    }
+    buf.push_str("]}");
+    buf.into_bytes()
+}
+
+fn make_books_doc() -> Vec<u8> {
+    let mut buf = String::from(r#"{"books":["#);
+    for i in 0..20_000 {
+        if i > 0 {
+            buf.push(',');
+        }
+        let price = (i % 50) + 1;
+        let score = 20_000 - i;
+        buf.push_str(&format!(
+            r#"{{"isbn":"isbn-{i}","price":{price},"score":{score},"name":"book-{i}"}}"#
+        ));
     }
     buf.push_str("]}");
     buf.into_bytes()
@@ -103,10 +122,49 @@ fn match_range_scan(c: &mut Criterion) {
     });
 }
 
+fn demand_map_last(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("demand_map_last", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(j.collect("$.books.map(isbn).last()").expect("eval"))
+        })
+    });
+}
+
+fn demand_filter_last(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("demand_filter_last", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect("$.books.filter(price > 20).map(isbn).last()")
+                    .expect("eval"),
+            )
+        })
+    });
+}
+
+fn demand_sort_take_map(c: &mut Criterion) {
+    let doc = make_books_doc();
+    c.bench_function("demand_sort_take_map", |b| {
+        b.iter(|| {
+            let j = Jetro::from_bytes(doc.clone()).expect("parse");
+            black_box(
+                j.collect("$.books.sort(-score).take(10).map({isbn, score})")
+                    .expect("eval"),
+            )
+        })
+    });
+}
+
 criterion_group!(
     match_benches,
     match_filter_take,
     match_dispatch_5_arms,
-    match_range_scan
+    match_range_scan,
+    demand_map_last,
+    demand_filter_last,
+    demand_sort_take_map
 );
 criterion_main!(match_benches);

@@ -39,6 +39,15 @@ impl SourceCapabilities {
         materialized_fallback: true,
     };
 
+    /// Capabilities for an already materialised `Val` array source.
+    pub(crate) const MATERIALIZED_ARRAY: Self = Self {
+        forward_stream: true,
+        reverse_stream: true,
+        indexed_array_child: true,
+        tape_view: false,
+        materialized_fallback: true,
+    };
+
     /// Chooses the most direct access mode that satisfies `demand`.
     pub(crate) fn choose_access(self, demand: PullDemand) -> SourceAccessMode {
         match demand {
@@ -435,10 +444,10 @@ mod tests {
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
-        MembershipSinkTarget, NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec,
-        ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode, ViewMaterialization,
-        ViewMembershipTarget, ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
+        NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink,
+        Stage, ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+        ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -688,14 +697,12 @@ mod tests {
                 key_kernel: 0,
             })
         ));
-        assert!(
-            Sink::ArgExtreme(ArgExtremeSinkSpec {
-                want_max: false,
-                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
-            })
-            .view_capability(&[BodyKernel::Generic])
-            .is_none()
-        );
+        assert!(Sink::ArgExtreme(ArgExtremeSinkSpec {
+            want_max: false,
+            key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+        })
+        .view_capability(&[BodyKernel::Generic])
+        .is_none());
     }
 
     #[test]

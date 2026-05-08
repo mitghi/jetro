@@ -11,61 +11,7 @@ use crate::parse::ast::{
     Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
 
-use super::{BodyKernel, ReducerOp, Sink, Stage};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValueDemand {
-    // The sink does not inspect element values at all (e.g. pure count).
-    None,
-    // The sink needs the complete materialised value.
-    Whole,
-    // The sink only needs a numeric projection of each element (e.g. sum, min).
-    Numeric,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RuntimeDemand {
-    value: ValueDemand,
-    // true when the sink is sensitive to element order (Collect, Terminal)
-    order: bool,
-}
-
-fn sink_runtime_demand(sink: &Sink) -> RuntimeDemand {
-    match sink {
-        Sink::Reducer(spec) if spec.op == ReducerOp::Count => RuntimeDemand {
-            value: ValueDemand::None,
-            order: false,
-        },
-        Sink::ApproxCountDistinct => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: false,
-        },
-        Sink::Reducer(spec) if matches!(spec.op, ReducerOp::Numeric(_)) => RuntimeDemand {
-            value: ValueDemand::Numeric,
-            order: false,
-        },
-        Sink::Reducer(_) => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: false,
-        },
-        Sink::Predicate(_) => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: false,
-        },
-        Sink::Membership(_) => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: false,
-        },
-        Sink::ArgExtreme(_) => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: true,
-        },
-        Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => RuntimeDemand {
-            value: ValueDemand::Whole,
-            order: true,
-        },
-    }
-}
+use super::{ir::SinkDemand, BodyKernel, ReducerOp, Sink, Stage};
 
 /// Demand-driven symbolic optimiser: tracks the current-element expression symbolically
 /// through map stages, substitutes `@` into downstream predicates, and drops stages whose
@@ -76,7 +22,7 @@ pub(super) fn normalize_symbolic(
     kernels: &mut Vec<BodyKernel>,
     sink: &mut Sink,
 ) {
-    let demand = sink_runtime_demand(sink);
+    let demand = sink.demand();
     let in_stages = std::mem::take(stages);
     let in_exprs = std::mem::take(exprs);
     std::mem::take(kernels);
@@ -129,15 +75,15 @@ pub(super) fn normalize_symbolic(
                 out.push_stage(stage, expr);
             }
             _ if stage.is_order_only_stage() => {
-                if out.demand.order || suffix_needs_order(&in_stages[idx + 1..]) {
+                if out.requires_order() || suffix_needs_order(&in_stages[idx + 1..]) {
                     out.flush_all();
                     out.push_stage(stage, expr);
                 }
                 // stage dropped: order is not required by any downstream consumer
             }
             _ if stage.can_drop_when_value_unused()
-                && out.demand.value == ValueDemand::None
-                && !out.demand.order
+                && !out.demand.chain.value.requires_payload()
+                && !out.requires_order()
                 && !suffix_consumes_value(&in_stages[idx + 1..]) =>
             {
                 // stage dropped: value is never observed by any downstream consumer
@@ -160,14 +106,14 @@ struct SymbolicEmitter {
     item: Expr,
     // accumulated predicate to be emitted as a filter at the next non-symbolic stage
     predicate: Option<Expr>,
-    demand: RuntimeDemand,
+    demand: SinkDemand,
     out_stages: Vec<Stage>,
     out_exprs: Vec<Option<Arc<Expr>>>,
     out_kernels: Vec<BodyKernel>,
 }
 
 impl SymbolicEmitter {
-    fn new(demand: RuntimeDemand) -> Self {
+    fn new(demand: SinkDemand) -> Self {
         Self {
             item: Expr::Current,
             predicate: None,
@@ -232,11 +178,17 @@ impl SymbolicEmitter {
                 let item = simplify_expr(std::mem::replace(&mut self.item, Expr::Current));
                 spec.projection = Some(compile_stage_expr(&item));
             }
-            _ if self.demand.value == ValueDemand::Whole && !matches!(self.item, Expr::Current) => {
+            _ if self.demand.chain.value.requires_payload()
+                && !matches!(self.item, Expr::Current) =>
+            {
                 self.flush_item();
             }
             _ => {}
         }
+    }
+
+    fn requires_order(&self) -> bool {
+        self.demand.chain.order || self.demand.positional.is_some()
     }
 }
 

@@ -389,9 +389,10 @@ where
         return None;
     };
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
-        .chain
-        .pull;
+    let source_demand =
+        pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
+            .chain
+            .pull;
     let mut selected = Val::Null;
     let mut seen = false;
 
@@ -1179,8 +1180,8 @@ mod tests {
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
-        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
-        MembershipSinkTarget, PipelineBody, Sink, Stage, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
+        PipelineBody, Sink, Stage, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
     use crate::util::JsonView;
@@ -1360,6 +1361,107 @@ mod tests {
     }
 
     #[test]
+    fn view_full_runner_uses_direct_access_for_first_last_and_nth() {
+        let first_source = CountingView::root(&[1, 2, 3, 4]);
+        let first_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let first = super::run_full(first_source.clone(), &first_body)
+            .unwrap()
+            .unwrap();
+        let first_json: serde_json::Value = first.into();
+        assert_eq!(first_json, serde_json::json!(1));
+        assert_eq!(first_source.materialize_reads(), 1);
+
+        let last_source = CountingView::root(&[1, 2, 3, 4]);
+        let last_body = PipelineBody {
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::Last),
+            ..first_body
+        };
+        let last = super::run_full(last_source.clone(), &last_body)
+            .unwrap()
+            .unwrap();
+        let last_json: serde_json::Value = last.into();
+        assert_eq!(last_json, serde_json::json!(4));
+        assert_eq!(last_source.materialize_reads(), 1);
+        assert_eq!(last_source.scalar_reads(), 1);
+
+        let nth_source = CountingView::root(&[1, 2, 3, 4]);
+        let nth_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(2),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let nth = super::run_full(nth_source.clone(), &nth_body)
+            .unwrap()
+            .unwrap();
+        let nth_json: serde_json::Value = nth.into();
+        assert_eq!(nth_json, serde_json::json!(3));
+        assert_eq!(nth_source.materialize_reads(), 1);
+        assert_eq!(nth_source.scalar_reads(), 1);
+    }
+
+    #[test]
+    fn view_runner_applies_late_map_only_to_demanded_rows() {
+        let map_stage = Stage::Map(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            crate::builtins::BuiltinViewStage::Map,
+        );
+
+        let first_source = CountingView::root(&[1, 2, 3, 4]);
+        let first_body = PipelineBody {
+            stages: vec![map_stage.clone()],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+        let first = super::run_terminal_select_projection(first_source.clone(), &first_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, Val::Int(1));
+        assert_eq!(first_source.scalar_reads(), 1);
+
+        let last_source = CountingView::root(&[1, 2, 3, 4]);
+        let last_body = PipelineBody {
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::Last),
+            ..first_body
+        };
+        let last = super::run_terminal_select_projection(last_source.clone(), &last_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(last, Val::Int(4));
+        assert_eq!(last_source.scalar_reads(), 2);
+
+        let take_source = CountingView::root(&[1, 2, 3, 4]);
+        let take_body = PipelineBody {
+            stages: vec![
+                map_stage,
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let take = super::run_terminal_collect(take_source.clone(), &take_body)
+            .unwrap()
+            .unwrap();
+        let take_json: serde_json::Value = take.into();
+        assert_eq!(take_json, serde_json::json!([1, 2, 3]));
+        assert_eq!(take_source.scalar_reads(), 3);
+    }
+
+    #[test]
     fn view_full_runner_handles_literal_membership_sinks_without_materializing_scalars() {
         let includes_source = CountingView::root(&[1, 2, 3, 4]);
         let includes_body = PipelineBody {
@@ -1437,9 +1539,10 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let includes = super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env))
-            .unwrap()
-            .unwrap();
+        let includes =
+            super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env))
+                .unwrap()
+                .unwrap();
         assert_eq!(includes, Val::Bool(true));
         assert_eq!(includes_source.materialize_reads(), 0);
         assert_eq!(includes_source.scalar_reads(), 3);
