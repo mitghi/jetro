@@ -142,6 +142,21 @@ pub fn missing_apply(recv: &Val, key: &str) -> Val {
     Val::Bool(!crate::util::field_exists_nested(recv, key))
 }
 
+/// Returns the subset of `keys` not present (or null) at any nesting level
+/// inside `recv`, as a `Val::Arr<Str>`. This is the variadic form of
+/// `missing` documented for required-field checks:
+/// `$.config.missing("host", "port")` → `["host"]` if only `host` is
+/// absent. Empty input → empty array; all keys present → empty array.
+#[inline]
+pub fn missing_many_apply(recv: &Val, keys: &[Arc<str>]) -> Val {
+    let out: Vec<Val> = keys
+        .iter()
+        .filter(|k| !crate::util::field_exists_nested(recv, k.as_ref()))
+        .map(|k| Val::Str(k.clone()))
+        .collect();
+    Val::arr(out)
+}
+
 /// Membership test: arrays/vectors check element presence, strings check substring, objects check key.
 #[inline]
 pub fn includes_apply(recv: &Val, item: &Val) -> Val {

@@ -27,22 +27,34 @@ pub(crate) struct PickSpec {
     pub source: PickSource,
 }
 
-/// Parses a dot/bracket path string (e.g. `"a.b[0].c"`) into a `Vec<PathSeg>`.
+/// Parses a dot/slash/bracket path string (e.g. `"a.b[0].c"`,
+/// `"users/0/name"`, or mixed `"users/0.name"`) into a `Vec<PathSeg>`.
+/// Both `.` and `/` act as field separators; `[idx]` is index access.
+/// Numeric segments between separators (`users/0/name`) parse as integer
+/// indices when the surrounding container is an array, otherwise as
+/// field names — disambiguation happens at traversal time, so the path
+/// parser stays uniform.
 pub(crate) fn parse_path_segs(path: &str) -> Vec<PathSeg> {
     let mut segs = Vec::new();
     let mut cur = String::new();
+    let push_field = |segs: &mut Vec<PathSeg>, cur: &mut String| {
+        if !cur.is_empty() {
+            // Numeric segment → array index. `users/0/name` walks
+            // `users[0].name`. Mixed-form paths still work.
+            if let Ok(n) = cur.parse::<i64>() {
+                segs.push(PathSeg::Index(n));
+            } else {
+                segs.push(PathSeg::Field(std::mem::take(cur)));
+            }
+            cur.clear();
+        }
+    };
     let mut chars = path.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '.' => {
-                if !cur.is_empty() {
-                    segs.push(PathSeg::Field(std::mem::take(&mut cur)));
-                }
-            }
+            '.' | '/' => push_field(&mut segs, &mut cur),
             '[' => {
-                if !cur.is_empty() {
-                    segs.push(PathSeg::Field(std::mem::take(&mut cur)));
-                }
+                push_field(&mut segs, &mut cur);
                 let mut idx = String::new();
                 for c2 in chars.by_ref() {
                     if c2 == ']' {
@@ -55,9 +67,7 @@ pub(crate) fn parse_path_segs(path: &str) -> Vec<PathSeg> {
             _ => cur.push(c),
         }
     }
-    if !cur.is_empty() {
-        segs.push(PathSeg::Field(cur));
-    }
+    push_field(&mut segs, &mut cur);
     segs
 }
 
@@ -213,12 +223,42 @@ pub fn has_path_apply(recv: &Val, path: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
-/// Returns `Val::Bool(true)` when the object has a top-level key named `key`.
+/// Returns `Val::Bool(true)` when the receiver contains the given needle.
+///
+/// Semantics by receiver kind:
+/// - `Val::Obj` / `Val::ObjSmall`: top-level key lookup (`key` is the
+///   needle).
+/// - `Val::Arr` / `Val::IntVec` / `Val::FloatVec` / `Val::StrVec` /
+///   `Val::StrSliceVec`: membership — `Bool(true)` iff some element
+///   equals the needle parsed against its element type.
+/// - `Val::Str` / `Val::StrSlice`: substring containment.
+/// - other: `None` (caller falls back to receiver-passthrough).
 #[inline]
 pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     let found = match recv {
         Val::Obj(m) => m.contains_key(key),
         Val::ObjSmall(pairs) => pairs.iter().any(|(k, _)| k.as_ref() == key),
+        Val::Arr(a) => {
+            // Compare element-wise against `key` interpreted as a string;
+            // numeric or bool elements are coerced to their string form
+            // for comparison so `[1,2,3].has("2")` works the same as a
+            // string array would.
+            a.iter().any(|item| match item {
+                Val::Str(s) => s.as_ref() == key,
+                Val::StrSlice(s) => s.as_str() == key,
+                Val::Int(n) => n.to_string() == key,
+                Val::Float(f) => f.to_string() == key,
+                Val::Bool(b) => (if *b { "true" } else { "false" }) == key,
+                Val::Null => key == "null",
+                _ => false,
+            })
+        }
+        Val::IntVec(a) => a.iter().any(|n| n.to_string() == key),
+        Val::FloatVec(a) => a.iter().any(|f| f.to_string() == key),
+        Val::StrVec(a) => a.iter().any(|s| s.as_ref() == key),
+        Val::StrSliceVec(a) => a.iter().any(|s| s.as_str() == key),
+        Val::Str(s) => s.contains(key),
+        Val::StrSlice(s) => s.as_str().contains(key),
         _ => return None,
     };
     Some(Val::Bool(found))

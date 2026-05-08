@@ -1345,7 +1345,7 @@ impl VM {
             
             
             match call.name.as_ref() {
-                "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
+                "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" | "now" => {
                     return crate::data::runtime::eval_global_compiled(self, call, env);
                 }
                 _ => {}
@@ -2131,6 +2131,13 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Partition => {
+                // `partition(pred)` — split into `[matching, non-matching]`
+                // tuple. The previous implementation returned an object
+                // `{true: [...], false: [...]}` which broke chained
+                // patterns like `xs.partition(p).map(([a, b]) => ...)`.
+                // Tuple form mirrors Python's `partition`-style return,
+                // matches the book's documented signature, and integrates
+                // cleanly with array-pattern destructure in lambdas.
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
                 let items = recv
                     .into_vec()
@@ -2138,10 +2145,7 @@ impl VM {
                 let (yes, no) = crate::builtins::partition_apply(items, |item| {
                     self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
                 })?;
-                let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(2);
-                m.insert(Arc::from("true"), Val::arr(yes));
-                m.insert(Arc::from("false"), Val::arr(no));
-                Ok(Val::obj(m))
+                Ok(Val::arr(vec![Val::arr(yes), Val::arr(no)]))
             }
             BuiltinMethod::TransformKeys => {
                 let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
@@ -2235,6 +2239,37 @@ impl VM {
             }
             BuiltinMethod::Pivot => call_builtin_method_compiled(self, recv, call, env),
             BuiltinMethod::Update => {
+                // Two callable shapes:
+                //   - `xs.update(fn)` (1-arg) — apply `fn` to receiver, return
+                //     the lambda's result. (Pre-existing behavior.)
+                //   - `doc.update(path, fn)` (2-arg) — read the value at
+                //     `path`, apply `fn` to it, write the transformed value
+                //     back to `doc[path]`. Path uses dot/slash notation
+                //     resolved through `get_path` / `set_path`.
+                if call.orig_args.len() == 2 {
+                    // arg[0] is the path expression; eval to a string.
+                    let path_val = crate::data::runtime::eval_compiled_arg(
+                        self,
+                        call,
+                        &call.orig_args[0],
+                        env,
+                    )?;
+                    let path: Arc<str> = match path_val {
+                        Val::Str(s) => s,
+                        Val::StrSlice(s) => Arc::from(s.as_str()),
+                        other => Arc::from(crate::util::val_to_string(&other).as_str()),
+                    };
+                    // arg[1] is the lambda; sub_progs[1] is the compiled body.
+                    let lam = call
+                        .sub_progs
+                        .get(1)
+                        .ok_or_else(|| EvalError("update: requires lambda".into()))?;
+                    let current = crate::builtins::get_path_apply(&recv, path.as_ref())
+                        .unwrap_or(Val::Null);
+                    let updated = self.exec_lam_body(lam, &current, lam_param, env)?;
+                    return crate::builtins::set_path_apply(&recv, path.as_ref(), &updated)
+                        .ok_or_else(|| EvalError("update: set_path failed".into()));
+                }
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
                 self.exec_lam_body(lam, &recv, lam_param, env)
             }

@@ -1280,8 +1280,13 @@ fn parse_literal(pair: Pair<Rule>) -> Expr {
         Rule::lit_str => {
             let s = inner.into_inner().next().unwrap();
             let raw = s.as_str();
-            // Strip surrounding quote characters (always single or double quote).
-            Expr::Str(raw[1..raw.len() - 1].to_string())
+            // Strip surrounding quote characters and process backslash
+            // escapes (`\n`, `\t`, `\r`, `\\`, `\"`, `\'`, `\0`, `\xNN`,
+            // `\uXXXX`). Pre-fix this was raw passthrough — `"a\nb"`
+            // became the literal 4-char string `a\nb`, breaking
+            // every method that operates on real newlines (lines,
+            // dedent, indent, words, regex with `\n`, etc.).
+            Expr::Str(unescape_str_lit(&raw[1..raw.len() - 1]))
         }
         r => panic!("unexpected literal rule: {:?}", r),
     }
@@ -1557,6 +1562,66 @@ fn parse_comp_vars(pair: Pair<Rule>) -> Vec<String> {
         .filter(|p| p.as_rule() == Rule::ident)
         .map(|p| p.as_str().to_string())
         .collect()
+}
+
+/// Process backslash escapes inside a string literal body (the contents
+/// between matching quotes, *not* including the quotes themselves).
+/// Recognised escapes: `\n`, `\r`, `\t`, `\0`, `\\`, `\"`, `\'`, `\xNN`
+/// (two hex digits → byte), `\uXXXX` (four hex digits → Unicode code
+/// point). An unrecognised escape sequence is preserved literally
+/// (e.g. `\d` stays `\d`) so regex patterns that pass through string
+/// literals continue to work.
+fn unescape_str_lit(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'\\' || i + 1 >= bytes.len() {
+            out.push(b as char);
+            i += 1;
+            continue;
+        }
+        let next = bytes[i + 1];
+        match next {
+            b'n' => { out.push('\n'); i += 2; }
+            b'r' => { out.push('\r'); i += 2; }
+            b't' => { out.push('\t'); i += 2; }
+            b'0' => { out.push('\0'); i += 2; }
+            b'\\' => { out.push('\\'); i += 2; }
+            b'"' => { out.push('"'); i += 2; }
+            b'\'' => { out.push('\''); i += 2; }
+            b'x' if i + 3 < bytes.len() => {
+                let hex = &s[i + 2..i + 4];
+                if let Ok(n) = u8::from_str_radix(hex, 16) {
+                    out.push(n as char);
+                    i += 4;
+                } else {
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+            b'u' if i + 5 < bytes.len() => {
+                let hex = &s[i + 2..i + 6];
+                if let Ok(n) = u32::from_str_radix(hex, 16) {
+                    if let Some(c) = char::from_u32(n) {
+                        out.push(c);
+                        i += 6;
+                        continue;
+                    }
+                }
+                out.push('\\');
+                i += 1;
+            }
+            // Unknown escape: keep the backslash + next char literal so
+            // regex patterns (`\d`, `\w`, `\s`) survive intact.
+            _ => {
+                out.push('\\');
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Conjoin a sequence of `if` clauses with logical `and`. Returns `None`

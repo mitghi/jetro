@@ -2,6 +2,59 @@
 
 ## 0.5.5
 
+### Builtin runtime fixes (limitations.md sweep)
+
+- **`.has(v)` method** — returns boolean. Previously returned the receiver
+  unchanged on arrays and `[true]`/`[false]` (single-element wrap) on
+  objects. Spec moved off `scalar_native_element_spec`'s `.element()`
+  marker; runtime extended to handle arrays, vectors, strings.
+- **`.remove(pred)`** — predicate body is now evaluated. The dispatch
+  previously matched only `Expr::Lambda`; `@`-form predicates fell
+  through to value-equality. Routes any expression that references
+  `Expr::Current` to the predicate path.
+- **`missing(...keys)`** — variadic returns the array of absent keys.
+  Single-key form keeps the legacy boolean. New `missing_many_apply`
+  helper.
+- **`update(path, fn)`** — two-arg form reads via `get_path`, applies
+  `fn`, writes back via `set_path`. The 1-arg form (single-lambda)
+  preserves prior behavior.
+- **`get_path("a/b/c")` / `has_path` / `del_path` / `set_path`** — slash
+  separator now joins to dot/bracket forms. Numeric segments parse as
+  array indices (`users/0/name` walks `users[0].name`).
+- **`dedent()`** — strips common leading whitespace per line. Backed by
+  the new string-literal escape processing (see Parser below).
+- **`now()`** — top-level builtin returning Unix-millis via
+  `eval_global_compiled`.
+- **`.enumerate()` and `.pairwise()` on path sources** — both removed
+  `.element()` from their specs so the streaming pipeline stops wrapping
+  the result and discarding the structural pairing.
+- **`.zip_shape()` / `.group_shape()`** — no-arg forms wired:
+  - `zip_shape()` over an object-of-arrays interleaves to an array of
+    objects (parallel-array → row form).
+  - `group_shape()` over an array of objects buckets by sorted-key-set.
+- **`.partition(pred)`** — returns `[matching, non-matching]` tuple
+  (was object `{true, false}`). Pairs with array-pattern destructure
+  in lambdas and indexing (`partition(p)[0]`).
+- **`.approx_count_distinct()`** — HLL backend with 14-bit precision
+  (M=16384 registers, ~16 KiB state, ≈0.81% RSE). Linear-counting
+  correction makes small inputs exact. Hash via `DefaultHasher`
+  (SipHash) for stable avalanche on small string keys.
+
+### Parser
+
+- **String-literal escapes**: `\n`, `\r`, `\t`, `\0`, `\\`, `\"`, `\'`,
+  `\xNN`, `\uXXXX` are now processed during parse. Unknown escapes
+  pass through untouched (`\d`, `\w`, `\s` → regex patterns continue
+  to work). Pre-fix the parser was raw passthrough — `"a\nb".lines()`
+  saw 4 chars `a\nb` instead of `a` `\n` `b`, so any builtin that
+  inspected newlines (lines, dedent, indent, words) silently
+  misbehaved.
+
+### Tests
+
+40 new tests in `tests::v0_5_5_quickfixes` (HLL, escapes, runtime
+fixes). Total: 1285 lib tests pass.
+
 ### Grammar
 
 - **Wildcard `[*]`**. Mid-chain expansion: `$.items[*].x.set(0)` lowers to

@@ -735,7 +735,10 @@ mod tests {
             BuiltinMethod::IsNumeric,
             BuiltinMethod::Abs,
             BuiltinMethod::ParseInt,
-            BuiltinMethod::Has,
+            // `Has` was previously element-wise but the streaming pipeline
+            // wrapped its boolean result into `[true]`. Spec is now whole-
+            // input scalar (not element-wise) — no wrap, no element-wise
+            // vectorisation. Same for `Keys` / `Values` / `Entries`.
             BuiltinMethod::HasKey,
             BuiltinMethod::Lines,
             BuiltinMethod::GetPath,

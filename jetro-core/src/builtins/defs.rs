@@ -622,6 +622,14 @@ impl Builtin for Count {
 }
 
 /// HyperLogLog-style approximate distinct count.
+///
+/// Backed by a register-array HyperLogLog estimator with 14-bit precision
+/// (≈16 KiB state). Hashes each element via `val_to_key` + 64-bit FNV; the
+/// algorithm is the canonical small-range corrected HLL, matching the
+/// classic Flajolet et al. error bound (~1.04 / sqrt(2^14) ≈ 0.81% RSE).
+/// Returns `Val::Int(estimate)`. For small arrays (< 16 distinct values)
+/// the linear-counting correction makes the estimate exact, so simple
+/// inputs converge to the same answer as `.unique().count()`.
 pub(crate) struct ApproxCountDistinct;
 impl Builtin for ApproxCountDistinct {
     const METHOD: BuiltinMethod = BuiltinMethod::ApproxCountDistinct;
@@ -634,6 +642,11 @@ impl Builtin for ApproxCountDistinct {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::KeyedReducer)
             .lowering(BuiltinPipelineLowering::TerminalSink)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        let items = recv.as_vals()?;
+        Some(crate::data::value::Val::Int(super::hll_count_distinct(&items) as i64))
     }
 }
 
@@ -822,7 +835,11 @@ impl Builtin for MinBy {
 
 // ── Indexed/element-only streaming ───────────────────────────────────────────
 
-/// `enumerate` — pairs each element with its index; element-wise.
+/// `enumerate` — pairs each element with its index. Operates on the
+/// whole receiver array as one unit; NOT marked `.element()` because the
+/// streaming pipeline would otherwise treat the receiver as a 1-element
+/// stream and discard the pairing (visible as `[items]` not `[{index,
+/// value}, ...]`).
 pub(crate) struct Enumerate;
 impl Builtin for Enumerate {
     const METHOD: BuiltinMethod = BuiltinMethod::Enumerate;
@@ -831,7 +848,6 @@ impl Builtin for Enumerate {
         BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
             .indexed()
             .cost(10.0)
-            .element()
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -839,7 +855,10 @@ impl Builtin for Enumerate {
     }
 }
 
-/// `pairwise` — yields adjacent pairs; element-wise indexed.
+/// `pairwise` — yields adjacent pairs as `[a, b]` tuples. Like
+/// `enumerate`, NOT marked `.element()` because the streaming pipeline
+/// would treat the receiver as a 1-element stream and discard the pair
+/// formation, returning the bare array instead of `[[a,b], ...]`.
 pub(crate) struct Pairwise;
 impl Builtin for Pairwise {
     const METHOD: BuiltinMethod = BuiltinMethod::Pairwise;
@@ -848,7 +867,6 @@ impl Builtin for Pairwise {
         BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
             .indexed()
             .cost(10.0)
-            .element()
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -1107,12 +1125,20 @@ impl Builtin for Sort {
     }
 }
 
-/// `group_shape` — barrier returning per-shape buckets.
+/// `group_shape()` — bucket an array of objects by their structural key
+/// set (sorted, comma-joined). Output is `{shape_key: [items]}` with
+/// first-occurrence order preserved. The 2-arg form `group_shape(key,
+/// shape)` (key projection + per-group shape transform) dispatches via
+/// the lambda-method runtime path.
 pub(crate) struct GroupShape;
 impl Builtin for GroupShape {
     const METHOD: BuiltinMethod = BuiltinMethod::GroupShape;
     const NAME: &'static str = "group_shape";
     fn spec() -> BuiltinSpec { barrier_default_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        super::group_shape_by_keys_apply(recv.clone())
+    }
 }
 
 /// `partition` — splits stream by predicate; barrier.
@@ -1629,12 +1655,23 @@ impl Builtin for Fanout {
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
 }
 
-/// `zip_shape(...)` — shape-preserving zip.
+/// `zip_shape(...)` — two callable shapes:
+///
+/// - **No-arg, object receiver**: parallel-array interleave. Receiver is
+///   `{k1: arr1, k2: arr2, ...}`; output is an array of objects, one per
+///   index, with each key holding `arr_i[index]`. Non-array values are
+///   broadcast to every row. Output length = min array length.
+/// - **Named-args, any receiver**: build an object `{name0: expr0(recv),
+///   name1: expr1(recv), ...}` (legacy form, dispatched separately).
 pub(crate) struct ZipShape;
 impl Builtin for ZipShape {
     const METHOD: BuiltinMethod = BuiltinMethod::ZipShape;
     const NAME: &'static str = "zip_shape";
     fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        super::zip_shape_obj_apply(recv)
+    }
 }
 
 // ── Object operations ────────────────────────────────────────────────────────
@@ -2720,16 +2757,24 @@ impl Builtin for IndicesOf {
     }
 }
 
-/// `missing` — sentinel for missing key/path.
+/// `missing(...keys)` — variadic key-existence audit. With one key,
+/// returns `Bool(true)` iff the key is absent (legacy form). With one or
+/// more keys passed as a string list, returns `Val::Arr<Str>` containing
+/// the subset of keys that are absent or null. Empty input → `[]`; all
+/// keys present → `[]`.
 pub(crate) struct Missing;
 impl Builtin for Missing {
     const METHOD: BuiltinMethod = BuiltinMethod::Missing;
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(key) => Some(super::missing_apply(recv, key)),
+            super::BuiltinArgs::StrVec(keys) => Some(super::missing_many_apply(recv, keys)),
             _ => None,
         }
     }
@@ -2926,7 +2971,6 @@ macro_rules! str_arg_scalar_native {
 }
 
 str_arg_scalar_native! {
-    Has, "has", has_apply;
     StripPrefix, "strip_prefix", strip_prefix_apply;
     StripSuffix, "strip_suffix", strip_suffix_apply;
     Scan, "scan", scan_apply;
@@ -2934,6 +2978,36 @@ str_arg_scalar_native! {
     ReMatchFirst, "match_first", re_match_first_apply;
     ReMatchAll, "match_all", re_match_all_apply;
     ReCaptures, "captures", re_captures_apply;
+}
+
+/// `has(key)` — scalar membership test. Object: key existence. Array:
+/// element-wise equality. String: substring. Returns `Val::Bool` always.
+/// Spec is non-element so the pipeline does not wrap the boolean result
+/// in a single-element array (was the cause of `$.o.has("a")` →
+/// `[true]`).
+pub(crate) struct Has;
+impl Builtin for Has {
+    const METHOD: BuiltinMethod = BuiltinMethod::Has;
+    const NAME: &'static str = "has";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(p) => super::has_apply(recv, p),
+            super::BuiltinArgs::Val(v) => {
+                let key = crate::util::val_to_key(v);
+                super::has_apply(recv, &key)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// `has_key(key)` — object key existence test with a view/tape-native backend.

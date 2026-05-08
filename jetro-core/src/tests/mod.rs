@@ -42,3 +42,5 @@ mod strslice_arith;
 mod entries_wrap;
 #[cfg(test)]
 mod builtin_migrations;
+#[cfg(test)]
+mod v0_5_5_quickfixes;

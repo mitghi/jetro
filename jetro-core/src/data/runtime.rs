@@ -160,6 +160,16 @@ pub(crate) fn eval_global_compiled(
             }
             crate::builtins::range_apply(&nums)
         }
+        // `now()` — current Unix time in milliseconds. No-arg builtin. Used
+        // for timestamp stamping in patches: `last_seen: now()`.
+        "now" if args.is_empty() => {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            Ok(crate::data::value::Val::Int(ms))
+        }
         other => if !args.is_empty() {
             let recv = eval_compiled_arg_at(vm, call, 0, env)?;
             call_builtin_method_compiled(vm, recv, call, env)
