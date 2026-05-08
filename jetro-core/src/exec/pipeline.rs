@@ -1504,6 +1504,14 @@ mod tests {
                 "$.rows.filter(price > 20).map(isbn).last()",
             ),
             (
+                "$.rows.filter(price > 20).map(isbn).first(2)",
+                "$.rows.filter(price > 20).map(isbn).first(2)",
+            ),
+            (
+                "$.rows.filter(price > 20).map(isbn).last(2)",
+                "$.rows.filter(price > 20).map(isbn).last(2)",
+            ),
+            (
                 "$.rows.map(price).filter(@ > 20).last()",
                 "$.rows.map(price).filter(@ > 20).last()",
             ),
