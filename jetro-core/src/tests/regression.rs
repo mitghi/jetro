@@ -1467,7 +1467,7 @@ mod tests {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
-        let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _)));
+        let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _, _)));
         assert!(
             has_slice,
             "sort+[0:n] should still emit GetSlice in opcode path"

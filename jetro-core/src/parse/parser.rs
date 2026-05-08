@@ -701,10 +701,53 @@ fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
             other => steps.push(other),
         }
     }
+    // Wildcard expansion. Mid-chain `[*]` (e.g. `$.items[*].x`) means
+    // "iterate the receiver and apply the rest of the chain per element".
+    // Rewrite the chain so subsequent steps are pushed inside a `.map(@ +
+    // rest)` lambda. End-of-chain `[*]` is dropped (identity over array).
+    //
+    // Done before write classification so chain-writes like
+    // `$.xs[*].field.set(v)` are seen as `$.xs.map(@.field.set(v))` (which
+    // the planner can broadcast through `patch_fusion`).
+    let steps = expand_wildcards(steps);
     if let Some(rewritten) = classify_chain_write(&base, &steps) {
         return rewritten;
     }
     base.maybe_chain(steps)
+}
+
+/// Rewrite mid-chain `Step::Wildcard` into an equivalent `.map(@ + rest)`
+/// method call. Trailing wildcards (with no further steps) collapse to
+/// nothing: `$.xs[*]` is equivalent to `$.xs`.
+fn expand_wildcards(steps: Vec<Step>) -> Vec<Step> {
+    // Fast path: no wildcards present.
+    if !steps.iter().any(|s| matches!(s, Step::Wildcard)) {
+        return steps;
+    }
+    let mut out: Vec<Step> = Vec::with_capacity(steps.len());
+    let mut iter = steps.into_iter().peekable();
+    while let Some(step) = iter.next() {
+        if matches!(step, Step::Wildcard) {
+            // Collect remaining steps. Recursively expand any further
+            // wildcards in the rest so `xs[*].ys[*].x` is supported.
+            let rest: Vec<Step> = iter.by_ref().collect();
+            if rest.is_empty() {
+                // Trailing `[*]` is identity over the array.
+                break;
+            }
+            let rest = expand_wildcards(rest);
+            // Build `Lambda(@ -> Chain(@, rest))` as the map argument.
+            let body = Expr::Chain(Box::new(Expr::Current), rest);
+            let lam = Expr::Lambda {
+                params: vec!["@".to_string()],
+                body: Box::new(body),
+            };
+            out.push(Step::Method("map".to_string(), vec![Arg::Pos(lam)]));
+            return out;
+        }
+        out.push(step);
+    }
+    out
 }
 
 
@@ -982,25 +1025,43 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
     }
 }
 
-/// Parse a bracket access expression (`[n]`, `[a:b]`, `[a:]`, `[:b]`, or a
-/// dynamic expression `[expr]`) into the appropriate `Step` variant.
+/// Parse a bracket access expression into the appropriate `Step`. Forms:
+///
+/// - `[n]` → `Step::Index(n)`
+/// - `[a:b]`, `[a:]`, `[:b]` → `Step::Slice(_, _, None)` (step defaults to 1)
+/// - `[a:b:s]`, `[::s]`, `[a::s]`, `[:b:s]` → `Step::Slice(_, _, Some(s))`
+/// - `[*]` → `Step::Wildcard`
+/// - `[expr]` → `Step::DynIndex(expr)`
 fn parse_bracket(pair: Pair<Rule>) -> Step {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::idx_only => Step::Index(inner.as_str().parse().unwrap()),
+        Rule::wildcard => Step::Wildcard,
         Rule::slice_full => {
             let mut i = inner.into_inner();
             let a = i.next().unwrap().as_str().parse().ok();
             let b = i.next().unwrap().as_str().parse().ok();
-            Step::Slice(a, b)
+            Step::Slice(a, b, None)
         }
         Rule::slice_from => {
             let a = inner.into_inner().next().unwrap().as_str().parse().ok();
-            Step::Slice(a, None)
+            Step::Slice(a, None, None)
         }
         Rule::slice_to => {
             let b = inner.into_inner().next().unwrap().as_str().parse().ok();
-            Step::Slice(None, b)
+            Step::Slice(None, b, None)
+        }
+        Rule::slice_step => {
+            // The grammar produces 0-3 `idx_val` children; missing positions
+            // are absent in the inner iterator. Walk text-position aware via
+            // a 3-slot accumulator parsed from the literal source.
+            let s = inner.as_str();
+            // Split on ':' in the raw literal — preserves positional missing-ness.
+            let mut parts = s.split(':');
+            let a = parts.next().and_then(|p| p.parse().ok());
+            let b = parts.next().and_then(|p| p.parse().ok());
+            let st = parts.next().and_then(|p| p.parse().ok());
+            Step::Slice(a, b, st)
         }
         Rule::expr => Step::DynIndex(Box::new(parse_expr(inner))),
         r => panic!("unexpected bracket rule: {:?}", r),
@@ -1340,38 +1401,145 @@ fn parse_let(pair: Pair<Rule>) -> Expr {
 }
 
 
+/// Parsed lambda parameter: either a single identifier or an `[a, b, ...]`
+/// array-pattern destructure. Used internally by `parse_lambda` /
+/// `parse_arrow_lambda` to desugar destructure params into
+/// `synthetic_name + chained let-bindings` before constructing
+/// `Expr::Lambda`.
+enum LambdaPatParam {
+    Ident(String),
+    /// `[a, b, ...]` — bind each name to the indexed element of the
+    /// receiver. Stored as the list of names in source order.
+    Array(Vec<String>),
+}
+
+/// Walk a `lambda_params` / `arrow_params` pair and collect each child as
+/// either an identifier or an array-pattern.
+fn collect_lambda_params(params_pair: Pair<Rule>) -> Vec<LambdaPatParam> {
+    let mut out = Vec::new();
+    for p in params_pair.into_inner() {
+        match p.as_rule() {
+            Rule::ident => out.push(LambdaPatParam::Ident(p.as_str().to_string())),
+            Rule::lambda_param => {
+                // The `lambda_param` rule wraps either an `ident` or a
+                // `lambda_array_pat`. Unwrap one level.
+                let inner = p.into_inner().next().unwrap();
+                match inner.as_rule() {
+                    Rule::ident => out.push(LambdaPatParam::Ident(inner.as_str().to_string())),
+                    Rule::lambda_array_pat => {
+                        let names: Vec<String> = inner
+                            .into_inner()
+                            .filter(|q| q.as_rule() == Rule::ident)
+                            .map(|q| q.as_str().to_string())
+                            .collect();
+                        out.push(LambdaPatParam::Array(names));
+                    }
+                    _ => {}
+                }
+            }
+            Rule::lambda_array_pat => {
+                let names: Vec<String> = p
+                    .into_inner()
+                    .filter(|q| q.as_rule() == Rule::ident)
+                    .map(|q| q.as_str().to_string())
+                    .collect();
+                out.push(LambdaPatParam::Array(names));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Lower a `[a, b, ...]` array-pattern into a synthetic ident plus a chain
+/// of `let` bindings indexing the synthetic. Returns the synthetic name and
+/// a function that wraps a body expression in the destructuring lets.
+///
+/// `__lampat_N` reuses the same naming scheme everywhere; the synthetic
+/// shadows nothing user-visible since identifiers starting with `__` are
+/// reserved.
+fn synth_destructure(
+    counter: &mut u32,
+    pat: Vec<String>,
+) -> (String, Box<dyn FnOnce(Expr) -> Expr>) {
+    let id = format!("__lampat_{}", *counter);
+    *counter += 1;
+    let synth = id.clone();
+    let wrap: Box<dyn FnOnce(Expr) -> Expr> = Box::new(move |body| {
+        // Build nested Let from innermost outward: rightmost name is the
+        // innermost binding. Walk pat in reverse so the leftmost binding
+        // ends up outermost (so name-shadowing matches source order).
+        pat.into_iter().enumerate().rev().fold(body, |acc, (i, name)| {
+            // `let name = synth[i] in acc`
+            let index = Expr::Chain(
+                Box::new(Expr::Ident(synth.clone())),
+                vec![Step::Index(i as i64)],
+            );
+            Expr::Let {
+                name,
+                init: Box::new(index),
+                body: Box::new(acc),
+            }
+        })
+    });
+    (id, wrap)
+}
+
+/// Lower a list of `LambdaPatParam` to (final param-name list, body wrapper).
+/// Identifier params pass through; array-pattern params get synthetic names
+/// and contribute let-binding wrappers.
+fn lower_lambda_params(
+    params: Vec<LambdaPatParam>,
+) -> (Vec<String>, Box<dyn FnOnce(Expr) -> Expr>) {
+    let mut names = Vec::with_capacity(params.len());
+    let mut wrappers: Vec<Box<dyn FnOnce(Expr) -> Expr>> = Vec::new();
+    let mut counter: u32 = 0;
+    for p in params {
+        match p {
+            LambdaPatParam::Ident(n) => names.push(n),
+            LambdaPatParam::Array(pat) => {
+                let (synth, wrap) = synth_destructure(&mut counter, pat);
+                names.push(synth);
+                wrappers.push(wrap);
+            }
+        }
+    }
+    let body_wrap: Box<dyn FnOnce(Expr) -> Expr> = Box::new(move |body| {
+        // Apply outermost-first so leftmost destructure is outer let.
+        wrappers
+            .into_iter()
+            .rev()
+            .fold(body, |acc, w| w(acc))
+    });
+    (names, body_wrap)
+}
+
 /// Parse a `lambda params body` expression (keyword-form lambda) into
-/// `Expr::Lambda`, collecting parameter identifiers before the body.
+/// `Expr::Lambda`. Array-pattern parameters are desugared via
+/// `lower_lambda_params`.
 fn parse_lambda(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner().filter(|p| p.as_rule() != Rule::kw_lambda);
     let params_pair = inner.next().unwrap();
-    let params: Vec<String> = params_pair
-        .into_inner()
-        .filter(|p| p.as_rule() == Rule::ident)
-        .map(|p| p.as_str().to_string())
-        .collect();
+    let raw = collect_lambda_params(params_pair);
+    let (params, wrap) = lower_lambda_params(raw);
     let body = parse_expr(inner.next().unwrap());
     Expr::Lambda {
         params,
-        body: Box::new(body),
+        body: Box::new(wrap(body)),
     }
 }
-
 
 /// Parse an arrow-lambda expression (`(params) => body`) into `Expr::Lambda`,
 /// using the same representation as keyword-form lambdas.
 fn parse_arrow_lambda(pair: Pair<Rule>) -> Expr {
     let mut inner = pair.into_inner();
     let params_pair = inner.next().unwrap();
-    let params: Vec<String> = params_pair
-        .into_inner()
-        .filter(|p| p.as_rule() == Rule::ident)
-        .map(|p| p.as_str().to_string())
-        .collect();
+    let raw = collect_lambda_params(params_pair);
+    let (params, wrap) = lower_lambda_params(raw);
     let body = parse_expr(inner.next().unwrap());
     Expr::Lambda {
         params,
-        body: Box::new(body),
+        body: Box::new(wrap(body)),
     }
 }
 
@@ -1558,11 +1726,12 @@ fn parse_obj_field(pair: Pair<Rule>) -> ObjField {
 }
 
 /// Extract the string key from an `obj_key_expr` pair, unwrapping either a
-/// bare identifier or a quoted string literal.
+/// loose identifier (which permits reserved keywords like `kind` in key
+/// position) or a quoted string literal.
 fn obj_key_str(pair: Pair<Rule>) -> String {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::ident => inner.as_str().to_string(),
+        Rule::ident | Rule::loose_ident => inner.as_str().to_string(),
         Rule::lit_str => {
             let s = inner.into_inner().next().unwrap();
             let raw = s.as_str();

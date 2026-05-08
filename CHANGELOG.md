@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.5
+
+### Grammar
+
+- **Wildcard `[*]`**. Mid-chain expansion: `$.items[*].x.set(0)` lowers to
+  `$.items.map(@.x.set(0))`. Trailing `[*]` is identity over the array.
+  Read-context only — no special runtime opcode.
+- **Slice with step**: `[a:b:c]`, `[::n]`, `[::-1]` (reverse).
+  `Step::Slice(a, b, step)`; `step == None | Some(1)` keeps the existing
+  step-1 fast path. Negative step walks backward.
+- **Lambda array-pattern destructure**: `([k, v]) => body` desugars to a
+  synthetic param plus chained `let` bindings. Both arrow and `lambda`
+  keyword forms accept the new pattern.
+- **Reserved keywords as object/pattern keys**: `{kind: "click"}` now
+  parses (in object literals and `match` arm patterns). New
+  `loose_ident` rule used in key positions only — `is kind` operator
+  unchanged.
+
+### Runtime
+
+- **`Val::StrSlice + Val::Str` string concat**. Path-rooted concat
+  (`$.user.first + "-" + $.user.last`) and f-string interpolation across
+  borrowed slices both now produce the joined string. Numeric and
+  array-concat hot paths unchanged.
+- **`entries()` / `keys()` / `values()` triple-wrap fix**. Removing
+  `.element()` from `object_element_spec` stops the streaming pipeline
+  from wrapping these whole-object results into single-element arrays.
+  `$.o.entries()` is now `[[k,v], …]` instead of `[[[k,v], …]]`.
+  Restores `group_by().entries()` and `count_by().entries()` to their
+  documented shapes.
+- **`rec` fixpoint** uses deep structural equality (new
+  `vals_deep_eq`), not the scalar-only `vals_eq`. Object and array
+  inputs converge in 1–2 iterations instead of looping to the 10000
+  ceiling.
+
+### Builtins
+
+- **`parse_int(radix)`**. Accepts radices 2–36, strips `0x` / `0b` /
+  `0o` prefix when matching base. No-arg form unchanged (base-10).
+- **`to_csv(headers)` / `to_tsv(headers)`**. Optional headers array
+  drives explicit column order with a header line emitted first.
+  Missing keys produce empty cells. No-arg paths unchanged.
+- **`accumulate(init, fn)`**. Two-arg fold variant: explicit initial
+  accumulator, one output per input. The single-arg form
+  (`accumulate(fn)` — seed from `items[0]`) and IntVec/FloatVec
+  specialised binop paths preserved.
+
+### Tests
+
+92 new tests across 4 files: `tests::grammar_extensions` (38),
+`tests::strslice_arith` (10), `tests::entries_wrap` (17),
+`tests::builtin_migrations` (27). Total: 1245 lib tests pass.
+
+### Bench
+
+`cargo bench -p jetro-core --bench match_bench -- --baseline pre-fix14`:
+no regression > 2%; `match_range_scan` -3.6% improved.
+
 ## 0.5.4
 
 ### Grammar fix

@@ -635,7 +635,14 @@ impl Compiler {
             Step::DescendAll => ops.push(Opcode::DescendAll),
             Step::Index(i) => ops.push(Opcode::GetIndex(*i)),
             Step::DynIndex(e) => ops.push(Opcode::DynIndex(Arc::new(Self::compile_sub(e, ctx)))),
-            Step::Slice(a, b) => ops.push(Opcode::GetSlice(*a, *b)),
+            Step::Slice(a, b, s) => ops.push(Opcode::GetSlice(*a, *b, *s)),
+            Step::Wildcard => {
+                // No-op in read context: receiver is already the array (or
+                // a stream of elements from a prior pipeline stage). Down-
+                // stream stages iterate as usual. This is sugar for jq
+                // parity (`.xs[*]` ≡ `.xs`) and a chain marker that the
+                // patch lowering recognises for broadcast writes.
+            }
             Step::Method(name, method_args) => {
                 let call = Self::compile_call(name, method_args, ctx);
                 ops.push(Opcode::CallMethod(Arc::new(call)));

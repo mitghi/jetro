@@ -2588,6 +2588,20 @@ where
         | BuiltinMethod::DeepMerge
         | BuiltinMethod::Defaults
         | BuiltinMethod::Rename => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
+        BuiltinMethod::ParseInt if !args.is_empty() => {
+            // `parse_int(radix)` — package the radix as a `Usize` so the
+            // trait dispatch in `BuiltinCall::apply_args` (defs::ParseInt)
+            // picks it up. Falls through to base-10 no-arg form when the
+            // arg is missing.
+            let radix = i64_arg!(0)?;
+            BuiltinCall::new(method, BuiltinArgs::Usize(radix.max(0) as usize))
+        }
+        BuiltinMethod::ToCsv | BuiltinMethod::ToTsv if !args.is_empty() => {
+            // `to_csv(headers)` / `to_tsv(headers)` — headers must be a
+            // string array; package as `BuiltinArgs::StrVec`.
+            let headers = str_vec_arg!(0)?;
+            BuiltinCall::new(method, BuiltinArgs::StrVec(headers))
+        }
         BuiltinMethod::Remove => match args.first() {
             Some(Arg::Pos(Expr::Lambda { .. })) | Some(Arg::Named(_, Expr::Lambda { .. })) => {
                 return remove_predicate_apply(recv, |item| eval_item(item, &args[0]));

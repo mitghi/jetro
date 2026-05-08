@@ -168,6 +168,63 @@ pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
     }
 }
 
+/// Like `csv_emit` but with a caller-provided header set. The first emitted
+/// row is the header (joined with `sep`), and every data row projects each
+/// header in order from the row's object (missing keys become empty cells).
+/// Non-object rows fall through to `csv_cell` per element of the header set
+/// (positional alignment).
+pub(crate) fn csv_emit_with_headers(val: &Val, sep: &str, headers: &[std::sync::Arc<str>]) -> String {
+    let mut out = String::new();
+    // Header line.
+    let mut first = true;
+    for h in headers {
+        if !first {
+            out.push_str(sep);
+        }
+        first = false;
+        out.push_str(&csv_cell_str(h.as_ref(), sep));
+    }
+    // Body.
+    let push_row = |out: &mut String, row: &Val| {
+        out.push('\n');
+        let mut first = true;
+        for h in headers {
+            if !first {
+                out.push_str(sep);
+            }
+            first = false;
+            let cell = match row {
+                Val::Obj(m) => m
+                    .get(h.as_ref())
+                    .map(|c| csv_cell(c, sep))
+                    .unwrap_or_default(),
+                _ => csv_cell(row, sep),
+            };
+            out.push_str(&cell);
+        }
+    };
+    match val {
+        Val::Arr(rows) => {
+            for row in rows.iter() {
+                push_row(&mut out, row);
+            }
+        }
+        single => push_row(&mut out, single),
+    }
+    out
+}
+
+#[inline]
+fn csv_cell_str(s: &str, sep: &str) -> String {
+    let needs_quote =
+        s.contains('\n') || s.contains('"') || s.contains(sep);
+    if !needs_quote {
+        return s.to_string();
+    }
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{}\"", escaped)
+}
+
 // Per-thread cache that maps pattern strings to compiled `Regex` objects,
 // avoiding repeated compilation for the same pattern across builtin calls.
 thread_local! {

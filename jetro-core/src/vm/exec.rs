@@ -695,9 +695,9 @@ impl VM {
                         _ => Val::Null,
                     });
                 }
-                Opcode::GetSlice(from, to) => {
+                Opcode::GetSlice(from, to, step) => {
                     let v = pop!(stack);
-                    stack.push(exec_slice(v, *from, *to));
+                    stack.push(exec_slice(v, *from, *to, *step));
                 }
                 Opcode::OptField(k) => {
                     let v = pop!(stack);
@@ -1923,16 +1923,62 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
-                
-                
-                let lam_body =
-                    sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
-                let (p1, p2) = match call.orig_args.first() {
+                // Two callable shapes:
+                //   - `xs.accumulate((a, x) => ...)` — single-arg form: the
+                //     accumulator is seeded from `items[0]`.
+                //   - `xs.accumulate(init, (a, x) => ...)` — two-arg form:
+                //     the first arg is an initial accumulator value, the
+                //     second is the binary lambda.
+                //
+                // The pre-existing fast paths (specialised binops over
+                // IntVec / FloatVec) only fire for the single-arg form;
+                // the two-arg form falls through to the generic lambda
+                // loop with `running = Some(init)` from the start so it
+                // correctly emits one output per input element.
+                let (init_val, lam_idx, lam_arg_idx) = match call.orig_args.len() {
+                    1 => (None, 0usize, 0usize),
+                    2 => {
+                        // Evaluate the init expression in the outer env.
+                        let init = match call.orig_args.first() {
+                            Some(arg) => crate::data::runtime::eval_compiled_arg(self, call, arg, env)?,
+                            None => Val::Null,
+                        };
+                        (Some(init), 1usize, 1usize)
+                    }
+                    _ => return call_builtin_method_compiled(self, recv, call, env),
+                };
+                let lam_body = call
+                    .sub_progs
+                    .get(lam_idx)
+                    .ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
+                let (p1, p2) = match call.orig_args.get(lam_arg_idx) {
                     Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                         (params[0].as_str(), params[1].as_str())
                     }
                     _ => return call_builtin_method_compiled(self, recv, call, env),
                 };
+                // The two-arg form skips the IntVec/FloatVec specialised
+                // paths because they implicitly seed `acc` from items[0]
+                // — a different semantic from explicit init. Fall straight
+                // to the generic lambda loop in that case.
+                if init_val.is_some() {
+                    let items = recv
+                        .into_vec()
+                        .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
+                    let mut out = Vec::with_capacity(items.len());
+                    let mut running = init_val;
+                    for item in items {
+                        let acc = running.take().unwrap_or(Val::Null);
+                        let f1 = scratch.push_lam(Some(p1), acc);
+                        let f2 = scratch.push_lam(Some(p2), item);
+                        let r = self.exec(lam_body, &scratch)?;
+                        scratch.pop_lam(f2);
+                        scratch.pop_lam(f1);
+                        out.push(r.clone());
+                        running = Some(r);
+                    }
+                    return Ok(Val::arr(out));
+                }
                 if call
                     .orig_args
                     .iter()
@@ -3433,7 +3479,74 @@ fn is_first_selector_op(op: &Opcode) -> bool {
 
 /// Slice an array or typed vector, resolving optional start/end indices with
 /// Python-style negative-index semantics and clamping to valid bounds.
-fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
+fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>, step: Option<i64>) -> Val {
+    // Hot path: step is None or Some(1). Match prior behavior exactly,
+    // forwarding to the same Arc::try_unwrap → range-copy path.
+    let step = step.unwrap_or(1);
+    if step == 1 {
+        return exec_slice_step1(v, from, to);
+    }
+    if step == 0 {
+        return Val::Null;
+    }
+    // Generic step path. For positive `step`, walk forward from `start` to
+    // `end` taking every `step`-th element. For negative `step`, walk
+    // backward from `start` (defaulting to len-1) to `end` (defaulting to
+    // -1, i.e. before index 0).
+    fn collect<T: Clone>(items: &[T], from: Option<i64>, to: Option<i64>, step: i64) -> Vec<T> {
+        let len = items.len() as i64;
+        if step > 0 {
+            let s = resolve_idx(from.unwrap_or(0), len) as i64;
+            let e = resolve_idx(to.unwrap_or(len), len) as i64;
+            let mut i = s;
+            let mut out = Vec::new();
+            while i < e && (i as usize) < items.len() {
+                out.push(items[i as usize].clone());
+                i += step;
+            }
+            out
+        } else {
+            // Negative step. Start defaults to len-1; end defaults to -1
+            // (sentinel meaning "before zero"). Negative bounds count from
+            // the end as in Python.
+            let s_raw = from.unwrap_or(len - 1);
+            let s = if s_raw < 0 { (len + s_raw).max(-1) } else { s_raw.min(len - 1) };
+            let e_raw = to.unwrap_or(-1);
+            let e = if e_raw < 0 && e_raw != -1 {
+                (len + e_raw).max(-1)
+            } else if e_raw == -1 && to.is_none() {
+                -1
+            } else {
+                e_raw
+            };
+            let mut i = s;
+            let mut out = Vec::new();
+            while i > e && i >= 0 {
+                out.push(items[i as usize].clone());
+                i += step;
+            }
+            out
+        }
+    }
+    match v {
+        Val::Arr(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::arr(collect(&items, from, to, step))
+        }
+        Val::IntVec(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::int_vec(collect(&items, from, to, step))
+        }
+        Val::FloatVec(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::float_vec(collect(&items, from, to, step))
+        }
+        _ => Val::Null,
+    }
+}
+
+/// Step-1 slice (the original implementation, preserved as a hot-path branch).
+fn exec_slice_step1(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     match v {
         Val::Arr(a) => {
             let len = a.len() as i64;

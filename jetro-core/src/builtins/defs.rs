@@ -1641,12 +1641,16 @@ impl Builtin for ZipShape {
 
 #[inline]
 fn object_element_spec() -> BuiltinSpec {
+    // Note: NOT marked `.element()`. Methods that share this spec (`keys`,
+    // `values`, `entries`) take a single object and produce a single array
+    // — they are not per-element vectorisable. Marking them element-wise
+    // caused the streaming pipeline to wrap their already-array result in
+    // an outer `Val::Arr`, producing the `[[pairs]]` triple-wrap bug.
     BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
         .view_scalar()
         .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .lowering(BuiltinPipelineLowering::Nullary)
-        .element()
 }
 
 /// `keys` — extract keys of an object (element-wise).
@@ -2193,7 +2197,8 @@ fn serialization_spec() -> BuiltinSpec {
         .cost(20.0)
 }
 
-/// `to_csv()` — CSV serialiser.
+/// `to_csv(headers?)` — CSV serialiser. Optional header-array argument
+/// drives explicit column ordering with the headers as the first row.
 pub(crate) struct ToCsv;
 impl Builtin for ToCsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToCsv;
@@ -2203,9 +2208,19 @@ impl Builtin for ToCsv {
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_csv_apply(recv).unwrap_or_else(|| recv.clone()))
     }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        if let super::BuiltinArgs::StrVec(headers) = args {
+            return super::to_csv_with_headers_apply(recv, headers);
+        }
+        None
+    }
 }
 
-/// `to_tsv()` — TSV serialiser.
+/// `to_tsv(headers?)` — TSV serialiser. Same header semantics as `to_csv`.
 pub(crate) struct ToTsv;
 impl Builtin for ToTsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToTsv;
@@ -2214,6 +2229,16 @@ impl Builtin for ToTsv {
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_tsv_apply(recv).unwrap_or_else(|| recv.clone()))
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        if let super::BuiltinArgs::StrVec(headers) = args {
+            return super::to_tsv_with_headers_apply(recv, headers);
+        }
+        None
     }
 }
 
@@ -2445,7 +2470,6 @@ scalar_native_element! {
     KebabCase => KebabCase, "kebab_case", apply: kebab_case_apply;
     CamelCase => CamelCase, "camel_case", apply: camel_case_apply;
     PascalCase => PascalCase, "pascal_case", apply: pascal_case_apply;
-    ParseInt => ParseInt, "parse_int", apply: parse_int_apply;
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
@@ -2453,6 +2477,57 @@ scalar_native_element! {
     ToString => ToString, "to_string", apply: to_string_apply;
     ToJson => ToJson, "to_json", apply: to_json_apply;
     Dedent => Dedent, "dedent", apply: dedent_apply;
+}
+
+/// `parse_int(radix)` — string → integer with optional radix (2–36).
+/// Strips a leading `0b` / `0x` for binary / hex when the radix matches,
+/// so both `"0xff".parse_int(16)` and `"ff".parse_int(16)` produce 255.
+/// No-arg form is base 10.
+pub(crate) struct ParseInt;
+impl Builtin for ParseInt {
+    const METHOD: BuiltinMethod = BuiltinMethod::ParseInt;
+    const NAME: &'static str = "parse_int";
+    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        Some(super::parse_int_apply(recv).unwrap_or_else(|| recv.clone()))
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        // Radix arrives via the static-args decoder as `BuiltinArgs::Usize`
+        // for a positive integer literal, or via `BuiltinArgs::I64` if
+        // the parser took a different path. Anything else falls through
+        // to the no-arg `apply_one` semantics (decoder hands us a base-10
+        // parse).
+        let radix: u32 = match args {
+            super::BuiltinArgs::Usize(n) => *n as u32,
+            super::BuiltinArgs::I64(n) if *n > 0 => *n as u32,
+            super::BuiltinArgs::None => return None,
+            _ => return None,
+        };
+        if !(2..=36).contains(&radix) {
+            return Some(crate::data::value::Val::Null);
+        }
+        super::ops::string::map_str_val(recv, |s| {
+            let cleaned = strip_radix_prefix(s.trim(), radix);
+            i64::from_str_radix(cleaned, radix)
+                .map(crate::data::value::Val::Int)
+                .unwrap_or(crate::data::value::Val::Null)
+        })
+    }
+}
+
+#[inline]
+fn strip_radix_prefix(s: &str, radix: u32) -> &str {
+    match radix {
+        16 => s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s),
+        2 => s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")).unwrap_or(s),
+        8 => s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")).unwrap_or(s),
+        _ => s,
+    }
 }
 
 scalar_view_scalar_element! {

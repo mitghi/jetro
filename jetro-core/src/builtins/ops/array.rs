@@ -768,9 +768,13 @@ pub fn rec_apply<F>(mut recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(Val) -> Result<Val, EvalError>,
 {
+    // Use deep structural equality so fixed-point detection works for
+    // object and array inputs — the original `vals_eq` is scalar-only,
+    // returning false for any two compound values and pushing every
+    // recursive transform to the 10 000-iter ceiling.
     for _ in 0..10_000 {
         let next = eval(recv.clone())?;
-        if crate::util::vals_eq(&recv, &next) {
+        if crate::util::vals_deep_eq(&recv, &next) {
             return Ok(next);
         }
         recv = next;

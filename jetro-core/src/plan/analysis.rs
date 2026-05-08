@@ -284,7 +284,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
             pop1!();
             stack.push(AbstractVal::UNKNOWN);
         }
-        Opcode::GetSlice(_, _) => {
+        Opcode::GetSlice(_, _, _) => {
             pop1!();
             stack.push(AbstractVal::array());
         }

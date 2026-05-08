@@ -8,11 +8,29 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
+/// `to_csv(headers)` — explicit header-driven CSV emission. The first line
+/// is the header row; each subsequent line projects the listed headers
+/// from each object row in order. Missing keys produce empty cells.
+#[inline]
+pub fn to_csv_with_headers_apply(recv: &Val, headers: &[Arc<str>]) -> Option<Val> {
+    Some(Val::Str(Arc::from(
+        crate::builtins::helpers::csv_emit_with_headers(recv, ",", headers).as_str(),
+    )))
+}
+
 /// Serialises an array of arrays/objects to TSV format (tab-delimited).
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
         crate::builtins::helpers::csv_emit(recv, "\t").as_str(),
+    )))
+}
+
+/// `to_tsv(headers)` — TSV variant of `to_csv_with_headers_apply`.
+#[inline]
+pub fn to_tsv_with_headers_apply(recv: &Val, headers: &[Arc<str>]) -> Option<Val> {
+    Some(Val::Str(Arc::from(
+        crate::builtins::helpers::csv_emit_with_headers(recv, "\t", headers).as_str(),
     )))
 }
 

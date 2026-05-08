@@ -388,8 +388,14 @@ pub enum Step {
     Index(i64),
     /// `[expr]` — runtime-computed index; `expr` is evaluated as a key or integer.
     DynIndex(Box<Expr>),
-    /// `[start:end]` — array slice; either bound may be absent (open range).
-    Slice(Option<i64>, Option<i64>),
+    /// `[start:end]` or `[start:end:step]` — array slice. Any of the three
+    /// fields may be absent (open range / default step). Negative indices
+    /// count from the end; negative step traverses in reverse.
+    Slice(Option<i64>, Option<i64>, Option<i64>),
+    /// `[*]` — wildcard. In read context this is a no-op (the receiver is
+    /// already the array; downstream stages iterate as usual). In a chained
+    /// patch context (`xs[*].field.set(v)`) it marks the broadcast level.
+    Wildcard,
     /// `.method(args…)` — method call dispatched through the builtin / custom registry.
     Method(String, Vec<Arg>),
     /// `.method?(args…)` — optional method call; errors become null.

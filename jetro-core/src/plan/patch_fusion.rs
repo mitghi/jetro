@@ -484,7 +484,8 @@ impl EffectAnalyzer {
             | Step::Descendant(_)
             | Step::DescendAll
             | Step::Index(_)
-            | Step::Slice(_, _)
+            | Step::Slice(_, _, _)
+            | Step::Wildcard
             | Step::Quantifier(_) => EffectSummary::default(),
             Step::DynIndex(e) | Step::InlineFilter(e) => self.visit(e),
             Step::Method(_, args) | Step::OptMethod(_, args) => {

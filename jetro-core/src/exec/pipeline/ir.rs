@@ -1097,7 +1097,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::LoadIdent(_)
         | Opcode::GetField(_)
         | Opcode::GetIndex(_)
-        | Opcode::GetSlice(_, _)
+        | Opcode::GetSlice(_, _, _)
         | Opcode::OptField(_)
         | Opcode::Descendant(_)
         | Opcode::DescendAll

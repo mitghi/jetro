@@ -265,8 +265,18 @@ fn decode_method_chain(
                     &mut sink,
                 )?;
             }
-            Step::Slice(start, end) => {
+            Step::Slice(start, end, step) => {
+                // Pipeline lowering only handles step-1 slices today. Step
+                // != 1 falls back to interpreted path (returns `None` to
+                // signal "lower me elsewhere").
+                if step.unwrap_or(1) != 1 {
+                    return None;
+                }
                 push_path_slice_stages(*start, *end, &mut stages, &mut stage_exprs)?;
+            }
+            Step::Wildcard => {
+                // Wildcard `[*]` is a no-op pass-through in pipeline form;
+                // upstream already produced the array element stream.
             }
             _ => return None,
         }

@@ -203,8 +203,10 @@ pub enum Opcode {
     GetField(Arc<str>),
     /// Pop an array/string, push element at the given index; negative indices count from end.
     GetIndex(i64),
-    /// Pop an array, push a sub-slice between the optional start and end indices.
-    GetSlice(Option<i64>, Option<i64>),
+    /// Pop an array, push a sub-slice between the optional start and end
+    /// indices, with an optional `step`. `step == None` and `step == Some(1)`
+    /// take the existing step-1 fast path; other values walk explicitly.
+    GetSlice(Option<i64>, Option<i64>, Option<i64>),
     /// Pop a container; evaluate the inner program to get a key, then index into the container.
     DynIndex(Arc<Program>),
     /// Like `GetField` but propagates `null` receivers silently instead of erroring.

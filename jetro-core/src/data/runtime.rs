@@ -179,7 +179,7 @@ fn arg_index(args: &[Arg], needle: &Arg) -> Option<usize> {
 /// Evaluate `arg` against the current environment, preferring the pre-compiled
 /// sub-program stored in `call` when the argument is part of the original call
 /// and falling back to a fresh `Compiler::compile` for synthetic arguments.
-fn eval_compiled_arg(
+pub(crate) fn eval_compiled_arg(
     vm: &mut VM,
     call: &CompiledCall,
     arg: &Arg,
