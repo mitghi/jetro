@@ -8,8 +8,8 @@
 use serde_json::Value;
 
 use crate::data::context::EvalError;
-use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::exec::interpreted as physical_eval;
+use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::plan::physical as planner;
 use crate::{with_vm, Jetro, VM};
 
@@ -80,15 +80,15 @@ mod tests {
 
     use serde_json::json;
 
+    use crate::data::value::Val;
+    use crate::exec::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::ir::physical::QueryRoot;
     use crate::ir::physical::{
         BackendPlan, BackendPreference, BackendSet, ExecutionFacts, NodeId, PhysicalArrayElem,
         PhysicalChainStep, PhysicalNode, PhysicalObjField, PhysicalPathStep, PipelinePlanSource,
         PlanNode, QueryPlan,
     };
-    use crate::exec::pipeline::{BodyKernel, NumOp, ReducerOp, Sink, Stage};
     use crate::plan::physical as planner;
-    use crate::data::value::Val;
     use crate::{Jetro, JetroEngine};
 
     fn assert_no_vm_fallback(plan: &crate::ir::physical::QueryPlan, id: NodeId) {
@@ -167,6 +167,7 @@ mod tests {
                 assert_no_vm_fallback(plan, *init);
                 assert_no_vm_fallback(plan, *body);
             }
+            PlanNode::UpdateBatch { .. } => panic!("unexpected update fallback in physical plan"),
         }
     }
 

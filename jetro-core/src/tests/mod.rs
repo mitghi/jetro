@@ -30,3 +30,17 @@ mod regression;
 mod dyn_index_lambda;
 #[cfg(test)]
 mod lambda_forms;
+#[cfg(test)]
+mod neq_grammar;
+#[cfg(test)]
+mod comprehensions;
+#[cfg(test)]
+mod grammar_extensions;
+#[cfg(test)]
+mod strslice_arith;
+#[cfg(test)]
+mod entries_wrap;
+#[cfg(test)]
+mod builtin_migrations;
+#[cfg(test)]
+mod v0_5_5_quickfixes;

@@ -8,11 +8,12 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{BinOp, KindType};
 use crate::builtins::BuiltinCall;
+use crate::data::value::Val;
 use crate::exec::pipeline::PipelineBody;
 use crate::exec::structural::StructuralPlan;
-use crate::data::value::Val;
+use crate::parse::ast::{BinOp, KindType, PatchOp, PathStep};
+use crate::plan::update::{UpdateDependencySummary, UpdateTriePlan};
 use crate::vm::Program;
 
 /// Compiled query plan: a DAG of `PhysicalNode`s plus a root selector.
@@ -211,6 +212,25 @@ pub enum PlanNode {
         init: NodeId,
         /// The body expression evaluated with `name` in scope.
         body: NodeId,
+    },
+    /// Functional batched update with planner-visible selector and relative writes.
+    ///
+    /// The current executor uses `fallback` through the interpreted backend,
+    /// while the selector/update shape remains available for future trie and
+    /// dependency planning.
+    UpdateBatch {
+        /// Root document/value being updated.
+        root: NodeId,
+        /// Selector path locating each updated subtree.
+        selector: Vec<PathStep>,
+        /// Ordered relative update operations.
+        ops: Vec<PatchOp>,
+        /// Coarse dependency facts for selecting native update strategies.
+        dependencies: UpdateDependencySummary,
+        /// Planner-visible grouping of relative write paths by shared prefix.
+        trie: UpdateTriePlan,
+        /// Compatibility program implementing the exact current semantics.
+        fallback: Arc<Program>,
     },
     /// Direct VM bytecode execution for expressions that no other path could lower.
     Vm(Arc<Program>),
@@ -415,6 +435,11 @@ impl ExecutionFacts {
                 contains_vm_fallback: true,
                 ..Self::default()
             },
+            PlanNode::UpdateBatch { .. } => Self {
+                contains_vm_fallback: true,
+                may_materialize_source: false,
+                ..Self::default()
+            },
             _ => Self::default(),
         }
     }
@@ -571,6 +596,7 @@ impl PlanNode {
                 BackendPreference::FastChildren,
                 BackendPreference::Interpreted,
             ],
+            Self::UpdateBatch { .. } => &[BackendPreference::Interpreted],
             _ => &[BackendPreference::Interpreted],
         }
     }

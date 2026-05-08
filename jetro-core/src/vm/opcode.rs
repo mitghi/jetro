@@ -16,9 +16,8 @@ use std::{
 
 use indexmap::IndexMap;
 
-use crate::parse::ast::*;
 pub use crate::builtins::BuiltinMethod;
-
+use crate::parse::ast::*;
 
 /// A method call compiled into a `CallMethod` opcode. Lambda/arg bodies are
 /// pre-compiled into `sub_progs` exactly once at compile time so the inner
@@ -43,7 +42,6 @@ pub struct CompiledCall {
     /// When set, `filter`/`map` may stop early after collecting this many results.
     pub demand_max_keep: Option<usize>,
 }
-
 
 /// A field entry inside a `MakeObj` opcode. `Short` is the fast path for
 /// `{name}` shorthand — reads from `current` using an inline-cache hint;
@@ -94,7 +92,6 @@ pub enum CompiledObjEntry {
     SpreadDeep(Arc<Program>),
 }
 
-
 /// A single traversal step in a `KvPath` entry, representing either a named
 /// field access or an integer index into an array.
 #[derive(Debug, Clone)]
@@ -104,7 +101,6 @@ pub enum KvStep {
     /// Access an array element; negative values count from the end.
     Index(i64),
 }
-
 
 /// A single segment of a compiled format-string (`f"..."`).
 /// Segments alternate between literal text and interpolated expressions.
@@ -121,7 +117,6 @@ pub enum CompiledFSPart {
     },
 }
 
-
 /// Specifies the destructuring pattern for an object bind step in a pipeline
 /// (`... | {a, b, ...rest} -> ...`).
 #[derive(Debug, Clone)]
@@ -131,7 +126,6 @@ pub struct BindObjSpec {
     /// If present, remaining fields are collected into this variable as an object.
     pub rest: Option<Arc<str>>,
 }
-
 
 /// A single compiled step inside a `PipelineRun` opcode. Each step either
 /// transforms the current pipeline value or captures it into named variables.
@@ -146,7 +140,6 @@ pub enum CompiledPipeStep {
     /// Destructure the current array value into positional variables by index.
     BindArr(Arc<[Arc<str>]>),
 }
-
 
 /// Compiled specification for a list, set, or generator comprehension
 /// (`[expr for vars in iter if cond]`).
@@ -178,7 +171,6 @@ pub struct DictCompSpec {
     pub cond: Option<Arc<Program>>,
 }
 
-
 /// Single instruction in a compiled `Program`. The VM executes a flat
 /// `Arc<[Opcode]>` slice iteratively; no per-opcode stack frames.
 #[derive(Debug, Clone)]
@@ -203,8 +195,10 @@ pub enum Opcode {
     GetField(Arc<str>),
     /// Pop an array/string, push element at the given index; negative indices count from end.
     GetIndex(i64),
-    /// Pop an array, push a sub-slice between the optional start and end indices.
-    GetSlice(Option<i64>, Option<i64>),
+    /// Pop an array, push a sub-slice between the optional start and end
+    /// indices, with an optional `step`. `step == None` and `step == Some(1)`
+    /// take the existing step-1 fast path; other values walk explicitly.
+    GetSlice(Option<i64>, Option<i64>, Option<i64>),
     /// Pop a container; evaluate the inner program to get a key, then index into the container.
     DynIndex(Arc<Program>),
     /// Like `GetField` but propagates `null` receivers silently instead of erroring.
@@ -351,6 +345,8 @@ pub enum Opcode {
 
     /// Execute a compiled patch expression (`.set`, `.modify`, `.delete`, `.unset`).
     PatchEval(Arc<CompiledPatch>),
+    /// Execute a compiled functional update batch.
+    UpdateBatchEval(Arc<CompiledUpdateBatch>),
 
     /// Guard that fires when a `DELETE` sentinel reaches execution outside a patch context.
     DeleteMarkErr,
@@ -636,7 +632,6 @@ pub enum MatchOp {
     },
 }
 
-
 /// A compiled, immutable bytecode program. Shared between the compile cache and
 /// the path-resolution cache via `Arc`; cloning is O(1).
 #[derive(Debug, Clone)]
@@ -657,7 +652,6 @@ pub struct Program {
     pub ics: Arc<[AtomicU64]>,
 }
 
-
 /// A compiled `patch` expression: a root document program plus a list of
 /// individual field-mutation operations applied in order.
 ///
@@ -676,6 +670,33 @@ pub struct CompiledPatch {
     /// `None` after build means the op set is not trie-eligible and the
     /// per-op fallback should always be used.
     pub trie: OnceLock<Option<CompiledPatchTrie>>,
+}
+
+/// A compiled functional update batch: evaluate `root_prog`, select zero or
+/// more target subtrees via `selector`, then apply the ordered relative `ops`
+/// to each selected snapshot.
+#[derive(Debug)]
+pub struct CompiledUpdateBatch {
+    /// Program that yields the base document to update.
+    pub root_prog: Arc<Program>,
+    /// Selector path locating each updated subtree.
+    pub selector: Vec<CompiledPathStep>,
+    /// Ordered relative update operations applied to every selected subtree.
+    pub ops: Vec<CompiledPatchOp>,
+    /// Lazily-built trie for the relative operations, reused for every
+    /// selected subtree when the op set is trie-eligible.
+    pub trie: OnceLock<Option<CompiledPatchTrie>>,
+}
+
+impl Clone for CompiledUpdateBatch {
+    fn clone(&self) -> Self {
+        Self {
+            root_prog: Arc::clone(&self.root_prog),
+            selector: self.selector.clone(),
+            ops: self.ops.clone(),
+            trie: OnceLock::new(),
+        }
+    }
 }
 
 impl Clone for CompiledPatch {
@@ -729,7 +750,6 @@ pub enum CompiledPathStep {
     Descendant(Arc<str>),
 }
 
-
 /// Phase D: a path-trie that batches multi-op patches into a single tree-walk.
 /// Sibling writes share their parent's `Arc::make_mut`; subtrees not on any
 /// write path stay `Arc`-shared and are never visited.
@@ -746,7 +766,13 @@ pub enum TrieNode {
     /// Replace this subtree with the result of executing `prog`. The
     /// program is evaluated with `@` bound to the current value at this
     /// position, mirroring the existing `CompiledPatchVal::Replace` semantics.
-    Replace(Arc<Program>),
+    Replace {
+        /// Source op index used by update execution to cache invariant RHS
+        /// values while preserving source-order conflict semantics.
+        op_idx: usize,
+        /// Program that produces the replacement value.
+        prog: Arc<Program>,
+    },
     /// Remove this node from its parent (object field or array element).
     /// Treated as a structural marker; deletion happens in the parent's
     /// `Branch` arm rather than by recursing into this node.
@@ -793,6 +819,9 @@ impl CompiledPatchTrie {
     /// leaf, but ops with deeper paths convert a leaf into a `Branch`. A
     /// later op replacing a prior `Branch` discards the prior children.
     pub fn from_ops(ops: &[CompiledPatchOp]) -> Option<Self> {
+        if has_strict_prefix_overlap(ops) {
+            return None;
+        }
         for op in ops {
             for step in &op.path {
                 match step {
@@ -809,9 +838,12 @@ impl CompiledPatchTrie {
             fields: IndexMap::new(),
             indices: Vec::new(),
         };
-        for op in ops {
+        for (op_idx, op) in ops.iter().enumerate() {
             let leaf = match &op.val {
-                CompiledPatchVal::Replace(prog) => TrieNode::Replace(Arc::clone(prog)),
+                CompiledPatchVal::Replace(prog) => TrieNode::Replace {
+                    op_idx,
+                    prog: Arc::clone(prog),
+                },
                 CompiledPatchVal::Delete => TrieNode::Delete,
             };
             // Phase F: wrap conditional ops so the trie applier evaluates
@@ -828,6 +860,36 @@ impl CompiledPatchTrie {
             insert_leaf(&mut root, &op.path, leaf);
         }
         Some(Self { root })
+    }
+}
+
+fn has_strict_prefix_overlap(ops: &[CompiledPatchOp]) -> bool {
+    for i in 0..ops.len() {
+        for j in 0..ops.len() {
+            if i != j && path_is_strict_prefix(&ops[i].path, &ops[j].path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn path_is_strict_prefix(prefix: &[CompiledPathStep], path: &[CompiledPathStep]) -> bool {
+    prefix.len() < path.len()
+        && prefix
+            .iter()
+            .zip(path)
+            .all(|(left, right)| path_step_eq(left, right))
+}
+
+fn path_step_eq(left: &CompiledPathStep, right: &CompiledPathStep) -> bool {
+    match (left, right) {
+        (CompiledPathStep::Field(left), CompiledPathStep::Field(right)) => left == right,
+        (CompiledPathStep::Index(left), CompiledPathStep::Index(right)) => left == right,
+        (CompiledPathStep::DynIndex(left), CompiledPathStep::DynIndex(right)) => {
+            Arc::ptr_eq(left, right)
+        }
+        _ => false,
     }
 }
 
@@ -930,7 +992,6 @@ impl Program {
     }
 }
 
-
 /// Cached pointer-path data for a `FieldChain` opcode. Stores the ordered field
 /// keys and one inline-cache slot per key for fast map-index lookup.
 #[derive(Debug)]
@@ -965,7 +1026,6 @@ impl std::ops::Deref for FieldChainData {
     }
 }
 
-
 /// Allocate `len` cold inline-cache slots (all zero) and return them as a shared slice.
 pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
     let mut v = Vec::with_capacity(len);
@@ -974,7 +1034,6 @@ pub fn fresh_ics(len: usize) -> Arc<[AtomicU64]> {
     }
     v.into()
 }
-
 
 /// Return `true` when the `JETRO_DISABLE_OPCODE_FUSION` environment variable is set,
 /// suppressing all peephole fusion passes for debugging purposes.

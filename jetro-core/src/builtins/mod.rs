@@ -1834,6 +1834,16 @@ impl BuiltinCall {
                     },
                 )
             }
+            // `missing(...keys)`: multi-arg form returns the array of
+            // absent keys; single-arg keeps the legacy boolean. Listed
+            // BEFORE the catch-all `Missing` so the multi-arg case wins.
+            BuiltinMethod::Missing if arg_len >= 2 => {
+                let mut keys = Vec::with_capacity(arg_len);
+                for i in 0..arg_len {
+                    keys.push(args.str(i)?);
+                }
+                Self::new(method, BuiltinArgs::StrVec(keys))
+            }
             BuiltinMethod::GetPath
             | BuiltinMethod::HasPath
             | BuiltinMethod::Has
@@ -2340,6 +2350,9 @@ where
         | BuiltinMethod::ToCsv
         | BuiltinMethod::ToTsv
         | BuiltinMethod::Schema
+        | BuiltinMethod::ApproxCountDistinct
+        | BuiltinMethod::ZipShape
+        | BuiltinMethod::GroupShape
             if args.is_empty() =>
         {
             BuiltinCall::new(method, BuiltinArgs::None)
@@ -2467,6 +2480,14 @@ where
             return fanout_apply(&recv, args.len(), |value, idx| eval_item(value, &args[idx]));
         }
         BuiltinMethod::ZipShape => {
+            // No-arg form: parallel-array interleave. Receiver is an
+            // object whose values are arrays of the same length; emit
+            // one row per index with each key holding the array's
+            // i-th element. Non-array values are broadcast.
+            if args.is_empty() {
+                return zip_shape_obj_apply(&recv)
+                    .ok_or_else(|| EvalError("zip_shape: expected object receiver".into()));
+            }
             let mut names = Vec::with_capacity(args.len());
             for arg in args {
                 let name: Arc<str> = match arg {
@@ -2483,6 +2504,14 @@ where
             return zip_shape_apply(&recv, &names, |value, idx| eval_item(value, &args[idx]));
         }
         BuiltinMethod::GroupShape => {
+            // No-arg form: group an array of objects by their
+            // structural key set (the sorted keys joined with `,`).
+            // Output is `{shape_key: [items]}`. Useful for partitioning
+            // a heterogeneous collection by which keys each row has.
+            if args.is_empty() {
+                return group_shape_by_keys_apply(recv)
+                    .ok_or_else(|| EvalError("group_shape: expected array".into()));
+            }
             let key_arg = args
                 .first()
                 .ok_or_else(|| EvalError("group_shape: requires key".into()))?;
@@ -2588,8 +2617,31 @@ where
         | BuiltinMethod::DeepMerge
         | BuiltinMethod::Defaults
         | BuiltinMethod::Rename => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
+        BuiltinMethod::ParseInt if !args.is_empty() => {
+            // `parse_int(radix)` — package the radix as a `Usize` so the
+            // trait dispatch in `BuiltinCall::apply_args` (defs::ParseInt)
+            // picks it up. Falls through to base-10 no-arg form when the
+            // arg is missing.
+            let radix = i64_arg!(0)?;
+            BuiltinCall::new(method, BuiltinArgs::Usize(radix.max(0) as usize))
+        }
+        BuiltinMethod::ToCsv | BuiltinMethod::ToTsv if !args.is_empty() => {
+            // `to_csv(headers)` / `to_tsv(headers)` — headers must be a
+            // string array; package as `BuiltinArgs::StrVec`.
+            let headers = str_vec_arg!(0)?;
+            BuiltinCall::new(method, BuiltinArgs::StrVec(headers))
+        }
         BuiltinMethod::Remove => match args.first() {
+            // Treat anything that touches the current item (`@.x > 0`,
+            // `@ != null`, comparison/binop/chain on `@`) as a per-element
+            // predicate — same path as an explicit lambda. The original
+            // dispatch only matched `Expr::Lambda`, so `@`-form predicates
+            // fell through to the value-equality path and silently kept
+            // every element.
             Some(Arg::Pos(Expr::Lambda { .. })) | Some(Arg::Named(_, Expr::Lambda { .. })) => {
+                return remove_predicate_apply(recv, |item| eval_item(item, &args[0]));
+            }
+            Some(arg) if arg_uses_current(arg) => {
                 return remove_predicate_apply(recv, |item| eval_item(item, &args[0]));
             }
             Some(_) => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
@@ -2654,6 +2706,15 @@ where
         }
         BuiltinMethod::FlattenKeys | BuiltinMethod::UnflattenKeys if args.is_empty() => {
             BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(".")))
+        }
+        // `missing(...keys)` — variadic key-existence audit. Multi-key
+        // form returns the array of absent keys; single-key form keeps the
+        // legacy boolean.
+        BuiltinMethod::Missing if args.len() >= 2 => {
+            let keys = (0..args.len())
+                .map(|i| str_arg!(i))
+                .collect::<Result<Vec<_>, _>>()?;
+            BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
         }
         BuiltinMethod::GetPath
         | BuiltinMethod::HasPath
@@ -2787,6 +2848,40 @@ where
 
     call.try_apply(&recv)?
         .ok_or_else(|| EvalError(format!("{}: builtin unsupported", name)))
+}
+
+/// Returns `true` if `arg`'s expression tree references `Expr::Current`
+/// (the `@` placeholder), indicating it should be treated as a per-element
+/// predicate / projection rather than a literal value. Used by builtins
+/// like `remove` whose semantics depend on whether the user supplied a
+/// per-element predicate or a literal needle.
+fn arg_uses_current(arg: &crate::parse::ast::Arg) -> bool {
+    use crate::parse::ast::{Arg, Expr};
+    fn walk(e: &Expr) -> bool {
+        match e {
+            Expr::Current => true,
+            Expr::Lambda { .. } => false, // lambda introduces its own scope
+            Expr::Chain(base, _) => walk(base),
+            Expr::UnaryNeg(x) | Expr::Not(x) => walk(x),
+            Expr::BinOp(l, _, r) => walk(l) || walk(r),
+            Expr::Coalesce(l, r) => walk(l) || walk(r),
+            Expr::IfElse { cond, then_, else_ } => walk(cond) || walk(then_) || walk(else_),
+            Expr::Try { body, default } => walk(body) || walk(default),
+            Expr::Cast { expr, .. } => walk(expr),
+            Expr::FString(parts) => parts.iter().any(|p| match p {
+                crate::parse::ast::FStringPart::Interp { expr, .. } => walk(expr),
+                _ => false,
+            }),
+            Expr::Let { init, body, .. } => walk(init) || walk(body),
+            // Comprehensions, match arms, patches, identifiers, literals,
+            // root, and ident references do not transitively bind `@` in
+            // the dispatch position we care about.
+            _ => false,
+        }
+    }
+    match arg {
+        Arg::Pos(e) | Arg::Named(_, e) => walk(e),
+    }
 }
 
 /// Convenience wrapper over [`eval_builtin_method`] for zero-argument builtins.

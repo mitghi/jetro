@@ -18,16 +18,16 @@ use std::{
     sync::Arc,
 };
 
-use crate::parse::ast::*;
+use super::opcode::*;
 use crate::builtins::BuiltinMethod;
 use crate::data::context::{Env, EvalError};
 use crate::data::runtime::call_builtin_method_compiled;
+use crate::data::value::Val;
+use crate::parse::ast::*;
 use crate::util::{
     add_vals, cmp_vals_binop, is_truthy, kind_matches, num_op, obj2, val_to_key, val_to_string,
     vals_eq,
 };
-use crate::data::value::Val;
-use super::opcode::*;
 
 /// Pop the top of the operand stack, returning a `stack underflow` error if empty.
 macro_rules! pop {
@@ -42,8 +42,6 @@ macro_rules! err {
     ($($t:tt)*) => { Err(EvalError(format!($($t)*))) };
 }
 
-
-
 /// Internal return value from the recursive patch walker indicating whether the
 /// target node should be replaced with a new value or removed entirely.
 #[derive(Debug)]
@@ -52,6 +50,25 @@ enum PatchResult {
     Replace(Val),
     /// The node at this path is deleted from its parent container.
     Delete,
+}
+
+struct UpdateRhsCache {
+    cacheable: Vec<bool>,
+    values: Vec<Option<Val>>,
+}
+
+impl UpdateRhsCache {
+    fn new(ops: &[CompiledPatchOp]) -> Self {
+        let cacheable = ops
+            .iter()
+            .map(|op| match &op.val {
+                CompiledPatchVal::Replace(prog) => program_is_update_invariant(prog),
+                CompiledPatchVal::Delete => false,
+            })
+            .collect::<Vec<_>>();
+        let values = vec![None; ops.len()];
+        Self { cacheable, values }
+    }
 }
 
 /// Resolve a signed index `i` into the range `[0, len]`, clamping out-of-bounds
@@ -71,12 +88,129 @@ fn vm_resolve_idx(i: i64, len: i64) -> usize {
     }
 }
 
+fn program_is_update_invariant(program: &Program) -> bool {
+    !program_reads_update_target(program)
+}
 
+fn program_reads_update_target(program: &Program) -> bool {
+    program.ops.iter().any(|op| opcode_reads_update_target(op))
+}
 
+fn opcode_reads_update_target(op: &Opcode) -> bool {
+    match op {
+        Opcode::PushCurrent | Opcode::SetCurrent => true,
+        Opcode::LoadIdent(name) => name.as_ref() == crate::plan::update::UPDATE_FOCUS_BINDING,
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_reads_update_target(prog),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .any(|prog| program_reads_update_target(prog)),
+        Opcode::MakeObj(entries) => entries.iter().any(|entry| match entry {
+            CompiledObjEntry::Kv { prog, cond, .. } => {
+                program_reads_update_target(prog)
+                    || cond
+                        .as_ref()
+                        .is_some_and(|prog| program_reads_update_target(prog))
+            }
+            CompiledObjEntry::Dynamic { key, val } => {
+                program_reads_update_target(key) || program_reads_update_target(val)
+            }
+            CompiledObjEntry::Spread(prog) | CompiledObjEntry::SpreadDeep(prog) => {
+                program_reads_update_target(prog)
+            }
+            CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
+        }),
+        Opcode::MakeArr(items) => items
+            .iter()
+            .any(|(prog, _)| program_reads_update_target(prog)),
+        Opcode::FString(parts) => parts.iter().any(|part| match part {
+            CompiledFSPart::Interp { prog, .. } => program_reads_update_target(prog),
+            CompiledFSPart::Lit(_) => false,
+        }),
+        Opcode::BindLamCurrent { .. } => true,
+        Opcode::PipelineRun { base, steps } => {
+            program_reads_update_target(base)
+                || steps.iter().any(|step| match step {
+                    CompiledPipeStep::Forward(prog) => program_reads_update_target(prog),
+                    CompiledPipeStep::BindName(_)
+                    | CompiledPipeStep::BindObj(_)
+                    | CompiledPipeStep::BindArr(_) => true,
+                })
+        }
+        Opcode::LetExpr { body, .. } => program_reads_update_target(body),
+        Opcode::IfElse { then_, else_ } => {
+            program_reads_update_target(then_) || program_reads_update_target(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_reads_update_target(body) || program_reads_update_target(default)
+        }
+        Opcode::ListComp(spec) | Opcode::SetComp(spec) => {
+            program_reads_update_target(&spec.expr)
+                || program_reads_update_target(&spec.iter)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|prog| program_reads_update_target(prog))
+        }
+        Opcode::DictComp(spec) => {
+            program_reads_update_target(&spec.key)
+                || program_reads_update_target(&spec.val)
+                || program_reads_update_target(&spec.iter)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|prog| program_reads_update_target(prog))
+        }
+        Opcode::PatchEval(_) | Opcode::UpdateBatchEval(_) => true,
+        Opcode::Match(m) | Opcode::DeepMatchAll(m) | Opcode::DeepMatchFirst(m) => {
+            (match &m.scrutinee {
+                MatchScrutinee::Current => true,
+                MatchScrutinee::Root => false,
+                MatchScrutinee::Program(prog) => program_reads_update_target(prog),
+            }) || m
+                .guards
+                .iter()
+                .any(|prog| program_reads_update_target(prog))
+                || m.bodies
+                    .iter()
+                    .any(|prog| program_reads_update_target(prog))
+        }
+        _ => false,
+    }
+}
 
+fn normalize_update_object(val: &mut Val) {
+    if matches!(val, Val::Obj(_)) {
+        return;
+    }
+    let map = std::mem::replace(val, Val::Null)
+        .into_map()
+        .unwrap_or_default();
+    *val = Val::obj(map);
+}
 
+fn normalize_update_array(val: &mut Val) {
+    if matches!(val, Val::Arr(_)) {
+        return;
+    }
+    let arr = std::mem::replace(val, Val::Null)
+        .into_vec()
+        .unwrap_or_default();
+    *val = Val::arr(arr);
+}
 
-
+fn normalize_existing_update_array(val: &mut Val) -> Option<()> {
+    if matches!(val, Val::Arr(_)) {
+        return Some(());
+    }
+    let arr = std::mem::replace(val, Val::Null).into_vec()?;
+    *val = Val::arr(arr);
+    Some(())
+}
 
 /// Look up `key` in the map using the inline-cache `ic` as a fast-path hint.
 /// On a cache miss the map is searched linearly and the cache is updated.
@@ -99,7 +233,6 @@ fn ic_get_field(m: &Arc<IndexMap<Arc<str>, Val>>, key: &str, ic: &AtomicU64) -> 
     }
 }
 
-
 /// Simple binary arithmetic operation used by specialised accumulate/transform paths.
 #[derive(Copy, Clone)]
 enum AccumOp {
@@ -110,7 +243,6 @@ enum AccumOp {
     /// Wrapping integer multiplication or float multiplication.
     Mul,
 }
-
 
 /// Sum a slice of `i64` values using 4-lane manual unrolling to assist auto-vectorisation.
 #[inline]
@@ -219,7 +351,6 @@ fn simd_max_f64_slice(a: &[f64]) -> Option<f64> {
 /// Sum a heterogeneous `Val` slice, promoting to `Float` as soon as a float element
 /// is encountered. Non-numeric elements are silently skipped.
 fn agg_sum_typed(a: &[Val]) -> Val {
-
     let mut i_acc: i64 = 0;
     let mut it = a.iter();
     while let Some(v) = it.next() {
@@ -236,7 +367,7 @@ fn agg_sum_typed(a: &[Val]) -> Val {
                 }
                 return Val::Float(f_acc);
             }
-            _ => {} 
+            _ => {}
         }
     }
     Val::Int(i_acc)
@@ -274,7 +405,7 @@ fn agg_avg_typed(a: &[Val]) -> Val {
 #[inline]
 fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     let mut it = a.iter();
-    
+
     let first = loop {
         match it.next() {
             Some(v) if v.is_number() => break v,
@@ -285,7 +416,7 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     match first {
         Val::Int(n0) => {
             let mut best: i64 = *n0;
-            
+
             while let Some(v) = it.next() {
                 match v {
                     Val::Int(n) => {
@@ -385,10 +516,7 @@ fn agg_minmax_typed(a: &[Val], want_max: bool) -> Val {
     }
 }
 
-
 use crate::compile::compiler::{Compiler, PassConfig};
-
-
 
 /// LRU path-resolution cache keyed by `(doc_hash, JSON-pointer string)`.
 /// Avoids re-traversing the document for repeated structural queries.
@@ -445,8 +573,6 @@ impl PathCache {
     }
 }
 
-
-
 /// Stack-machine VM that owns both a compile cache and a path-resolution cache.
 /// Instances are long-lived (typically thread-local) so caches warm up across calls.
 pub struct VM {
@@ -475,7 +601,6 @@ pub struct VM {
     /// The pass configuration used when compiling new programs in this VM instance.
     config: PassConfig,
 }
-
 
 /// Delegate `Default` to `VM::new` with the standard capacity defaults.
 impl Default for VM {
@@ -530,8 +655,7 @@ impl VM {
     ) -> Result<serde_json::Value, EvalError> {
         let root = Val::from(doc);
         self.doc_hash = self.compute_or_cache_root_hash(&root);
-        
-        
+
         self.root_chain_cache.clear();
         let env = self.make_env(root);
         let result = self.exec(program, &env)?;
@@ -603,7 +727,6 @@ impl VM {
         Ok(arc)
     }
 
-    
     /// Move `key` to the back of the LRU deque, marking it as most-recently-used.
     fn touch_lru(&mut self, key: &(u64, String)) {
         if let Some(pos) = self.compile_lru.iter().position(|k| k == key) {
@@ -650,18 +773,15 @@ impl VM {
                 continue;
             }
             match op {
-                
                 Opcode::PushNull => stack.push(Val::Null),
                 Opcode::PushBool(b) => stack.push(Val::Bool(*b)),
                 Opcode::PushInt(n) => stack.push(Val::Int(*n)),
                 Opcode::PushFloat(f) => stack.push(Val::Float(*f)),
                 Opcode::PushStr(s) => stack.push(Val::Str(s.clone())),
 
-                
                 Opcode::PushRoot => stack.push(env.root.clone()),
                 Opcode::PushCurrent => stack.push(env.current.clone()),
 
-                
                 Opcode::GetField(k) => {
                     let v = pop!(stack);
                     let out = match &v {
@@ -695,9 +815,9 @@ impl VM {
                         _ => Val::Null,
                     });
                 }
-                Opcode::GetSlice(from, to) => {
+                Opcode::GetSlice(from, to, step) => {
                     let v = pop!(stack);
-                    stack.push(exec_slice(v, *from, *to));
+                    stack.push(exec_slice(v, *from, *to, *step));
                 }
                 Opcode::OptField(k) => {
                     let v = pop!(stack);
@@ -710,15 +830,13 @@ impl VM {
                 }
                 Opcode::Descendant(k) => {
                     let v = pop!(stack);
-                    
-                    
+
                     let from_root = match (&v, &env.root) {
                         (Val::Obj(a), Val::Obj(b)) => Arc::ptr_eq(a, b),
                         (Val::Arr(a), Val::Arr(b)) => Arc::ptr_eq(a, b),
                         _ => matches!((&v, &env.root), (Val::Null, Val::Null)),
                     };
-                    
-                    
+
                     if let Some(next) = ops_slice.get(op_idx + 1) {
                         if is_first_selector_op(next) {
                             let hit = find_desc_first(&v, k.as_ref()).unwrap_or(Val::Null);
@@ -791,10 +909,7 @@ impl VM {
                     });
                 }
 
-                
                 Opcode::RootChain(chain) => {
-                    
-                    
                     let key = Arc::as_ptr(chain) as *const () as usize;
                     if let Some(v) = self.root_chain_cache.get(&key) {
                         stack.push(v.clone());
@@ -808,8 +923,7 @@ impl VM {
                     for k in chain.iter() {
                         ptr.push('/');
                         ptr.push_str(k.as_ref());
-                        
-                        
+
                         if !resumed_from_cache {
                             if let Some(cached) = self.path_cache.get(doc_hash, &ptr) {
                                 current = cached;
@@ -825,8 +939,7 @@ impl VM {
                     self.root_chain_cache.insert(key, current.clone());
                     stack.push(current);
                 }
-                
-                
+
                 Opcode::LoadIdent(name) => {
                     let v = if let Some(v) = env.get_var(name.as_ref()) {
                         v.clone()
@@ -848,7 +961,6 @@ impl VM {
                     stack.push(v);
                 }
 
-                
                 Opcode::Add => {
                     let r = pop!(stack);
                     let l = pop!(stack);
@@ -938,7 +1050,6 @@ impl VM {
                     stack.push(exec_cast(&v, *ty)?);
                 }
 
-                
                 Opcode::AndOp(rhs) => {
                     let lv = pop!(stack);
                     if !is_truthy(&lv) {
@@ -969,15 +1080,11 @@ impl VM {
                     let branch = if is_truthy(&cv) { then_ } else { else_ };
                     stack.push(self.exec(branch, env)?);
                 }
-                Opcode::TryExpr { body, default } => {
-                    
-                    match self.exec(body, env) {
-                        Ok(v) if !v.is_null() => stack.push(v),
-                        Ok(_) | Err(_) => stack.push(self.exec(default, env)?),
-                    }
-                }
+                Opcode::TryExpr { body, default } => match self.exec(body, env) {
+                    Ok(v) if !v.is_null() => stack.push(v),
+                    Ok(_) | Err(_) => stack.push(self.exec(default, env)?),
+                },
 
-                
                 Opcode::CallMethod(call) => {
                     let recv = pop!(stack);
                     let result = self.exec_call(recv, call, env)?;
@@ -992,7 +1099,6 @@ impl VM {
                     }
                 }
 
-                
                 Opcode::MakeObj(entries) => {
                     let entries = Arc::clone(entries);
                     let result = self.exec_make_obj(&entries, env)?;
@@ -1021,25 +1127,19 @@ impl VM {
                     stack.push(Val::arr(out));
                 }
 
-                
                 Opcode::FString(parts) => {
                     let parts = Arc::clone(parts);
                     let result = self.exec_fstring(&parts, env)?;
                     stack.push(result);
                 }
 
-                
                 Opcode::KindCheck { ty, negate } => {
                     let v = pop!(stack);
                     let m = kind_matches(&v, *ty);
                     stack.push(Val::Bool(if *negate { !m } else { m }));
                 }
 
-                
-                Opcode::SetCurrent => {
-
-
-                }
+                Opcode::SetCurrent => {}
                 Opcode::BindLamCurrent { name, body } => {
                     // Bind `name` (when present) to the current item in a
                     // local clone of `env`, run `body` under that env, then
@@ -1048,8 +1148,7 @@ impl VM {
                     // host pipeline stage uses `swap_current` rather than
                     // `push_lam` to advance.
                     let mut scratch = env.clone();
-                    let frame = scratch
-                        .push_lam(name.as_deref(), env.current.clone());
+                    let frame = scratch.push_lam(name.as_deref(), env.current.clone());
                     let result = self.exec(body, &scratch);
                     scratch.pop_lam(frame);
                     stack.push(result?);
@@ -1061,8 +1160,6 @@ impl VM {
                     for step in steps.iter() {
                         match step {
                             CompiledPipeStep::Forward(rhs) => {
-                                
-                                
                                 let prev = local_env.swap_current(cur);
                                 cur = self.exec(rhs, &local_env)?;
                                 let _ = local_env.swap_current(prev);
@@ -1109,7 +1206,6 @@ impl VM {
                     stack.push(cur);
                 }
 
-                
                 Opcode::LetExpr { name, body } => {
                     let init_val = pop!(stack);
                     let body_env = env.with_var(name.as_ref(), init_val);
@@ -1119,8 +1215,7 @@ impl VM {
                 Opcode::ListComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut out = Vec::with_capacity(items.len());
-                    
-                    
+
                     if spec.vars.len() == 1 {
                         let vname = spec.vars[0].clone();
                         let mut scratch = env.clone();
@@ -1153,12 +1248,10 @@ impl VM {
                 Opcode::DictComp(spec) => {
                     let items = self.exec_iter_vals(&spec.iter, env)?;
                     let mut map: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(items.len());
-                    
-                    
+
                     if spec.vars.len() == 1 {
                         let vname = spec.vars[0].clone();
-                        
-                        
+
                         let val_is_ident = matches!(
                             spec.val.ops.as_ref(),
                             [Opcode::LoadIdent(v)] if v.as_ref() == vname.as_ref()
@@ -1265,9 +1358,12 @@ impl VM {
                     stack.push(Val::arr(out));
                 }
 
-                
                 Opcode::PatchEval(cp) => {
                     let result = self.exec_patch_compiled(cp, env)?;
+                    stack.push(result);
+                }
+                Opcode::UpdateBatchEval(batch) => {
+                    let result = self.exec_update_batch_compiled(batch, env)?;
                     stack.push(result);
                 }
                 Opcode::DeleteMarkErr => {
@@ -1340,12 +1436,10 @@ impl VM {
     /// Dispatch a `CallMethod` opcode: applies fast numeric/typed specialisations first,
     /// then lambda-aware methods, then the general `call_builtin_method_compiled` fallback.
     fn exec_call(&mut self, recv: Val, call: &CompiledCall, env: &Env) -> Result<Val, EvalError> {
-        
         if call.method == BuiltinMethod::Unknown {
-            
-            
             match call.name.as_ref() {
-                "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range" => {
+                "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
+                | "now" => {
                     return crate::data::runtime::eval_global_compiled(self, call, env);
                 }
                 _ => {}
@@ -1383,12 +1477,10 @@ impl VM {
             );
         }
 
-        
         if call.method.is_lambda_method() {
             return self.exec_lambda_method(recv, call, env);
         }
 
-        
         if call.sub_progs.is_empty() && call.orig_args.is_empty() {
             if let Val::Arr(a) = &recv {
                 match call.method {
@@ -1399,8 +1491,7 @@ impl VM {
                     _ => {}
                 }
             }
-            
-            
+
             if let Val::IntVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Sum => return Ok(Val::Int(simd_sum_i64_slice(a))),
@@ -1422,8 +1513,7 @@ impl VM {
                     _ => {}
                 }
             }
-            
-            
+
             if let Val::Arr(a) = &recv {
                 let is_all_int = a.iter().all(|v| matches!(v, Val::Int(_)));
                 if is_all_int && !a.is_empty() {
@@ -1458,7 +1548,7 @@ impl VM {
                     }
                 }
             }
-            
+
             if let Val::IntVec(a) = &recv {
                 match call.method {
                     BuiltinMethod::Reverse => {
@@ -1497,11 +1587,9 @@ impl VM {
                     _ => {}
                 }
             }
-            
-            
+
             if call.method == BuiltinMethod::Flatten {
                 if let Val::Arr(a) = &recv {
-                    
                     let all_int_inner = a.iter().all(|it| match it {
                         Val::IntVec(_) => true,
                         Val::Arr(inner) => inner.iter().all(|v| matches!(v, Val::Int(_))),
@@ -1560,7 +1648,7 @@ impl VM {
                     }
                     return Ok(Val::arr(out));
                 }
-                
+
                 if matches!(
                     &recv,
                     Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) | Val::StrSliceVec(_)
@@ -1568,8 +1656,7 @@ impl VM {
                     return Ok(recv);
                 }
             }
-            
-            
+
             if call.method == BuiltinMethod::ToString {
                 let s: Arc<str> = match &recv {
                     Val::Str(s) => return Ok(Val::Str(s.clone())),
@@ -1581,8 +1668,7 @@ impl VM {
                 };
                 return Ok(Val::Str(s));
             }
-            
-            
+
             if call.method == BuiltinMethod::ToJson {
                 match &recv {
                     Val::Int(n) => return Ok(Val::Str(Arc::from(n.to_string()))),
@@ -1599,8 +1685,6 @@ impl VM {
                     }
                     Val::Null => return Ok(Val::Str(Arc::from("null"))),
                     Val::Str(s) => {
-                        
-                        
                         let src = s.as_ref();
                         let mut needs_escape = false;
                         for &b in src.as_bytes() {
@@ -1616,7 +1700,6 @@ impl VM {
                             out.push('"');
                             return Ok(Val::Str(Arc::from(out)));
                         }
-                        
                     }
                     _ => {}
                 }
@@ -1627,7 +1710,6 @@ impl VM {
             return Ok(v);
         }
 
-        
         call_builtin_method_compiled(self, recv, call, env)
     }
 
@@ -1708,7 +1790,6 @@ impl VM {
             }
             _ => None,
         };
-
 
         let mut scratch = env.clone();
 
@@ -1840,8 +1921,7 @@ impl VM {
                 let items = recv
                     .into_vec()
                     .ok_or_else(|| EvalError("groupBy: expected array".into()))?;
-                
-                
+
                 if let Some(param) = lam_param {
                     if let [Opcode::LoadIdent(p), Opcode::PushInt(k_lit), Opcode::Mod] =
                         key_prog.ops.as_ref()
@@ -1852,7 +1932,7 @@ impl VM {
                             let mut buckets: Vec<Vec<Val>> = vec![Vec::new(); k_u];
                             let mut seen: Vec<bool> = vec![false; k_u];
                             let mut order: Vec<usize> = Vec::new();
-                            
+
                             for item in items {
                                 let idx = match &item {
                                     Val::Int(n) => n.rem_euclid(k_lit) as usize,
@@ -1876,7 +1956,7 @@ impl VM {
                         }
                     }
                 }
-                
+
                 let map = crate::builtins::group_by_apply(items, |item| {
                     self.exec_lam_body_scratch(key_prog, item, lam_param, &mut scratch)
                 })?;
@@ -1923,16 +2003,64 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Accumulate => {
-                
-                
-                let lam_body =
-                    sub.ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
-                let (p1, p2) = match call.orig_args.first() {
+                // Two callable shapes:
+                //   - `xs.accumulate((a, x) => ...)` — single-arg form: the
+                //     accumulator is seeded from `items[0]`.
+                //   - `xs.accumulate(init, (a, x) => ...)` — two-arg form:
+                //     the first arg is an initial accumulator value, the
+                //     second is the binary lambda.
+                //
+                // The pre-existing fast paths (specialised binops over
+                // IntVec / FloatVec) only fire for the single-arg form;
+                // the two-arg form falls through to the generic lambda
+                // loop with `running = Some(init)` from the start so it
+                // correctly emits one output per input element.
+                let (init_val, lam_idx, lam_arg_idx) = match call.orig_args.len() {
+                    1 => (None, 0usize, 0usize),
+                    2 => {
+                        // Evaluate the init expression in the outer env.
+                        let init = match call.orig_args.first() {
+                            Some(arg) => {
+                                crate::data::runtime::eval_compiled_arg(self, call, arg, env)?
+                            }
+                            None => Val::Null,
+                        };
+                        (Some(init), 1usize, 1usize)
+                    }
+                    _ => return call_builtin_method_compiled(self, recv, call, env),
+                };
+                let lam_body = call
+                    .sub_progs
+                    .get(lam_idx)
+                    .ok_or_else(|| EvalError("accumulate: requires lambda".into()))?;
+                let (p1, p2) = match call.orig_args.get(lam_arg_idx) {
                     Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
                         (params[0].as_str(), params[1].as_str())
                     }
                     _ => return call_builtin_method_compiled(self, recv, call, env),
                 };
+                // The two-arg form skips the IntVec/FloatVec specialised
+                // paths because they implicitly seed `acc` from items[0]
+                // — a different semantic from explicit init. Fall straight
+                // to the generic lambda loop in that case.
+                if init_val.is_some() {
+                    let items = recv
+                        .into_vec()
+                        .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
+                    let mut out = Vec::with_capacity(items.len());
+                    let mut running = init_val;
+                    for item in items {
+                        let acc = running.take().unwrap_or(Val::Null);
+                        let f1 = scratch.push_lam(Some(p1), acc);
+                        let f2 = scratch.push_lam(Some(p2), item);
+                        let r = self.exec(lam_body, &scratch)?;
+                        scratch.pop_lam(f2);
+                        scratch.pop_lam(f1);
+                        out.push(r.clone());
+                        running = Some(r);
+                    }
+                    return Ok(Val::arr(out));
+                }
                 if call
                     .orig_args
                     .iter()
@@ -1940,7 +2068,7 @@ impl VM {
                 {
                     return call_builtin_method_compiled(self, recv, call, env);
                 }
-                
+
                 let specialised_binop = match lam_body.ops.as_ref() {
                     [Opcode::LoadIdent(a), Opcode::LoadIdent(b), op]
                         if a.as_ref() == p1 && b.as_ref() == p2 =>
@@ -1954,7 +2082,7 @@ impl VM {
                     }
                     _ => None,
                 };
-                
+
                 if let (Val::IntVec(a), Some(bop)) = (&recv, specialised_binop.as_ref().copied()) {
                     let mut out: Vec<i64> = Vec::with_capacity(a.len());
                     let mut acc: i64 = 0;
@@ -1999,8 +2127,6 @@ impl VM {
                     .ok_or_else(|| EvalError("accumulate: expected array".into()))?;
                 let mut out = Vec::with_capacity(items.len());
                 if let Some(bop) = specialised_binop {
-                    
-                    
                     if items.iter().all(|v| matches!(v, Val::Int(_))) {
                         let mut acc_out: Vec<i64> = Vec::with_capacity(items.len());
                         let mut acc: i64 = 0;
@@ -2025,7 +2151,7 @@ impl VM {
                         }
                         return Ok(Val::int_vec(acc_out));
                     }
-                    
+
                     if items.iter().all(|v| matches!(v, Val::Float(_))) {
                         let mut acc_out: Vec<f64> = Vec::with_capacity(items.len());
                         let mut acc: f64 = 0.0;
@@ -2050,7 +2176,7 @@ impl VM {
                         }
                         return Ok(Val::float_vec(acc_out));
                     }
-                    
+
                     let mut running: Option<Val> = None;
                     for item in items {
                         let next = match running.take() {
@@ -2066,7 +2192,7 @@ impl VM {
                     }
                     return Ok(Val::arr(out));
                 }
-                
+
                 let mut running: Option<Val> = None;
                 for item in items {
                     let next = if let Some(acc) = running.take() {
@@ -2085,6 +2211,13 @@ impl VM {
                 Ok(Val::arr(out))
             }
             BuiltinMethod::Partition => {
+                // `partition(pred)` — split into `[matching, non-matching]`
+                // tuple. The previous implementation returned an object
+                // `{true: [...], false: [...]}` which broke chained
+                // patterns like `xs.partition(p).map(([a, b]) => ...)`.
+                // Tuple form mirrors Python's `partition`-style return,
+                // matches the book's documented signature, and integrates
+                // cleanly with array-pattern destructure in lambdas.
                 let pred = sub.ok_or_else(|| EvalError("partition: requires predicate".into()))?;
                 let items = recv
                     .into_vec()
@@ -2092,10 +2225,7 @@ impl VM {
                 let (yes, no) = crate::builtins::partition_apply(items, |item| {
                     self.exec_lam_body_scratch(pred, item, lam_param, &mut scratch)
                 })?;
-                let mut m: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(2);
-                m.insert(Arc::from("true"), Val::arr(yes));
-                m.insert(Arc::from("false"), Val::arr(no));
-                Ok(Val::obj(m))
+                Ok(Val::arr(vec![Val::arr(yes), Val::arr(no)]))
             }
             BuiltinMethod::TransformKeys => {
                 let lam = sub.ok_or_else(|| EvalError("transformKeys: requires lambda".into()))?;
@@ -2110,13 +2240,11 @@ impl VM {
             BuiltinMethod::TransformValues => {
                 let lam =
                     sub.ok_or_else(|| EvalError("transformValues: requires lambda".into()))?;
-                
-                
+
                 let mut map = recv
                     .into_map()
                     .ok_or_else(|| EvalError("transformValues: expected object".into()))?;
-                
-                
+
                 let pat = match lam.ops.as_ref() {
                     [Opcode::PushCurrent, Opcode::PushInt(k), op] => match op {
                         Opcode::Add => Some((AccumOp::Add, *k)),
@@ -2153,8 +2281,7 @@ impl VM {
                     }
                     return Ok(Val::obj(map));
                 }
-                
-                
+
                 for v in map.values_mut() {
                     *v = crate::builtins::map_one(v, |item| {
                         self.exec_lam_body_scratch(lam, item, lam_param, &mut scratch)
@@ -2189,6 +2316,37 @@ impl VM {
             }
             BuiltinMethod::Pivot => call_builtin_method_compiled(self, recv, call, env),
             BuiltinMethod::Update => {
+                // Two callable shapes:
+                //   - `xs.update(fn)` (1-arg) — apply `fn` to receiver, return
+                //     the lambda's result. (Pre-existing behavior.)
+                //   - `doc.update(path, fn)` (2-arg) — read the value at
+                //     `path`, apply `fn` to it, write the transformed value
+                //     back to `doc[path]`. Path uses dot/slash notation
+                //     resolved through `get_path` / `set_path`.
+                if call.orig_args.len() == 2 {
+                    // arg[0] is the path expression; eval to a string.
+                    let path_val = crate::data::runtime::eval_compiled_arg(
+                        self,
+                        call,
+                        &call.orig_args[0],
+                        env,
+                    )?;
+                    let path: Arc<str> = match path_val {
+                        Val::Str(s) => s,
+                        Val::StrSlice(s) => Arc::from(s.as_str()),
+                        other => Arc::from(crate::util::val_to_string(&other).as_str()),
+                    };
+                    // arg[1] is the lambda; sub_progs[1] is the compiled body.
+                    let lam = call
+                        .sub_progs
+                        .get(1)
+                        .ok_or_else(|| EvalError("update: requires lambda".into()))?;
+                    let current =
+                        crate::builtins::get_path_apply(&recv, path.as_ref()).unwrap_or(Val::Null);
+                    let updated = self.exec_lam_body(lam, &current, lam_param, env)?;
+                    return crate::builtins::set_path_apply(&recv, path.as_ref(), &updated)
+                        .ok_or_else(|| EvalError("update: set_path failed".into()));
+                }
                 let lam = sub.ok_or_else(|| EvalError("update: requires lambda".into()))?;
                 self.exec_lam_body(lam, &recv, lam_param, env)
             }
@@ -2263,32 +2421,323 @@ impl VM {
     /// Sibling writes share the parent's `make_mut`; subtrees not on any
     /// write path stay `Arc`-shared and are never visited.
     fn exec_patch_compiled(&mut self, cp: &CompiledPatch, env: &Env) -> Result<Val, EvalError> {
-        let mut doc = self.exec(&cp.root_prog, env)?;
-        if cp.ops.len() >= 2 {
-            let trie_slot = cp.trie.get_or_init(|| CompiledPatchTrie::from_ops(&cp.ops));
+        let doc = self.exec(&cp.root_prog, env)?;
+        self.apply_compiled_patch_ops(doc, &cp.ops, &cp.trie, env, None)
+    }
+
+    fn exec_update_batch_compiled(
+        &mut self,
+        batch: &CompiledUpdateBatch,
+        env: &Env,
+    ) -> Result<Val, EvalError> {
+        let mut doc = self.exec(&batch.root_prog, env)?;
+        let mut rhs_cache = UpdateRhsCache::new(&batch.ops);
+        match self.apply_update_selector_compiled(
+            &mut doc,
+            &batch.selector,
+            0,
+            &batch.ops,
+            &batch.trie,
+            env,
+            &mut rhs_cache,
+        )? {
+            PatchResult::Replace(_) => Ok(doc),
+            PatchResult::Delete => Ok(Val::Null),
+        }
+    }
+
+    fn apply_compiled_patch_ops(
+        &mut self,
+        mut doc: Val,
+        ops: &[CompiledPatchOp],
+        trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
+        env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
+    ) -> Result<Val, EvalError> {
+        if ops.len() >= 2 {
+            let trie_slot = trie.get_or_init(|| CompiledPatchTrie::from_ops(ops));
             if let Some(trie) = trie_slot {
                 // Phase F: snapshot the doc *before* any op fires so
                 // `TrieNode::Conditional` guards can read pre-batch state
                 // (matching invariant 5 / the per-op walker's `$` semantics).
                 // Cloning a `Val` is O(1) — Arc bump only.
                 let pre_batch = doc.clone();
-                self.apply_trie(&mut doc, &trie.root, env, &pre_batch)?;
+                self.apply_trie(
+                    &mut doc,
+                    &trie.root,
+                    env,
+                    &pre_batch,
+                    rhs_cache.as_deref_mut(),
+                )?;
                 return Ok(doc);
             }
         }
-        for op in &cp.ops {
+        for (op_idx, op) in ops.iter().enumerate() {
             if let Some(cond) = &op.cond {
                 let cenv = env.with_current(doc.clone());
                 if !is_truthy(&self.exec(cond, &cenv)?) {
                     continue;
                 }
             }
-            match self.apply_patch_step_compiled(doc, &op.path, 0, &op.val, env)? {
+            match self.apply_patch_step_compiled(
+                doc,
+                &op.path,
+                0,
+                &op.val,
+                env,
+                rhs_cache.as_deref_mut(),
+                Some(op_idx),
+            )? {
                 PatchResult::Replace(v) => doc = v,
                 PatchResult::Delete => doc = Val::Null,
             }
         }
         Ok(doc)
+    }
+
+    fn apply_update_selector_compiled(
+        &mut self,
+        v: &mut Val,
+        selector: &[CompiledPathStep],
+        i: usize,
+        ops: &[CompiledPatchOp],
+        trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
+        env: &Env,
+        rhs_cache: &mut UpdateRhsCache,
+    ) -> Result<PatchResult, EvalError> {
+        if i == selector.len() {
+            if self.selected_node_delete_applies(ops, env, v)? {
+                return Ok(PatchResult::Delete);
+            }
+            let old = std::mem::replace(v, Val::Null);
+            let focus = old.clone();
+            let update_env = env.with_var(crate::plan::update::UPDATE_FOCUS_BINDING, focus);
+            *v = self.apply_compiled_patch_ops(old, ops, trie, &update_env, Some(rhs_cache))?;
+            return Ok(PatchResult::Replace(Val::Null));
+        }
+        match &selector[i] {
+            CompiledPathStep::Field(name) => {
+                normalize_update_object(v);
+                let Val::Obj(map_arc) = v else {
+                    unreachable!("normalize_update_object always yields object");
+                };
+                let map = Arc::make_mut(map_arc);
+                if let Some(child) = map.get_mut(name.as_ref()) {
+                    match self.apply_update_selector_compiled(
+                        child,
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {
+                            map.shift_remove(name.as_ref());
+                        }
+                        PatchResult::Replace(_) => {}
+                    }
+                } else {
+                    let mut fresh = Val::Null;
+                    match self.apply_update_selector_compiled(
+                        &mut fresh,
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {}
+                        PatchResult::Replace(_) => {
+                            map.insert(name.clone(), fresh);
+                        }
+                    }
+                }
+                Ok(PatchResult::Replace(Val::Null))
+            }
+            CompiledPathStep::Index(idx) => {
+                normalize_update_array(v);
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let resolved = vm_resolve_idx(*idx, arr.len() as i64);
+                if resolved >= arr.len() {
+                    return Ok(PatchResult::Replace(Val::Null));
+                }
+                match self.apply_update_selector_compiled(
+                    &mut arr[resolved],
+                    selector,
+                    i + 1,
+                    ops,
+                    trie,
+                    env,
+                    rhs_cache,
+                )? {
+                    PatchResult::Delete => {
+                        arr.remove(resolved);
+                    }
+                    PatchResult::Replace(_) => {}
+                }
+                Ok(PatchResult::Replace(Val::Null))
+            }
+            CompiledPathStep::DynIndex(prog) => {
+                let idx_val = self.exec(prog, env)?;
+                let idx = idx_val.as_i64().ok_or_else(|| {
+                    EvalError(format!(
+                        "update dyn-index: expected integer, got {}",
+                        idx_val.type_name()
+                    ))
+                })?;
+                normalize_update_array(v);
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let resolved = vm_resolve_idx(idx, arr.len() as i64);
+                if resolved >= arr.len() {
+                    return Ok(PatchResult::Replace(Val::Null));
+                }
+                match self.apply_update_selector_compiled(
+                    &mut arr[resolved],
+                    selector,
+                    i + 1,
+                    ops,
+                    trie,
+                    env,
+                    rhs_cache,
+                )? {
+                    PatchResult::Delete => {
+                        arr.remove(resolved);
+                    }
+                    PatchResult::Replace(_) => {}
+                }
+                Ok(PatchResult::Replace(Val::Null))
+            }
+            CompiledPathStep::Wildcard => {
+                normalize_existing_update_array(v)
+                    .ok_or_else(|| EvalError("update [*]: expected array".into()))?;
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_existing_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let mut idx = 0usize;
+                while idx < arr.len() {
+                    match self.apply_update_selector_compiled(
+                        &mut arr[idx],
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {
+                            arr.remove(idx);
+                        }
+                        PatchResult::Replace(_) => {
+                            idx += 1;
+                        }
+                    }
+                }
+                Ok(PatchResult::Replace(Val::Null))
+            }
+            CompiledPathStep::WildcardFilter(pred) => {
+                normalize_existing_update_array(v)
+                    .ok_or_else(|| EvalError("update [* if]: expected array".into()))?;
+                let Val::Arr(arr_arc) = v else {
+                    unreachable!("normalize_existing_update_array always yields array");
+                };
+                let arr = Arc::make_mut(arr_arc);
+                let mut env_mut = env.clone();
+                let mut idx = 0usize;
+                while idx < arr.len() {
+                    let frame = env_mut.push_lam(None, arr[idx].clone());
+                    let include = match self.exec(pred, &env_mut) {
+                        Ok(v) => is_truthy(&v),
+                        Err(e) => {
+                            env_mut.pop_lam(frame);
+                            return Err(e);
+                        }
+                    };
+                    env_mut.pop_lam(frame);
+                    if include {
+                        match self.apply_update_selector_compiled(
+                            &mut arr[idx],
+                            selector,
+                            i + 1,
+                            ops,
+                            trie,
+                            env,
+                            rhs_cache,
+                        )? {
+                            PatchResult::Delete => {
+                                arr.remove(idx);
+                            }
+                            PatchResult::Replace(_) => {
+                                idx += 1;
+                            }
+                        }
+                    } else {
+                        idx += 1;
+                    }
+                }
+                Ok(PatchResult::Replace(Val::Null))
+            }
+            CompiledPathStep::Descendant(name) => {
+                self.descend_apply_update_selector_compiled(
+                    v, name, selector, i, ops, trie, env, rhs_cache,
+                )?;
+                Ok(PatchResult::Replace(Val::Null))
+            }
+        }
+    }
+
+    fn selected_node_delete_applies(
+        &mut self,
+        ops: &[CompiledPatchOp],
+        env: &Env,
+        current: &Val,
+    ) -> Result<bool, EvalError> {
+        if ops.len() != 1 || !ops[0].path.is_empty() {
+            return Ok(false);
+        }
+        if !matches!(ops[0].val, CompiledPatchVal::Delete) {
+            return Ok(false);
+        }
+        if let Some(cond) = &ops[0].cond {
+            return Ok(is_truthy(
+                &self.exec(cond, &env.with_current(current.clone()))?,
+            ));
+        }
+        Ok(true)
+    }
+
+    fn eval_patch_replace(
+        &mut self,
+        prog: &Arc<Program>,
+        env: &Env,
+        rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
+    ) -> Result<Val, EvalError> {
+        let Some(cache) = rhs_cache else {
+            return self.exec(prog, env);
+        };
+        let Some(op_idx) = op_idx else {
+            return self.exec(prog, env);
+        };
+        if !cache.cacheable.get(op_idx).copied().unwrap_or(false) {
+            return self.exec(prog, env);
+        }
+        if let Some(val) = cache.values.get(op_idx).and_then(|v| v.as_ref()) {
+            return Ok(val.clone());
+        }
+        let val = self.exec(prog, env)?;
+        if let Some(slot) = cache.values.get_mut(op_idx) {
+            *slot = Some(val.clone());
+        }
+        Ok(val)
     }
 
     /// Apply a `CompiledPatchTrie` node against `val` in place. Uses
@@ -2302,14 +2751,16 @@ impl VM {
         node: &TrieNode,
         env: &Env,
         pre_batch_doc: &Val,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
     ) -> Result<(), EvalError> {
         match node {
-            TrieNode::Replace(prog) => {
+            TrieNode::Replace { op_idx, prog } => {
                 // Bind the existing value to `@` so `Replace` programs that
                 // reference the old value (e.g. `.modify(@ + 1)`) still see it.
                 let old = std::mem::replace(val, Val::Null);
                 let cenv = env.with_current(old);
-                *val = self.exec(prog, &cenv)?;
+                *val =
+                    self.eval_patch_replace(prog, &cenv, rhs_cache.as_deref_mut(), Some(*op_idx))?;
                 Ok(())
             }
             TrieNode::Delete => {
@@ -2328,7 +2779,7 @@ impl VM {
                 // soundness test `conditional_reads_prebatch_state`.
                 let cenv = env.with_current(pre_batch_doc.clone());
                 if is_truthy(&self.exec(cond_prog, &cenv)?) {
-                    self.apply_trie(val, then, env, pre_batch_doc)?;
+                    self.apply_trie(val, then, env, pre_batch_doc, rhs_cache.as_deref_mut())?;
                 }
                 Ok(())
             }
@@ -2354,109 +2805,126 @@ impl VM {
                     }
                 }
                 match val {
-                Val::Obj(arc) => {
-                    let map = Arc::make_mut(arc);
-                    for (key, child_node) in fields {
-                        // Phase F: pre-resolve any `Conditional` guards
-                        // against pre-batch state. Skip / Delete short-
-                        // circuit; Apply hands back the unwrapped subtree.
-                        let effect = self.trie_resolve_child(
-                            child_node,
-                            env,
-                            pre_batch_doc,
-                        )?;
-                        match effect {
-                            ChildEffect::Skip => continue,
-                            ChildEffect::Delete => {
-                                map.shift_remove(key.as_ref());
-                                continue;
-                            }
-                            ChildEffect::Apply(inner) => {
-                                if let Some(child) = map.get_mut(key.as_ref()) {
-                                    self.apply_trie(child, inner, env, pre_batch_doc)?;
-                                } else {
-                                    // Path doesn't exist yet — synthesise from Null.
-                                    let mut fresh = Val::Null;
-                                    self.apply_trie(&mut fresh, inner, env, pre_batch_doc)?;
-                                    map.insert(Arc::clone(key), fresh);
+                    Val::Obj(arc) => {
+                        let map = Arc::make_mut(arc);
+                        for (key, child_node) in fields {
+                            // Phase F: pre-resolve any `Conditional` guards
+                            // against pre-batch state. Skip / Delete short-
+                            // circuit; Apply hands back the unwrapped subtree.
+                            let effect = self.trie_resolve_child(child_node, env, pre_batch_doc)?;
+                            match effect {
+                                ChildEffect::Skip => continue,
+                                ChildEffect::Delete => {
+                                    map.shift_remove(key.as_ref());
+                                    continue;
+                                }
+                                ChildEffect::Apply(inner) => {
+                                    if let Some(child) = map.get_mut(key.as_ref()) {
+                                        self.apply_trie(
+                                            child,
+                                            inner,
+                                            env,
+                                            pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
+                                        )?;
+                                    } else {
+                                        // Path doesn't exist yet — synthesise from Null.
+                                        let mut fresh = Val::Null;
+                                        self.apply_trie(
+                                            &mut fresh,
+                                            inner,
+                                            env,
+                                            pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
+                                        )?;
+                                        map.insert(Arc::clone(key), fresh);
+                                    }
                                 }
                             }
                         }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                Val::Arr(arc) => {
-                    let v = Arc::make_mut(arc);
-                    // Apply indices in source order. Deletions shift the
-                    // array and may invalidate later static indices, just
-                    // like the per-op walker. Source-order ops over the
-                    // same array should be rare enough that this matches
-                    // existing semantics for the supported cases.
-                    for (idx_key, child_node) in indices {
-                        let idx = match idx_key {
-                            IdxKey::Static(i) => *i,
-                            IdxKey::Dynamic(prog) => {
-                                let r = self.exec(prog, env)?;
-                                r.as_i64().ok_or_else(|| {
-                                    EvalError(format!(
-                                        "patch dyn-index: expected integer, got {}",
-                                        r.type_name()
-                                    ))
-                                })?
-                            }
-                        };
-                        let len = v.len() as i64;
-                        let resolved = vm_resolve_idx(idx, len);
-                        // Phase F: pre-resolve guards (see object arm).
-                        let effect = self.trie_resolve_child(
-                            child_node,
-                            env,
-                            pre_batch_doc,
-                        )?;
-                        match effect {
-                            ChildEffect::Skip => continue,
-                            ChildEffect::Delete => {
-                                if resolved < v.len() {
-                                    v.remove(resolved);
+                    Val::Arr(arc) => {
+                        let v = Arc::make_mut(arc);
+                        // Apply indices in source order. Deletions shift the
+                        // array and may invalidate later static indices, just
+                        // like the per-op walker. Source-order ops over the
+                        // same array should be rare enough that this matches
+                        // existing semantics for the supported cases.
+                        for (idx_key, child_node) in indices {
+                            let idx = match idx_key {
+                                IdxKey::Static(i) => *i,
+                                IdxKey::Dynamic(prog) => {
+                                    let r = self.exec(prog, env)?;
+                                    r.as_i64().ok_or_else(|| {
+                                        EvalError(format!(
+                                            "patch dyn-index: expected integer, got {}",
+                                            r.type_name()
+                                        ))
+                                    })?
                                 }
-                                continue;
-                            }
-                            ChildEffect::Apply(inner) => {
-                                if resolved < v.len() {
-                                    self.apply_trie(
-                                        &mut v[resolved],
-                                        inner,
-                                        env,
-                                        pre_batch_doc,
-                                    )?;
-                                } else {
-                                    // Out-of-bounds index on a `Replace` is
-                                    // a no-op in the per-op walker; preserve.
+                            };
+                            let len = v.len() as i64;
+                            let resolved = vm_resolve_idx(idx, len);
+                            // Phase F: pre-resolve guards (see object arm).
+                            let effect = self.trie_resolve_child(child_node, env, pre_batch_doc)?;
+                            match effect {
+                                ChildEffect::Skip => continue,
+                                ChildEffect::Delete => {
+                                    if resolved < v.len() {
+                                        v.remove(resolved);
+                                    }
+                                    continue;
+                                }
+                                ChildEffect::Apply(inner) => {
+                                    if resolved < v.len() {
+                                        self.apply_trie(
+                                            &mut v[resolved],
+                                            inner,
+                                            env,
+                                            pre_batch_doc,
+                                            rhs_cache.as_deref_mut(),
+                                        )?;
+                                    } else {
+                                        // Out-of-bounds index on a `Replace` is
+                                        // a no-op in the per-op walker; preserve.
+                                    }
                                 }
                             }
                         }
+                        Ok(())
                     }
-                    Ok(())
-                }
-                // Non-container at this position: fall back to building from
-                // Null when the trie wants to descend further. This mirrors
-                // the per-op walker which materialises empty maps/vecs as
-                // needed (`v.into_map().unwrap_or_default()`).
-                _ => {
-                    if fields.is_empty() && indices.is_empty() {
-                        return Ok(());
+                    // Non-container at this position: fall back to building from
+                    // Null when the trie wants to descend further. This mirrors
+                    // the per-op walker which materialises empty maps/vecs as
+                    // needed (`v.into_map().unwrap_or_default()`).
+                    _ => {
+                        if fields.is_empty() && indices.is_empty() {
+                            return Ok(());
+                        }
+                        if !fields.is_empty() {
+                            let mut fresh = Val::obj(IndexMap::new());
+                            self.apply_trie(
+                                &mut fresh,
+                                node,
+                                env,
+                                pre_batch_doc,
+                                rhs_cache.as_deref_mut(),
+                            )?;
+                            *val = fresh;
+                        } else {
+                            let mut fresh = Val::arr(Vec::new());
+                            self.apply_trie(
+                                &mut fresh,
+                                node,
+                                env,
+                                pre_batch_doc,
+                                rhs_cache.as_deref_mut(),
+                            )?;
+                            *val = fresh;
+                        }
+                        Ok(())
                     }
-                    if !fields.is_empty() {
-                        let mut fresh = Val::obj(IndexMap::new());
-                        self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
-                        *val = fresh;
-                    } else {
-                        let mut fresh = Val::arr(Vec::new());
-                        self.apply_trie(&mut fresh, node, env, pre_batch_doc)?;
-                        *val = fresh;
-                    }
-                    Ok(())
-                }
                 }
             }
         }
@@ -2503,12 +2971,16 @@ impl VM {
         i: usize,
         val: &CompiledPatchVal,
         env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
     ) -> Result<PatchResult, EvalError> {
         if i == path.len() {
             return Ok(match val {
                 CompiledPatchVal::Delete => PatchResult::Delete,
                 CompiledPatchVal::Replace(prog) => {
-                    let nv = self.exec(prog, &env.with_current(v))?;
+                    let cenv = env.with_current(v);
+                    let nv =
+                        self.eval_patch_replace(prog, &cenv, rhs_cache.as_deref_mut(), op_idx)?;
                     PatchResult::Replace(nv)
                 }
             });
@@ -2521,7 +2993,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         m.shift_remove(name.as_ref());
@@ -2540,7 +3020,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         if resolved < a.len() {
@@ -2570,7 +3058,15 @@ impl VM {
                 } else {
                     Val::Null
                 };
-                let child = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                let child = self.apply_patch_step_compiled(
+                    existing,
+                    path,
+                    i + 1,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 match child {
                     PatchResult::Delete => {
                         if resolved < a.len() {
@@ -2592,7 +3088,15 @@ impl VM {
                 let mut write_idx = 0usize;
                 for read_idx in 0..arr.len() {
                     let item = std::mem::replace(&mut arr[read_idx], Val::Null);
-                    match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
+                    match self.apply_patch_step_compiled(
+                        item,
+                        path,
+                        i + 1,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )? {
                         PatchResult::Delete => {}
                         PatchResult::Replace(nv) => {
                             arr[write_idx] = nv;
@@ -2621,7 +3125,15 @@ impl VM {
                     };
                     env_mut.pop_lam(frame);
                     if include {
-                        match self.apply_patch_step_compiled(item, path, i + 1, val, env)? {
+                        match self.apply_patch_step_compiled(
+                            item,
+                            path,
+                            i + 1,
+                            val,
+                            env,
+                            rhs_cache.as_deref_mut(),
+                            op_idx,
+                        )? {
                             PatchResult::Delete => {}
                             PatchResult::Replace(nv) => {
                                 arr[write_idx] = nv;
@@ -2637,7 +3149,16 @@ impl VM {
                 Ok(PatchResult::Replace(Val::arr(arr)))
             }
             CompiledPathStep::Descendant(name) => {
-                let v2 = self.descend_apply_patch_compiled(v, name, path, i, val, env)?;
+                let v2 = self.descend_apply_patch_compiled(
+                    v,
+                    name,
+                    path,
+                    i,
+                    val,
+                    env,
+                    rhs_cache.as_deref_mut(),
+                    op_idx,
+                )?;
                 Ok(PatchResult::Replace(v2))
             }
         }
@@ -2653,6 +3174,8 @@ impl VM {
         i: usize,
         val: &CompiledPatchVal,
         env: &Env,
+        mut rhs_cache: Option<&mut UpdateRhsCache>,
+        op_idx: Option<usize>,
     ) -> Result<Val, EvalError> {
         match v {
             Val::Obj(m) => {
@@ -2664,15 +3187,31 @@ impl VM {
                     } else {
                         continue;
                     };
-                    let replaced =
-                        self.descend_apply_patch_compiled(child, name, path, i, val, env)?;
+                    let replaced = self.descend_apply_patch_compiled(
+                        child,
+                        name,
+                        path,
+                        i,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                     if let Some((_, slot)) = map.get_index_mut(idx) {
                         *slot = replaced;
                     }
                 }
                 if map.contains_key(name.as_ref()) {
                     let existing = map.get(name.as_ref()).cloned().unwrap_or(Val::Null);
-                    let r = self.apply_patch_step_compiled(existing, path, i + 1, val, env)?;
+                    let r = self.apply_patch_step_compiled(
+                        existing,
+                        path,
+                        i + 1,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                     match r {
                         PatchResult::Delete => {
                             map.shift_remove(name.as_ref());
@@ -2688,11 +3227,74 @@ impl VM {
                 let mut vec = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
                 for slot in vec.iter_mut() {
                     let old = std::mem::replace(slot, Val::Null);
-                    *slot = self.descend_apply_patch_compiled(old, name, path, i, val, env)?;
+                    *slot = self.descend_apply_patch_compiled(
+                        old,
+                        name,
+                        path,
+                        i,
+                        val,
+                        env,
+                        rhs_cache.as_deref_mut(),
+                        op_idx,
+                    )?;
                 }
                 Ok(Val::arr(vec))
             }
             other => Ok(other),
+        }
+    }
+
+    fn descend_apply_update_selector_compiled(
+        &mut self,
+        v: &mut Val,
+        name: &Arc<str>,
+        selector: &[CompiledPathStep],
+        i: usize,
+        ops: &[CompiledPatchOp],
+        trie: &std::sync::OnceLock<Option<CompiledPatchTrie>>,
+        env: &Env,
+        rhs_cache: &mut UpdateRhsCache,
+    ) -> Result<(), EvalError> {
+        match v {
+            Val::Obj(map_arc) => {
+                let map = Arc::make_mut(map_arc);
+                let mut idx = 0usize;
+                while idx < map.len() {
+                    let Some((_, child)) = map.get_index_mut(idx) else {
+                        break;
+                    };
+                    self.descend_apply_update_selector_compiled(
+                        child, name, selector, i, ops, trie, env, rhs_cache,
+                    )?;
+                    idx += 1;
+                }
+                if let Some(child) = map.get_mut(name.as_ref()) {
+                    match self.apply_update_selector_compiled(
+                        child,
+                        selector,
+                        i + 1,
+                        ops,
+                        trie,
+                        env,
+                        rhs_cache,
+                    )? {
+                        PatchResult::Delete => {
+                            map.shift_remove(name.as_ref());
+                        }
+                        PatchResult::Replace(_) => {}
+                    }
+                }
+                Ok(())
+            }
+            Val::Arr(arr_arc) => {
+                for slot in Arc::make_mut(arr_arc).iter_mut() {
+                    self.descend_apply_update_selector_compiled(
+                        slot, name, selector, i, ops, trie, env, rhs_cache,
+                    )?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 
@@ -2743,10 +3345,8 @@ impl VM {
         // so `lam_param` no longer gates the fast path. Multi-param and
         // nested-ref-wrapped lambdas classify as `Generic` and naturally
         // fall through.
-        let starts_with_load_ident = matches!(
-            prog.ops.first(),
-            Some(crate::vm::Opcode::LoadIdent(_))
-        );
+        let starts_with_load_ident =
+            matches!(prog.ops.first(), Some(crate::vm::Opcode::LoadIdent(_)));
         if scratch.has_no_vars()
             && !starts_with_load_ident
             && !matches!(kernel, BodyKernel::Generic)
@@ -2858,7 +3458,7 @@ impl VM {
     /// and fast-path shortcuts for simple `{@}`, `{@.field}`, and `{ident}` patterns.
     fn exec_fstring(&mut self, parts: &[CompiledFSPart], env: &Env) -> Result<Val, EvalError> {
         use std::fmt::Write as _;
-        
+
         let lit_len: usize = parts
             .iter()
             .map(|p| match p {
@@ -2871,8 +3471,6 @@ impl VM {
             match part {
                 CompiledFSPart::Lit(s) => out.push_str(s.as_ref()),
                 CompiledFSPart::Interp { prog, fmt } => {
-                    
-                    
                     let val: Val = match &prog.ops[..] {
                         [Opcode::PushCurrent] => env.current.clone(),
                         [Opcode::PushCurrent, Opcode::GetIndex(n)] => match &env.current {
@@ -2897,7 +3495,6 @@ impl VM {
                     };
                     match fmt {
                         None => match &val {
-                            
                             Val::Str(s) => out.push_str(s.as_ref()),
                             Val::Int(n) => {
                                 let _ = write!(out, "{}", n);
@@ -2935,24 +3532,28 @@ impl VM {
                 }
             }
         }
-        
+
         Ok(Val::Str(Arc::<str>::from(out)))
     }
 
     /// Evaluate `iter_prog` and expand the result into a `Vec<Val>` suitable for iteration.
     /// Objects are converted to `[{key, value}]` pairs; scalars become single-element vecs.
     fn exec_iter_vals(&mut self, iter_prog: &Program, env: &Env) -> Result<Vec<Val>, EvalError> {
-        match self.exec(iter_prog, env)? {
-            Val::Arr(a) => Ok(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone())),
-            Val::Obj(m) => {
-                let entries = Arc::try_unwrap(m).unwrap_or_else(|m| (*m).clone());
-                Ok(entries
-                    .into_iter()
-                    .map(|(k, v)| obj2("key", Val::Str(k), "value", v))
-                    .collect())
-            }
-            other => Ok(vec![other]),
+        let raw = self.exec(iter_prog, env)?;
+        // Object → entries (key/value record per entry).
+        if let Val::Obj(m) = &raw {
+            let entries = Arc::try_unwrap(m.clone()).unwrap_or_else(|m| (*m).clone());
+            return Ok(entries
+                .into_iter()
+                .map(|(k, v)| obj2("key", Val::Str(k), "value", v))
+                .collect());
         }
+        // Array-shaped sources (Val::Arr, IntVec, FloatVec, StrVec, StrSliceVec,
+        // ObjVec) → per-element iteration via `into_vec`. Scalars fall through.
+        if let Some(v) = raw.clone().into_vec() {
+            return Ok(v);
+        }
+        Ok(vec![raw])
     }
 
     /// Evaluate a compiled `match` expression by walking the flat
@@ -2995,7 +3596,11 @@ impl VM {
                     }
                     pc += 1;
                 }
-                MatchOp::KindCheck { slot, kind, else_pc } => {
+                MatchOp::KindCheck {
+                    slot,
+                    kind,
+                    else_pc,
+                } => {
                     if val_matches_kind(&slots[*slot as usize], *kind) {
                         pc += 1;
                     } else {
@@ -3025,10 +3630,7 @@ impl VM {
                     }
                 }
                 MatchOp::ObjCheck { slot, else_pc } => {
-                    if matches!(
-                        &slots[*slot as usize],
-                        Val::Obj(_) | Val::ObjSmall(_)
-                    ) {
+                    if matches!(&slots[*slot as usize], Val::Obj(_) | Val::ObjSmall(_)) {
                         pc += 1;
                     } else {
                         pc = *else_pc;
@@ -3039,15 +3641,13 @@ impl VM {
                     key,
                     dst,
                     else_pc,
-                } => {
-                    match obj_like_get(&slots[*src as usize], key.as_ref()) {
-                        Some(v) => {
-                            slots[*dst as usize] = v;
-                            pc += 1;
-                        }
-                        None => pc = *else_pc,
+                } => match obj_like_get(&slots[*src as usize], key.as_ref()) {
+                    Some(v) => {
+                        slots[*dst as usize] = v;
+                        pc += 1;
                     }
-                }
+                    None => pc = *else_pc,
+                },
                 MatchOp::LenCheck {
                     slot,
                     len,
@@ -3062,7 +3662,11 @@ impl VM {
                         }
                     };
                     let want = *len as usize;
-                    let ok = if *exact { arr_len == want } else { arr_len >= want };
+                    let ok = if *exact {
+                        arr_len == want
+                    } else {
+                        arr_len >= want
+                    };
                     if ok {
                         pc += 1;
                     } else {
@@ -3092,7 +3696,11 @@ impl VM {
                     slots[*dst as usize] = build_obj_rest(&slots[*src as usize], &listed);
                     pc += 1;
                 }
-                MatchOp::TestSubPat { slot, subpat, else_pc } => {
+                MatchOp::TestSubPat {
+                    slot,
+                    subpat,
+                    else_pc,
+                } => {
                     let saved = bindings.len();
                     let mut tmp: Vec<(Arc<str>, Val)> = Vec::new();
                     let ok = match_pat(
@@ -3416,7 +4024,6 @@ fn val_matches_kind(val: &Val, kind: KindType) -> bool {
     }
 }
 
-
 /// Return `true` when `op` is a "take the first element" selector (`?` quantifier
 /// or a no-arg `.first()` call), used to short-circuit `Descendant` to `find_desc_first`.
 fn is_first_selector_op(op: &Opcode) -> bool {
@@ -3429,7 +4036,78 @@ fn is_first_selector_op(op: &Opcode) -> bool {
 
 /// Slice an array or typed vector, resolving optional start/end indices with
 /// Python-style negative-index semantics and clamping to valid bounds.
-fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
+fn exec_slice(v: Val, from: Option<i64>, to: Option<i64>, step: Option<i64>) -> Val {
+    // Hot path: step is None or Some(1). Match prior behavior exactly,
+    // forwarding to the same Arc::try_unwrap → range-copy path.
+    let step = step.unwrap_or(1);
+    if step == 1 {
+        return exec_slice_step1(v, from, to);
+    }
+    if step == 0 {
+        return Val::Null;
+    }
+    // Generic step path. For positive `step`, walk forward from `start` to
+    // `end` taking every `step`-th element. For negative `step`, walk
+    // backward from `start` (defaulting to len-1) to `end` (defaulting to
+    // -1, i.e. before index 0).
+    fn collect<T: Clone>(items: &[T], from: Option<i64>, to: Option<i64>, step: i64) -> Vec<T> {
+        let len = items.len() as i64;
+        if step > 0 {
+            let s = resolve_idx(from.unwrap_or(0), len) as i64;
+            let e = resolve_idx(to.unwrap_or(len), len) as i64;
+            let mut i = s;
+            let mut out = Vec::new();
+            while i < e && (i as usize) < items.len() {
+                out.push(items[i as usize].clone());
+                i += step;
+            }
+            out
+        } else {
+            // Negative step. Start defaults to len-1; end defaults to -1
+            // (sentinel meaning "before zero"). Negative bounds count from
+            // the end as in Python.
+            let s_raw = from.unwrap_or(len - 1);
+            let s = if s_raw < 0 {
+                (len + s_raw).max(-1)
+            } else {
+                s_raw.min(len - 1)
+            };
+            let e_raw = to.unwrap_or(-1);
+            let e = if e_raw < 0 && e_raw != -1 {
+                (len + e_raw).max(-1)
+            } else if e_raw == -1 && to.is_none() {
+                -1
+            } else {
+                e_raw
+            };
+            let mut i = s;
+            let mut out = Vec::new();
+            while i > e && i >= 0 {
+                out.push(items[i as usize].clone());
+                i += step;
+            }
+            out
+        }
+    }
+    match v {
+        Val::Arr(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::arr(collect(&items, from, to, step))
+        }
+        Val::IntVec(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::int_vec(collect(&items, from, to, step))
+        }
+        Val::FloatVec(a) => {
+            let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
+            Val::float_vec(collect(&items, from, to, step))
+        }
+        _ => Val::Null,
+    }
+}
+
+/// Step-1 slice (the original implementation, preserved as a hot-path branch).
+fn exec_slice_step1(v: Val, from: Option<i64>, to: Option<i64>) -> Val {
     match v {
         Val::Arr(a) => {
             let len = a.len() as i64;
@@ -3498,7 +4176,6 @@ fn collect_desc(v: &Val, name: &str, out: &mut Vec<Val>) {
         _ => {}
     }
 }
-
 
 /// DFS pre-order search returning the first occurrence of `name` in the subtree of `v`.
 /// Used to optimise `Descendant` when followed by a `.first()` selector.
@@ -3626,7 +4303,6 @@ fn collect_all(v: &Val, out: &mut Vec<Val>) {
     }
 }
 
-
 /// Like `collect_desc` but also records `(JSON-pointer, value)` pairs in `cached`
 /// for bulk insertion into the `PathCache` when traversing from the root document.
 fn collect_desc_with_paths(
@@ -3705,13 +4381,37 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
             e.current = item;
             e
         }
+        // 2-var form binds (a, b) by matching item shape:
+        //   - Array/Vec with ≥ 2 elems: a = item[0], b = item[1] (pair destructure).
+        //     Fits `[(k, v), ...]`-shaped sources, which is the common case
+        //     coming from `.entries()`, `.pairwise()`, `.enumerate()`, etc.
+        //   - Object with `key`/`value` keys: a = key, b = value (also covers
+        //     entries-style records produced by iterating an object directly).
+        //   - Object with `index`/`value` keys: a = index, b = value
+        //     (legacy enumerate shape).
+        //   - Anything else: a = null, b = whole item. Caller should prefer
+        //     a 1-var binding in that case.
         [v1, v2, ..] => {
-            let idx = item.get("index").cloned().unwrap_or(Val::Null);
-            let val = item.get("value").cloned().unwrap_or_else(|| item.clone());
+            let (a, b) = if let Some(elems) = item.clone().into_vec() {
+                let mut it = elems.into_iter();
+                let a = it.next().unwrap_or(Val::Null);
+                let b = it.next().unwrap_or(Val::Null);
+                (a, b)
+            } else if let Val::Obj(m) = &item {
+                let k = m
+                    .get("key")
+                    .or_else(|| m.get("index"))
+                    .cloned()
+                    .unwrap_or(Val::Null);
+                let v = m.get("value").cloned().unwrap_or_else(|| item.clone());
+                (k, v)
+            } else {
+                (Val::Null, item.clone())
+            };
             let mut e = env
-                .with_var(v1.as_ref(), idx)
-                .with_var(v2.as_ref(), val.clone());
-            e.current = val;
+                .with_var(v1.as_ref(), a)
+                .with_var(v2.as_ref(), b.clone());
+            e.current = b;
             e
         }
     }
@@ -3819,10 +4519,6 @@ fn apply_fmt_spec(val: &Val, spec: &str) -> String {
     }
     s
 }
-
-
-
-
 
 /// Compute a structural hash of a `Val` that distinguishes both shape AND leaf values.
 /// Two documents with the same shape but different primitive values must produce different
@@ -3982,7 +4678,11 @@ where
                 }
                 pc += 1;
             }
-            MatchOp::KindCheck { slot, kind, else_pc } => {
+            MatchOp::KindCheck {
+                slot,
+                kind,
+                else_pc,
+            } => {
                 if slot_view_matches_kind(&slots[*slot as usize], *kind) {
                     pc += 1;
                 } else {
@@ -4044,7 +4744,11 @@ where
                     }
                 };
                 let want = *len as usize;
-                let ok = if *exact { arr_len == want } else { arr_len >= want };
+                let ok = if *exact {
+                    arr_len == want
+                } else {
+                    arr_len >= want
+                };
                 if ok {
                     pc += 1;
                 } else {
@@ -4248,5 +4952,33 @@ where
     match slot {
         SlotView::View(v) => SlotView::View(v.index(idx)),
         SlotView::Owned(val) => SlotView::Owned(arr_like_get(val, idx as usize)),
+    }
+}
+
+#[cfg(test)]
+mod update_rhs_cache_tests {
+    use super::program_is_update_invariant;
+    use crate::compile::compiler::Compiler;
+
+    fn compiled(src: &str) -> crate::vm::Program {
+        Compiler::compile_str(src).expect("compile")
+    }
+
+    #[test]
+    fn root_only_update_rhs_is_cacheable() {
+        let program = compiled("$.default_tag");
+        assert!(program_is_update_invariant(&program));
+    }
+
+    #[test]
+    fn current_dependent_update_rhs_is_not_cacheable() {
+        let program = compiled(r#"@.append("x")"#);
+        assert!(!program_is_update_invariant(&program));
+    }
+
+    #[test]
+    fn selected_focus_update_rhs_is_not_cacheable() {
+        let program = compiled(r#"__update_focus.tags.append($.default_tag)"#);
+        assert!(!program_is_update_invariant(&program));
     }
 }

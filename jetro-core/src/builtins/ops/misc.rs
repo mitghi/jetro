@@ -8,11 +8,29 @@ pub fn to_csv_apply(recv: &Val) -> Option<Val> {
     )))
 }
 
+/// `to_csv(headers)` — explicit header-driven CSV emission. The first line
+/// is the header row; each subsequent line projects the listed headers
+/// from each object row in order. Missing keys produce empty cells.
+#[inline]
+pub fn to_csv_with_headers_apply(recv: &Val, headers: &[Arc<str>]) -> Option<Val> {
+    Some(Val::Str(Arc::from(
+        crate::builtins::helpers::csv_emit_with_headers(recv, ",", headers).as_str(),
+    )))
+}
+
 /// Serialises an array of arrays/objects to TSV format (tab-delimited).
 #[inline]
 pub fn to_tsv_apply(recv: &Val) -> Option<Val> {
     Some(Val::Str(Arc::from(
         crate::builtins::helpers::csv_emit(recv, "\t").as_str(),
+    )))
+}
+
+/// `to_tsv(headers)` — TSV variant of `to_csv_with_headers_apply`.
+#[inline]
+pub fn to_tsv_with_headers_apply(recv: &Val, headers: &[Arc<str>]) -> Option<Val> {
+    Some(Val::Str(Arc::from(
+        crate::builtins::helpers::csv_emit_with_headers(recv, "\t", headers).as_str(),
     )))
 }
 
@@ -122,6 +140,21 @@ pub fn or_apply(recv: &Val, default: &Val) -> Val {
 #[inline]
 pub fn missing_apply(recv: &Val, key: &str) -> Val {
     Val::Bool(!crate::util::field_exists_nested(recv, key))
+}
+
+/// Returns the subset of `keys` not present (or null) at any nesting level
+/// inside `recv`, as a `Val::Arr<Str>`. This is the variadic form of
+/// `missing` documented for required-field checks:
+/// `$.config.missing("host", "port")` → `["host"]` if only `host` is
+/// absent. Empty input → empty array; all keys present → empty array.
+#[inline]
+pub fn missing_many_apply(recv: &Val, keys: &[Arc<str>]) -> Val {
+    let out: Vec<Val> = keys
+        .iter()
+        .filter(|k| !crate::util::field_exists_nested(recv, k.as_ref()))
+        .map(|k| Val::Str(k.clone()))
+        .collect();
+    Val::arr(out)
 }
 
 /// Membership test: arrays/vectors check element presence, strings check substring, objects check key.

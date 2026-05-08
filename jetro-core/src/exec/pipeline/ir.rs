@@ -13,18 +13,18 @@ use crate::builtins::registry::{
     BuiltinId,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+    BuiltinCardinality, BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
     BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
     BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
-use crate::parse::chain_ir::{Cardinality, ChainOp};
-use crate::plan::demand::{Demand as ChainDemand, PullDemand, ValueNeed};
+use crate::parse::chain_ir::ChainOp;
+use crate::plan::demand::{Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, Sink, Stage, ViewSinkCapability,
-    ViewMembershipTarget, ViewStageCapability,
+    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerOp, Sink, Stage,
+    ViewMembershipTarget, ViewSinkCapability, ViewStageCapability,
 };
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
@@ -53,6 +53,50 @@ impl SinkDemand {
         chain: ChainDemand::RESULT,
         positional: None,
     };
+}
+
+/// Source payload demand split into scan-time and result-row lanes.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadDemand {
+    /// Fields/value needed while deciding which rows survive.
+    pub scan_need: FieldDemand,
+    /// Fields/value needed only for rows that are emitted or retained by the sink.
+    pub result_need: FieldDemand,
+}
+
+/// Explicit pending projection run discovered at the tail of a pipeline.
+#[derive(Debug, Clone)]
+pub struct LateProjection {
+    /// Number of leading stages that must run before the delayed projection is applied.
+    #[allow(dead_code)]
+    pub prefix_len: usize,
+    /// Composed projection kernel to apply to selected rows.
+    #[allow(dead_code)]
+    pub kernel: BodyKernel,
+}
+
+/// Boundary where the pipeline must leave the current low-materialization path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackBoundary {
+    /// No known materialization/fallback boundary in this pipeline.
+    None,
+    /// Stage at `index` requires legacy materialization.
+    LegacyStage {
+        /// Index of the first legacy-materialized stage.
+        index: usize,
+    },
+    /// The selected physical path can fall back to materialized execution.
+    MaterializedExecution,
+}
+
+impl From<DemandLanes> for PayloadDemand {
+    fn from(value: DemandLanes) -> Self {
+        Self {
+            scan_need: value.scan_need,
+            result_need: value.result_need,
+        }
+    }
 }
 
 impl Sink {
@@ -268,7 +312,7 @@ fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
 
 fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
     match value {
-        BuiltinSinkValueNeed::None => ValueNeed::None,
+        BuiltinSinkValueNeed::None => ValueNeed::CountOnly,
         BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
         BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
     }
@@ -302,7 +346,7 @@ pub enum StageStrategy {
 #[derive(Debug, Clone, Copy)]
 pub struct StageShape {
     /// Whether the stage emits one-to-one, fewer, more, or barrier-level output rows.
-    pub cardinality: Cardinality,
+    pub cardinality: BuiltinCardinality,
     /// `true` when the stage supports position-indexed execution (used for `IndexedDispatch`).
     pub can_indexed: bool,
     /// Estimated relative CPU cost per element passing through the stage.
@@ -314,7 +358,7 @@ pub struct StageShape {
 impl StageShape {
     pub(crate) fn from_view_stage(stage: BuiltinViewStage) -> Self {
         Self {
-            cardinality: stage.cardinality().into(),
+            cardinality: stage.cardinality(),
             can_indexed: stage.can_indexed(),
             cost: stage.cost(),
             selectivity: stage.selectivity(),
@@ -327,14 +371,14 @@ impl StageShape {
         let spec = method.spec();
         if let Some(shape) = pipeline_shape(BuiltinId::from_method(method)) {
             return Self {
-                cardinality: shape.cardinality.into(),
+                cardinality: shape.cardinality,
                 can_indexed: shape.can_indexed,
                 cost: shape.cost,
                 selectivity: shape.selectivity,
             };
         }
         Self {
-            cardinality: spec.cardinality.into(),
+            cardinality: spec.cardinality,
             can_indexed: spec.can_indexed,
             cost: spec.cost,
             selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
@@ -510,6 +554,15 @@ impl Stage {
         !matches!(
             self.pipeline_materialization(),
             BuiltinPipelineMaterialization::Streaming
+        )
+    }
+
+    /// Returns `true` when the stage cannot use a composed/view barrier and must fall back to the
+    /// legacy full-materialisation executor.
+    pub(crate) fn requires_legacy_fallback(&self) -> bool {
+        matches!(
+            self.pipeline_materialization(),
+            BuiltinPipelineMaterialization::LegacyMaterialized
         )
     }
 
@@ -696,7 +749,7 @@ impl Stage {
         let Some(desc) = self.descriptor() else {
             return false;
         };
-        if !matches!(self.shape().cardinality, Cardinality::OneToOne) {
+        if !matches!(self.shape().cardinality, BuiltinCardinality::OneToOne) {
             return false;
         }
         if desc.pipeline_order_effect() != BuiltinPipelineOrderEffect::Preserves {
@@ -761,7 +814,7 @@ impl Stage {
             Some(op) => op.propagate_demand(demand.chain),
             None => ChainDemand::RESULT,
         };
-        let positional = if matches!(self.shape().cardinality, Cardinality::OneToOne) {
+        let positional = if matches!(self.shape().cardinality, BuiltinCardinality::OneToOne) {
             demand.positional
         } else {
             None
@@ -801,20 +854,20 @@ impl Stage {
     pub fn shape(&self) -> StageShape {
         match self {
             Stage::CompiledMap(_) => StageShape {
-                cardinality: Cardinality::OneToOne,
+                cardinality: BuiltinCardinality::OneToOne,
                 can_indexed: true,
                 cost: 10.0,
                 selectivity: 1.0,
             },
             Stage::SortedDedup(_) => StageShape {
-                cardinality: Cardinality::OneToOne,
+                cardinality: BuiltinCardinality::OneToOne,
                 can_indexed: true,
                 cost: 1.0,
                 selectivity: 1.0,
             },
             _ => self.descriptor().map_or(
                 StageShape {
-                    cardinality: Cardinality::OneToOne,
+                    cardinality: BuiltinCardinality::OneToOne,
                     can_indexed: false,
                     cost: 1.0,
                     selectivity: 1.0,
@@ -824,7 +877,7 @@ impl Stage {
                         .map(StageShape::from_view_stage)
                         .or_else(|| desc.method.map(StageShape::from_builtin))
                         .unwrap_or(StageShape {
-                            cardinality: Cardinality::OneToOne,
+                            cardinality: BuiltinCardinality::OneToOne,
                             can_indexed: false,
                             cost: 1.0,
                             selectivity: 1.0,
@@ -1008,6 +1061,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::DictComp(_)
         | Opcode::SetComp(_)
         | Opcode::PatchEval(_)
+        | Opcode::UpdateBatchEval(_)
         | Opcode::Match(_)
         | Opcode::DeepMatchAll(_)
         | Opcode::DeepMatchFirst(_) => false,
@@ -1044,7 +1098,7 @@ pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
         | Opcode::LoadIdent(_)
         | Opcode::GetField(_)
         | Opcode::GetIndex(_)
-        | Opcode::GetSlice(_, _)
+        | Opcode::GetSlice(_, _, _)
         | Opcode::OptField(_)
         | Opcode::Descendant(_)
         | Opcode::DescendAll
@@ -1123,6 +1177,250 @@ impl Pipeline {
     /// Returns the `SinkDemand` that the pipeline's source must satisfy after propagating the
     /// sink demand through all stages.
     pub fn source_demand(&self) -> SinkDemand {
-        Self::segment_source_demand(&self.stages, &self.sink)
+        self.source_demand
     }
+
+    /// Computes precise payload demand at the source, split into fields needed while scanning
+    /// and fields needed only for selected output rows.
+    #[allow(dead_code)]
+    pub fn segment_payload_demand(
+        stages: &[Stage],
+        stage_kernels: &[BodyKernel],
+        sink: &Sink,
+        sink_kernels: &[BodyKernel],
+    ) -> PayloadDemand {
+        let mut lanes = sink_payload_lanes(sink, sink_kernels);
+        for (idx, stage) in stages.iter().enumerate().rev() {
+            let kernel = stage_kernels.get(idx).unwrap_or(&BodyKernel::Generic);
+            lanes = stage_payload_lanes(stage, kernel, lanes);
+        }
+        lanes.into()
+    }
+
+    /// Computes precise payload demand at this pipeline's source.
+    #[allow(dead_code)]
+    pub fn payload_demand(&self) -> PayloadDemand {
+        self.payload_demand.clone()
+    }
+
+    /// Finds a trailing run of pure one-to-one projection stages and composes it into a
+    /// single late-projection annotation.
+    pub fn late_projection_for(
+        stages: &[Stage],
+        stage_kernels: &[BodyKernel],
+    ) -> Option<LateProjection> {
+        let mut idx = stages.len();
+        let mut kernel = BodyKernel::Current;
+        let mut found = false;
+
+        while idx > 0 {
+            let stage_idx = idx - 1;
+            let Some(stage_kernel) =
+                trailing_projection_kernel(&stages[stage_idx], stage_kernels.get(stage_idx))
+            else {
+                break;
+            };
+            kernel = compose_projection_kernel(stage_kernel, kernel);
+            found = true;
+            idx -= 1;
+        }
+
+        found.then_some(LateProjection {
+            prefix_len: idx,
+            kernel,
+        })
+    }
+
+    /// Computes the first explicit materialization/fallback boundary for this physical path.
+    pub fn fallback_boundary_for(
+        stages: &[Stage],
+        exec_path: PhysicalExecPath,
+    ) -> FallbackBoundary {
+        if let Some(index) = stages.iter().position(Stage::requires_legacy_fallback) {
+            return FallbackBoundary::LegacyStage { index };
+        }
+        match exec_path {
+            PhysicalExecPath::Legacy => FallbackBoundary::MaterializedExecution,
+            PhysicalExecPath::Indexed | PhysicalExecPath::Columnar | PhysicalExecPath::Composed => {
+                FallbackBoundary::None
+            }
+        }
+    }
+}
+
+fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Option<BodyKernel> {
+    match stage {
+        Stage::Map(_, _) => {
+            let kernel = kernel?;
+            kernel.is_view_native().then(|| kernel.clone())
+        }
+        Stage::Builtin(call)
+            if call.spec().pure
+                && call.spec().view_scalar
+                && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
+        {
+            Some(BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: call.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn compose_projection_kernel(first: BodyKernel, then: BodyKernel) -> BodyKernel {
+    if matches!(then, BodyKernel::Current) {
+        return first;
+    }
+    BodyKernel::Compose {
+        first: Box::new(first),
+        then: Box::new(then),
+    }
+}
+
+#[allow(dead_code)]
+fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
+    match sink {
+        Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => {
+            DemandLanes::RESULT
+        }
+        Sink::Reducer(spec) if spec.op == ReducerOp::Count => {
+            let mut lanes = DemandLanes::NONE;
+            if let Some(idx) = spec.predicate_kernel_index() {
+                lanes.merge_scan(kernel_payload_need(sink_kernels, idx));
+            }
+            lanes
+        }
+        Sink::Reducer(spec) => {
+            let mut lanes = DemandLanes::NONE;
+            if let Some(idx) = spec.predicate_kernel_index() {
+                lanes.merge_scan(kernel_payload_need(sink_kernels, idx));
+            }
+            lanes.merge_scan(match spec.projection_kernel_index() {
+                Some(idx) => kernel_payload_need(sink_kernels, idx),
+                None => FieldDemand::Whole,
+            });
+            lanes
+        }
+        Sink::Predicate(spec) => {
+            let mut lanes = DemandLanes::NONE;
+            lanes.merge_scan(kernel_payload_need(
+                sink_kernels,
+                spec.predicate_kernel_index(),
+            ));
+            if spec.op == PredicateSinkOp::FindOne {
+                lanes.merge_result(FieldDemand::Whole);
+            }
+            lanes
+        }
+        Sink::Membership(_) | Sink::ApproxCountDistinct => DemandLanes {
+            scan_need: FieldDemand::Whole,
+            result_need: FieldDemand::None,
+        },
+        Sink::ArgExtreme(spec) => {
+            let mut lanes = DemandLanes::RESULT;
+            lanes.merge_scan(kernel_payload_need(sink_kernels, spec.key_kernel_index()));
+            lanes
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLanes) -> DemandLanes {
+    match stage {
+        Stage::Filter(_, _) => {
+            let mut lanes = downstream;
+            lanes.merge_scan(kernel.field_demand());
+            lanes
+        }
+        Stage::Map(_, _) | Stage::CompiledMap(_) => DemandLanes {
+            scan_need: map_lane_payload(&downstream.scan_need, kernel),
+            result_need: map_lane_payload(&downstream.result_need, kernel),
+        },
+        Stage::FlatMap(_, _) => DemandLanes {
+            scan_need: FieldDemand::Whole,
+            result_need: FieldDemand::Whole,
+        },
+        Stage::Sort(spec) => {
+            let mut lanes = downstream;
+            lanes.merge_scan(match spec.key {
+                Some(_) => kernel.field_demand(),
+                None => FieldDemand::Whole,
+            });
+            lanes
+        }
+        Stage::UniqueBy(Some(_)) | Stage::SortedDedup(Some(_)) => {
+            let mut lanes = downstream;
+            lanes.merge_scan(kernel.field_demand());
+            lanes
+        }
+        Stage::UniqueBy(None) | Stage::SortedDedup(None) => {
+            let mut lanes = downstream;
+            lanes.merge_scan(FieldDemand::Whole);
+            lanes
+        }
+        Stage::ExprBuiltin { method, .. }
+            if matches!(
+                method,
+                BuiltinMethod::TakeWhile | BuiltinMethod::DropWhile | BuiltinMethod::FilterKeys
+            ) =>
+        {
+            let mut lanes = downstream;
+            lanes.merge_scan(kernel.field_demand());
+            lanes
+        }
+        Stage::ExprBuiltin {
+            method:
+                BuiltinMethod::Map
+                | BuiltinMethod::TransformKeys
+                | BuiltinMethod::TransformValues
+                | BuiltinMethod::FilterValues,
+            ..
+        } => DemandLanes {
+            scan_need: map_lane_payload(&downstream.scan_need, kernel),
+            result_need: map_lane_payload(&downstream.result_need, kernel),
+        },
+        Stage::Builtin(call)
+            if call.method.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
+        {
+            if downstream.scan_need.is_none() && downstream.result_need.is_none() {
+                downstream
+            } else {
+                DemandLanes {
+                    scan_need: if downstream.scan_need.is_none() {
+                        FieldDemand::None
+                    } else {
+                        FieldDemand::Whole
+                    },
+                    result_need: if downstream.result_need.is_none() {
+                        FieldDemand::None
+                    } else {
+                        FieldDemand::Whole
+                    },
+                }
+            }
+        }
+        _ if stage.consumes_input_value() => DemandLanes {
+            scan_need: FieldDemand::Whole,
+            result_need: downstream.result_need,
+        },
+        _ => downstream,
+    }
+}
+
+#[allow(dead_code)]
+fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
+    if demand.is_none() {
+        FieldDemand::None
+    } else {
+        kernel.field_demand()
+    }
+}
+
+#[allow(dead_code)]
+fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
+    kernels
+        .get(idx)
+        .map(BodyKernel::field_demand)
+        .unwrap_or(FieldDemand::Whole)
 }

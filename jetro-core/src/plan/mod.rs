@@ -5,8 +5,10 @@
 //! `analysis` provides shared shape, nullability, and selectivity passes.
 
 pub(crate) mod analysis;
+pub(crate) mod chain_demand;
 pub(crate) mod demand;
 pub(crate) mod logical;
 pub(crate) mod optimize;
 pub(crate) mod patch_fusion;
 pub(crate) mod physical;
+pub(crate) mod update;

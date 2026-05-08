@@ -554,10 +554,10 @@ mod examples {
 
     #[test]
     fn iter_partition() {
+        // Tuple `[matching, non-matching]` shape (v0.5.5 onwards).
         let doc = json!({"v": [1, 2, 3, 4, 5, 6]});
         let r = vm_query("$.v.partition(lambda n: n % 2 == 0)", &doc).unwrap();
-        assert_eq!(r["true"], json!([2, 4, 6]));
-        assert_eq!(r["false"], json!([1, 3, 5]));
+        assert_eq!(r, json!([[2, 4, 6], [1, 3, 5]]));
     }
 
     #[test]

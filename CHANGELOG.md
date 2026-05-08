@@ -1,5 +1,159 @@
 # Changelog
 
+## 0.5.5
+
+### Demand propagation and functional batched updates
+
+- **Demand lanes and late projection planning**. Added shared demand models
+  for scan needs and result needs, with physical-plan annotations for delayed
+  one-to-one projections. This lets chains such as
+  `$.books.filter(price > 20).map(isbn).last()` scan for the semantic winner
+  first and project only the selected result.
+- **Indexed and reverse positional demand**. Pipeline planning now propagates
+  first/last/nth/bounded-prefix demand through eligible chains and selects
+  indexed, reverse, bounded, or fallback source access from source
+  capabilities.
+- **Ordering-aware demand paths**. Added lazy ordered suffix handling for
+  safe `sort/filter/take/map/last` shapes while preserving prefix barriers
+  such as `drop_while` / `take_while`.
+- **Functional `.update({...})` batches**. Rooted writes now lower to a
+  first-class `UpdateBatch` AST / physical-plan node instead of materializing
+  one full document per write. Multi-field updates share selector traversal,
+  group static paths into an update trie, and return the full updated root
+  once.
+- **High-performance update execution**. VM update execution mutates selected
+  paths with `Arc::make_mut`, preserving untouched subtree sharing. Wildcard
+  and filtered-wildcard updates compact selected deletes correctly, and
+  invariant RHS expressions are evaluated once per batch when safe.
+- **Functional write examples**:
+  `$.books[*].update({ tags: tags.append("test"), reviewed: true })`,
+  `$.books[* if year > 1980].update({ tags: tags.append("modern") })`,
+  and root batches such as
+  `$.update({ "books[*].tags": @.append("test"), active: false })`.
+
+### Builtin runtime fixes (limitations.md sweep)
+
+- **`.has(v)` method** — returns boolean. Previously returned the receiver
+  unchanged on arrays and `[true]`/`[false]` (single-element wrap) on
+  objects. Spec moved off `scalar_native_element_spec`'s `.element()`
+  marker; runtime extended to handle arrays, vectors, strings.
+- **`.remove(pred)`** — predicate body is now evaluated. The dispatch
+  previously matched only `Expr::Lambda`; `@`-form predicates fell
+  through to value-equality. Routes any expression that references
+  `Expr::Current` to the predicate path.
+- **`missing(...keys)`** — variadic returns the array of absent keys.
+  Single-key form keeps the legacy boolean. New `missing_many_apply`
+  helper.
+- **`update(path, fn)`** — two-arg form reads via `get_path`, applies
+  `fn`, writes back via `set_path`. The 1-arg form (single-lambda)
+  preserves prior behavior.
+- **`get_path("a/b/c")` / `has_path` / `del_path` / `set_path`** — slash
+  separator now joins to dot/bracket forms. Numeric segments parse as
+  array indices (`users/0/name` walks `users[0].name`).
+- **`dedent()`** — strips common leading whitespace per line. Backed by
+  the new string-literal escape processing (see Parser below).
+- **`now()`** — top-level builtin returning Unix-millis via
+  `eval_global_compiled`.
+- **`.enumerate()` and `.pairwise()` on path sources** — both removed
+  `.element()` from their specs so the streaming pipeline stops wrapping
+  the result and discarding the structural pairing.
+- **`.zip_shape()` / `.group_shape()`** — no-arg forms wired:
+  - `zip_shape()` over an object-of-arrays interleaves to an array of
+    objects (parallel-array → row form).
+  - `group_shape()` over an array of objects buckets by sorted-key-set.
+- **`.partition(pred)`** — returns `[matching, non-matching]` tuple
+  (was object `{true, false}`). Pairs with array-pattern destructure
+  in lambdas and indexing (`partition(p)[0]`).
+- **`.approx_count_distinct()`** — HLL backend with 14-bit precision
+  (M=16384 registers, ~16 KiB state, ≈0.81% RSE). Linear-counting
+  correction makes small inputs exact. Hash via `DefaultHasher`
+  (SipHash) for stable avalanche on small string keys.
+
+### Parser
+
+- **String-literal escapes**: `\n`, `\r`, `\t`, `\0`, `\\`, `\"`, `\'`,
+  `\xNN`, `\uXXXX` are now processed during parse. Unknown escapes
+  pass through untouched (`\d`, `\w`, `\s` → regex patterns continue
+  to work). Pre-fix the parser was raw passthrough — `"a\nb".lines()`
+  saw 4 chars `a\nb` instead of `a` `\n` `b`, so any builtin that
+  inspected newlines (lines, dedent, indent, words) silently
+  misbehaved.
+
+### Tests
+
+40 new tests in `tests::v0_5_5_quickfixes` (HLL, escapes, runtime
+fixes). Total: 1285 lib tests pass.
+
+### Grammar
+
+- **Wildcard `[*]`**. Mid-chain expansion: `$.items[*].x.set(0)` lowers to
+  `$.items.map(@.x.set(0))`. Trailing `[*]` is identity over the array.
+  Read-context only — no special runtime opcode.
+- **Slice with step**: `[a:b:c]`, `[::n]`, `[::-1]` (reverse).
+  `Step::Slice(a, b, step)`; `step == None | Some(1)` keeps the existing
+  step-1 fast path. Negative step walks backward.
+- **Lambda array-pattern destructure**: `([k, v]) => body` desugars to a
+  synthetic param plus chained `let` bindings. Both arrow and `lambda`
+  keyword forms accept the new pattern.
+- **Reserved keywords as object/pattern keys**: `{kind: "click"}` now
+  parses (in object literals and `match` arm patterns). New
+  `loose_ident` rule used in key positions only — `is kind` operator
+  unchanged.
+
+### Runtime
+
+- **`Val::StrSlice + Val::Str` string concat**. Path-rooted concat
+  (`$.user.first + "-" + $.user.last`) and f-string interpolation across
+  borrowed slices both now produce the joined string. Numeric and
+  array-concat hot paths unchanged.
+- **`entries()` / `keys()` / `values()` triple-wrap fix**. Removing
+  `.element()` from `object_element_spec` stops the streaming pipeline
+  from wrapping these whole-object results into single-element arrays.
+  `$.o.entries()` is now `[[k,v], …]` instead of `[[[k,v], …]]`.
+  Restores `group_by().entries()` and `count_by().entries()` to their
+  documented shapes.
+- **`rec` fixpoint** uses deep structural equality (new
+  `vals_deep_eq`), not the scalar-only `vals_eq`. Object and array
+  inputs converge in 1–2 iterations instead of looping to the 10000
+  ceiling.
+
+### Builtins
+
+- **`parse_int(radix)`**. Accepts radices 2–36, strips `0x` / `0b` /
+  `0o` prefix when matching base. No-arg form unchanged (base-10).
+- **`to_csv(headers)` / `to_tsv(headers)`**. Optional headers array
+  drives explicit column order with a header line emitted first.
+  Missing keys produce empty cells. No-arg paths unchanged.
+- **`accumulate(init, fn)`**. Two-arg fold variant: explicit initial
+  accumulator, one output per input. The single-arg form
+  (`accumulate(fn)` — seed from `items[0]`) and IntVec/FloatVec
+  specialised binop paths preserved.
+
+### Tests
+
+92 new tests across 4 files: `tests::grammar_extensions` (38),
+`tests::strslice_arith` (10), `tests::entries_wrap` (17),
+`tests::builtin_migrations` (27). Total: 1245 lib tests pass.
+
+### Bench
+
+`cargo bench -p jetro-core --bench match_bench -- --baseline pre-fix14`:
+no regression > 2%; `match_range_scan` -3.6% improved.
+
+## 0.5.4
+
+### Grammar fix
+
+- `!=` operator now parses everywhere — top-level, method args, lambda
+  bodies, match guards, inline filters, list-comp guards, ternary
+  conditions. The postfix `!` quantifier previously consumed the leading
+  `!` of every `!=`, surfacing as a confusing
+  "expected kw_and / kw_or / kw_if / kw_kind" diagnostic at the
+  whitespace before the comparator. Quantifier rule now uses a `!"="`
+  negative lookahead, mirroring the existing `?` quantifier's defensive
+  `!("|" | "?")` lookahead. The bare `!` quantifier on its own (e.g.
+  `xs!` exactly-one assertion) keeps working.
+  
 ## 0.5.3
 
 ### Lambda

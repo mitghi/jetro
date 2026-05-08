@@ -192,10 +192,56 @@ pub fn kind_matches(v: &Val, ty: KindType) -> bool {
     )
 }
 
-/// Test equality between two `Val` references by delegating to `json_vals_eq`.
+/// Test scalar equality between two `Val` references via `json_vals_eq`.
+/// **This is shallow** — compound values (`Val::Obj`, `Val::Arr`, vector
+/// variants) compare as `false` even when structurally identical. Use
+/// [`vals_deep_eq`] when structural equivalence is required.
 #[inline]
 pub fn vals_eq(a: &Val, b: &Val) -> bool {
     json_vals_eq(JsonView::from_val(a), JsonView::from_val(b))
+}
+
+/// Deep structural equality. Compares scalar values via `vals_eq` and
+/// compound values element-wise. `Val::IntVec` / `FloatVec` / `StrVec` /
+/// `StrSliceVec` are compared against `Val::Arr` element-wise (so a
+/// promoted columnar form is equal to its boxed equivalent), and
+/// `Val::ObjSmall` against `Val::Obj`.
+///
+/// Used by `rec` to detect fixpoint convergence — the previous shallow
+/// check returned `false` for two identical `Val::Obj` and made `rec`
+/// loop until exhaustion on every object input.
+pub fn vals_deep_eq(a: &Val, b: &Val) -> bool {
+    // Scalar fast path: pointer equality on Arc-wrapped compound types
+    // is a sound shortcut (same Arc → same content).
+    match (a, b) {
+        (Val::Arr(x), Val::Arr(y)) if Arc::ptr_eq(x, y) => return true,
+        (Val::Obj(x), Val::Obj(y)) if Arc::ptr_eq(x, y) => return true,
+        (Val::IntVec(x), Val::IntVec(y)) if Arc::ptr_eq(x, y) => return true,
+        (Val::FloatVec(x), Val::FloatVec(y)) if Arc::ptr_eq(x, y) => return true,
+        _ => {}
+    }
+    if let (Some(av), Some(bv)) = (a.clone().into_vec(), b.clone().into_vec()) {
+        if av.len() != bv.len() {
+            return false;
+        }
+        return av.iter().zip(bv.iter()).all(|(x, y)| vals_deep_eq(x, y));
+    }
+    let am = a.as_object();
+    let bm = b.as_object();
+    if let (Some(am), Some(bm)) = (am, bm) {
+        if am.len() != bm.len() {
+            return false;
+        }
+        for (k, av) in am.iter() {
+            match bm.get(k.as_ref()) {
+                Some(bv) if vals_deep_eq(av, bv) => continue,
+                _ => return false,
+            }
+        }
+        return true;
+    }
+    // Mixed types or scalar: fall back to scalar equality.
+    vals_eq(a, b)
 }
 
 /// Compare two `Val` references and return their ordering.
@@ -250,29 +296,47 @@ pub fn val_key(s: &str) -> Arc<str> {
 }
 
 
-/// Add two `Val` operands; supports numeric addition, string concatenation,
-/// and array concatenation. Returns an error for incompatible types.
-pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
-    match (a, b) {
-        (Val::Int(x), Val::Int(y)) => Ok(Val::Int(x + y)),
-        (Val::Float(x), Val::Float(y)) => Ok(Val::Float(x + y)),
-        (Val::Int(x), Val::Float(y)) => Ok(Val::Float(x as f64 + y)),
-        (Val::Float(x), Val::Int(y)) => Ok(Val::Float(x + y as f64)),
-        (Val::Str(x), Val::Str(y)) => {
-            
-            
-            let mut s = String::with_capacity(x.len() + y.len());
-            s.push_str(&x);
-            s.push_str(&y);
-            Ok(Val::Str(Arc::<str>::from(s)))
-        }
-        (Val::Arr(x), Val::Arr(y)) => {
-            let mut v = Arc::try_unwrap(x).unwrap_or_else(|a| (*a).clone());
-            v.extend_from_slice(&y);
-            Ok(Val::arr(v))
-        }
-        _ => Err(EvalError("+ not supported between these types".into())),
+/// Borrow a `&str` view of any string-like `Val`. Used to make `+` accept
+/// every cross-product of `Val::Str` and `Val::StrSlice` without
+/// proliferating match arms.
+#[inline]
+fn as_str_view(v: &Val) -> Option<&str> {
+    match v {
+        Val::Str(s) => Some(s.as_ref()),
+        Val::StrSlice(s) => Some(s.as_str()),
+        _ => None,
     }
+}
+
+/// Add two `Val` operands; supports numeric addition, string concatenation
+/// (any combination of `Val::Str` and `Val::StrSlice`), and array
+/// concatenation. Returns an error for incompatible types.
+pub fn add_vals(a: Val, b: Val) -> Result<Val, EvalError> {
+    // Numeric: keep tight match on hot `Int`/`Float` pairs first so the
+    // string-like path doesn't widen the dispatch fan-out for arithmetic.
+    match (&a, &b) {
+        (Val::Int(x), Val::Int(y)) => return Ok(Val::Int(x + y)),
+        (Val::Float(x), Val::Float(y)) => return Ok(Val::Float(x + y)),
+        (Val::Int(x), Val::Float(y)) => return Ok(Val::Float(*x as f64 + *y)),
+        (Val::Float(x), Val::Int(y)) => return Ok(Val::Float(*x + *y as f64)),
+        _ => {}
+    }
+    // String concat: any pairing of Str/StrSlice. Borrowed slices avoid
+    // an Arc unwrap when the resulting string is a fresh allocation
+    // anyway.
+    if let (Some(xa), Some(xb)) = (as_str_view(&a), as_str_view(&b)) {
+        let mut s = String::with_capacity(xa.len() + xb.len());
+        s.push_str(xa);
+        s.push_str(xb);
+        return Ok(Val::Str(Arc::<str>::from(s)));
+    }
+    // Array concat.
+    if let (Val::Arr(x), Val::Arr(y)) = (&a, &b) {
+        let mut v = Arc::try_unwrap(x.clone()).unwrap_or_else(|a| (*a).clone());
+        v.extend_from_slice(y);
+        return Ok(Val::arr(v));
+    }
+    Err(EvalError("+ not supported between these types".into()))
 }
 
 /// Apply an integer operation `fi` or a float operation `ff` to two `Val` operands,

@@ -210,10 +210,7 @@ fn inline_walk(expr: Expr, env: &mut Vec<(String, Expr)>) -> Expr {
         },
         Expr::GlobalCall { name, args } => Expr::GlobalCall {
             name,
-            args: args
-                .into_iter()
-                .map(|a| inline_walk_arg(a, env))
-                .collect(),
+            args: args.into_iter().map(|a| inline_walk_arg(a, env)).collect(),
         },
         Expr::Cast { expr, ty } => Expr::Cast {
             expr: Box::new(inline_walk(*expr, env)),
@@ -221,6 +218,41 @@ fn inline_walk(expr: Expr, env: &mut Vec<(String, Expr)>) -> Expr {
         },
         Expr::Patch { root, ops } => Expr::Patch {
             root: Box::new(inline_walk(*root, env)),
+            ops: ops
+                .into_iter()
+                .map(|op| PatchOp {
+                    path: op
+                        .path
+                        .into_iter()
+                        .map(|s| match s {
+                            PathStep::DynIndex(e) => PathStep::DynIndex(inline_walk(e, env)),
+                            PathStep::WildcardFilter(e) => {
+                                PathStep::WildcardFilter(Box::new(inline_walk(*e, env)))
+                            }
+                            other => other,
+                        })
+                        .collect(),
+                    val: inline_walk(op.val, env),
+                    cond: op.cond.map(|c| inline_walk(c, env)),
+                })
+                .collect(),
+        },
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => Expr::UpdateBatch {
+            root: Box::new(inline_walk(*root, env)),
+            selector: selector
+                .into_iter()
+                .map(|s| match s {
+                    PathStep::DynIndex(e) => PathStep::DynIndex(inline_walk(e, env)),
+                    PathStep::WildcardFilter(e) => {
+                        PathStep::WildcardFilter(Box::new(inline_walk(*e, env)))
+                    }
+                    other => other,
+                })
+                .collect(),
             ops: ops
                 .into_iter()
                 .map(|op| PatchOp {
@@ -339,10 +371,7 @@ fn inline_walk_obj_field(field: ObjField, env: &mut Vec<(String, Expr)>) -> ObjF
 /// `swap_current` rather than `push_lam`. Used by every pipeline-side
 /// compile site that previously routed `Compiler::compile` on an
 /// `Expr::Lambda` (which would have lowered to a single `PushNull`).
-pub(crate) fn compile_lambda_arg(
-    expr: &Expr,
-    source: &str,
-) -> std::sync::Arc<crate::vm::Program> {
+pub(crate) fn compile_lambda_arg(expr: &Expr, source: &str) -> std::sync::Arc<crate::vm::Program> {
     use crate::vm::Opcode;
     use std::sync::Arc;
     if let Expr::Lambda { params, body } = expr {
@@ -615,10 +644,7 @@ pub(crate) fn substitute_current(expr: Expr, name: &str) -> Expr {
         },
         Expr::GlobalCall { name: n, args } => Expr::GlobalCall {
             name: n,
-            args: args
-                .into_iter()
-                .map(|a| substitute_arg(a, name))
-                .collect(),
+            args: args.into_iter().map(|a| substitute_arg(a, name)).collect(),
         },
         Expr::Cast { expr, ty } => Expr::Cast {
             expr: Box::new(substitute_current(*expr, name)),
@@ -626,6 +652,21 @@ pub(crate) fn substitute_current(expr: Expr, name: &str) -> Expr {
         },
         Expr::Patch { root, ops } => Expr::Patch {
             root: Box::new(substitute_current(*root, name)),
+            ops: ops
+                .into_iter()
+                .map(|op| substitute_patch_op(op, name))
+                .collect(),
+        },
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => Expr::UpdateBatch {
+            root: Box::new(substitute_current(*root, name)),
+            selector: selector
+                .into_iter()
+                .map(|step| substitute_path_step(step, name))
+                .collect(),
             ops: ops
                 .into_iter()
                 .map(|op| substitute_patch_op(op, name))

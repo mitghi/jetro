@@ -94,7 +94,7 @@ fn suffix_is_one_to_one(stages: &[Stage]) -> bool {
     stages.iter().all(|stage| {
         matches!(
             stage.shape().cardinality,
-            crate::parse::chain_ir::Cardinality::OneToOne
+            crate::builtins::BuiltinCardinality::OneToOne
         )
     })
 }
@@ -404,14 +404,14 @@ fn fold_merge_with_kernels(
 /// Chooses the top-level execution `Strategy` for a planned pipeline by inspecting cardinality,
 /// indexed support, and pull demand of the stages and sink.
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
-    use crate::parse::chain_ir::Cardinality;
+    use crate::builtins::BuiltinCardinality;
 
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
     let sink_positional =
         sink.demand().positional.is_some() || matches!(sink, Sink::SelectMany { .. });
     let has_barrier = stages
         .iter()
-        .any(|s| matches!(s.shape().cardinality, Cardinality::Barrier));
+        .any(|s| matches!(s.shape().cardinality, BuiltinCardinality::Barrier));
     let has_short_circuit = matches!(
         sink.demand().chain.pull,
         PullDemand::FirstInput(_) | PullDemand::LastInput(_) | PullDemand::NthInput(_)

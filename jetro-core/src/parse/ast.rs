@@ -173,6 +173,21 @@ pub enum Expr {
         ops: Vec<PatchOp>,
     },
 
+    /// Functional batched update over a selected subtree set.
+    ///
+    /// Unlike `Patch`, this preserves the user-level update shape: a root
+    /// document, a selector path, and field updates evaluated against each
+    /// selected snapshot. The compiler may lower it to the patch core, but
+    /// planner passes can still inspect update-specific structure.
+    UpdateBatch {
+        /// Document to update; rooted chain syntax uses `Expr::Root`.
+        root: Box<Expr>,
+        /// Selector identifying each object/subtree to update.
+        selector: Vec<PathStep>,
+        /// Ordered field/path updates relative to each selected value.
+        ops: Vec<PatchOp>,
+    },
+
     /// Sentinel emitted by the parser for `.delete()` / `.unset()` terminals.
     /// Reaching the evaluator is a hard error; the compiler must consume it during patch lowering.
     DeleteMark,
@@ -225,9 +240,15 @@ pub enum Pat {
         rest: Option<Option<String>>,
     },
     /// Array pattern `[a, b, ...rest]` — fixed prefix with optional rest binding.
-    Arr { elems: Vec<Pat>, rest: Option<Option<String>> },
+    Arr {
+        elems: Vec<Pat>,
+        rest: Option<Option<String>>,
+    },
     /// Type-kind pattern `name: kind` (e.g. `s: str`) — matches a kind, binds the value.
-    Kind { name: Option<String>, kind: KindType },
+    Kind {
+        name: Option<String>,
+        kind: KindType,
+    },
     /// Numeric range pattern `lo..hi` (exclusive) or `lo..=hi` (inclusive).
     /// Both bounds are stored as `f64` and compared as floating-point at
     /// runtime; integer scrutinees are widened transparently.
@@ -257,7 +278,6 @@ pub enum PatLit {
     Str(String),
 }
 
-
 /// A single write operation inside a `Patch` expression.
 #[derive(Debug, Clone)]
 pub struct PatchOp {
@@ -286,7 +306,6 @@ pub enum PathStep {
     Descendant(String),
 }
 
-
 /// Target type for an `as` cast expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CastType {
@@ -307,7 +326,6 @@ pub enum CastType {
     /// Always returns `Val::Null`; useful to conditionally erase a field.
     Null,
 }
-
 
 /// One stage in a `Pipeline` expression.
 #[derive(Debug, Clone)]
@@ -334,7 +352,6 @@ pub enum BindTarget {
     Arr(Vec<String>),
 }
 
-
 /// One part of an `FString` template.
 #[derive(Debug, Clone)]
 pub enum FStringPart {
@@ -353,7 +370,6 @@ pub enum FmtSpec {
     Pipe(String),
 }
 
-
 /// One element inside an array literal.
 #[derive(Debug, Clone)]
 pub enum ArrayElem {
@@ -362,7 +378,6 @@ pub enum ArrayElem {
     /// Spread operator `...expr`; splices an iterable's items inline.
     Spread(Expr),
 }
-
 
 /// Controls how `.first` / `.one` quantifiers resolve a multi-value result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,8 +403,14 @@ pub enum Step {
     Index(i64),
     /// `[expr]` — runtime-computed index; `expr` is evaluated as a key or integer.
     DynIndex(Box<Expr>),
-    /// `[start:end]` — array slice; either bound may be absent (open range).
-    Slice(Option<i64>, Option<i64>),
+    /// `[start:end]` or `[start:end:step]` — array slice. Any of the three
+    /// fields may be absent (open range / default step). Negative indices
+    /// count from the end; negative step traverses in reverse.
+    Slice(Option<i64>, Option<i64>, Option<i64>),
+    /// `[*]` — wildcard. In read context this is a no-op (the receiver is
+    /// already the array; downstream stages iterate as usual). In a chained
+    /// patch context (`xs[*].field.set(v)`) it marks the broadcast level.
+    Wildcard,
     /// `.method(args…)` — method call dispatched through the builtin / custom registry.
     Method(String, Vec<Arg>),
     /// `.method?(args…)` — optional method call; errors become null.
@@ -410,7 +431,6 @@ pub enum Step {
     },
 }
 
-
 /// One argument in a method or global-function call.
 #[derive(Debug, Clone)]
 pub enum Arg {
@@ -419,7 +439,6 @@ pub enum Arg {
     /// A named (keyword) argument.
     Named(String, Expr),
 }
-
 
 /// One field in an object literal.
 #[derive(Debug, Clone)]
@@ -444,7 +463,6 @@ pub enum ObjField {
     /// Deep recursive spread `{**expr}` — recursively merges nested objects.
     SpreadDeep(Expr),
 }
-
 
 /// Binary infix operator. Variants map 1-to-1 to opcodes after compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +496,6 @@ pub enum BinOp {
     /// Short-circuit logical OR; right side compiled into a sub-program.
     Or,
 }
-
 
 /// Runtime type tag used with `is` / `is not` kind-check expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

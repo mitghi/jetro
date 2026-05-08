@@ -373,7 +373,7 @@ pub fn reverse_str_apply(recv: &Val) -> Option<Val> {
 
 /// Applies a `&str → Val` transform to the string inside `recv`.
 #[inline]
-fn map_str_val(recv: &Val, f: impl FnOnce(&str) -> Val) -> Option<Val> {
+pub fn map_str_val(recv: &Val, f: impl FnOnce(&str) -> Val) -> Option<Val> {
     Some(f(recv.as_str_ref()?))
 }
 

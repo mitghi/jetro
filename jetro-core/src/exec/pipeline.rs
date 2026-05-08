@@ -48,7 +48,10 @@ pub(crate) use common::{
 };
 #[cfg(test)]
 pub use ir::Strategy;
-pub use ir::{PhysicalExecPath, Plan, Position, StageStrategy};
+pub use ir::{
+    FallbackBoundary, LateProjection, PayloadDemand, PhysicalExecPath, Plan, Position, SinkDemand,
+    StageStrategy,
+};
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
 pub use operator::{
@@ -146,7 +149,9 @@ fn sink_name(s: &Sink) -> &'static str {
         Sink::ArgExtreme(_) => "min_by",
         Sink::Terminal(BuiltinMethod::First) => "first",
         Sink::Terminal(BuiltinMethod::Last) => "last",
-        Sink::SelectMany { from_end: false, .. } => "first_n",
+        Sink::SelectMany {
+            from_end: false, ..
+        } => "first_n",
         Sink::SelectMany { from_end: true, .. } => "last_n",
         Sink::Nth(_) => "nth",
         Sink::Terminal(_) => "terminal",
@@ -192,6 +197,16 @@ pub enum Source {
     /// A sequence of field names resolved left-to-right from the document root (`$`),
     /// producing the array (or scalar) that feeds the first pipeline stage.
     FieldChain { keys: Arc<[Arc<str>]> },
+}
+
+impl Source {
+    /// Static traversal capabilities for this source shape.
+    pub(crate) fn capabilities(&self) -> SourceCapabilities {
+        match self {
+            Source::Receiver(_) => SourceCapabilities::MATERIALIZED_ARRAY,
+            Source::FieldChain { .. } => SourceCapabilities::MATERIALIZED_ARRAY,
+        }
+    }
 }
 
 /// Type alias for a fully-resolved built-in call used as a pipeline stage.
@@ -407,6 +422,28 @@ pub struct Pipeline {
     /// Pre-classified kernels for sink sub-programs (predicate / projection inside a reducer).
     pub sink_kernels: Vec<BodyKernel>,
 
+    /// Source pull/value/order demand computed once during lowering.
+    pub source_demand: SinkDemand,
+
+    /// Precise source payload demand split into scan-time and result-row lanes.
+    #[allow(dead_code)]
+    pub payload_demand: PayloadDemand,
+
+    /// Tail projection that can be delayed until rows have been selected.
+    #[allow(dead_code)]
+    pub late_projection: Option<LateProjection>,
+
+    /// Static source traversal capabilities used to choose the access mode.
+    #[allow(dead_code)]
+    pub(crate) source_capabilities: SourceCapabilities,
+
+    /// Access mode selected from source capabilities plus propagated pull demand.
+    pub(crate) source_access: SourceAccessMode,
+
+    /// Boundary where execution must materialize or fall back.
+    #[allow(dead_code)]
+    pub fallback_boundary: FallbackBoundary,
+
     /// Physical execution path selected at lower time; tells `exec.rs` which specialised
     /// backends to attempt before falling back to legacy, eliminating runtime fallthrough
     /// for paths that static analysis proves cannot fire.
@@ -437,9 +474,26 @@ impl PipelineBody {
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
         let exec_path = select_exec_path(&self.stages, &self.sink);
+        let source_demand = Pipeline::segment_source_demand(&self.stages, &self.sink);
+        let payload_demand = Pipeline::segment_payload_demand(
+            &self.stages,
+            &self.stage_kernels,
+            &self.sink,
+            &self.sink_kernels,
+        );
+        let late_projection = Pipeline::late_projection_for(&self.stages, &self.stage_kernels);
+        let source_capabilities = source.capabilities();
+        let source_access = source_capabilities.choose_access(source_demand.chain.pull);
+        let fallback_boundary = Pipeline::fallback_boundary_for(&self.stages, exec_path);
         Pipeline {
             source,
             exec_path,
+            source_demand,
+            payload_demand,
+            late_projection,
+            source_capabilities,
+            source_access,
+            fallback_boundary,
             stages: self.stages,
             stage_exprs: self.stage_exprs,
             sink: self.sink,
@@ -519,6 +573,24 @@ mod tests {
                 );
             }
             _ => panic!("expected `price * qty`, got {expr:#?}"),
+        }
+    }
+
+    fn demand_paths(need: &crate::plan::demand::FieldDemand) -> Vec<String> {
+        match need {
+            crate::plan::demand::FieldDemand::None => Vec::new(),
+            crate::plan::demand::FieldDemand::Whole => vec!["*".to_string()],
+            crate::plan::demand::FieldDemand::Fields(fields) => fields
+                .paths()
+                .iter()
+                .map(|path| {
+                    path.keys()
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect(),
         }
     }
 
@@ -1083,6 +1155,76 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_delays_map_for_last_selection() {
+        let p = lower_query("$.books.map(isbn).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&demand.result_need), vec!["isbn"]);
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+        assert!(matches!(
+            p.source_access,
+            SourceAccessMode::Reverse { outputs: 1 }
+        ));
+        assert!(!p.source_capabilities.tape_view);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert!(
+            matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
+        );
+    }
+
+    #[test]
+    fn payload_demand_splits_filter_scan_from_late_projection() {
+        let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["price"]);
+        assert_eq!(demand_paths(&demand.result_need), vec!["isbn"]);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 1, .. })
+        ));
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert!(
+            matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
+        );
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+    }
+
+    #[test]
+    fn payload_demand_tracks_sort_filter_project_lanes() {
+        let p = lower_query("$.books.sort(-score).filter(price > 20).map(isbn).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["price", "score"]);
+        assert_eq!(demand_paths(&demand.result_need), vec!["isbn"]);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 2, .. })
+        ));
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert!(
+            matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
+        );
+    }
+
+    #[test]
+    fn fallback_boundary_marks_legacy_barrier_stage() {
+        let p = lower_query("$.books.flat_map(tags).last()").unwrap();
+        assert_eq!(
+            p.fallback_boundary,
+            FallbackBoundary::LegacyStage { index: 0 }
+        );
+    }
+
+    #[test]
     fn demand_optimizer_computed_map_filter_count_matches_vm() {
         use serde_json::json;
         assert_pipeline_matches_vm(
@@ -1273,6 +1415,33 @@ mod tests {
     }
 
     #[test]
+    fn sort_drop_while_filter_map_last_preserves_prefix_boundary() {
+        use serde_json::json;
+
+        let query =
+            "$.rows.sort(-score).drop_while(name.contains(\"_test\")).filter(price > 20).map(isbn).last()";
+        let p = lower_query(query).unwrap();
+        let demand = p.source_demand();
+        assert_eq!(demand.chain.pull, crate::plan::demand::PullDemand::All);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 3, .. })
+        ));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "dropped", "name": "top_test", "score": 100, "price": 99},
+                    {"isbn": "kept-fails-filter", "name": "live", "score": 90, "price": 10},
+                    {"isbn": "middle-pass", "name": "middle", "score": 80, "price": 30},
+                    {"isbn": "answer", "name": "tail_test", "score": 70, "price": 50}
+                ]
+            }),
+        );
+    }
+
+    #[test]
     fn sort_prefix_filter_last_does_not_shrink_before_filtering() {
         use serde_json::json;
 
@@ -1335,6 +1504,14 @@ mod tests {
                 "$.rows.filter(price > 20).map(isbn).last()",
             ),
             (
+                "$.rows.filter(price > 20).map(isbn).first(2)",
+                "$.rows.filter(price > 20).map(isbn).first(2)",
+            ),
+            (
+                "$.rows.filter(price > 20).map(isbn).last(2)",
+                "$.rows.filter(price > 20).map(isbn).last(2)",
+            ),
+            (
                 "$.rows.map(price).filter(@ > 20).last()",
                 "$.rows.map(price).filter(@ > 20).last()",
             ),
@@ -1349,6 +1526,10 @@ mod tests {
             (
                 "$.rows.drop_while(price < 20).last()",
                 "$.rows.drop_while(price < 20).last()",
+            ),
+            (
+                "$.rows.sort(-score).drop_while(name.contains(\"_test\")).filter(price > 20).map(isbn).last()",
+                "$.rows.sort(-score).drop_while(name.contains(\"_test\")).filter(price > 20).map(isbn).last()",
             ),
             (
                 "$.rows.sort(-score).filter(price > 20).map(isbn).last()",
@@ -1537,20 +1718,32 @@ mod tests {
         use serde_json::json;
         let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
 
-        let first_one: serde_json::Value =
-            lower_query("$.xs.first(1)").unwrap().run(&root).unwrap().into();
+        let first_one: serde_json::Value = lower_query("$.xs.first(1)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
         assert_eq!(first_one, json!(1));
 
-        let first_two: serde_json::Value =
-            lower_query("$.xs.first(2)").unwrap().run(&root).unwrap().into();
+        let first_two: serde_json::Value = lower_query("$.xs.first(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
         assert_eq!(first_two, json!([1, 2]));
 
-        let last_one: serde_json::Value =
-            lower_query("$.xs.last(1)").unwrap().run(&root).unwrap().into();
+        let last_one: serde_json::Value = lower_query("$.xs.last(1)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
         assert_eq!(last_one, json!(4));
 
-        let last_two: serde_json::Value =
-            lower_query("$.xs.last(2)").unwrap().run(&root).unwrap().into();
+        let last_two: serde_json::Value = lower_query("$.xs.last(2)")
+            .unwrap()
+            .run(&root)
+            .unwrap()
+            .into();
         assert_eq!(last_two, json!([3, 4]));
 
         let mapped_first: serde_json::Value = lower_query("$.xs.map(@ + 1).first(2)")
@@ -1842,7 +2035,9 @@ mod tests {
         );
 
         let find_one = lower_query("$.xs.find_one(@ > 2)").unwrap();
-        assert!(matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindOne));
+        assert!(
+            matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindOne)
+        );
         assert_eq!(
             find_one.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
@@ -1917,7 +2112,9 @@ mod tests {
         );
 
         let index = lower_query("$.xs.index(\"urgent\")").unwrap();
-        assert!(matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index));
+        assert!(
+            matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index)
+        );
 
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
@@ -1925,10 +2122,8 @@ mod tests {
         );
 
         let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
-        assert!(
-            matches!(dynamic.sink, Sink::Membership(ref spec)
-                if matches!(spec.target, MembershipSinkTarget::Program(_)))
-        );
+        assert!(matches!(dynamic.sink, Sink::Membership(ref spec)
+                if matches!(spec.target, MembershipSinkTarget::Program(_))));
     }
 
     #[test]

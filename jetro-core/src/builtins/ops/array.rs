@@ -768,9 +768,13 @@ pub fn rec_apply<F>(mut recv: Val, mut eval: F) -> Result<Val, EvalError>
 where
     F: FnMut(Val) -> Result<Val, EvalError>,
 {
+    // Use deep structural equality so fixed-point detection works for
+    // object and array inputs — the original `vals_eq` is scalar-only,
+    // returning false for any two compound values and pushing every
+    // recursive transform to the 10 000-iter ceiling.
     for _ in 0..10_000 {
         let next = eval(recv.clone())?;
-        if crate::util::vals_eq(&recv, &next) {
+        if crate::util::vals_deep_eq(&recv, &next) {
             return Ok(next);
         }
         recv = next;
@@ -859,6 +863,123 @@ where
         out.insert(name.clone(), eval(recv, idx)?);
     }
     Ok(Val::obj(out))
+}
+
+/// No-arg `zip_shape()` — receiver is an object whose values are parallel
+/// arrays. Output is an array of objects, one per row, with the same keys
+/// and values picked from each array at the matching index.
+///
+/// `{"names":["a","b"], "ages":[1,2]}` → `[{"names":"a","ages":1},
+/// {"names":"b","ages":2}]`. The output length is the **shortest** of the
+/// input arrays; longer arrays are truncated. Non-array values are
+/// broadcast to every row (so `{"names":["a","b"], "tag":"x"}` produces
+/// `[{"names":"a","tag":"x"},{"names":"b","tag":"x"}]`).
+#[inline]
+pub fn zip_shape_obj_apply(recv: &Val) -> Option<Val> {
+    let m = recv.as_object()?;
+    if m.is_empty() {
+        return Some(Val::arr(Vec::new()));
+    }
+    // Compute output length = min(array-valued field lengths). Scalars
+    // don't bound the length.
+    let mut min_len: Option<usize> = None;
+    for v in m.values() {
+        if let Some(items) = v.as_vals() {
+            min_len = Some(min_len.map_or(items.len(), |cur| cur.min(items.len())));
+        }
+    }
+    let n = min_len.unwrap_or(0);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut row = IndexMap::with_capacity(m.len());
+        for (k, v) in m.iter() {
+            let cell = match v.as_vals() {
+                Some(items) => items.get(i).cloned().unwrap_or(Val::Null),
+                None => v.clone(),
+            };
+            row.insert(k.clone(), cell);
+        }
+        out.push(Val::obj(row));
+    }
+    Some(Val::arr(out))
+}
+
+/// HyperLogLog cardinality estimator over a `[Val]` slice. Hashes each
+/// element via the canonical Jetro key form (`val_to_key`) folded
+/// through a 64-bit FNV-1a, then runs HLL with 14-bit register
+/// precision. Memory: 2^14 = 16384 bytes (`u8` registers). RSE: ≈0.81%
+/// for `count > 2^15`; small-range linear-counting correction makes the
+/// estimate exact for inputs with fewer than ≈ 0.625 × m distinct
+/// values (m = 16384), so `[1, 1, 2, 3]` returns 3 exactly.
+#[inline]
+pub fn hll_count_distinct(items: &[Val]) -> u64 {
+    const PRECISION: u32 = 14;
+    const M: usize = 1 << PRECISION;
+    const W: u32 = 64 - PRECISION;
+    // alpha for m=16384 per Flajolet et al.
+    const ALPHA: f64 = 0.7213 / (1.0 + 1.079 / (M as f64));
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut regs = vec![0u8; M];
+    for v in items {
+        let key = crate::util::val_to_key(v);
+        // SipHash via `DefaultHasher` — uniform avalanche on short keys
+        // (FNV-1a clusters the top bits for 1–2 byte inputs, putting
+        // every distinct small int in the same HLL bucket).
+        let mut hasher = DefaultHasher::new();
+        key.as_bytes().hash(&mut hasher);
+        let h = hasher.finish();
+        let bucket = (h >> W) as usize;
+        let w = (h << PRECISION) | (1u64 << (PRECISION - 1));
+        let rho = (w.leading_zeros() + 1) as u8;
+        if rho > regs[bucket] {
+            regs[bucket] = rho;
+        }
+    }
+    // Raw HLL estimate.
+    let mut sum = 0.0f64;
+    let mut zeros = 0usize;
+    for &r in &regs {
+        sum += (-(r as f64)).exp2();
+        if r == 0 {
+            zeros += 1;
+        }
+    }
+    let raw = ALPHA * (M as f64) * (M as f64) / sum;
+    // Small-range correction (linear counting) when many empty registers.
+    let estimate = if raw <= 2.5 * (M as f64) && zeros > 0 {
+        (M as f64) * ((M as f64) / zeros as f64).ln()
+    } else {
+        raw
+    };
+    estimate.round().max(0.0) as u64
+}
+
+
+/// No-arg `group_shape()` — bucket an array of objects by their key-set
+/// shape. Each item's shape key is the sorted, comma-joined key list of
+/// the object; non-object items map to a sentinel `"<scalar>"` bucket.
+/// Output: `{shape_key: [items]}` preserving first-occurrence order.
+#[inline]
+pub fn group_shape_by_keys_apply(recv: Val) -> Option<Val> {
+    let items = recv.into_vec()?;
+    let mut buckets: IndexMap<Arc<str>, Vec<Val>> = IndexMap::with_capacity(items.len());
+    for item in items {
+        let key: Arc<str> = match item.as_object() {
+            Some(m) => {
+                let mut keys: Vec<&str> = m.keys().map(|k| k.as_ref()).collect();
+                keys.sort_unstable();
+                Arc::from(keys.join(",").as_str())
+            }
+            None => Arc::from("<scalar>"),
+        };
+        buckets.entry(key).or_default().push(item);
+    }
+    let map: IndexMap<Arc<str>, Val> = buckets
+        .into_iter()
+        .map(|(k, v)| (k, Val::arr(v)))
+        .collect();
+    Some(Val::obj(map))
 }
 
 /// Groups elements by a key expression (arg 0), then applies a shape expression (arg 1)

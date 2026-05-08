@@ -35,6 +35,13 @@ reserved = _{
 }
 
 ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
+// `loose_ident` allows reserved keywords in *key* positions (object
+// literal keys, object-pattern field names) where the trailing `:` or
+// `?` disambiguates from operator usage. Lets `{kind: "click"}` and
+// pattern arms like `{kind: "click", ...}` parse — `kind` is reserved
+// only because of the `is kind` operator, not because it's an unsafe
+// identifier in key position.
+loose_ident = @{ (ASCII_ALPHA | "_") ~ ident_char* }
 field_name = @{ (ASCII_ALPHA | "_") ~ field_char* }
 
 // ── Literals ──────────────────────────────────────────────────────────────────
@@ -65,12 +72,24 @@ add_op = { "+" | "-" }
 mul_op = { "*" | "/" | "%" }
 
 // ── Slice / Index ─────────────────────────────────────────────────────────────
+// `idx_val` matches an integer (with optional sign). `slice_step` adds a
+// Python-style step (`[start:end:step]` or any subset). `wildcard` is the
+// `[*]` form — sugar for "every element of the array, kept as-is in read
+// context".
+//
+// IMPORTANT: longer alternatives must come first (PEG rules are ordered):
+// `slice_step` before `slice_full` before `slice_from` etc., otherwise the
+// shorter rule consumes the input and the optional `:step` part never
+// parses.
 idx_val       = @{ "-"? ~ ASCII_DIGIT+ }
+slice_step    = { idx_val? ~ ":" ~ idx_val? ~ ":" ~ idx_val? }
 slice_full    = { idx_val ~ ":" ~ idx_val }
 slice_from    = { idx_val ~ ":" }
 slice_to      = { ":" ~ idx_val }
+wildcard_filter = { "*" ~ kw_if ~ expr }
+wildcard      = { "*" }
 idx_only      = { idx_val }
-bracket_inner = { slice_full | slice_from | slice_to | idx_only | expr }
+bracket_inner = { slice_step | slice_full | slice_from | slice_to | wildcard_filter | wildcard | idx_only | expr }
 
 // ── Arguments ─────────────────────────────────────────────────────────────────
 named_arg = { ident ~ ":" ~ expr }
@@ -96,7 +115,7 @@ inline_filter  = { "{" ~ expr ~ "}" }
 // Allow `.` / `?` to follow so postfix `?` can be chained with more steps
 // (e.g. `..services?.name`, `.a?.b?`).  Still reject `?|` to avoid
 // conflict with pipe, and `??` which is coalesce.
-quantifier     = { ("?" ~ !("|" | "?")) | "!" }
+quantifier     = { ("?" ~ !("|" | "?")) | ("!" ~ !"=") }
 postfix = { deep_match | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
 // ── Expression hierarchy ──────────────────────────────────────────────────────
@@ -152,20 +171,32 @@ unary_expr = { unary_neg ~ unary_expr | postfix_expr }
 postfix_expr = { primary ~ postfix* }
 
 // ── Comprehension variables ────────────────────────────────────────────────────
-comp_vars = { ident ~ ("," ~ ident)? }
+// Bare `a` (single var), `a, b` (pair destructure), or `[a, b]`
+// (explicit array-pattern destructure). The pattern form is sugar for the
+// 2-var form and is bound the same way at runtime.
+comp_vars = { ("[" ~ ident ~ ("," ~ ident)+ ~ "]") | (ident ~ ("," ~ ident)?) }
 
 // ── Comprehensions ─────────────────────────────────────────────────────────────
-list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "]" }
-dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
-set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ "}" }
-gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)? ~ ")" }
+// Multiple `if` clauses are conjoined with logical `and` at parse time so the
+// runtime sees a single combined predicate.
+list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "]" }
+dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "}" }
+set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "}" }
+gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ ")" }
 
 // ── Lambda ────────────────────────────────────────────────────────────────────
-lambda_params = { ident ~ ("," ~ ident)* }
-lambda_expr   = { kw_lambda ~ lambda_params ~ ":" ~ expr }
+// Each parameter is either a bare identifier or an `[a, b, ...]` array-pattern
+// destructure. Array patterns are sugar: `([k, v]) => body` desugars to
+// `__lampat_N => let k = __lampat_N[0] in let v = __lampat_N[1] in body`.
+// This lets `pairwise().map(([a, b]) => b - a)` and similar idioms work
+// without any runtime support for destructuring beyond array indexing.
+lambda_array_pat = { "[" ~ ident ~ ("," ~ ident)+ ~ "]" }
+lambda_param     = { lambda_array_pat | ident }
+lambda_params    = { lambda_param ~ ("," ~ lambda_param)* }
+lambda_expr      = { kw_lambda ~ lambda_params ~ ":" ~ expr }
 
-// Arrow-form lambda: `x => body` or `(x, y) => body`
-arrow_params  = { "(" ~ (ident ~ ("," ~ ident)*)? ~ ")" | ident }
+// Arrow-form lambda: `x => body` or `(x, y) => body` or `([a, b]) => body`.
+arrow_params  = { "(" ~ (lambda_param ~ ("," ~ lambda_param)*)? ~ ")" | lambda_param }
 arrow_lambda  = { arrow_params ~ "=>" ~ expr }
 
 // ── Let ───────────────────────────────────────────────────────────────────────
@@ -174,7 +205,7 @@ let_binding = { ident ~ "=" ~ expr }
 let_expr    = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
 
 // ── Object construction ────────────────────────────────────────────────────────
-obj_key_expr     = { ident | lit_str }
+obj_key_expr     = { loose_ident | lit_str }
 obj_field_dyn    = { "[" ~ expr ~ "]" ~ ":" ~ expr }
 obj_field_opt_v  = { obj_key_expr ~ "?" ~ ":" ~ expr }
 obj_field_opt    = { obj_key_expr ~ "?" }
@@ -230,7 +261,7 @@ pat_bind      = { ident }
 pat_obj_rest_named = { "...*" ~ ident }
 pat_obj_rest_anon  = { "...*" }
 pat_obj_rest       = { pat_obj_rest_named | pat_obj_rest_anon }
-pat_obj_field = { ident ~ ":" ~ pat_or }
+pat_obj_field = { loose_ident ~ ":" ~ pat_or }
 pat_obj       = { "{" ~ (pat_obj_field ~ ("," ~ pat_obj_field)* ~ ("," ~ pat_obj_rest)? ~ ","?)? ~ "}" }
 
 pat_arr_rest_named = { "..." ~ ident }

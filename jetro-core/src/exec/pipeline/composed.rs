@@ -6,7 +6,9 @@
 //! This module consolidates the composed-execution helpers: barrier-stage handling,
 //! segment chain building, sink dispatch, and the per-stage builder.
 
+use std::borrow::Borrow;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,8 +22,8 @@ use crate::vm::Program;
 
 use super::ir::program_match_only;
 use super::{
-    compute_strategies_with_kernels, ordered_by_key_cmp, row_source, BodyKernel, Pipeline, Sink,
-    Source, Stage, StageStrategy,
+    compute_strategies_with_kernels, eval_kernel, ordered_by_key_cmp, row_source, BodyKernel,
+    Pipeline, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -363,7 +365,10 @@ fn run_sink(sink: &Sink, rows: &[Val], chain: &dyn cmp::Stage, demand: PullDeman
         Sink::Reducer(_) | Sink::Terminal(_) => {
             run_composed_sink!(run_pipeline_with_demand, rows, chain, demand, sink)
         }
-        Sink::Predicate(_) | Sink::Membership(_) | Sink::ArgExtreme(_) | Sink::SelectMany { .. } => return None,
+        Sink::Predicate(_)
+        | Sink::Membership(_)
+        | Sink::ArgExtreme(_)
+        | Sink::SelectMany { .. } => return None,
         Sink::ApproxCountDistinct => return None,
     };
 
@@ -392,7 +397,10 @@ where
             demand,
             sink
         ),
-        Sink::Predicate(_) | Sink::Membership(_) | Sink::ArgExtreme(_) | Sink::SelectMany { .. } => return None,
+        Sink::Predicate(_)
+        | Sink::Membership(_)
+        | Sink::ArgExtreme(_)
+        | Sink::SelectMany { .. } => return None,
         Sink::ApproxCountDistinct => return None,
     };
 
@@ -451,6 +459,7 @@ pub(super) fn run(
         if let StageStrategy::SortUntilOutput(target_outputs) = strategy {
             let _ = target_outputs;
             if let Some(out) = run_lazy_ordered_suffix(
+                pipeline,
                 stage,
                 kernel,
                 &eff_sink,
@@ -489,6 +498,18 @@ pub(super) fn run(
     let final_demand = Pipeline::segment_source_demand(&stages_ref[last_split..], &eff_sink)
         .chain
         .pull;
+    if let Some(out) = run_late_projection_sink(
+        pipeline,
+        &eff_sink,
+        &stage_builder,
+        stages_ref,
+        kernels,
+        last_split,
+        buf.as_slice(),
+    ) {
+        return Some(out);
+    }
+
     let (sink, chain) =
         append_reducer_sink_stages(&eff_sink, &pipeline.sink_kernels, &stage_builder, chain)?;
     let out = run_sink(&sink, buf.as_slice(), chain.as_ref(), final_demand)?;
@@ -496,8 +517,277 @@ pub(super) fn run(
     Some(Ok(out))
 }
 
+/// Runs a terminal sink through only the non-projection prefix, applying the delayed projection
+/// inside the sink so rows rejected or skipped by the prefix never pay projection cost.
+fn run_late_projection_sink(
+    pipeline: &Pipeline,
+    sink: &Sink,
+    stage_builder: &ComposedStageBuilder<'_>,
+    stages: &[Stage],
+    kernels: &[BodyKernel],
+    start: usize,
+    rows: &[Val],
+) -> Option<Result<Val, EvalError>> {
+    let projection = pipeline.late_projection.as_ref()?;
+    if projection.prefix_len < start || projection.prefix_len >= stages.len() {
+        return None;
+    }
+    if stages[projection.prefix_len..]
+        .iter()
+        .any(Stage::is_composed_barrier)
+    {
+        return None;
+    }
+
+    let prefix = build_chain(stages, kernels, start..projection.prefix_len, stage_builder)?;
+    let demand = Pipeline::segment_source_demand(&stages[start..projection.prefix_len], sink)
+        .chain
+        .pull;
+
+    let projecting_sink = projecting_sink_for(sink, demand)?;
+    run_projecting_iter(
+        demand_rows(rows, demand),
+        prefix.as_ref(),
+        demand,
+        &projection.kernel,
+        projecting_sink,
+    )
+}
+
+fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink> {
+    match sink {
+        Sink::Collect if !matches!(demand, PullDemand::LastInput(_)) => {
+            Some(ProjectingSink::Collect(Vec::new()))
+        }
+        Sink::Terminal(crate::builtins::BuiltinMethod::First) => Some(ProjectingSink::First(None)),
+        Sink::Terminal(crate::builtins::BuiltinMethod::Last) => Some(ProjectingSink::Last(None)),
+        Sink::Nth(idx) => {
+            let target = if matches!(demand, PullDemand::NthInput(_)) {
+                0
+            } else {
+                *idx
+            };
+            Some(ProjectingSink::Nth {
+                target,
+                seen: 0,
+                value: None,
+            })
+        }
+        Sink::SelectMany { n, from_end } => Some(ProjectingSink::SelectMany {
+            n: *n,
+            from_end: *from_end,
+            prepend: *from_end && matches!(demand, PullDemand::LastInput(_)),
+            items: VecDeque::new(),
+        }),
+        _ => None,
+    }
+}
+
+enum DemandRows<'a> {
+    Forward(std::slice::Iter<'a, Val>),
+    Reverse(std::iter::Rev<std::slice::Iter<'a, Val>>),
+    One(std::option::IntoIter<&'a Val>),
+}
+
+impl<'a> Iterator for DemandRows<'a> {
+    type Item = &'a Val;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            DemandRows::Forward(iter) => iter.next(),
+            DemandRows::Reverse(iter) => iter.next(),
+            DemandRows::One(iter) => iter.next(),
+        }
+    }
+}
+
+fn demand_rows(rows: &[Val], demand: PullDemand) -> DemandRows<'_> {
+    match demand {
+        PullDemand::LastInput(_) => DemandRows::Reverse(rows.iter().rev()),
+        PullDemand::NthInput(i) => DemandRows::One(rows.get(i).into_iter()),
+        _ => DemandRows::Forward(rows.iter()),
+    }
+}
+
+enum ProjectingSink {
+    Collect(Vec<Val>),
+    First(Option<Val>),
+    Last(Option<Val>),
+    Nth {
+        target: usize,
+        seen: usize,
+        value: Option<Val>,
+    },
+    SelectMany {
+        n: usize,
+        from_end: bool,
+        prepend: bool,
+        items: VecDeque<Val>,
+    },
+}
+
+impl ProjectingSink {
+    fn observe(&mut self, item: &Val, projection: &BodyKernel) -> Result<bool, EvalError> {
+        match self {
+            ProjectingSink::Collect(items) => {
+                items.push(eval_late_projection(projection, item)?);
+                Ok(false)
+            }
+            ProjectingSink::First(slot) => {
+                if slot.is_none() {
+                    *slot = Some(eval_late_projection(projection, item)?);
+                }
+                Ok(true)
+            }
+            ProjectingSink::Last(slot) => {
+                *slot = Some(eval_late_projection(projection, item)?);
+                Ok(false)
+            }
+            ProjectingSink::Nth {
+                target,
+                seen,
+                value,
+            } => {
+                if *seen == *target {
+                    *value = Some(eval_late_projection(projection, item)?);
+                    return Ok(true);
+                }
+                *seen += 1;
+                Ok(false)
+            }
+            ProjectingSink::SelectMany {
+                n,
+                from_end,
+                prepend,
+                items,
+            } => {
+                if *n == 0 {
+                    return Ok(true);
+                }
+                let item = eval_late_projection(projection, item)?;
+                if *prepend {
+                    if items.len() == *n {
+                        items.pop_back();
+                    }
+                    items.push_front(item);
+                    return Ok(items.len() >= *n);
+                }
+                if *from_end {
+                    if items.len() == *n {
+                        items.pop_front();
+                    }
+                    items.push_back(item);
+                    Ok(false)
+                } else {
+                    items.push_back(item);
+                    Ok(items.len() >= *n)
+                }
+            }
+        }
+    }
+
+    fn done(&self) -> bool {
+        matches!(
+            self,
+            ProjectingSink::First(Some(_)) | ProjectingSink::Nth { value: Some(_), .. }
+        )
+    }
+
+    fn finish(self) -> Val {
+        match self {
+            ProjectingSink::Collect(items) => Val::Arr(Arc::new(items)),
+            ProjectingSink::First(value) | ProjectingSink::Last(value) => {
+                value.unwrap_or(Val::Null)
+            }
+            ProjectingSink::Nth { value, .. } => value.unwrap_or(Val::Null),
+            ProjectingSink::SelectMany { n: 0, .. } => Val::Null,
+            ProjectingSink::SelectMany { n, items, .. } if n == 1 => {
+                items.into_iter().next().unwrap_or(Val::Null)
+            }
+            ProjectingSink::SelectMany { items, .. } => Val::arr(items.into_iter().collect()),
+        }
+    }
+}
+
+fn eval_late_projection(projection: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
+    eval_kernel(projection, item, |_| {
+        Err(EvalError(
+            "late projection requires a native body kernel".to_string(),
+        ))
+    })
+}
+
+fn run_projecting_iter<I>(
+    rows: I,
+    stages: &dyn cmp::Stage,
+    demand: PullDemand,
+    projection: &BodyKernel,
+    mut sink: ProjectingSink,
+) -> Option<Result<Val, EvalError>>
+where
+    I: IntoIterator,
+    I::Item: Borrow<Val>,
+{
+    let mut pulled_inputs = 0usize;
+    let mut emitted_outputs = 0usize;
+    for row in rows {
+        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+            break;
+        }
+        pulled_inputs += 1;
+
+        match stages.apply(row.borrow()) {
+            cmp::StageOutput::Pass(cow) => {
+                let done = match sink.observe(cow.as_ref(), projection) {
+                    Ok(done) => done,
+                    Err(err) => return Some(Err(err)),
+                };
+                emitted_outputs += 1;
+                if done || sink.done() {
+                    break;
+                }
+                if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                    break;
+                }
+                if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    break;
+                }
+            }
+            cmp::StageOutput::Filtered => continue,
+            cmp::StageOutput::Many(items) => {
+                for item in items {
+                    let done = match sink.observe(item.as_ref(), projection) {
+                        Ok(done) => done,
+                        Err(err) => return Some(Err(err)),
+                    };
+                    emitted_outputs += 1;
+                    if done || sink.done() {
+                        break;
+                    }
+                    if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+                        break;
+                    }
+                    if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                        break;
+                    }
+                }
+                if sink.done()
+                    || matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
+                    || matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n)
+                {
+                    break;
+                }
+            }
+            cmp::StageOutput::Done => break,
+        }
+    }
+
+    Some(Ok(sink.finish()))
+}
+
 /// Sorts `rows` by key and feeds the ordered iterator into the composed sink for top-N short-circuit.
 fn run_lazy_ordered_suffix(
+    pipeline: &Pipeline,
     stage: &Stage,
     kernel: &BodyKernel,
     sink: &Sink,
@@ -539,6 +829,33 @@ fn run_lazy_ordered_suffix(
         Ok(ordered) => ordered,
         Err(err) => return Some(Err(err)),
     };
+    let suffix_start = sort_idx + 1;
+    if let Some(projection) = pipeline.late_projection.as_ref() {
+        if projection.prefix_len >= suffix_start
+            && projection.prefix_len < stages.len()
+            && !stages[projection.prefix_len..]
+                .iter()
+                .any(Stage::is_composed_barrier)
+        {
+            if let Some(projecting_sink) = projecting_sink_for(sink, final_demand) {
+                if let Some(prefix) = build_chain(
+                    stages,
+                    kernels,
+                    suffix_start..projection.prefix_len,
+                    stage_builder,
+                ) {
+                    return run_projecting_iter(
+                        ordered,
+                        prefix.as_ref(),
+                        final_demand,
+                        &projection.kernel,
+                        projecting_sink,
+                    );
+                }
+            }
+        }
+    }
+
     let chain = build_chain(stages, kernels, sort_idx + 1..stages.len(), stage_builder)?;
     let (sink, chain) = append_reducer_sink_stages(sink, sink_kernels, stage_builder, chain)?;
     run_sink_owned_iter(&sink, ordered, chain.as_ref(), final_demand).map(Ok)

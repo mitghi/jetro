@@ -9,18 +9,18 @@
 
 use std::sync::Arc;
 
-use crate::plan::analysis;
-use crate::parse::ast::{ArrayElem, Expr, ObjField, Step};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::compile::compiler::Compiler;
-use crate::parse::parser;
+use crate::data::value::Val;
+use crate::exec::pipeline::{Pipeline, Source};
+use crate::exec::structural::{StructuralPathStep, StructuralPlan};
 use crate::ir::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
     PhysicalObjField, PhysicalPathStep, PipelinePlanSource, PlanNode, QueryPlan,
 };
-use crate::exec::pipeline::{Pipeline, Source};
-use crate::exec::structural::{StructuralPathStep, StructuralPlan};
-use crate::data::value::Val;
+use crate::parse::ast::{ArrayElem, Expr, ObjField, Step};
+use crate::parse::parser;
+use crate::plan::analysis;
 
 /// Accumulates `PhysicalNode`s as the AST is lowered and tracks lexical state
 /// needed to distinguish let-bound locals from bare field identifiers.
@@ -194,6 +194,14 @@ impl PlanBuilder {
             PlanNode::Let { init, body, .. } => {
                 ExecutionFacts::combine_all([self.node_facts(*init), self.node_facts(*body)])
             }
+            PlanNode::UpdateBatch { root, .. } => {
+                let root = self.node_facts(*root);
+                ExecutionFacts {
+                    contains_vm_fallback: true,
+                    may_materialize_source: root.may_materialize_source,
+                    ..root
+                }
+            }
             PlanNode::IfElse { cond, then_, else_ } => ExecutionFacts::combine_all([
                 self.node_facts(*cond),
                 self.node_facts(*then_),
@@ -255,12 +263,10 @@ fn select_backend_plan(
         (InputMode::Val, PlanNode::RootPath(_) | PlanNode::Structural { .. }) => {
             BackendPlan::new(&[crate::ir::physical::BackendPreference::Interpreted])
         }
-        (InputMode::Bytes, PlanNode::Structural { .. }) => {
-            BackendPlan::new(&[
-                crate::ir::physical::BackendPreference::Structural,
-                crate::ir::physical::BackendPreference::Interpreted,
-            ])
-        }
+        (InputMode::Bytes, PlanNode::Structural { .. }) => BackendPlan::new(&[
+            crate::ir::physical::BackendPreference::Structural,
+            crate::ir::physical::BackendPreference::Interpreted,
+        ]),
         (
             InputMode::Bytes,
             PlanNode::Pipeline {
@@ -439,14 +445,18 @@ fn recompile_stage_body_for_lexical_env(stage: &mut crate::exec::pipeline::Stage
         crate::exec::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
         crate::exec::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
         crate::exec::pipeline::Stage::CompiledMap(_) => {
-            *stage = crate::exec::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
+            *stage =
+                crate::exec::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
         }
         _ => {}
     }
 }
 
 /// Returns `true` if `kernel` references any identifier that is currently a let-bound local.
-fn kernel_mentions_active_local(kernel: &crate::exec::pipeline::BodyKernel, locals: &[Arc<str>]) -> bool {
+fn kernel_mentions_active_local(
+    kernel: &crate::exec::pipeline::BodyKernel,
+    locals: &[Arc<str>],
+) -> bool {
     kernel.mentions_any_field_like_ident(locals)
 }
 
@@ -763,6 +773,23 @@ fn try_lower_structural(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId
             builder.pop_local();
             Some(builder.push(PlanNode::Let { name, init, body }))
         }
+        Expr::UpdateBatch {
+            root,
+            selector,
+            ops,
+        } => {
+            let dependencies = crate::plan::update::analyze_update_batch(root, selector, ops);
+            let trie = crate::plan::update::build_update_trie_plan(ops);
+            let root_node = lower_expr(builder, root);
+            Some(builder.push(PlanNode::UpdateBatch {
+                root: root_node,
+                selector: selector.clone(),
+                ops: ops.clone(),
+                dependencies,
+                trie,
+                fallback: Arc::new(Compiler::compile(expr, "<planned-update>")),
+            }))
+        }
         _ => None,
     }
 }
@@ -858,10 +885,10 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::ast::BinOp;
     use crate::ir::physical::{
         BackendPreference, PhysicalObjField, PipelinePlanSource, PlanNode, QueryRoot,
     };
+    use crate::parse::ast::BinOp;
 
     fn root_node(plan: &QueryPlan) -> &PlanNode {
         let QueryRoot::Node(root) = plan.root() else {
@@ -892,6 +919,39 @@ mod tests {
                 BackendPreference::ValView,
             ]
         );
+    }
+
+    #[test]
+    fn functional_update_lowers_to_physical_update_batch() {
+        let plan = plan_query(r#"$.books[*].update({ tags: tags.append("test") })"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        let PlanNode::UpdateBatch {
+            selector,
+            ops,
+            dependencies,
+            trie,
+            ..
+        } = plan.node(*root)
+        else {
+            panic!("expected update batch plan");
+        };
+        assert_eq!(selector.len(), 2);
+        assert_eq!(ops.len(), 1);
+        assert!(!dependencies.reads_root);
+        assert!(dependencies.reads_focus);
+        assert!(!dependencies.reads_current);
+        assert!(!dependencies.has_dynamic_path);
+        assert!(trie.static_prefixes_only);
+        assert_eq!(trie.op_count, 1);
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[BackendPreference::Interpreted]
+        );
+        let facts = plan.execution_facts(*root);
+        assert!(facts.contains_vm_fallback);
+        assert!(!facts.may_materialize_source);
     }
 
     #[test]
@@ -1091,7 +1151,6 @@ mod tests {
         assert!(matches!(root_node(&plan), PlanNode::Structural { .. }));
     }
 
-
     #[test]
     fn deep_find_unsupported_predicate_does_not_lower_to_structural_plan() {
         let plan = plan_query(r#"$.deep_find(score > 10)"#);
@@ -1183,7 +1242,10 @@ mod tests {
             panic!("expected physical receiver pipeline");
         };
         assert!(matches!(source, PipelinePlanSource::Expr(_)));
-        assert!(matches!(body.stages[0], crate::exec::pipeline::Stage::Sort(_)));
+        assert!(matches!(
+            body.stages[0],
+            crate::exec::pipeline::Stage::Sort(_)
+        ));
         assert!(matches!(
             body.stages[1],
             crate::exec::pipeline::Stage::ExprBuiltin {
