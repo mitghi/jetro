@@ -539,6 +539,17 @@ where
         }
     }
 
+    /// Returns `Some(prefix)` only when the argument is a string-typed
+    /// value, leaving non-string arguments untouched. Used to disambiguate
+    /// overloaded scalar-arg builtins (e.g. `indent(2)` vs `indent("> ")`).
+    fn str_lit(&mut self, idx: usize) -> Option<Arc<str>> {
+        match (self.eval_arg)(idx).ok().flatten()? {
+            Val::Str(s) => Some(s),
+            Val::StrSlice(r) => Some(r.to_arc()),
+            _ => None,
+        }
+    }
+
     /// Evaluates the argument at `idx` as a signed 64-bit integer.
     fn i64(&mut self, idx: usize) -> Result<i64, EvalError> {
         match self.val(idx)? {
@@ -1704,6 +1715,9 @@ impl BuiltinCall {
             (BuiltinMethod::Indent, BuiltinArgs::Usize(n)) => {
                 apply_or_recv!(indent_apply(recv, *n))
             }
+            (BuiltinMethod::Indent, BuiltinArgs::Str(prefix)) => {
+                apply_or_recv!(indent_with_prefix_apply(recv, prefix.as_ref()))
+            }
             (BuiltinMethod::PadLeft, BuiltinArgs::Pad { width, fill }) => {
                 apply_or_recv!(pad_left_apply(recv, *width, *fill))
             }
@@ -1933,8 +1947,15 @@ impl BuiltinCall {
             }
             BuiltinMethod::Repeat => Self::new(method, BuiltinArgs::Usize(args.usize(0)?)),
             BuiltinMethod::Indent => {
-                let n = if arg_len > 0 { args.usize(0)? } else { 2 };
-                Self::new(method, BuiltinArgs::Usize(n))
+                if arg_len > 0 {
+                    if let Some(prefix) = args.str_lit(0) {
+                        Self::new(method, BuiltinArgs::Str(prefix))
+                    } else {
+                        Self::new(method, BuiltinArgs::Usize(args.usize(0)?))
+                    }
+                } else {
+                    Self::new(method, BuiltinArgs::Usize(2))
+                }
             }
             BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center => Self::new(
                 method,
@@ -2495,6 +2516,14 @@ where
             let arg = args
                 .first()
                 .ok_or_else(|| EvalError("rec: requires step expression".into()))?;
+            if let Some(cond_arg) = args.get(1) {
+                let eval_cell = std::cell::RefCell::new(eval_item);
+                return rec_cond_apply(
+                    recv,
+                    |value| eval_cell.borrow_mut()(&value, arg),
+                    |value| eval_cell.borrow_mut()(value, cond_arg),
+                );
+            }
             return rec_apply(recv, |value| eval_item(&value, arg));
         }
         BuiltinMethod::TracePath => {
@@ -2515,6 +2544,23 @@ where
                 return zip_shape_obj_apply(&recv)
                     .ok_or_else(|| EvalError("zip_shape: expected object receiver".into()));
             }
+            // Object-literal sugar: `zip_shape({a, b})` ≡ `zip_shape(a, b)`.
+            // The single `{a, b}` arg is evaluated as an object literal
+            // against the receiver, then dispatched through the no-arg
+            // parallel-array interleave.
+            if args.len() == 1 {
+                if let Arg::Pos(Expr::Object(fields)) = &args[0] {
+                    let all_short = fields.iter().all(|f| {
+                        matches!(f, crate::parse::ast::ObjField::Short(_))
+                    });
+                    if all_short {
+                        let obj = eval_arg(&args[0])?;
+                        return zip_shape_obj_apply(&obj).ok_or_else(|| {
+                            EvalError("zip_shape: expected object receiver".into())
+                        });
+                    }
+                }
+            }
             let mut names = Vec::with_capacity(args.len());
             for arg in args {
                 let name: Arc<str> = match arg {
@@ -2522,13 +2568,15 @@ where
                     Arg::Pos(Expr::Ident(n)) => Arc::from(n.as_str()),
                     _ => {
                         return Err(EvalError(
-                            "zip_shape: args must be `name = expr` or bare identifier".into(),
+                            "zip_shape: args must be `name: expr` or bare identifier".into(),
                         ))
                     }
                 };
                 names.push(name);
             }
-            return zip_shape_apply(&recv, &names, |value, idx| eval_item(value, &args[idx]));
+            return zip_shape_apply(&recv, &names, |value, idx| {
+                eval_item(value, &args[idx])
+            });
         }
         BuiltinMethod::GroupShape => {
             // No-arg form: group an array of objects by their
@@ -2539,12 +2587,21 @@ where
                 return group_shape_by_keys_apply(recv)
                     .ok_or_else(|| EvalError("group_shape: expected array".into()));
             }
-            let key_arg = args
-                .first()
-                .ok_or_else(|| EvalError("group_shape: requires key".into()))?;
-            let shape_arg = args
-                .get(1)
-                .ok_or_else(|| EvalError("group_shape: requires shape".into()))?;
+            // 1-arg form: `group_shape(key_expr)` keys each element by the
+            // projected value and emits `{key_value: [items]}` with the
+            // original element preserved as the bucket value.
+            if args.len() == 1 {
+                let key_arg = &args[0];
+                return group_shape_apply(recv, |value, idx| {
+                    if idx == 0 {
+                        eval_item(&value, key_arg)
+                    } else {
+                        Ok(value)
+                    }
+                });
+            }
+            let key_arg = &args[0];
+            let shape_arg = &args[1];
             return group_shape_apply(recv, |value, idx| {
                 if idx == 0 {
                     eval_item(&value, key_arg)
@@ -2833,16 +2890,33 @@ where
             BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
         }
         BuiltinMethod::Repeat | BuiltinMethod::Indent => {
-            let n = if args.is_empty() {
-                if matches!(method, BuiltinMethod::Indent) {
-                    2
-                } else {
-                    1
+            // `indent("> ")` accepts a string prefix argument. Detect the
+            // string-literal shape before falling through to the integer
+            // count coercion used by both `repeat` and the spaces-form of
+            // `indent`.
+            let prefix_arg = if matches!(method, BuiltinMethod::Indent) && !args.is_empty() {
+                match &args[0] {
+                    Arg::Pos(Expr::Str(s)) => Some(Arc::<str>::from(s.as_str())),
+                    Arg::Named(_, Expr::Str(s)) => Some(Arc::<str>::from(s.as_str())),
+                    _ => None,
                 }
             } else {
-                i64_arg!(0)?.max(0) as usize
+                None
             };
-            BuiltinCall::new(method, BuiltinArgs::Usize(n))
+            if let Some(prefix) = prefix_arg {
+                BuiltinCall::new(method, BuiltinArgs::Str(prefix))
+            } else {
+                let n = if args.is_empty() {
+                    if matches!(method, BuiltinMethod::Indent) {
+                        2
+                    } else {
+                        1
+                    }
+                } else {
+                    i64_arg!(0)?.max(0) as usize
+                };
+                BuiltinCall::new(method, BuiltinArgs::Usize(n))
+            }
         }
         BuiltinMethod::PadLeft | BuiltinMethod::PadRight | BuiltinMethod::Center => {
             BuiltinCall::new(

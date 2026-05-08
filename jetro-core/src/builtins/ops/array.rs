@@ -780,7 +780,39 @@ where
         recv = next;
     }
     Err(EvalError(
-        "rec: exceeded 10000 iterations without reaching fixpoint".into(),
+        "rec(fn): no fixpoint within 10000 iterations — \
+         pass `rec(fn, cond)` to bound the loop or ensure `fn` is idempotent"
+            .into(),
+    ))
+}
+
+/// Applies `step` while `cond` returns truthy, capped at 10 000 iterations.
+/// Returns the value at the point `cond` first becomes falsy. Errors if the
+/// guard never falsifies within the cap.
+#[inline]
+pub fn rec_cond_apply<F, G>(
+    mut recv: Val,
+    mut step: F,
+    mut cond: G,
+) -> Result<Val, EvalError>
+where
+    F: FnMut(Val) -> Result<Val, EvalError>,
+    G: FnMut(&Val) -> Result<Val, EvalError>,
+{
+    for _ in 0..10_000 {
+        if !is_truthy(&cond(&recv)?) {
+            return Ok(recv);
+        }
+        let next = step(recv.clone())?;
+        if crate::util::vals_deep_eq(&recv, &next) {
+            // Idempotent guard: `step` is a fixpoint but `cond` still says
+            // continue. Return rather than spin to the cap.
+            return Ok(next);
+        }
+        recv = next;
+    }
+    Err(EvalError(
+        "rec(fn, cond): cond did not become falsy within 10000 iterations".into(),
     ))
 }
 

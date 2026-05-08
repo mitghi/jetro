@@ -1509,6 +1509,21 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
         Rule::literal => parse_literal(inner),
         Rule::root => Expr::Root,
         Rule::current => Expr::Current,
+        Rule::bare_leading_field => {
+            // `.field` is sugar for `@.field` — desugar at parse time so
+            // method-arg shapes like `filter(.active)` become indistinguishable
+            // from the explicit `filter(@.active)` form downstream.
+            let name = inner
+                .into_inner()
+                .next()
+                .expect("bare_leading_field has a field_name child")
+                .as_str()
+                .to_string();
+            Expr::Chain(
+                Box::new(Expr::Current),
+                vec![Step::Field(name)],
+            )
+        }
         Rule::ident => Expr::Ident(inner.as_str().to_string()),
         Rule::let_expr => parse_let(inner),
         Rule::lambda_expr => parse_lambda(inner),
@@ -1610,10 +1625,24 @@ fn parse_pat(pair: Pair<Rule>) -> Pat {
             for p in pair.into_inner() {
                 match p.as_rule() {
                     Rule::pat_obj_field => {
-                        let mut fi = p.into_inner();
-                        let k = fi.next().unwrap().as_str().to_string();
-                        let v = parse_pat(fi.next().unwrap());
-                        fields.push((k, v));
+                        // Either `key: pat` (Kv) or `key` (Short) — the
+                        // grammar splits these into two named subrules so
+                        // we can branch without re-checking presence of
+                        // the trailing colon.
+                        let inner = p.into_inner().next().unwrap();
+                        match inner.as_rule() {
+                            Rule::pat_obj_field_kv => {
+                                let mut fi = inner.into_inner();
+                                let k = fi.next().unwrap().as_str().to_string();
+                                let v = parse_pat(fi.next().unwrap());
+                                fields.push((k, v));
+                            }
+                            Rule::pat_obj_field_short => {
+                                let k = inner.as_str().to_string();
+                                fields.push((k.clone(), Pat::Bind(k)));
+                            }
+                            _ => {}
+                        }
                     }
                     Rule::pat_obj_rest => {
                         let inner = p.into_inner().next().unwrap();
@@ -1838,9 +1867,13 @@ fn parse_let(pair: Pair<Rule>) -> Expr {
 /// `Expr::Lambda`.
 enum LambdaPatParam {
     Ident(String),
-    /// `[a, b, ...]` — bind each name to the indexed element of the
-    /// receiver. Stored as the list of names in source order.
-    Array(Vec<String>),
+    /// `[a, b, ...rest]` — bind each fixed-prefix name to the indexed
+    /// element of the receiver, with an optional trailing identifier that
+    /// captures the rest of the array (sliced from `len(prefix)` onward).
+    Array {
+        names: Vec<String>,
+        rest: Option<String>,
+    },
 }
 
 /// Walk a `lambda_params` / `arrow_params` pair and collect each child as
@@ -1857,23 +1890,13 @@ fn collect_lambda_params(params_pair: Pair<Rule>) -> Vec<LambdaPatParam> {
                 match inner.as_rule() {
                     Rule::ident => out.push(LambdaPatParam::Ident(inner.as_str().to_string())),
                     Rule::lambda_array_pat => {
-                        let names: Vec<String> = inner
-                            .into_inner()
-                            .filter(|q| q.as_rule() == Rule::ident)
-                            .map(|q| q.as_str().to_string())
-                            .collect();
-                        out.push(LambdaPatParam::Array(names));
+                        out.push(parse_lambda_array_pat(inner));
                     }
                     _ => {}
                 }
             }
             Rule::lambda_array_pat => {
-                let names: Vec<String> = p
-                    .into_inner()
-                    .filter(|q| q.as_rule() == Rule::ident)
-                    .map(|q| q.as_str().to_string())
-                    .collect();
-                out.push(LambdaPatParam::Array(names));
+                out.push(parse_lambda_array_pat(p));
             }
             _ => {}
         }
@@ -1881,7 +1904,26 @@ fn collect_lambda_params(params_pair: Pair<Rule>) -> Vec<LambdaPatParam> {
     out
 }
 
-/// Lower a `[a, b, ...]` array-pattern into a synthetic ident plus a chain
+/// Decode a `lambda_array_pat` Pest pair into the destructure shape:
+/// the ordered list of fixed-prefix names, plus an optional trailing
+/// `...rest` capture identifier.
+fn parse_lambda_array_pat(pair: Pair<Rule>) -> LambdaPatParam {
+    let mut names: Vec<String> = Vec::new();
+    let mut rest: Option<String> = None;
+    for child in pair.into_inner() {
+        match child.as_rule() {
+            Rule::ident => names.push(child.as_str().to_string()),
+            Rule::lambda_array_rest => {
+                let inner = child.into_inner().next().unwrap();
+                rest = Some(inner.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
+    LambdaPatParam::Array { names, rest }
+}
+
+/// Lower a `[a, b, ...rest]` array-pattern into a synthetic ident plus a chain
 /// of `let` bindings indexing the synthetic. Returns the synthetic name and
 /// a function that wraps a body expression in the destructuring lets.
 ///
@@ -1891,18 +1933,34 @@ fn collect_lambda_params(params_pair: Pair<Rule>) -> Vec<LambdaPatParam> {
 fn synth_destructure(
     counter: &mut u32,
     pat: Vec<String>,
+    rest: Option<String>,
 ) -> (String, Box<dyn FnOnce(Expr) -> Expr>) {
     let id = format!("__lampat_{}", *counter);
     *counter += 1;
     let synth = id.clone();
     let wrap: Box<dyn FnOnce(Expr) -> Expr> = Box::new(move |body| {
+        // Optional rest: `let rest = synth[len(pat):] in body`. Innermost
+        // because the index lookups for fixed names then bind around it.
+        let mut acc = body;
+        if let Some(rest_name) = rest {
+            let prefix_len = pat.len() as i64;
+            let slice = Expr::Chain(
+                Box::new(Expr::Ident(synth.clone())),
+                vec![Step::Slice(Some(prefix_len), None, None)],
+            );
+            acc = Expr::Let {
+                name: rest_name,
+                init: Box::new(slice),
+                body: Box::new(acc),
+            };
+        }
         // Build nested Let from innermost outward: rightmost name is the
         // innermost binding. Walk pat in reverse so the leftmost binding
         // ends up outermost (so name-shadowing matches source order).
         pat.into_iter()
             .enumerate()
             .rev()
-            .fold(body, |acc, (i, name)| {
+            .fold(acc, |acc, (i, name)| {
                 // `let name = synth[i] in acc`
                 let index = Expr::Chain(
                     Box::new(Expr::Ident(synth.clone())),
@@ -1930,8 +1988,8 @@ fn lower_lambda_params(
     for p in params {
         match p {
             LambdaPatParam::Ident(n) => names.push(n),
-            LambdaPatParam::Array(pat) => {
-                let (synth, wrap) = synth_destructure(&mut counter, pat);
+            LambdaPatParam::Array { names: pat, rest } => {
+                let (synth, wrap) = synth_destructure(&mut counter, pat, rest);
                 names.push(synth);
                 wrappers.push(wrap);
             }

@@ -3093,7 +3093,34 @@ macro_rules! usize_arg_scalar_native {
 }
 usize_arg_scalar_native! {
     Repeat, "repeat", repeat_apply, aliases: ["repeat_str"];
-    Indent, "indent", indent_apply;
+}
+
+/// `indent(n_or_prefix)` — prepend each line with `n` spaces (when `n` is a
+/// non-negative integer) or with the literal `prefix` string (when a string
+/// is supplied). Both forms preserve trailing-newline semantics of `lines()`.
+pub(crate) struct Indent;
+impl Builtin for Indent {
+    const METHOD: BuiltinMethod = BuiltinMethod::Indent;
+    const NAME: &'static str = "indent";
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => {
+                Some(super::indent_apply(recv, *n).unwrap_or_else(|| recv.clone()))
+            }
+            super::BuiltinArgs::Str(prefix) => Some(
+                super::indent_with_prefix_apply(recv, prefix.as_ref())
+                    .unwrap_or_else(|| recv.clone()),
+            ),
+            _ => None,
+        }
+    }
 }
 
 macro_rules! pad_arg_scalar_native {
