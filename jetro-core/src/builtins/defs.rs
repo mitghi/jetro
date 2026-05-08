@@ -2322,10 +2322,15 @@ impl Builtin for Update {
 
 #[inline]
 fn streaming_one_to_one_element_spec() -> BuiltinSpec {
+    // `lag`/`lead`/`cummax`/`cummin`/`diff_window`/`pct_change`/`zscore`
+    // and friends are whole-array transforms (output[i] depends on
+    // input[i] and input[i-k]), not per-element vectorisable. Marking
+    // them `.element()` made the streaming pipeline treat the receiver
+    // as a 1-element stream and discard the structural shift, returning
+    // the bare input. Same fix pattern as `enumerate`/`pairwise`.
     BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
         .indexed()
         .cost(10.0)
-        .element()
 }
 
 /// `lag(n)` — element shifted by N positions.
