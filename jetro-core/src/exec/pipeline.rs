@@ -1223,6 +1223,18 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_prefixes_scan_and_result_lanes_through_map() {
+        let p = lower_query("$.books.map(user).filter(@.active).map(name).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["user.active"]);
+        assert_eq!(demand_paths(&demand.result_need), vec!["name"]);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 1, .. })
+        ));
+    }
+
+    #[test]
     fn object_lambda_stages_preserve_positional_demand() {
         for query in [
             "$.books.transform_values(@).last()",
