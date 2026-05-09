@@ -9,7 +9,7 @@ use crate::builtins::{
     BuiltinViewOutputMode, BuiltinViewStage,
 };
 use crate::data::value::Val;
-use crate::plan::demand::PullDemand;
+use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
 
 use super::{MembershipSinkOp, MembershipSinkTarget, PipelineBody, PredicateSinkOp, Stage};
@@ -72,6 +72,29 @@ impl SourceCapabilities {
             _ => SourceAccessMode::MaterializedFallback,
         }
     }
+
+    /// Returns true when this source can satisfy split payload lanes without
+    /// materialising every row as a full owned value.
+    pub(crate) fn supports_payload_lanes(
+        self,
+        scan_need: &FieldDemand,
+        result_need: &FieldDemand,
+    ) -> bool {
+        payload_lane_supported(scan_need, self.field_key_read, self.subtree_skip)
+            && payload_lane_supported(
+                result_need,
+                self.field_key_read,
+                self.selected_row_materialization,
+            )
+    }
+}
+
+fn payload_lane_supported(need: &FieldDemand, field_key_read: bool, whole_value_ok: bool) -> bool {
+    match need {
+        FieldDemand::None => true,
+        FieldDemand::Fields(_) => field_key_read,
+        FieldDemand::Whole => whole_value_ok,
+    }
 }
 
 /// Physical traversal selected from source capabilities plus propagated demand.
@@ -95,7 +118,8 @@ pub(crate) enum SourceAccessMode {
 #[cfg(test)]
 mod source_capability_tests {
     use super::{SourceAccessMode, SourceCapabilities};
-    use crate::plan::demand::PullDemand;
+    use crate::plan::demand::{FieldDemand, FieldSet, PullDemand};
+    use std::sync::Arc;
 
     #[test]
     fn indexed_sources_choose_direct_positional_access() {
@@ -228,6 +252,16 @@ mod source_capability_tests {
             fallback_only.choose_access(PullDemand::All),
             SourceAccessMode::MaterializedFallback
         );
+    }
+
+    #[test]
+    fn payload_lanes_require_matching_source_capabilities() {
+        let fields = FieldDemand::Fields(FieldSet::single(Arc::from("price")));
+        assert!(SourceCapabilities::VIEW_ARRAY.supports_payload_lanes(&fields, &fields));
+        assert!(SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_payload_lanes(&fields, &FieldDemand::Whole));
+        assert!(!SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_payload_lanes(&FieldDemand::Whole, &fields));
     }
 }
 

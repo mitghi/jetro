@@ -437,6 +437,10 @@ pub struct Pipeline {
     #[allow(dead_code)]
     pub(crate) source_capabilities: SourceCapabilities,
 
+    /// Whether the source can satisfy split scan/result payload lanes without full row materialization.
+    #[allow(dead_code)]
+    pub(crate) source_payload_lanes_supported: bool,
+
     /// Access mode selected from source capabilities plus propagated pull demand.
     pub(crate) source_access: SourceAccessMode,
 
@@ -484,6 +488,8 @@ impl PipelineBody {
         let late_projection = Pipeline::late_projection_for(&self.stages, &self.stage_kernels);
         let source_capabilities = source.capabilities();
         let source_access = source_capabilities.choose_access(source_demand.chain.pull);
+        let source_payload_lanes_supported = source_capabilities
+            .supports_payload_lanes(&payload_demand.scan_need, &payload_demand.result_need);
         let fallback_boundary = Pipeline::fallback_boundary_for(&self.stages, exec_path);
         Pipeline {
             source,
@@ -492,6 +498,7 @@ impl PipelineBody {
             payload_demand,
             late_projection,
             source_capabilities,
+            source_payload_lanes_supported,
             source_access,
             fallback_boundary,
             stages: self.stages,
