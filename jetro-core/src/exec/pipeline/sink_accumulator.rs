@@ -539,3 +539,87 @@ fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
     }
     raw
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, sync::Arc};
+
+    use crate::exec::pipeline::PredicateSinkSpec;
+    use crate::vm::Program;
+
+    use super::*;
+
+    fn empty_program() -> Arc<Program> {
+        Arc::new(Program::new(Vec::new(), "<sink-accumulator-test>"))
+    }
+
+    fn predicate_sink(op: PredicateSinkOp) -> Sink {
+        Sink::Predicate(PredicateSinkSpec {
+            op,
+            predicate: empty_program(),
+        })
+    }
+
+    #[test]
+    fn predicate_short_circuit_sinks_do_not_materialize_rows() {
+        let any_sink = predicate_sink(PredicateSinkOp::Any);
+        let mut any = SinkAccumulator::new(&any_sink);
+        let materialized = Cell::new(0);
+        let decided = any
+            .observe_predicate_lazy(PredicateSinkOp::Any, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(1)
+            })
+            .unwrap();
+
+        assert!(decided);
+        assert_eq!(materialized.get(), 0);
+        assert_eq!(any.finish(false), Val::Bool(true));
+
+        let all_sink = predicate_sink(PredicateSinkOp::All);
+        let mut all = SinkAccumulator::new(&all_sink);
+        let materialized = Cell::new(0);
+        let decided = all
+            .observe_predicate_lazy(PredicateSinkOp::All, false, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(1)
+            })
+            .unwrap();
+
+        assert!(decided);
+        assert_eq!(materialized.get(), 0);
+        assert_eq!(all.finish(false), Val::Bool(false));
+    }
+
+    #[test]
+    fn find_one_materializes_only_matching_row_once() {
+        let sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut acc = SinkAccumulator::new(&sink);
+        let materialized = Cell::new(0);
+
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(0)
+            })
+            .unwrap());
+        assert_eq!(materialized.get(), 0);
+
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(42)
+            })
+            .unwrap());
+        assert_eq!(materialized.get(), 1);
+
+        let err = acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(99)
+            })
+            .unwrap_err();
+        assert!(err.0.contains("got multiple"));
+        assert_eq!(materialized.get(), 1);
+    }
+}
