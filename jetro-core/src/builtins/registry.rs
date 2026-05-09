@@ -255,6 +255,33 @@ pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterial
         .unwrap_or(BuiltinPipelineMaterialization::Streaming)
 }
 
+/// Return true when builtin `id` streams row-by-row without buffering.
+#[inline]
+pub(crate) fn pipeline_streams(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::Streaming
+    )
+}
+
+/// Return true when builtin `id` buffers through the composed barrier path.
+#[inline]
+pub(crate) fn pipeline_composed_barrier(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::ComposedBarrier
+    )
+}
+
+/// Return true when builtin `id` requires the legacy materialized executor.
+#[inline]
+pub(crate) fn pipeline_legacy_materialized(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::LegacyMaterialized
+    )
+}
+
 /// Return the cardinality/cost shape annotation for builtin `id`, used by
 /// the pipeline cost estimator during plan selection.
 #[inline]
@@ -667,6 +694,13 @@ mod tests {
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
             BuiltinPipelineMaterialization::Streaming
         );
+        assert!(pipeline_streams(BuiltinId::from_method(BuiltinMethod::TakeWhile)));
+        assert!(pipeline_composed_barrier(BuiltinId::from_method(
+            BuiltinMethod::Sort
+        )));
+        assert!(pipeline_legacy_materialized(BuiltinId::from_method(
+            BuiltinMethod::Split
+        )));
         assert_eq!(
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
                 .unwrap()

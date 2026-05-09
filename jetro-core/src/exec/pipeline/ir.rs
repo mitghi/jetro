@@ -9,12 +9,13 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    effective_pipeline_order_effect, participates_in_demand, pipeline_materialization,
-    pipeline_shape, sink_demand as builtin_sink_demand, BuiltinId,
+    effective_pipeline_order_effect, participates_in_demand, pipeline_composed_barrier,
+    pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
+    sink_demand as builtin_sink_demand, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -436,14 +437,6 @@ impl<'a> StageDescriptor<'a> {
         self.method.and_then(|method| method.spec().columnar_stage)
     }
 
-    /// Returns whether the stage is streaming, legacy-materialised, or a composed barrier.
-    #[inline]
-    pub(crate) fn pipeline_materialization(self) -> BuiltinPipelineMaterialization {
-        self.method
-            .map(|method| pipeline_materialization(BuiltinId::from_method(method)))
-            .unwrap_or(BuiltinPipelineMaterialization::Streaming)
-    }
-
     /// Returns how this stage affects the sort order of its input stream.
     #[inline]
     pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
@@ -497,25 +490,30 @@ impl Stage {
     /// Returns `true` when this stage requires a composed-barrier materialisation pass before
     /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {
-        self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
+        self.descriptor()
+            .and_then(|desc| desc.method)
+            .is_some_and(|method| pipeline_composed_barrier(BuiltinId::from_method(method)))
     }
 
     /// Returns `true` when the stage cannot participate in the streaming pull loop and must be
     /// executed via the legacy materialisation path.
     pub(crate) fn requires_legacy_materialization(&self) -> bool {
-        !matches!(
-            self.pipeline_materialization(),
-            BuiltinPipelineMaterialization::Streaming
-        )
+        matches!(self, Stage::SortedDedup(_))
+            || (!matches!(self, Stage::CompiledMap(_))
+                && self
+                    .descriptor()
+                    .and_then(|desc| desc.method)
+                    .is_some_and(|method| !pipeline_streams(BuiltinId::from_method(method))))
     }
 
     /// Returns `true` when the stage cannot use a composed/view barrier and must fall back to the
     /// legacy full-materialisation executor.
     pub(crate) fn requires_legacy_fallback(&self) -> bool {
-        matches!(
-            self.pipeline_materialization(),
-            BuiltinPipelineMaterialization::LegacyMaterialized
-        )
+        matches!(self, Stage::SortedDedup(_))
+            || self
+                .descriptor()
+                .and_then(|desc| desc.method)
+                .is_some_and(|method| pipeline_legacy_materialized(BuiltinId::from_method(method)))
     }
 
     /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,
@@ -605,18 +603,6 @@ impl Stage {
                 Some(StageDescriptor::special().receiver_unsafe_without_body())
             }
             _ => None,
-        }
-    }
-
-    // Hard-coded overrides for CompiledMap (streaming) and SortedDedup (legacy).
-    fn pipeline_materialization(&self) -> BuiltinPipelineMaterialization {
-        match self {
-            Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
-            Stage::SortedDedup(_) => BuiltinPipelineMaterialization::LegacyMaterialized,
-            _ => self
-                .descriptor()
-                .map(StageDescriptor::pipeline_materialization)
-                .unwrap_or(BuiltinPipelineMaterialization::Streaming),
         }
     }
 
