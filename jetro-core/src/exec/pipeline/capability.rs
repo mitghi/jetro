@@ -27,6 +27,10 @@ pub(crate) struct SourceCapabilities {
     pub tape_view: bool,
     /// Source can read object fields by key without materialising the whole object row.
     pub field_key_read: bool,
+    /// Source can skip unneeded nested subtrees while scanning.
+    pub subtree_skip: bool,
+    /// Source can materialise only rows selected by the sink/predicate path.
+    pub selected_row_materialization: bool,
     /// Source can fall back to materialising owned values.
     pub materialized_fallback: bool,
 }
@@ -39,6 +43,8 @@ impl SourceCapabilities {
         indexed_array_child: true,
         tape_view: true,
         field_key_read: true,
+        subtree_skip: true,
+        selected_row_materialization: true,
         materialized_fallback: true,
     };
 
@@ -49,6 +55,8 @@ impl SourceCapabilities {
         indexed_array_child: true,
         tape_view: false,
         field_key_read: true,
+        subtree_skip: false,
+        selected_row_materialization: true,
         materialized_fallback: true,
     };
 
@@ -114,6 +122,8 @@ mod source_capability_tests {
         assert!(caps.indexed_array_child);
         assert!(caps.materialized_fallback);
         assert!(caps.field_key_read);
+        assert!(caps.subtree_skip);
+        assert!(caps.selected_row_materialization);
         assert_eq!(
             caps.choose_access(PullDemand::NthInput(2)),
             SourceAccessMode::Indexed(2)
@@ -132,6 +142,8 @@ mod source_capability_tests {
             indexed_array_child: false,
             tape_view: false,
             field_key_read: false,
+            subtree_skip: false,
+            selected_row_materialization: false,
             materialized_fallback: true,
         };
 
@@ -157,6 +169,8 @@ mod source_capability_tests {
             indexed_array_child: true,
             tape_view: false,
             field_key_read: true,
+            subtree_skip: false,
+            selected_row_materialization: true,
             materialized_fallback: true,
         };
 
@@ -178,6 +192,8 @@ mod source_capability_tests {
             indexed_array_child: true,
             tape_view: true,
             field_key_read: true,
+            subtree_skip: true,
+            selected_row_materialization: true,
             materialized_fallback: true,
         };
 
@@ -203,6 +219,8 @@ mod source_capability_tests {
             indexed_array_child: false,
             tape_view: false,
             field_key_read: false,
+            subtree_skip: false,
+            selected_row_materialization: false,
             materialized_fallback: true,
         };
 
