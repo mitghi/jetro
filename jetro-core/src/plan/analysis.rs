@@ -430,7 +430,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         | SetPath | DelPath | DelPaths | Update | Schema => AbstractVal::object(),
         // Scalar-returning methods whose type cannot be determined without runtime information.
         First | Last | Nth | FindFirst | FindOne | FindIndex | MaxBy | MinBy | Walk | WalkPre
-        | Rec | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
+        | Rec | Fold | GetPath | ReMatchFirst | ReCaptures => AbstractVal::UNKNOWN,
         HasPath => AbstractVal::scalar(VType::Bool),
         ReMatchAll | ReCapturesAll | ReSplit => AbstractVal::array(),
         ReReplace | ReReplaceAll => AbstractVal::scalar(VType::Str),

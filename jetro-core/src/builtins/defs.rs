@@ -1278,6 +1278,17 @@ impl Builtin for Accumulate {
     fn spec() -> BuiltinSpec { barrier_default_spec() }
 }
 
+/// `fold(init, fn)` / `fold(fn)` — like `accumulate(...).last()` but
+/// emits a single value instead of the running-trace array. Equivalent
+/// to `Iterator::fold` (with init) or `Iterator::reduce` (without).
+pub(crate) struct Fold;
+impl Builtin for Fold {
+    const METHOD: BuiltinMethod = BuiltinMethod::Fold;
+    const NAME: &'static str = "fold";
+    const ALIASES: &'static [&'static str] = &["reduce"];
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
 // ── Keyed reducers ───────────────────────────────────────────────────────────
 
 /// `group_by(key)` — keyed reducer collecting elements per key.

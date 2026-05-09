@@ -19,6 +19,21 @@
   not opted out). Used by both `try_lower_pipeline` and the top-level
   fast-path lowering in `plan_query_with_context`.
 
+### New builtin: `fold` / `reduce`
+
+- **`fold(init, fn)` and `fold(fn)`**. Left fold returning a single
+  value — same loop as `accumulate` but emits only the final acc, no
+  intermediate trace. The 1-arg form seeds the accumulator from the
+  first element (Iterator::reduce); empty array with no init returns
+  `null`. `reduce` is registered as an alias.
+
+  ```jetro
+  $.xs.fold(0, (a, b) => a + b)            # → final sum
+  $.orders.fold(0, (acc, o) => acc + o.total)
+  $.orders.fold({total: 0, n: 0}, (a, o) =>
+    {total: a.total + o.total, n: a.n + 1})
+  ```
+
 ### `rec` family
 
 - **`rec(fn, cond)` 2-arg form**. Iterates `fn` while `cond(@)` is truthy,

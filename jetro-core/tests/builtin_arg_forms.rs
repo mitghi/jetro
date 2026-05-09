@@ -611,6 +611,39 @@ fn accumulate_one_arg_forms() {
     );
 }
 
+#[test]
+fn fold_two_arg_forms() {
+    let d = xs();
+    assert_all(
+        "fold(0, fn)",
+        &[
+            "$.xs.fold(0, (a, b) => a + b)",
+            "$.xs.fold(0, lambda a, b: a + b)",
+            "$.xs.reduce(0, (a, b) => a + b)",
+        ],
+        &d,
+        "15",
+    );
+}
+
+#[test]
+fn fold_one_arg_forms() {
+    let d = xs();
+    assert_all(
+        "fold(fn)",
+        &[
+            "$.xs.fold((a, b) => a + b)",
+            "$.xs.fold(lambda a, b: a + b)",
+        ],
+        &d,
+        "15",
+    );
+    // Empty / single-element edge cases.
+    assert_eq!(run("[].fold(0, (a, b) => a + b)", &json!({})), "0");
+    assert_eq!(run("[].fold((a, b) => a + b)", &json!({})), "null");
+    assert_eq!(run("[7].fold((a, b) => a + b)", &json!({})), "7");
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Group D: bare-identifier args (no `@`, no path)
 // ──────────────────────────────────────────────────────────────────────────

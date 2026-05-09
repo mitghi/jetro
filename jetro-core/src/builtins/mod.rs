@@ -159,6 +159,9 @@ pub enum BuiltinMethod {
     ApproxCountDistinct,
     /// Produces a running accumulation using the lambda.
     Accumulate,
+    /// Folds the array to a single value with `fn(acc, row) -> acc`. Equivalent
+    /// to `accumulate(init, fn).last()` but avoids the intermediate array.
+    Fold,
     /// Splits an array into two arrays: elements that pass and those that fail the predicate.
     Partition,
     /// Zips two arrays element-wise into `[[a0, b0], ...]`.
@@ -415,7 +418,7 @@ macro_rules! for_each_builtin {
             DeepLike, DeepMerge, DeepShape, Defaults, DelPath, DelPaths, Diff, DiffWindow,
             DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
             FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
-            FlatMap, Flatten, FlattenKeys, Floor, FromBase64, FromJson, FromPairs, GetPath,
+            FlatMap, Flatten, FlattenKeys, Floor, Fold, FromBase64, FromJson, FromPairs, GetPath,
             GroupBy, GroupShape, Has, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
             Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
             IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
@@ -462,6 +465,7 @@ impl BuiltinMethod {
                 | Self::TakeWhile
                 | Self::DropWhile
                 | Self::Accumulate
+                | Self::Fold
                 | Self::Partition
                 | Self::TransformKeys
                 | Self::TransformValues
