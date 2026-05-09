@@ -1215,6 +1215,7 @@ mod tests {
         assert_eq!(demand_paths(&demand.result_need), vec!["user.name"]);
         assert!(p.source_capabilities.field_key_read);
         assert!(p.source_capabilities.selected_row_materialization);
+        assert!(p.source_payload_lanes_supported);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 0, .. })
@@ -1235,6 +1236,7 @@ mod tests {
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), vec!["user.active"]);
         assert_eq!(demand_paths(&demand.result_need), vec!["name"]);
+        assert!(p.source_payload_lanes_supported);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 1, .. })
