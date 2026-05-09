@@ -75,6 +75,14 @@ impl FieldPath {
     pub fn keys(&self) -> &[Arc<str>] {
         &self.keys
     }
+
+    /// Return this path with `prefix` inserted before its first key.
+    pub fn prefixed(&self, prefix: &[Arc<str>]) -> Self {
+        let mut keys = Vec::with_capacity(prefix.len() + self.keys.len());
+        keys.extend(prefix.iter().cloned());
+        keys.extend(self.keys.iter().cloned());
+        Self { keys: keys.into() }
+    }
 }
 
 /// Small ordered set of field paths. Insertion preserves first-seen order so diagnostics
@@ -121,6 +129,15 @@ impl FieldSet {
     /// Borrow all paths in deterministic order.
     pub fn paths(&self) -> &[FieldPath] {
         &self.paths
+    }
+
+    /// Return all paths with `prefix` inserted before each path.
+    pub fn prefixed(&self, prefix: &[Arc<str>]) -> Self {
+        let mut out = Self::new();
+        for path in self.paths.iter() {
+            out.insert(path.prefixed(prefix));
+        }
+        out
     }
 
     /// Returns `true` if the set contains no paths.

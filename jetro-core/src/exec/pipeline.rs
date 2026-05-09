@@ -1203,6 +1203,9 @@ mod tests {
     fn late_projection_composes_chained_maps() {
         let query = "$.books.map(user).map(name).last()";
         let p = lower_query(query).unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&demand.result_need), vec!["user.name"]);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 0, .. })

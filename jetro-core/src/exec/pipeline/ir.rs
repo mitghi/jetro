@@ -1348,10 +1348,14 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
 
 #[allow(dead_code)]
 fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
-    if demand.is_none() {
-        FieldDemand::None
-    } else {
-        kernel.field_demand()
+    match demand {
+        FieldDemand::None => FieldDemand::None,
+        FieldDemand::Fields(fields) => match kernel {
+            BodyKernel::FieldRead(key) => FieldDemand::Fields(fields.prefixed(&[Arc::clone(key)])),
+            BodyKernel::FieldChain(keys) => FieldDemand::Fields(fields.prefixed(keys)),
+            _ => kernel.field_demand(),
+        },
+        FieldDemand::Whole => kernel.field_demand(),
     }
 }
 
