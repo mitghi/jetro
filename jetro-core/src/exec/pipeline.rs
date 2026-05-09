@@ -1206,6 +1206,8 @@ mod tests {
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
         assert_eq!(demand_paths(&demand.result_need), vec!["user.name"]);
+        assert!(p.source_capabilities.field_key_read);
+        assert!(p.source_capabilities.selected_row_materialization);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 0, .. })
