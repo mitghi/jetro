@@ -209,3 +209,55 @@ impl ReducerSpec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_program() -> Arc<Program> {
+        Arc::new(Program::new(Vec::new(), "<sink-demand-test>"))
+    }
+
+    #[test]
+    fn predicate_sink_demand_matches_terminal_semantics() {
+        let any = PredicateSinkSpec {
+            op: PredicateSinkOp::Any,
+            predicate: empty_program(),
+        }
+        .demand();
+        assert_eq!(any.pull, PullDemand::All);
+        assert_eq!(any.value, ValueNeed::Predicate);
+        assert!(!any.order);
+
+        let find_one = PredicateSinkSpec {
+            op: PredicateSinkOp::FindOne,
+            predicate: empty_program(),
+        }
+        .demand();
+        assert_eq!(find_one.pull, PullDemand::All);
+        assert_eq!(find_one.value, ValueNeed::Whole);
+        assert!(!find_one.order);
+    }
+
+    #[test]
+    fn membership_and_arg_extreme_demands_match_terminal_semantics() {
+        let membership = MembershipSinkSpec {
+            op: MembershipSinkOp::Includes,
+            target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
+            method: BuiltinMethod::Includes,
+        }
+        .demand();
+        assert_eq!(membership.pull, PullDemand::All);
+        assert_eq!(membership.value, ValueNeed::Whole);
+        assert!(!membership.order);
+
+        let arg_extreme = ArgExtremeSinkSpec {
+            want_max: true,
+            key: empty_program(),
+        }
+        .demand();
+        assert_eq!(arg_extreme.pull, PullDemand::All);
+        assert_eq!(arg_extreme.value, ValueNeed::Whole);
+        assert!(arg_extreme.order);
+    }
+}
