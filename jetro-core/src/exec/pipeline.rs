@@ -1163,6 +1163,8 @@ mod tests {
 
     #[test]
     fn payload_demand_delays_map_for_last_selection() {
+        use serde_json::json;
+
         let p = lower_query("$.books.map(isbn).last()").unwrap();
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
@@ -1183,6 +1185,15 @@ mod tests {
         assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert!(
             matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
+        );
+        assert_pipeline_matches_vm(
+            "$.books.map(isbn).last()",
+            json!({
+                "books": [
+                    {"isbn": "first"},
+                    {"isbn": "last"}
+                ]
+            }),
         );
     }
 
