@@ -1177,6 +1177,9 @@ impl Pipeline {
         };
         projection.prefix_len >= start
             && projection.prefix_len < self.stages.len()
+            && !self.stages[start..projection.prefix_len]
+                .iter()
+                .any(Stage::requires_legacy_fallback)
             && !self.stages[projection.prefix_len..]
                 .iter()
                 .any(Stage::is_composed_barrier)

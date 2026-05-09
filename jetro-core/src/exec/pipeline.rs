@@ -1244,6 +1244,21 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_guard_respects_prefix_and_barriers() {
+        let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
+        assert!(p.can_apply_late_projection_from(0));
+        assert!(p.can_apply_late_projection_from(1));
+        assert!(!p.can_apply_late_projection_from(2));
+
+        let p = lower_query("$.books.unique().map(isbn).last()").unwrap();
+        assert!(matches!(
+            p.fallback_boundary,
+            FallbackBoundary::LegacyStage { index: 0 }
+        ));
+        assert!(!p.can_apply_late_projection_from(0));
+    }
+
+    #[test]
     fn object_lambda_stages_preserve_positional_demand() {
         for query in [
             "$.books.transform_values(@).last()",
