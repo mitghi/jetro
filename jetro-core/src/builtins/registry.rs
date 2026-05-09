@@ -7,8 +7,9 @@
 
 use crate::{
     builtins::{
-        BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
+        BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+        BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
@@ -266,6 +267,28 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
     id.method().map(|m| m.spec().order_effect).flatten()
+}
+
+/// Return the effective pipeline order behaviour for builtin `id`. Explicit
+/// registry metadata wins; optionally, pure one-to-one builtins may be treated
+/// as order-preserving by callers that allow this conservative fallback.
+#[inline]
+pub(crate) fn effective_pipeline_order_effect(
+    id: BuiltinId,
+    allow_one_to_one_fallback: bool,
+) -> BuiltinPipelineOrderEffect {
+    let Some(method) = id.method() else {
+        return BuiltinPipelineOrderEffect::Blocks;
+    };
+    let spec = method.spec();
+    if let Some(effect) = pipeline_order_effect(id) {
+        return effect;
+    }
+    if allow_one_to_one_fallback && spec.cardinality == BuiltinCardinality::OneToOne {
+        BuiltinPipelineOrderEffect::Preserves
+    } else {
+        BuiltinPipelineOrderEffect::Blocks
+    }
 }
 
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
@@ -663,6 +686,18 @@ mod tests {
         assert_eq!(
             pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace)),
             Some(BuiltinPipelineOrderEffect::Preserves)
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace), false),
+            BuiltinPipelineOrderEffect::Preserves
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::HasKey), true),
+            BuiltinPipelineOrderEffect::Preserves
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Count), true),
+            BuiltinPipelineOrderEffect::Blocks
         );
     }
 

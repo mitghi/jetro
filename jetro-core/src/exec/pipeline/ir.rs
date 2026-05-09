@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
-    sink_demand as builtin_sink_demand, BuiltinId,
+    effective_pipeline_order_effect, participates_in_demand, pipeline_materialization,
+    pipeline_shape, sink_demand as builtin_sink_demand, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
@@ -450,16 +450,10 @@ impl<'a> StageDescriptor<'a> {
         let Some(method) = self.method else {
             return BuiltinPipelineOrderEffect::Blocks;
         };
-        let spec = method.spec();
-        if let Some(effect) = pipeline_order_effect(BuiltinId::from_method(method)) {
-            return effect;
-        }
-        if self.allow_one_to_one_order_fallback
-            && spec.cardinality == crate::builtins::BuiltinCardinality::OneToOne
-        {
-            return BuiltinPipelineOrderEffect::Preserves;
-        }
-        BuiltinPipelineOrderEffect::Blocks
+        effective_pipeline_order_effect(
+            BuiltinId::from_method(method),
+            self.allow_one_to_one_order_fallback,
+        )
     }
 
     /// Returns `true` when the stage can run using only a materialised receiver, delegating
