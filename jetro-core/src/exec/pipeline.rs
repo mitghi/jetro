@@ -1978,6 +1978,23 @@ mod tests {
     }
 
     #[test]
+    fn scalar_and_path_element_stages_preserve_positional_demand() {
+        for query in [
+            "$.rows.has_key(\"isbn\").last()",
+            "$.rows.get_path(\"isbn\").last()",
+            "$.rows.upper().last()",
+            "$.rows.byte_len().last()",
+        ] {
+            let p = lower_query(query).unwrap();
+            assert_eq!(
+                p.source_demand().chain.pull,
+                crate::plan::demand::PullDemand::LastInput(1),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn chunk_and_window_bounded_demand_match_vm() {
         use serde_json::json;
         let doc: Val = (&json!({"xs": [1, 2, 3, 4, 5, 6, 7, 8]})).into();
