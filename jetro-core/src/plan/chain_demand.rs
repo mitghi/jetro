@@ -1,14 +1,16 @@
-//! Demand propagation adapters for parser-facing chain operators.
+//! Demand propagation adapters for planner-facing chain operators.
 //!
-//! `parse::chain_ir` owns only the syntax-adjacent operator description.
-//! This module maps that representation onto the shared planning demand model.
+//! `plan::chain_ir` owns only the operator description. This module maps that
+//! representation onto the shared planning demand model.
 
 use crate::{
     builtins::{
         registry::propagate_demand as propagate_builtin_demand, BuiltinCardinality, BuiltinCategory,
     },
-    parse::chain_ir::{ChainOp, MatchRole},
-    plan::demand::{Demand, DemandOperator, PullDemand},
+    plan::{
+        chain_ir::{ChainOp, MatchRole},
+        demand::{Demand, DemandOperator, PullDemand},
+    },
 };
 
 /// Describes whether a pipeline slot carries a homogeneous stream, a single

@@ -1,7 +1,8 @@
-//! Parser-facing chain operator metadata.
+//! Planner-facing chain operator representation.
 //!
-//! Demand propagation adapters for this representation live in
-//! `plan::chain_demand`, keeping planning semantics out of the parse layer.
+//! This IR is post-AST metadata for dotted pipeline chains. It carries stable
+//! builtin identities and the small amount of argument shape needed by demand
+//! propagation without tying the executor to parser syntax.
 
 #![allow(dead_code)]
 

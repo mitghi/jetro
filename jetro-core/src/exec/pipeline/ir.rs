@@ -18,7 +18,7 @@ use crate::builtins::{
     BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
-use crate::parse::chain_ir::ChainOp;
+use crate::plan::chain_ir::{ChainOp, MatchRole};
 use crate::plan::demand::{Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, ValueNeed};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
@@ -784,12 +784,12 @@ impl Stage {
             // reason about them with the role-specific propagation rules
             // (`Predicate` widens upstream demand to scan-until-output;
             // `Transform` is 1:1).
-            Stage::Filter(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
-                crate::parse::chain_ir::MatchRole::Predicate,
-            )),
-            Stage::Map(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
-                crate::parse::chain_ir::MatchRole::Transform,
-            )),
+            Stage::Filter(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(MatchRole::Predicate))
+            }
+            Stage::Map(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(MatchRole::Transform))
+            }
             _ => self.chain_demand_op(),
         }
     }
