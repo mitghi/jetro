@@ -602,6 +602,31 @@ mod tests {
     }
 
     #[test]
+    fn registry_marks_one_to_one_element_demands() {
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+
+        for method in [
+            BuiltinMethod::TransformValues,
+            BuiltinMethod::FilterKeys,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::GetPath,
+        ] {
+            let demand = propagate_demand(
+                BuiltinId::from_method(method),
+                BuiltinDemandArg::None,
+                downstream,
+            );
+            assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
     fn registry_drives_pipeline_execution_policy() {
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Sort)),
