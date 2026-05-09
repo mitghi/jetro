@@ -129,3 +129,50 @@ fn arg_expr(arg: &Arg) -> &Expr {
         Arg::Pos(expr) | Arg::Named(_, expr) => expr,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_paths_allow_selective_steps() {
+        let steps = vec![
+            Step::Field("books".to_string()),
+            Step::Wildcard,
+            Step::InlineFilter(Box::new(Expr::Bool(true))),
+            Step::Field("tags".to_string()),
+        ];
+
+        let path = steps_to_path(&steps, true).unwrap();
+        assert!(matches!(path[0], PathStep::Field(ref key) if key == "books"));
+        assert!(matches!(path[1], PathStep::Wildcard));
+        assert!(matches!(path[2], PathStep::WildcardFilter(_)));
+        assert!(matches!(path[3], PathStep::Field(ref key) if key == "tags"));
+    }
+
+    #[test]
+    fn planner_paths_reject_selective_steps() {
+        assert!(steps_to_path(&[Step::Wildcard], false).is_none());
+        assert!(steps_to_path(&[Step::InlineFilter(Box::new(Expr::Bool(true)))], false).is_none());
+    }
+
+    #[test]
+    fn build_patch_op_lowers_modify_lambda_to_current_let() {
+        let op = build_patch_op(
+            "modify",
+            &[Arg::Pos(Expr::Lambda {
+                params: vec!["x".to_string()],
+                body: Box::new(Expr::Ident("x".to_string())),
+            })],
+            vec![PathStep::Field("price".to_string())],
+        )
+        .unwrap();
+
+        assert!(matches!(op.path.as_slice(), [PathStep::Field(key)] if key == "price"));
+        assert!(matches!(
+            op.val,
+            Expr::Let { ref name, ref init, .. }
+                if name == "x" && matches!(init.as_ref(), Expr::Current)
+        ));
+    }
+}
