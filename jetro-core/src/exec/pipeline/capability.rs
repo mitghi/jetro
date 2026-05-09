@@ -144,6 +144,26 @@ mod source_capability_tests {
     }
 
     #[test]
+    fn indexed_without_reverse_still_scans_forward_for_last_demand() {
+        let indexed_forward = SourceCapabilities {
+            forward_stream: true,
+            reverse_stream: false,
+            indexed_array_child: true,
+            tape_view: false,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            indexed_forward.choose_access(PullDemand::NthInput(5)),
+            SourceAccessMode::Indexed(5)
+        );
+        assert_eq!(
+            indexed_forward.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::Forward
+        );
+    }
+
+    #[test]
     fn non_streaming_sources_request_materialized_fallback() {
         let fallback_only = SourceCapabilities {
             forward_stream: false,
