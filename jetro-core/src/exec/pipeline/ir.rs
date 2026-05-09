@@ -112,17 +112,9 @@ impl Sink {
                 positional: Some(Position::First),
             };
         }
-        if let Sink::SelectMany { n, from_end } = self {
+        if matches!(self, Sink::SelectMany { .. }) {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: if *from_end {
-                        PullDemand::LastInput(*n)
-                    } else {
-                        PullDemand::FirstInput(*n)
-                    },
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
+                chain: self.select_many_demand().expect("checked SelectMany"),
                 positional: None,
             };
         }
@@ -252,6 +244,21 @@ impl Sink {
             Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
             Sink::Collect => None,
         }
+    }
+
+    fn select_many_demand(&self) -> Option<ChainDemand> {
+        let Sink::SelectMany { n, from_end } = self else {
+            return None;
+        };
+        Some(ChainDemand {
+            pull: if *from_end {
+                PullDemand::LastInput(*n)
+            } else {
+                PullDemand::FirstInput(*n)
+            },
+            value: ValueNeed::Whole,
+            order: true,
+        })
     }
 }
 
