@@ -1863,6 +1863,18 @@ mod tests {
     }
 
     #[test]
+    fn nth_sink_demand_is_indexed_and_order_free() {
+        let demand = Sink::Nth(3).demand();
+        assert_eq!(
+            demand.chain.pull,
+            crate::plan::demand::PullDemand::NthInput(3)
+        );
+        assert_eq!(demand.chain.value, crate::plan::demand::ValueNeed::Whole);
+        assert!(!demand.chain.order);
+        assert_eq!(demand.positional, Some(Position::First));
+    }
+
+    #[test]
     fn filter_nth_sink_keeps_filtered_semantics() {
         use serde_json::json;
         let doc: Val = (&json!({
