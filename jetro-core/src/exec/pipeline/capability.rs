@@ -102,6 +102,24 @@ mod source_capability_tests {
     }
 
     #[test]
+    fn view_array_sources_advertise_tape_backed_access() {
+        let caps = SourceCapabilities::VIEW_ARRAY;
+        assert!(caps.tape_view);
+        assert!(caps.forward_stream);
+        assert!(caps.reverse_stream);
+        assert!(caps.indexed_array_child);
+        assert!(caps.materialized_fallback);
+        assert_eq!(
+            caps.choose_access(PullDemand::NthInput(2)),
+            SourceAccessMode::Indexed(2)
+        );
+        assert_eq!(
+            caps.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::Reverse { outputs: 1 }
+        );
+    }
+
+    #[test]
     fn non_seekable_sources_fall_back_to_forward_streaming() {
         let forward_only = SourceCapabilities {
             forward_stream: true,
