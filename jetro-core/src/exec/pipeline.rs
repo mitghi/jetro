@@ -1198,6 +1198,26 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_positional_sinks_match_vm() {
+        use serde_json::json;
+
+        let doc = json!({
+            "books": [
+                {"isbn": "a"},
+                {"isbn": "b"},
+                {"isbn": "c"}
+            ]
+        });
+        for query in [
+            "$.books.map(isbn).first()",
+            "$.books.map(isbn).take(2)",
+            "$.books.map(isbn).nth(1)",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
     fn payload_demand_splits_filter_scan_from_late_projection() {
         let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();
