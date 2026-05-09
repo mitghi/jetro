@@ -7,3 +7,4 @@
 pub(crate) mod ast;
 pub(crate) mod chain_ir;
 pub(crate) mod parser;
+pub(crate) mod write_terminal;

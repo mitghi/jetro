@@ -19,6 +19,10 @@
 use crate::parse::ast::{
     Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
+use crate::parse::write_terminal::{
+    build_patch_op as build_write_patch_op, is_pipeline_fusion_terminal,
+    steps_to_path as write_steps_to_path,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -1370,7 +1374,7 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         Step::Method(n, a) => (n.clone(), a.clone()),
         _ => return Err(Expr::Chain(Box::new(base), steps)),
     };
-    if !is_write_terminal(&name) {
+    if !is_pipeline_fusion_terminal(&name) {
         return Err(Expr::Chain(Box::new(base), steps));
     }
     // Base must be a recognised root form.
@@ -1379,7 +1383,7 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         return Err(Expr::Chain(Box::new(base), steps));
     }
     let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
-    let path = match steps_to_path(&prefix) {
+    let path = match write_steps_to_path(&prefix, false) {
         Some(p) => p,
         None => return Err(Expr::Chain(Box::new(base), steps)),
     };
@@ -1391,99 +1395,6 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         root: Box::new(base),
         ops: vec![op],
     })
-}
-
-/// Mirrors `parser::is_terminal_write` — duplicated locally so we don't
-/// need to make that helper `pub(crate)` for one call site.
-fn is_write_terminal(name: &str) -> bool {
-    matches!(
-        name,
-        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge"
-    )
-}
-
-fn steps_to_path(steps: &[Step]) -> Option<Vec<PathStep>> {
-    let mut out = Vec::with_capacity(steps.len());
-    for s in steps {
-        match s {
-            Step::Field(f) | Step::OptField(f) => out.push(PathStep::Field(f.clone())),
-            Step::Index(i) => out.push(PathStep::Index(*i)),
-            Step::Descendant(f) => out.push(PathStep::Descendant(f.clone())),
-            Step::DynIndex(e) => out.push(PathStep::DynIndex((**e).clone())),
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
-/// Mirrors `parser::build_write_op`. We only need `set` / `modify` /
-/// `delete` / `unset` for pipe-stage lifting; `merge` and `deep_merge`
-/// already pass through the original parser path when the base is `$`,
-/// and the pipe form `| .merge(x)` is unusual enough that we leave it
-/// alone for now.
-fn build_write_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
-    match name {
-        "set" => {
-            let v = arg_expr_owned(args.first()?);
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        "modify" => {
-            let v = match arg_expr_owned(args.first()?) {
-                Expr::Lambda { params, body } => {
-                    if let Some(p) = params.into_iter().next() {
-                        Expr::Let {
-                            name: p,
-                            init: Box::new(Expr::Current),
-                            body,
-                        }
-                    } else {
-                        *body
-                    }
-                }
-                other => other,
-            };
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        "delete" => {
-            if !args.is_empty() {
-                return None;
-            }
-            Some(PatchOp {
-                path,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        "unset" => {
-            let key = match arg_expr_owned(args.first()?) {
-                Expr::Str(s) => s,
-                Expr::Ident(s) => s,
-                _ => return None,
-            };
-            let mut p = path;
-            p.push(PathStep::Field(key));
-            Some(PatchOp {
-                path: p,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn arg_expr_owned(a: &Arg) -> Expr {
-    match a {
-        Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
-    }
 }
 
 /// Fuse a pipeline. Walks left-to-right, merging adjacent same-root
@@ -1918,14 +1829,14 @@ fn try_lift_chain_write(expr: &Expr) -> Option<Expr> {
         Step::Method(n, a) => (n.clone(), a.clone()),
         _ => return None,
     };
-    if !is_write_terminal(&name) {
+    if !is_pipeline_fusion_terminal(&name) {
         return None;
     }
     if !matches!(base, Expr::Current | Expr::Ident(_) | Expr::Root) {
         return None;
     }
     let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
-    let path = steps_to_path(&prefix)?;
+    let path = write_steps_to_path(&prefix, false)?;
     let op = build_write_patch_op(&name, &args, path)?;
     Some(Expr::Patch {
         root: Box::new(base.clone()),
