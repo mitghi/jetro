@@ -164,6 +164,30 @@ mod source_capability_tests {
     }
 
     #[test]
+    fn indexed_only_sources_seek_nth_and_materialize_other_demands() {
+        let indexed_only = SourceCapabilities {
+            forward_stream: false,
+            reverse_stream: false,
+            indexed_array_child: true,
+            tape_view: true,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::NthInput(7)),
+            SourceAccessMode::Indexed(7)
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::FirstInput(1)),
+            SourceAccessMode::MaterializedFallback
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::MaterializedFallback
+        );
+    }
+
+    #[test]
     fn non_streaming_sources_request_materialized_fallback() {
         let fallback_only = SourceCapabilities {
             forward_stream: false,
