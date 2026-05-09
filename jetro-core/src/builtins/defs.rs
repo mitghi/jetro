@@ -1912,6 +1912,7 @@ fn object_lambda_spec() -> BuiltinSpec {
             1.0,
             1.0,
         ))
+        .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }

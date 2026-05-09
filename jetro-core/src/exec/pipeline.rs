@@ -1200,6 +1200,23 @@ mod tests {
     }
 
     #[test]
+    fn object_lambda_stages_preserve_positional_demand() {
+        for query in [
+            "$.books.transform_values(@).last()",
+            "$.books.transform_keys(@).last()",
+            "$.books.filter_values(@ != null).last()",
+            "$.books.filter_keys(@ != \"debug\").last()",
+        ] {
+            let p = lower_query(query).unwrap();
+            assert_eq!(
+                p.source_demand().chain.pull,
+                crate::plan::demand::PullDemand::LastInput(1),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_demand_tracks_sort_filter_project_lanes() {
         let p = lower_query("$.books.sort(-score).filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();
