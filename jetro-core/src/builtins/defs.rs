@@ -2063,6 +2063,8 @@ impl Builtin for FilterValues {
 fn path_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne)
         .indexed()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 
@@ -2457,6 +2459,8 @@ fn scalar_native_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
         .indexed()
         .view_native()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 
@@ -2466,6 +2470,8 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
         .indexed()
         .view_native()
         .view_scalar()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 

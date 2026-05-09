@@ -1501,6 +1501,28 @@ mod tests {
     }
 
     #[test]
+    fn sort_scalar_element_last_can_use_bounded_bottomk() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).has_key(\"isbn\").last()";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortBottomK(1)));
+
+        let out: serde_json::Value = p
+            .run(&Val::from(&json!({
+                "rows": [
+                    {"isbn": "top", "score": 100},
+                    {"score": 70},
+                    {"isbn": "mid", "score": 90}
+                ]
+            })))
+            .unwrap()
+            .into();
+        assert_eq!(out, json!(false));
+    }
+
+    #[test]
     fn adversarial_bounded_demand_chains_match_vm() {
         use serde_json::json;
 
