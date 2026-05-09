@@ -243,7 +243,19 @@ fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
 /// restrict the amount of input the planner must pull from its source.
 #[inline]
 pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
-    demand_law(id) != BuiltinDemandLaw::Identity
+    demand_law(id) != BuiltinDemandLaw::Identity || demand_is_conservative_barrier(id)
+}
+
+/// Return true when builtin `id` cannot safely preserve downstream pull
+/// precision and must be treated as a full-input demand boundary.
+#[inline]
+pub(crate) fn demand_is_conservative_barrier(id: BuiltinId) -> bool {
+    matches!(
+        demand_law(id),
+        BuiltinDemandLaw::FlatMapLike
+            | BuiltinDemandLaw::DropWhile
+            | BuiltinDemandLaw::OrderBarrier
+    ) || matches!(id.method(), Some(BuiltinMethod::Unknown) | None)
 }
 
 /// Return the materialization policy for builtin `id`; defaults to `Streaming`
@@ -673,6 +685,33 @@ mod tests {
             assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
             assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
             assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_marks_conservative_demand_barriers() {
+        for method in [
+            BuiltinMethod::FlatMap,
+            BuiltinMethod::DropWhile,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Unknown,
+        ] {
+            assert!(
+                demand_is_conservative_barrier(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Map,
+            BuiltinMethod::Filter,
+            BuiltinMethod::Take,
+            BuiltinMethod::Last,
+        ] {
+            assert!(
+                !demand_is_conservative_barrier(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
         }
     }
 
