@@ -7,9 +7,9 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinSinkAccumulator,
+        BuiltinCardinality, BuiltinCategory, BuiltinDemandLaw, BuiltinMethod,
+        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
@@ -299,6 +299,18 @@ pub(crate) fn pipeline_legacy_materialized(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     id.method().map(|m| m.spec().pipeline_shape).flatten()
+}
+
+/// Return the builtin category for planner classification.
+#[inline]
+pub(crate) fn builtin_category(id: BuiltinId) -> Option<BuiltinCategory> {
+    id.method().map(|m| m.spec().category)
+}
+
+/// Return the builtin cardinality for planner classification.
+#[inline]
+pub(crate) fn builtin_cardinality(id: BuiltinId) -> Option<BuiltinCardinality> {
+    id.method().map(|m| m.spec().cardinality)
 }
 
 /// Return how builtin `id` affects element ordering in the pipeline, or

@@ -5,7 +5,11 @@
 
 use crate::{
     builtins::{
-        registry::propagate_demand as propagate_builtin_demand, BuiltinCardinality, BuiltinCategory,
+        registry::{
+            builtin_cardinality, builtin_category, effective_pipeline_order_effect,
+            propagate_demand as propagate_builtin_demand,
+        },
+        BuiltinCardinality, BuiltinCategory, BuiltinPipelineOrderEffect,
     },
     plan::{
         chain_ir::{ChainOp, MatchRole},
@@ -65,7 +69,7 @@ impl ChainOp {
                 }
             }
             ChainOp::Builtin { id, .. } => {
-                let Some(method) = id.method() else {
+                let Some(category) = builtin_category(*id) else {
                     return OpSpec {
                         input: ValueKind::Any,
                         output: ValueKind::Any,
@@ -73,8 +77,9 @@ impl ChainOp {
                         preserves_order: true,
                     };
                 };
-                let spec = method.spec();
-                let input = match spec.category {
+                let cardinality =
+                    builtin_cardinality(*id).unwrap_or(BuiltinCardinality::OneToOne);
+                let input = match category {
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
                     | BuiltinCategory::StreamingExpand
@@ -84,7 +89,7 @@ impl ChainOp {
                     | BuiltinCategory::Relational => ValueKind::Stream,
                     _ => ValueKind::Any,
                 };
-                let output = match spec.category {
+                let output = match category {
                     BuiltinCategory::Reducer | BuiltinCategory::Positional => ValueKind::Scalar,
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
@@ -94,9 +99,11 @@ impl ChainOp {
                 OpSpec {
                     input,
                     output,
-                    cardinality: spec.cardinality,
-                    preserves_order: spec.view_native
-                        || !matches!(spec.cardinality, BuiltinCardinality::Barrier),
+                    cardinality,
+                    preserves_order: !matches!(
+                        effective_pipeline_order_effect(*id, true),
+                        BuiltinPipelineOrderEffect::Blocks
+                    ),
                 }
             }
         }
