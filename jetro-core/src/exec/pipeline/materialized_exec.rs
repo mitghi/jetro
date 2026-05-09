@@ -183,6 +183,14 @@ where
     let mut vm = crate::vm::VM::new();
     let mut loop_env = base_env.clone();
     let source_demand = pipeline.source_demand().chain.pull;
+    let late_projection = pipeline
+        .can_apply_late_projection_from(0)
+        .then(|| pipeline.late_projection.as_ref())
+        .flatten()
+        .filter(|_| pipeline.sink.supports_late_projection(source_demand));
+    let stage_limit = late_projection
+        .map(|projection| projection.prefix_len)
+        .unwrap_or(pipeline.stages.len());
     let mut pulled_inputs: usize = 0;
     let mut emitted_outputs: usize = 0;
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
@@ -192,7 +200,8 @@ where
         Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
         _ => None,
     };
-    let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect)
+    let terminal_map_idx = if late_projection.is_none()
+        && matches!(pipeline.sink, Sink::Collect)
         && pipeline
             .stages
             .last()
@@ -220,7 +229,7 @@ where
         }
         pulled_inputs += 1;
 
-        for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
+        for (stage_idx, stage) in pipeline.stages[..stage_limit].iter().enumerate() {
             let kernel = pipeline
                 .stage_kernels
                 .get(stage_idx)
@@ -258,7 +267,22 @@ where
 
         if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
         {
+            if let Some(projection) = late_projection {
+                return eval_kernel(&projection.kernel, &item, |_| {
+                    Err(EvalError(
+                        "late projection requires a native body kernel".to_string(),
+                    ))
+                });
+            }
             return Ok(item);
+        }
+
+        if let Some(projection) = late_projection {
+            item = eval_kernel(&projection.kernel, &item, |_| {
+                Err(EvalError(
+                    "late projection requires a native body kernel".to_string(),
+                ))
+            })?;
         }
 
         let sink_done = match &pipeline.sink {
