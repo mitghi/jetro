@@ -80,6 +80,68 @@ pub(crate) enum SourceAccessMode {
     MaterializedFallback,
 }
 
+#[cfg(test)]
+mod source_capability_tests {
+    use super::{SourceAccessMode, SourceCapabilities};
+    use crate::plan::demand::PullDemand;
+
+    #[test]
+    fn indexed_sources_choose_direct_positional_access() {
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::NthInput(3)),
+            SourceAccessMode::Indexed(3)
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(2)),
+            SourceAccessMode::Reverse { outputs: 2 }
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(4)),
+            SourceAccessMode::ForwardBounded(4)
+        );
+    }
+
+    #[test]
+    fn non_seekable_sources_fall_back_to_forward_streaming() {
+        let forward_only = SourceCapabilities {
+            forward_stream: true,
+            reverse_stream: false,
+            indexed_array_child: false,
+            tape_view: false,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            forward_only.choose_access(PullDemand::NthInput(3)),
+            SourceAccessMode::Forward
+        );
+        assert_eq!(
+            forward_only.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::Forward
+        );
+        assert_eq!(
+            forward_only.choose_access(PullDemand::FirstInput(2)),
+            SourceAccessMode::ForwardBounded(2)
+        );
+    }
+
+    #[test]
+    fn non_streaming_sources_request_materialized_fallback() {
+        let fallback_only = SourceCapabilities {
+            forward_stream: false,
+            reverse_stream: false,
+            indexed_array_child: false,
+            tape_view: false,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            fallback_only.choose_access(PullDemand::All),
+            SourceAccessMode::MaterializedFallback
+        );
+    }
+}
+
 /// Describes whether a view-pipeline stage reads the input `ValueView` or only acts on position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewInputMode {
