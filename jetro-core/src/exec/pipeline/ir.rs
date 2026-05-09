@@ -126,37 +126,21 @@ impl Sink {
                 positional: None,
             };
         }
-        if matches!(self, Sink::Predicate(_)) {
-            let value = match self {
-                Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne => ValueNeed::Whole,
-                _ => ValueNeed::Predicate,
-            };
+        if let Sink::Predicate(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value,
-                    order: false,
-                },
+                chain: spec.demand(),
                 positional: None,
             };
         }
-        if matches!(self, Sink::Membership(_)) {
+        if let Sink::Membership(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Whole,
-                    order: false,
-                },
+                chain: spec.demand(),
                 positional: None,
             };
         }
-        if matches!(self, Sink::ArgExtreme(_)) {
+        if let Sink::ArgExtreme(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
+                chain: spec.demand(),
                 positional: None,
             };
         }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
+use crate::plan::demand::{Demand, PullDemand, ValueNeed};
 use crate::vm::Program;
 
 use super::NumOp;
@@ -89,6 +90,19 @@ pub enum MembershipSinkOp {
 }
 
 impl PredicateSinkSpec {
+    /// Demand placed on the row stream by this terminal predicate sink.
+    pub(crate) fn demand(&self) -> Demand {
+        Demand {
+            pull: PullDemand::All,
+            value: if self.op == PredicateSinkOp::FindOne {
+                ValueNeed::Whole
+            } else {
+                ValueNeed::Predicate
+            },
+            order: false,
+        }
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.predicate)
@@ -101,6 +115,15 @@ impl PredicateSinkSpec {
 }
 
 impl MembershipSinkSpec {
+    /// Demand placed on the row stream by this terminal membership sink.
+    pub(crate) fn demand(&self) -> Demand {
+        Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Whole,
+            order: false,
+        }
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         match &self.target {
@@ -112,6 +135,15 @@ impl MembershipSinkSpec {
 }
 
 impl ArgExtremeSinkSpec {
+    /// Demand placed on the row stream by this terminal arg-extreme sink.
+    pub(crate) fn demand(&self) -> Demand {
+        Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Whole,
+            order: true,
+        }
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.key)
