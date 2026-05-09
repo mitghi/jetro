@@ -1200,6 +1200,24 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_composes_chained_maps() {
+        let query = "$.books.map(user).map(name).last()";
+        let p = lower_query(query).unwrap();
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+        assert!(
+            matches!(
+                p.late_projection.as_ref().map(|projection| &projection.kernel),
+                Some(BodyKernel::FieldChain(keys)) if keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>() == ["user", "name"]
+            ),
+            "{:?}",
+            p.late_projection
+        );
+    }
+
+    #[test]
     fn object_lambda_stages_preserve_positional_demand() {
         for query in [
             "$.books.transform_values(@).last()",
