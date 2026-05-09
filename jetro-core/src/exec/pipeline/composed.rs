@@ -549,10 +549,11 @@ fn run_late_projection_sink(
 }
 
 fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink> {
+    if !sink.supports_late_projection(demand) {
+        return None;
+    }
     match sink {
-        Sink::Collect if !matches!(demand, PullDemand::LastInput(_)) => {
-            Some(ProjectingSink::Collect(Vec::new()))
-        }
+        Sink::Collect => Some(ProjectingSink::Collect(Vec::new())),
         Sink::Terminal(crate::builtins::BuiltinMethod::First) => Some(ProjectingSink::First(None)),
         Sink::Terminal(crate::builtins::BuiltinMethod::Last) => Some(ProjectingSink::Last(None)),
         Sink::Nth(idx) => {

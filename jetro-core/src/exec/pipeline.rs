@@ -1259,6 +1259,17 @@ mod tests {
     }
 
     #[test]
+    fn sink_late_projection_support_is_demand_aware() {
+        use crate::plan::demand::PullDemand;
+
+        assert!(Sink::Collect.supports_late_projection(PullDemand::FirstInput(2)));
+        assert!(!Sink::Collect.supports_late_projection(PullDemand::LastInput(2)));
+        assert!(Sink::Nth(3).supports_late_projection(PullDemand::NthInput(3)));
+        assert!(Sink::Terminal(BuiltinMethod::Last).supports_late_projection(PullDemand::LastInput(1)));
+        assert!(!Sink::Reducer(ReducerSpec::count()).supports_late_projection(PullDemand::All));
+    }
+
+    #[test]
     fn object_lambda_stages_preserve_positional_demand() {
         for query in [
             "$.books.transform_values(@).last()",

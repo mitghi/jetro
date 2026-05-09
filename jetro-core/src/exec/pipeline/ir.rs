@@ -143,6 +143,18 @@ impl Sink {
         SinkDemand::RESULT
     }
 
+    /// Returns true when this sink can apply a delayed projection only to the
+    /// rows it actually emits or retains.
+    pub(crate) fn supports_late_projection(&self, demand: PullDemand) -> bool {
+        match self {
+            Sink::Collect => !matches!(demand, PullDemand::LastInput(_)),
+            Sink::Terminal(BuiltinMethod::First | BuiltinMethod::Last)
+            | Sink::Nth(_)
+            | Sink::SelectMany { .. } => true,
+            _ => false,
+        }
+    }
+
     /// Returns `true` when every sub-program in the sink (predicate, projection) satisfies
     /// `program_ok`, meaning the sink can execute against a materialised receiver without a
     /// document-root lookup.
