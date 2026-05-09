@@ -33,13 +33,13 @@ pub fn compute_strategies_with_kernels(
     for (i, stage) in stages.iter().enumerate().rev() {
         if let Stage::Sort(spec) = stage {
             match demand.chain.pull {
-                PullDemand::FirstInput(k) => {
+                PullDemand::FirstInput(k) if bounded_sort_is_worthwhile(k) => {
                     strategies[i] = match demand.positional {
                         Some(Position::Last) => StageStrategy::SortBottomK(k),
                         _ => StageStrategy::SortTopK(k),
                     };
                 }
-                PullDemand::UntilOutput(k) => {
+                PullDemand::UntilOutput(k) if bounded_sort_is_worthwhile(k) => {
                     let sort_kernel = kernels.get(i).unwrap_or(&BodyKernel::Generic);
                     let kernel_suffix = if kernels.len() == stages.len() {
                         &kernels[i + 1..]
@@ -60,7 +60,7 @@ pub fn compute_strategies_with_kernels(
                         strategies[i] = StageStrategy::SortUntilOutput(k);
                     }
                 }
-                PullDemand::LastInput(k) => {
+                PullDemand::LastInput(k) if bounded_sort_is_worthwhile(k) => {
                     if suffix_is_one_to_one(&stages[i + 1..]) {
                         strategies[i] = match demand.positional {
                             Some(Position::First) => StageStrategy::SortTopK(k),
@@ -71,11 +71,29 @@ pub fn compute_strategies_with_kernels(
                     }
                 }
                 PullDemand::NthInput(_) | PullDemand::All => {}
+                PullDemand::FirstInput(_) | PullDemand::UntilOutput(_) | PullDemand::LastInput(_) => {}
             }
         }
         demand = stage.upstream_demand(demand);
     }
     strategies
+}
+
+#[inline]
+fn bounded_sort_is_worthwhile(k: usize) -> bool {
+    k > 0
+}
+
+#[cfg(test)]
+mod cost_guard_tests {
+    use super::bounded_sort_is_worthwhile;
+
+    #[test]
+    fn bounded_sort_cost_guard_rejects_empty_limits() {
+        assert!(!bounded_sort_is_worthwhile(0));
+        assert!(bounded_sort_is_worthwhile(1));
+        assert!(bounded_sort_is_worthwhile(16));
+    }
 }
 
 fn ordered_prefix_suffix_is_safe(
