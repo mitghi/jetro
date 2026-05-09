@@ -1839,6 +1839,30 @@ mod tests {
     }
 
     #[test]
+    fn select_many_sink_demand_is_directional() {
+        let first = Sink::SelectMany {
+            n: 4,
+            from_end: false,
+        }
+        .demand();
+        assert_eq!(
+            first.chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+
+        let last = Sink::SelectMany {
+            n: 2,
+            from_end: true,
+        }
+        .demand();
+        assert_eq!(
+            last.chain.pull,
+            crate::plan::demand::PullDemand::LastInput(2)
+        );
+        assert!(last.chain.order);
+    }
+
+    #[test]
     fn filter_nth_sink_keeps_filtered_semantics() {
         use serde_json::json;
         let doc: Val = (&json!({
