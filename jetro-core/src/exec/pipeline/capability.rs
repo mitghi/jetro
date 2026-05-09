@@ -25,6 +25,8 @@ pub(crate) struct SourceCapabilities {
     pub indexed_array_child: bool,
     /// Source rows can remain in the borrowed tape/view domain.
     pub tape_view: bool,
+    /// Source can read object fields by key without materialising the whole object row.
+    pub field_key_read: bool,
     /// Source can fall back to materialising owned values.
     pub materialized_fallback: bool,
 }
@@ -36,6 +38,7 @@ impl SourceCapabilities {
         reverse_stream: true,
         indexed_array_child: true,
         tape_view: true,
+        field_key_read: true,
         materialized_fallback: true,
     };
 
@@ -45,6 +48,7 @@ impl SourceCapabilities {
         reverse_stream: true,
         indexed_array_child: true,
         tape_view: false,
+        field_key_read: true,
         materialized_fallback: true,
     };
 
@@ -109,6 +113,7 @@ mod source_capability_tests {
         assert!(caps.reverse_stream);
         assert!(caps.indexed_array_child);
         assert!(caps.materialized_fallback);
+        assert!(caps.field_key_read);
         assert_eq!(
             caps.choose_access(PullDemand::NthInput(2)),
             SourceAccessMode::Indexed(2)
@@ -126,6 +131,7 @@ mod source_capability_tests {
             reverse_stream: false,
             indexed_array_child: false,
             tape_view: false,
+            field_key_read: false,
             materialized_fallback: true,
         };
 
@@ -150,6 +156,7 @@ mod source_capability_tests {
             reverse_stream: false,
             indexed_array_child: true,
             tape_view: false,
+            field_key_read: true,
             materialized_fallback: true,
         };
 
@@ -170,6 +177,7 @@ mod source_capability_tests {
             reverse_stream: false,
             indexed_array_child: true,
             tape_view: true,
+            field_key_read: true,
             materialized_fallback: true,
         };
 
@@ -194,6 +202,7 @@ mod source_capability_tests {
             reverse_stream: false,
             indexed_array_child: false,
             tape_view: false,
+            field_key_read: false,
             materialized_fallback: true,
         };
 
