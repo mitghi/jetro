@@ -9,7 +9,7 @@ use crate::{
     builtins::{
         BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
-        BuiltinStructural,
+        BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
@@ -208,6 +208,33 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value,
             order: downstream.order,
         },
+    }
+}
+
+/// Convert builtin terminal-sink metadata into the shared planner demand model.
+#[inline]
+pub(crate) fn sink_demand(spec: BuiltinSinkSpec) -> Demand {
+    match spec.demand {
+        BuiltinSinkDemand::First { value } => Demand::first(sink_value_need(value)),
+        BuiltinSinkDemand::Last { value } => Demand {
+            pull: PullDemand::LastInput(1),
+            value: sink_value_need(value),
+            order: true,
+        },
+        BuiltinSinkDemand::All { value, order } => Demand {
+            pull: PullDemand::All,
+            value: sink_value_need(value),
+            order,
+        },
+    }
+}
+
+#[inline]
+fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
+    match value {
+        BuiltinSinkValueNeed::None => ValueNeed::CountOnly,
+        BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
+        BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
     }
 }
 
@@ -556,6 +583,22 @@ mod tests {
         let demand = propagate_demand(window, BuiltinDemandArg::Usize(4), downstream);
         assert_eq!(demand.pull, PullDemand::FirstInput(6));
         assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn registry_converts_sink_demands() {
+        let first = sink_demand(BuiltinMethod::First.spec().sink.unwrap());
+        assert_eq!(first.pull, PullDemand::FirstInput(1));
+        assert_eq!(first.value, ValueNeed::Whole);
+
+        let last = sink_demand(BuiltinMethod::Last.spec().sink.unwrap());
+        assert_eq!(last.pull, PullDemand::LastInput(1));
+        assert_eq!(last.value, ValueNeed::Whole);
+
+        let count = sink_demand(BuiltinMethod::Count.spec().sink.unwrap());
+        assert_eq!(count.pull, PullDemand::All);
+        assert_eq!(count.value, ValueNeed::CountOnly);
+        assert!(!count.order);
     }
 
     #[test]

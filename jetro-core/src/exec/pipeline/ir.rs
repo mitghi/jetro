@@ -10,12 +10,11 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
-    BuiltinId,
+    sink_demand as builtin_sink_demand, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-    BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -277,44 +276,12 @@ fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<us
 }
 
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
-    match spec.demand {
-        BuiltinSinkDemand::First { value } => SinkDemand {
-            chain: ChainDemand::first(sink_value_need(value)),
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
+    SinkDemand {
+        chain: builtin_sink_demand(spec),
+        positional: match spec.accumulator {
+            BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
+            _ => None,
         },
-        BuiltinSinkDemand::Last { value } => SinkDemand {
-            chain: ChainDemand {
-                pull: PullDemand::LastInput(1),
-                value: sink_value_need(value),
-                order: true,
-            },
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
-        },
-        BuiltinSinkDemand::All { value, order } => SinkDemand {
-            chain: ChainDemand {
-                pull: PullDemand::All,
-                value: sink_value_need(value),
-                order,
-            },
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
-        },
-    }
-}
-
-fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
-    match value {
-        BuiltinSinkValueNeed::None => ValueNeed::CountOnly,
-        BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
-        BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
     }
 }
 
