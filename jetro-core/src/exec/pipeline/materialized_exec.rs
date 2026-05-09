@@ -268,21 +268,13 @@ where
         if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
         {
             if let Some(projection) = late_projection {
-                return eval_kernel(&projection.kernel, &item, |_| {
-                    Err(EvalError(
-                        "late projection requires a native body kernel".to_string(),
-                    ))
-                });
+                return eval_late_projection(&projection.kernel, &item);
             }
             return Ok(item);
         }
 
         if let Some(projection) = late_projection {
-            item = eval_kernel(&projection.kernel, &item, |_| {
-                Err(EvalError(
-                    "late projection requires a native body kernel".to_string(),
-                ))
-            })?;
+            item = eval_late_projection(&projection.kernel, &item)?;
         }
 
         let sink_done = match &pipeline.sink {
@@ -318,6 +310,14 @@ where
         return Ok(collector.finish());
     }
     sink_acc.finish_result(false)
+}
+
+fn eval_late_projection(projection: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
+    eval_kernel(projection, item, |_| {
+        Err(EvalError(
+            "late projection requires a native body kernel".to_string(),
+        ))
+    })
 }
 
 // barrier stages always produce a Vec<Val>, so only the Owned variant is needed here
