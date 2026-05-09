@@ -288,6 +288,38 @@ impl Demand {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{FieldDemand, FieldSet};
+
+    fn paths(need: FieldDemand) -> Vec<String> {
+        match need {
+            FieldDemand::Fields(fields) => fields
+                .paths()
+                .iter()
+                .map(|path| {
+                    path.keys()
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect(),
+            FieldDemand::None => Vec::new(),
+            FieldDemand::Whole => vec!["*".to_string()],
+        }
+    }
+
+    #[test]
+    fn field_sets_prefix_nested_paths() {
+        let fields = FieldSet::chain(Arc::from([Arc::<str>::from("name")]));
+        let prefixed = fields.prefixed(&[Arc::from("user")]);
+        assert_eq!(paths(FieldDemand::Fields(prefixed)), vec!["user.name"]);
+    }
+}
+
 /// Adapter trait implemented by whichever operator representation a planner
 /// uses for demand propagation.
 pub trait DemandOperator {
