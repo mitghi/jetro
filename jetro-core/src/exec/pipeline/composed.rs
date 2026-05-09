@@ -529,13 +529,7 @@ fn run_late_projection_sink(
     rows: &[Val],
 ) -> Option<Result<Val, EvalError>> {
     let projection = pipeline.late_projection.as_ref()?;
-    if projection.prefix_len < start || projection.prefix_len >= stages.len() {
-        return None;
-    }
-    if stages[projection.prefix_len..]
-        .iter()
-        .any(Stage::is_composed_barrier)
-    {
+    if !pipeline.can_apply_late_projection_from(start) {
         return None;
     }
 
@@ -831,12 +825,7 @@ fn run_lazy_ordered_suffix(
     };
     let suffix_start = sort_idx + 1;
     if let Some(projection) = pipeline.late_projection.as_ref() {
-        if projection.prefix_len >= suffix_start
-            && projection.prefix_len < stages.len()
-            && !stages[projection.prefix_len..]
-                .iter()
-                .any(Stage::is_composed_barrier)
-        {
+        if pipeline.can_apply_late_projection_from(suffix_start) {
             if let Some(projecting_sink) = projecting_sink_for(sink, final_demand) {
                 if let Some(prefix) = build_chain(
                     stages,

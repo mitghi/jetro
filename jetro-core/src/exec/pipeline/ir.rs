@@ -1169,6 +1169,19 @@ impl Pipeline {
         })
     }
 
+    /// Returns true when the stored late projection can be applied after a
+    /// prefix that starts at `start` without crossing a composed barrier.
+    pub(crate) fn can_apply_late_projection_from(&self, start: usize) -> bool {
+        let Some(projection) = self.late_projection.as_ref() else {
+            return false;
+        };
+        projection.prefix_len >= start
+            && projection.prefix_len < self.stages.len()
+            && !self.stages[projection.prefix_len..]
+                .iter()
+                .any(Stage::is_composed_barrier)
+    }
+
     /// Computes the first explicit materialization/fallback boundary for this physical path.
     pub fn fallback_boundary_for(
         stages: &[Stage],
