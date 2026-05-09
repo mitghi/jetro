@@ -633,6 +633,23 @@ mod tests {
     }
 
     #[test]
+    fn find_one_finish_result_requires_exactly_one_match() {
+        let empty_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut empty = SinkAccumulator::new(&empty_sink);
+        empty
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || Val::Int(0))
+            .unwrap();
+        let err = empty.finish_result(false).unwrap_err();
+        assert!(err.0.contains("got 0"));
+
+        let one_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut one = SinkAccumulator::new(&one_sink);
+        one.observe_predicate_lazy(PredicateSinkOp::FindOne, true, || Val::Int(9))
+            .unwrap();
+        assert_eq!(one.finish_result(false).unwrap(), Val::Int(9));
+    }
+
+    #[test]
     fn membership_short_circuit_sinks_stop_on_first_match() {
         let includes_sink = membership_sink(MembershipSinkOp::Includes);
         let mut includes = SinkAccumulator::new(&includes_sink);
