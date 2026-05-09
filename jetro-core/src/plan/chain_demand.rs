@@ -187,6 +187,24 @@ mod tests {
     }
 
     #[test]
+    fn builtin_specs_come_from_registry_metadata() {
+        let filter = op(BuiltinMethod::Filter).spec();
+        assert_eq!(filter.input, ValueKind::Stream);
+        assert_eq!(filter.output, ValueKind::Stream);
+        assert_eq!(filter.cardinality, BuiltinCardinality::Filtering);
+        assert!(filter.preserves_order);
+
+        let count = op(BuiltinMethod::Count).spec();
+        assert_eq!(count.input, ValueKind::Stream);
+        assert_eq!(count.output, ValueKind::Scalar);
+        assert_eq!(count.cardinality, BuiltinCardinality::Reducing);
+
+        let sort = op(BuiltinMethod::Sort).spec();
+        assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
+        assert!(!sort.preserves_order);
+    }
+
+    #[test]
     fn chain_adapter_keeps_match_demand_in_plan_layer() {
         let ops = [
             ChainOp::match_role(MatchRole::Predicate),
