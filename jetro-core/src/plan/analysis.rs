@@ -5,14 +5,20 @@
 //! and used by the compiler for peephole specialisation and by the planner
 //! for CSE (`dedup_subprograms`). None affect runtime correctness.
 
+#![cfg_attr(test, allow(dead_code))]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::KindType;
-use crate::vm::{CompiledPipeStep, Opcode, Program};
+#[cfg(test)]
+use crate::vm::CompiledPipeStep;
+use crate::vm::{Opcode, Program};
 
 /// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VType {
     /// Unreachable position; join with any type yields that type.
@@ -40,6 +46,7 @@ pub enum VType {
 impl VType {
     /// Lattice join: return the least upper bound of `self` and `other`.
     /// `Int ⊔ Float = Num`; incompatible concrete types collapse to `Unknown`.
+    #[cfg(test)]
     pub fn join(self, other: VType) -> VType {
         if self == other {
             return self;
@@ -57,24 +64,29 @@ impl VType {
     }
 
     /// Return `true` only for `Arr`; used to guard array-specific optimisations.
+    #[cfg(test)]
     pub fn is_array_like(self) -> bool {
         matches!(self, VType::Arr)
     }
     /// Return `true` only for `Obj`; used to guard object-specific optimisations.
+    #[cfg(test)]
     pub fn is_object_like(self) -> bool {
         matches!(self, VType::Obj)
     }
     /// Return `true` for any numeric variant (`Int`, `Float`, or `Num`).
+    #[cfg(test)]
     pub fn is_numeric(self) -> bool {
         matches!(self, VType::Int | VType::Float | VType::Num)
     }
     /// Return `true` only when the type is definitely a string.
+    #[cfg(test)]
     pub fn is_string(self) -> bool {
         matches!(self, VType::Str)
     }
 }
 
 /// Nullness lattice element tracking whether a value can ever be `null`.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nullness {
     /// The value is always `Val::Null` at this program point.
@@ -85,6 +97,7 @@ pub enum Nullness {
     MaybeNull,
 }
 
+#[cfg(test)]
 impl Nullness {
     /// Lattice join: any disagreement between `AlwaysNull` and `NonNull` yields `MaybeNull`.
     pub fn join(self, other: Nullness) -> Nullness {
@@ -96,6 +109,7 @@ impl Nullness {
 }
 
 /// Cardinality lattice element describing how many values a program position produces.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cardinality {
     /// Produces no values (empty result / unreachable branch).
@@ -112,6 +126,7 @@ pub enum Cardinality {
     Unknown,
 }
 
+#[cfg(test)]
 impl Cardinality {
     /// Lattice join: `Zero ⊔ One = ZeroOrOne`; all other mixed pairs collapse to `Unknown`.
     pub fn join(self, other: Cardinality) -> Cardinality {
@@ -128,6 +143,7 @@ impl Cardinality {
 }
 
 /// Product of all three lattice dimensions for a single program point.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbstractVal {
     /// Inferred type of the value.
@@ -138,6 +154,7 @@ pub struct AbstractVal {
     pub card: Cardinality,
 }
 
+#[cfg(test)]
 impl AbstractVal {
     /// Fully conservative element; used as the initial stack value and when analysis fails.
     pub const UNKNOWN: Self = Self {
@@ -187,6 +204,7 @@ impl AbstractVal {
 
 /// Run the forward-flow type analysis over `program` and return the abstract
 /// value at the top of the stack after the last opcode.
+#[cfg(test)]
 pub fn infer_result_type(program: &Program) -> AbstractVal {
     let mut stack: Vec<AbstractVal> = Vec::with_capacity(16);
     let mut env: HashMap<Arc<str>, AbstractVal> = HashMap::new();
@@ -198,6 +216,7 @@ pub fn infer_result_type(program: &Program) -> AbstractVal {
 
 /// Like `infer_result_type` but also returns the variable environment so the
 /// caller can inspect inferred types for named bindings.
+#[cfg(test)]
 pub fn infer_result_type_with_env(
     program: &Program,
 ) -> (AbstractVal, HashMap<Arc<str>, AbstractVal>) {
@@ -211,6 +230,7 @@ pub fn infer_result_type_with_env(
 
 /// Apply a single opcode to the abstract stack, threading the variable environment
 /// for `LetExpr` and `LoadIdent`; delegates to `apply_op` for all other opcodes.
+#[cfg(test)]
 fn apply_op_env(
     op: &Opcode,
     stack: &mut Vec<AbstractVal>,
@@ -248,6 +268,7 @@ fn apply_op_env(
 
 /// Apply a single opcode to the abstract stack, producing abstract output values
 /// from abstract input values without touching the variable environment.
+#[cfg(test)]
 fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
     macro_rules! pop2 {
         () => {{
@@ -391,6 +412,7 @@ fn apply_op(op: &Opcode, stack: &mut Vec<AbstractVal>) {
 /// Return the statically known result type of a builtin method call.
 /// Grouped by return-type family; methods whose return type is data-dependent
 /// fall through to `AbstractVal::UNKNOWN`.
+#[cfg(test)]
 pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
     use BuiltinMethod::*;
     match m {
@@ -442,6 +464,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
 
 /// Count how many times `name` is referenced as `Opcode::LoadIdent` across
 /// `program` and all nested sub-programs; used for inlining decisions.
+#[cfg(test)]
 pub fn count_ident_uses(program: &Program, name: &str) -> usize {
     let mut n = 0;
     count_ident_uses_in_ops(&program.ops, name, &mut n);
@@ -449,6 +472,7 @@ pub fn count_ident_uses(program: &Program, name: &str) -> usize {
 }
 
 /// Recursive helper for `count_ident_uses`; descends into every embedded `Program`.
+#[cfg(test)]
 fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
     for op in ops {
         match op {
@@ -526,6 +550,7 @@ fn count_ident_uses_in_ops(ops: &[Opcode], name: &str, acc: &mut usize) {
 
 /// Collect every field name statically accessed by `program` (via `GetField`,
 /// `OptField`, `Descendant`, or `RootChain`). De-duplicated; order is discovery order.
+#[cfg(test)]
 pub fn collect_accessed_fields(program: &Program) -> Vec<Arc<str>> {
     let mut set = Vec::new();
     collect_fields_in_ops(&program.ops, &mut set);
@@ -533,6 +558,7 @@ pub fn collect_accessed_fields(program: &Program) -> Vec<Arc<str>> {
 }
 
 /// Recursive helper for `collect_accessed_fields`.
+#[cfg(test)]
 fn collect_fields_in_ops(ops: &[Opcode], acc: &mut Vec<Arc<str>>) {
     for op in ops {
         match op {
@@ -688,6 +714,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
 
 /// Walk `program` and its nested sub-programs, recording every sub-program
 /// signature and how many times it appears; entries with count ≥ 2 are CSE candidates.
+#[cfg(test)]
 pub fn find_common_subexprs(program: &Program) -> HashMap<u64, usize> {
     let mut map: HashMap<u64, usize> = HashMap::new();
     walk_subprograms(&program.ops, &mut map);
@@ -697,6 +724,7 @@ pub fn find_common_subexprs(program: &Program) -> HashMap<u64, usize> {
 
 /// Recursive helper for `find_common_subexprs`; increments a counter for each
 /// sub-program encountered and recurses into its opcodes.
+#[cfg(test)]
 fn walk_subprograms(ops: &[Opcode], map: &mut HashMap<u64, usize>) {
     for op in ops {
         let sub_progs: Vec<&Arc<Program>> = match op {
@@ -1132,6 +1160,7 @@ fn rewrite_call(
 
 /// Return an estimated execution cost for a single opcode, used by the planner
 /// to order filter predicates cheapest-first and to guide inlining decisions.
+#[cfg(test)]
 pub fn opcode_cost(op: &Opcode) -> u32 {
     match op {
         Opcode::PushNull
@@ -1241,11 +1270,13 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
 
 /// Sum `opcode_cost` over all opcodes in `program`; used as a proxy for execution
 /// time when comparing alternative sub-expressions for predicate reordering.
+#[cfg(test)]
 pub fn program_cost(program: &Program) -> u32 {
     program.ops.iter().map(opcode_cost).sum()
 }
 
 /// Monotonicity of an array-valued program with respect to its natural order.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Monotonicity {
     /// Order is unknown or has been disrupted by a non-monotone operation.
@@ -1258,6 +1289,7 @@ pub enum Monotonicity {
     NotArray,
 }
 
+#[cfg(test)]
 impl Monotonicity {
     /// Compute the monotonicity that results from applying `op` to a value
     /// with the current monotonicity. Used to track sort order through pipelines.
@@ -1282,6 +1314,7 @@ impl Monotonicity {
 
 /// Infer the output monotonicity of `program` by stepping through each opcode
 /// sequentially from `Unknown`, updating the state with `Monotonicity::after`.
+#[cfg(test)]
 pub fn infer_monotonicity(program: &Program) -> Monotonicity {
     let mut m = Monotonicity::Unknown;
     for op in program.ops.iter() {
@@ -1293,6 +1326,7 @@ pub fn infer_monotonicity(program: &Program) -> Monotonicity {
 /// Return `true` when `program` reads from the input document (`PushRoot`,
 /// `PushCurrent`, field/index accesses, descendants). Used to detect programs
 /// that are fully constant and need not be re-evaluated per document.
+#[cfg(test)]
 pub fn escapes_doc(program: &Program) -> bool {
     for op in program.ops.iter() {
         match op {
