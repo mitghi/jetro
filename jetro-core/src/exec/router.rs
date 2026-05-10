@@ -812,6 +812,28 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_path_helpers_use_tape_native_navigation() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"user":{"name":"ada"}},{"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let name = j
+            .collect(r#"$.books.map(@.get_path("user.name")).last()"#)
+            .unwrap();
+        let found = j
+            .collect(r#"$.books.map(@.has_path("user.name")).last()"#)
+            .unwrap();
+
+        assert_eq!(name, json!("bob"));
+        assert_eq!(found, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
