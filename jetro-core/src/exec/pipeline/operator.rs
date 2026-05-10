@@ -121,6 +121,10 @@ impl PredicateSinkSpec {
 impl MembershipSinkSpec {
     /// Demand placed on the row stream by this terminal membership sink.
     pub(crate) fn demand(&self) -> Demand {
+        // `includes` and `index` can stop once their accumulator observes a match,
+        // but the pull demand is still over input rows, not over the terminal
+        // scalar result. Keep the source conservative and let the sink stop the
+        // executor loop when it has enough information.
         Demand {
             pull: PullDemand::All,
             value: ValueNeed::Whole,
