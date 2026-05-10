@@ -552,6 +552,7 @@ mod tests {
     #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
+        let remove = BuiltinId::from_method(BuiltinMethod::Remove);
         let take = BuiltinId::from_method(BuiltinMethod::Take);
         let count = BuiltinId::from_method(BuiltinMethod::Count);
         let unique = BuiltinId::from_method(BuiltinMethod::Unique);
@@ -570,6 +571,26 @@ mod tests {
         let demand = propagate_demand(filter, BuiltinDemandArg::None, demand);
         assert_eq!(demand.pull, PullDemand::UntilOutput(3));
         assert_eq!(demand.value, ValueNeed::Whole);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(2),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
 
         let demand = propagate_demand(count, BuiltinDemandArg::None, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
