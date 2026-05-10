@@ -922,6 +922,7 @@ where
         winners.as_slice(),
         body,
         plan.sort_stage + 1,
+        false,
     ) {
         return Some(out);
     }
@@ -973,6 +974,7 @@ fn run_sorted_rows_terminal_select_projection_suffix<'a, V>(
     rows: &[V],
     body: &pipeline::PipelineBody,
     suffix_start: usize,
+    source_reversed: bool,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -987,7 +989,7 @@ where
     )
     .chain
     .pull;
-    if let pipeline::Sink::SelectMany { .. } = body.sink {
+    if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
         let mut selected = Vec::new();
         drive_view_iter(
             rows.iter().cloned(),
@@ -999,6 +1001,9 @@ where
                 Some(ViewRowAction::Emit)
             },
         )?;
+        if from_end && source_reversed {
+            selected.reverse();
+        }
         return Some(Ok(Val::Arr(Arc::new(selected))));
     }
     let mut nth_target = None;
@@ -1060,15 +1065,16 @@ where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, suffix_start)?;
-    let sink = match resolve_view_sink(suffix.sink, Some(base_env)) {
-        Some(Ok(sink)) => sink,
-        Some(Err(err)) => return Some(Err(err)),
-        None => return None,
-    };
     let source_demand =
         pipeline::Pipeline::segment_source_demand(&body.stages[suffix_start..], &body.sink)
             .chain
             .pull;
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
+    let sink = match resolve_view_sink(sink, Some(base_env)) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
     drive_view_iter(
@@ -1095,20 +1101,22 @@ where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
-    let sink = match resolve_view_sink(suffix.sink, Some(base_env)) {
-        Some(Ok(sink)) => sink,
-        Some(Err(err)) => return Some(Err(err)),
-        None => return None,
-    };
     let source_demand =
         pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
             .chain
             .pull;
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
+    let sink = match resolve_view_sink(sink, Some(base_env)) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
     let ordered_descending = if matches!(source_demand, PullDemand::LastInput(_)) {
         !plan.descending
     } else {
         plan.descending
     };
+    let source_reversed = ordered_descending != plan.descending;
     let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
     drive_view_frontier(
@@ -1126,8 +1134,18 @@ where
 
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
+    let ordered: Vec<_> = sorter.finish().collect();
+    if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
+        ordered.as_slice(),
+        body,
+        plan.sort_stage + 1,
+        source_reversed,
+    ) {
+        return Some(out);
+    }
+
     drive_view_iter(
-        sorter.finish(),
+        ordered,
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
@@ -1135,6 +1153,23 @@ where
     )?;
 
     Some(sink_acc.finish_result(false))
+}
+
+fn view_suffix_sink_for_demand(
+    sink: pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+) -> pipeline::ViewSinkCapability {
+    match (source_demand, sink) {
+        (
+            PullDemand::LastInput(_),
+            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
+        ) => pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed: true,
+        },
+        (_, sink) => sink,
+    }
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
