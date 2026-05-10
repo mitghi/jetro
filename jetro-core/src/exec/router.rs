@@ -765,9 +765,31 @@ mod tests {
         let picked = j
             .collect(r#"$.books.map(@.pick("title", "score")).last()"#)
             .unwrap();
+        let omitted = j
+            .collect(r#"$.books.map(@.omit("debug")).last()"#)
+            .unwrap();
 
         assert_eq!(keys, json!(["title", "score", "debug"]));
         assert_eq!(picked, json!({"title": "b", "score": 902}));
+        assert_eq!(omitted, json!({"title": "b", "score": 902}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_object_values_entries_use_tape_native_helpers() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"a","score":1},{"title":"b","score":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let values = j.collect(r#"$.books.map(@.values()).last()"#).unwrap();
+        let entries = j.collect(r#"$.books.map(@.entries()).last()"#).unwrap();
+
+        assert_eq!(values, json!(["b", 2]));
+        assert_eq!(entries, json!([["title", "b"], ["score", 2]]));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
