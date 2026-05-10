@@ -994,3 +994,47 @@ fn pipeline_body_has_dynamic_membership_target(body: &pipeline::PipelineBody) ->
         })
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::data::value::Val;
+    use crate::exec::pipeline::{
+        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody, Sink,
+    };
+
+    fn body_with_target(target: MembershipSinkTarget) -> PipelineBody {
+        PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target,
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dynamic_membership_targets_require_root_env() {
+        let dynamic = body_with_target(MembershipSinkTarget::Program(Arc::new(
+            crate::vm::Program::new(Vec::new(), ""),
+        )));
+        assert!(super::pipeline_body_has_dynamic_membership_target(&dynamic));
+
+        let literal = body_with_target(MembershipSinkTarget::Literal(Val::Int(1)));
+        assert!(!super::pipeline_body_has_dynamic_membership_target(&literal));
+
+        let collect = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: Vec::<BodyKernel>::new(),
+            sink_kernels: Vec::new(),
+        };
+        assert!(!super::pipeline_body_has_dynamic_membership_target(&collect));
+    }
+}
