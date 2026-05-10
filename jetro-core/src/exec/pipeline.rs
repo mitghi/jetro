@@ -1205,6 +1205,37 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_delays_map_for_first_and_nth_selection() {
+        let first = lower_query("$.books.map(isbn).first()").unwrap();
+        let first_demand = first.payload_demand();
+        assert_eq!(demand_paths(&first_demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&first_demand.result_need), vec!["isbn"]);
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+        assert!(matches!(first.source_access, SourceAccessMode::Indexed(0)));
+        assert!(matches!(
+            first.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+
+        let nth = lower_query("$.books.map(isbn).nth(2)").unwrap();
+        let nth_demand = nth.payload_demand();
+        assert_eq!(demand_paths(&nth_demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&nth_demand.result_need), vec!["isbn"]);
+        assert_eq!(
+            nth.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::NthInput(2)
+        );
+        assert!(matches!(nth.source_access, SourceAccessMode::Indexed(2)));
+        assert!(matches!(
+            nth.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+    }
+
+    #[test]
     fn late_projection_positional_sinks_match_vm() {
         use serde_json::json;
 
