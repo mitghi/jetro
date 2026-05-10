@@ -1041,6 +1041,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_chained_map_take_composes_bounded_projection() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"user":{"name":"al"}},{"user":{"name":"bob"}},{"user":{"name":"cy"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.map(@.user).map(@.name).take(2)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["al", "bob"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_filter_map_last_scans_from_tail_until_match() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":2},{"name":"cy","score":903}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
