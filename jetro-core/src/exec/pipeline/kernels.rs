@@ -247,7 +247,8 @@ impl BodyKernel {
         match self {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
-                receiver.is_view_native() && call.spec().view_scalar
+                receiver.is_view_native()
+                    && (call.spec().view_scalar || object_key_view_call(call.method))
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -519,7 +520,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)] if call.method.spec().view_scalar => {
+        [receiver @ .., Opcode::CallMethod(call)]
+            if call.method.spec().view_scalar || object_key_view_call(call.method) =>
+        {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
             } else {
@@ -548,7 +551,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
                 .ok()
                 .flatten()?
             };
-            if !builtin_call.spec().view_scalar {
+            if !builtin_call.spec().view_scalar && !object_key_view_call(builtin_call.method) {
                 return None;
             }
             Some(BodyKernel::BuiltinCall {
@@ -558,6 +561,16 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
         }
         _ => None,
     }
+}
+
+#[inline]
+fn object_key_view_call(method: crate::builtins::BuiltinMethod) -> bool {
+    matches!(
+        method,
+        crate::builtins::BuiltinMethod::Has
+            | crate::builtins::BuiltinMethod::HasKey
+            | crate::builtins::BuiltinMethod::Missing
+    )
 }
 
 fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
@@ -807,11 +820,18 @@ where
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
             ViewKernelValue::View(view) => match (call.method, &call.args) {
                 (
-                    crate::builtins::BuiltinMethod::HasKey,
+                    crate::builtins::BuiltinMethod::Has | crate::builtins::BuiltinMethod::HasKey,
                     crate::builtins::BuiltinArgs::Str(key),
                 ) => view
                     .has_key(key.as_ref())
                     .map(Val::Bool)
+                    .map(ViewKernelValue::Owned),
+                (
+                    crate::builtins::BuiltinMethod::Missing,
+                    crate::builtins::BuiltinArgs::Str(key),
+                ) => view
+                    .has_key(key.as_ref())
+                    .map(|present| Val::Bool(!present))
                     .map(ViewKernelValue::Owned),
                 (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
                     view.object_keys().map(ViewKernelValue::Owned)

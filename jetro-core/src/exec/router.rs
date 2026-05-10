@@ -774,6 +774,26 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_object_key_predicates_use_tape_native_helpers() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"b","isbn":"x"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let has = j.collect(r#"$.books.map(@.has("isbn")).last()"#).unwrap();
+        let missing = j
+            .collect(r#"$.books.map(@.missing("score")).last()"#)
+            .unwrap();
+
+        assert_eq!(has, json!(true));
+        assert_eq!(missing, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
