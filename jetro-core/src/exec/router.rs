@@ -1722,6 +1722,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_nth_keeps_projection_as_tape_view() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"mid","score":20},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).map(isbn).nth(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!("mid"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_streams_into_sort_topk_without_materializing_prefix_rows() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"low","score":10},{"name":"top","score":30},{"name":"mid","score":20},{"name":"skip","score":5}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

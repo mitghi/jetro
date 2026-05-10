@@ -1001,8 +1001,12 @@ where
         )?;
         return Some(Ok(Val::Arr(Arc::new(selected))));
     }
+    let mut nth_target = None;
     let position = match &body.sink {
-        pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
+        pipeline::Sink::Nth(index) => {
+            nth_target = Some(*index);
+            TerminalSelectPosition::Nth
+        }
         _ => {
             let sink_spec = body.sink.builtin_sink_spec()?;
             match sink_spec.accumulator {
@@ -1018,6 +1022,7 @@ where
     };
     let mut selected = Val::Null;
     let mut seen = false;
+    let mut selected_index = 0usize;
 
     drive_view_iter(
         rows.iter().cloned(),
@@ -1025,6 +1030,12 @@ where
         &body.stage_kernels,
         source_demand,
         |item| {
+            if let Some(target) = nth_target {
+                if selected_index < target {
+                    selected_index += 1;
+                    return Some(ViewRowAction::Skip);
+                }
+            }
             selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
             seen = true;
             Some(match position {
