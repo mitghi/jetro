@@ -90,10 +90,16 @@ impl<'a> ComposedStageBuilder<'a> {
             ) => Box::new(cmp::Skip {
                 remaining: Cell::new(*value),
             }),
-            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Compact => {
+            (Stage::Builtin(call), _)
+                if call.method.spec().view_stage
+                    == Some(crate::builtins::BuiltinViewStage::Compact) =>
+            {
                 Box::new(cmp::CompactFilterStage)
             }
-            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Remove => {
+            (Stage::Builtin(call), _)
+                if call.method.spec().view_stage
+                    == Some(crate::builtins::BuiltinViewStage::RemoveValue) =>
+            {
                 match &call.args {
                     crate::builtins::BuiltinArgs::Val(target) => {
                         Box::new(cmp::RemoveValueFilterStage::new(target.clone()))
