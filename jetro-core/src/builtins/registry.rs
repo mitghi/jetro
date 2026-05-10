@@ -558,6 +558,7 @@ mod tests {
         let count_by = BuiltinId::from_method(BuiltinMethod::CountBy);
         let sort = BuiltinId::from_method(BuiltinMethod::Sort);
         let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
+        let take_while = BuiltinId::from_method(BuiltinMethod::TakeWhile);
         let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
         let slice = BuiltinId::from_method(BuiltinMethod::Slice);
         let chunk = BuiltinId::from_method(BuiltinMethod::Chunk);
@@ -629,6 +630,26 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(take_while, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(2),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(take_while, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
 
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
