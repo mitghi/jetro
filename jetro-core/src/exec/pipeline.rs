@@ -2331,6 +2331,7 @@ mod tests {
     fn scalar_and_path_element_stages_preserve_positional_demand() {
         for query in [
             "$.rows.has_key(\"isbn\").last()",
+            "$.rows.has_path(\"isbn\").last()",
             "$.rows.get_path(\"isbn\").last()",
             "$.rows.upper().last()",
             "$.rows.byte_len().last()",
