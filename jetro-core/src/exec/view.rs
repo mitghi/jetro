@@ -1422,7 +1422,7 @@ mod tests {
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
         PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceAccessMode,
-        SourceCapabilities, Stage, ViewStageCapability,
+        SourceCapabilities, Stage, ViewSinkCapability, ViewStageCapability,
     };
     use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
@@ -1800,6 +1800,26 @@ mod tests {
         assert_eq!(super::index_from_end(4, 3), Some(0));
         assert_eq!(super::index_from_end(4, 4), None);
         assert_eq!(super::index_from_end(4, usize::MAX), None);
+    }
+
+    #[test]
+    fn view_suffix_sink_marks_reversed_select_many_for_last_input() {
+        let sink = ViewSinkCapability::SelectMany {
+            n: 2,
+            from_end: true,
+            source_reversed: false,
+        };
+
+        let adjusted = super::view_suffix_sink_for_demand(sink, PullDemand::LastInput(2));
+
+        assert!(matches!(
+            adjusted,
+            ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: true
+            }
+        ));
     }
 
     #[test]
