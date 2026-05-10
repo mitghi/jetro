@@ -773,7 +773,9 @@ fn terminal_projection_stage_kernel(
     }
 
     match stage {
-        pipeline::Stage::Builtin(call) if call.spec().view_scalar => {
+        pipeline::Stage::Builtin(call)
+            if call.spec().view_scalar || call.method.is_view_object_key_method() =>
+        {
             Some(pipeline::BodyKernel::BuiltinCall {
                 receiver: Box::new(pipeline::BodyKernel::Current),
                 call: call.clone(),
@@ -1959,6 +1961,27 @@ mod tests {
 
         assert!(plan.prefix.is_empty());
         assert!(matches!(plan.collect_kernel, BodyKernel::Compose { .. }));
+    }
+
+    #[test]
+    fn terminal_collect_plan_composes_trailing_object_key_builtins() {
+        let call = crate::builtins::BuiltinCall {
+            method: crate::builtins::BuiltinMethod::HasKey,
+            args: crate::builtins::BuiltinArgs::Str(Arc::from("isbn")),
+        };
+        assert!(call.method.is_view_object_key_method());
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(call)],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let plan = super::terminal_collect_plan(&body).unwrap();
+
+        assert!(plan.prefix.is_empty());
+        assert!(matches!(plan.collect_kernel, BodyKernel::BuiltinCall { .. }));
     }
 
     #[test]

@@ -248,7 +248,7 @@ impl BodyKernel {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
                 receiver.is_view_native()
-                    && (call.spec().view_scalar || object_key_view_call(call.method))
+                    && (call.spec().view_scalar || call.method.is_view_object_key_method())
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -521,7 +521,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             Some(BodyKernel::FieldChain(keys.into()))
         }
         [receiver @ .., Opcode::CallMethod(call)]
-            if call.method.spec().view_scalar || object_key_view_call(call.method) =>
+            if call.method.spec().view_scalar || call.method.is_view_object_key_method() =>
         {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
@@ -551,7 +551,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
                 .ok()
                 .flatten()?
             };
-            if !builtin_call.spec().view_scalar && !object_key_view_call(builtin_call.method) {
+            if !builtin_call.spec().view_scalar
+                && !builtin_call.method.is_view_object_key_method()
+            {
                 return None;
             }
             Some(BodyKernel::BuiltinCall {
@@ -561,18 +563,6 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
         }
         _ => None,
     }
-}
-
-#[inline]
-fn object_key_view_call(method: crate::builtins::BuiltinMethod) -> bool {
-    matches!(
-        method,
-        crate::builtins::BuiltinMethod::Has
-            | crate::builtins::BuiltinMethod::HasKey
-            | crate::builtins::BuiltinMethod::Missing
-            | crate::builtins::BuiltinMethod::GetPath
-            | crate::builtins::BuiltinMethod::HasPath
-    )
 }
 
 fn walk_view_path<'a, V>(mut cur: V, segs: &[crate::builtins::PathSeg]) -> V
