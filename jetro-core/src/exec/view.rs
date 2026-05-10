@@ -416,6 +416,17 @@ where
             .pull;
     let mut selected = Val::Null;
     let mut seen = false;
+    let mut nth_seen = 0usize;
+    let nth_target = match body.sink {
+        pipeline::Sink::Nth(_)
+            if matches!(source_demand, PullDemand::NthInput(_))
+                && view_stages_preserve_cardinality(&prefix) =>
+        {
+            Some(0)
+        }
+        pipeline::Sink::Nth(index) => Some(index),
+        _ => None,
+    };
 
     drive_view_frontier(
         source,
@@ -424,6 +435,12 @@ where
         &body.stage_kernels,
         source_demand,
         |item| {
+            if let Some(target) = nth_target {
+                if nth_seen < target {
+                    nth_seen += 1;
+                    return Some(ViewRowAction::Emit);
+                }
+            }
             selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
             seen = true;
             Some(match position {
@@ -531,6 +548,13 @@ fn view_frontier_access(
         if source_capabilities.reverse_stream {
             return pipeline::SourceAccessMode::Reverse { outputs: 1 };
         }
+        if source_capabilities.forward_stream {
+            return pipeline::SourceAccessMode::Forward;
+        }
+    }
+    if matches!(access, pipeline::SourceAccessMode::Indexed(_))
+        && !view_stages_preserve_cardinality(stages)
+    {
         if source_capabilities.forward_stream {
             return pipeline::SourceAccessMode::Forward;
         }
@@ -1776,7 +1800,7 @@ mod tests {
             .unwrap();
         let first_json: serde_json::Value = first.into();
         assert_eq!(first_json, serde_json::json!(1));
-        assert_eq!(first_source.materialize_reads(), 1);
+        assert_eq!(first_source.materialize_reads(), 0);
         assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
@@ -1789,8 +1813,8 @@ mod tests {
             .unwrap();
         let last_json: serde_json::Value = last.into();
         assert_eq!(last_json, serde_json::json!(4));
-        assert_eq!(last_source.materialize_reads(), 1);
-        assert_eq!(last_source.scalar_reads(), 1);
+        assert_eq!(last_source.materialize_reads(), 0);
+        assert_eq!(last_source.scalar_reads(), 2);
         assert_eq!(last_source.array_iter_reads(), 0);
 
         let nth_source = CountingView::root(&[1, 2, 3, 4]);
