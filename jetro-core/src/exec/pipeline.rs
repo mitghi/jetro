@@ -1225,6 +1225,24 @@ mod tests {
     }
 
     #[test]
+    fn positional_sinks_choose_direct_source_access() {
+        assert!(matches!(
+            lower_query("$.books.map(isbn).first()")
+                .unwrap()
+                .source_access,
+            SourceAccessMode::Indexed(0)
+        ));
+        assert!(matches!(
+            lower_query("$.books.map(isbn).nth(2)").unwrap().source_access,
+            SourceAccessMode::Indexed(2)
+        ));
+        assert!(matches!(
+            lower_query("$.books.map(isbn).last()").unwrap().source_access,
+            SourceAccessMode::IndexedFromEnd(0)
+        ));
+    }
+
+    #[test]
     fn payload_demand_splits_filter_scan_from_late_projection() {
         let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();
