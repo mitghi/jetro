@@ -1420,6 +1420,31 @@ mod tests {
     }
 
     #[test]
+    fn view_frontier_zero_demand_skips_source_access() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let observed = Rc::new(Cell::new(0usize));
+        let observed_in_closure = Rc::clone(&observed);
+
+        let result = super::drive_view_frontier(
+            source.clone(),
+            SourceCapabilities::VIEW_ARRAY,
+            &[],
+            &[],
+            PullDemand::FirstInput(0),
+            move |_| {
+                observed_in_closure.set(observed_in_closure.get() + 1);
+                Some(super::ViewRowAction::Emit)
+            },
+        );
+
+        assert!(result.is_some());
+        assert_eq!(observed.get(), 0);
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
     fn view_full_runner_stops_after_until_output_demand_is_met() {
         let source = CountingView::root(&[1, 2, 3]);
         let body = PipelineBody {
