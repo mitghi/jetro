@@ -820,19 +820,22 @@ where
         }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
             ViewKernelValue::View(view) => match (call.method, &call.args) {
+                (crate::builtins::BuiltinMethod::Has, crate::builtins::BuiltinArgs::Str(key)) => {
+                    view_has(&view, key.as_ref())
+                        .map(|found| ViewKernelValue::Owned(Val::Bool(found)))
+                }
                 (
-                    crate::builtins::BuiltinMethod::Has | crate::builtins::BuiltinMethod::HasKey,
+                    crate::builtins::BuiltinMethod::HasKey,
                     crate::builtins::BuiltinArgs::Str(key),
-                ) => view
-                    .has_key(key.as_ref())
-                    .map(Val::Bool)
-                    .map(ViewKernelValue::Owned),
+                ) => Some(ViewKernelValue::Owned(Val::Bool(
+                    view.has_key(key.as_ref()).unwrap_or(false),
+                ))),
                 (
                     crate::builtins::BuiltinMethod::Missing,
                     crate::builtins::BuiltinArgs::Str(key),
                 ) => view.has_key(key.as_ref()).map(|present| {
-                    let missing = !present
-                        || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
+                    let missing =
+                        !present || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
                     ViewKernelValue::Owned(Val::Bool(missing))
                 }),
                 (
@@ -940,6 +943,36 @@ where
     }
 }
 
+fn view_has<'a, V>(view: &V, key: &str) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    if let Some(found) = view.has_key(key) {
+        return Some(found);
+    }
+    if let JsonView::Str(value) = view.scalar() {
+        return Some(value.contains(key));
+    }
+    if let Some(mut iter) = view.array_iter() {
+        return Some(iter.any(|item| scalar_matches_key(item.scalar(), key)));
+    }
+    None
+}
+
+#[inline]
+fn scalar_matches_key(value: JsonView<'_>, key: &str) -> bool {
+    match value {
+        JsonView::Str(value) => value == key,
+        JsonView::Int(value) => value.to_string() == key,
+        JsonView::UInt(value) => value.to_string() == key,
+        JsonView::Float(value) => value.to_string() == key,
+        JsonView::Bool(true) => key == "true",
+        JsonView::Bool(false) => key == "false",
+        JsonView::Null => key == "null",
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => false,
+    }
+}
+
 #[inline]
 fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
@@ -1032,6 +1065,36 @@ mod tests {
             owned_bool(eval_view_kernel(
                 &key_call(BuiltinMethod::Missing, "isbn"),
                 &view
+            )),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn has_kernel_preserves_array_and_string_membership_on_value_views() {
+        let tags = Val::arr(vec![Val::Str(Arc::from("sf")), Val::Str(Arc::from("hugo"))]);
+        let tags_view = ValView::new(&tags);
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Has, "sf"),
+                &tags_view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::HasKey, "sf"),
+                &tags_view
+            )),
+            Some(false)
+        );
+
+        let text = Val::Str(Arc::from("science fiction"));
+        let text_view = ValView::new(&text);
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Has, "fiction"),
+                &text_view
             )),
             Some(true)
         );

@@ -820,6 +820,28 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_has_preserves_array_and_string_membership_without_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"tags":["sf"],"title":"Dune"},{"tags":["sf","hugo"],"title":"Foundation"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let tag = j
+            .collect(r#"$.books.map(@.tags.has("hugo")).last()"#)
+            .unwrap();
+        let title = j
+            .collect(r#"$.books.map(@.title.has("dation")).last()"#)
+            .unwrap();
+
+        assert_eq!(tag, json!(true));
+        assert_eq!(title, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_missing_treats_null_as_missing_without_materialization() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"isbn":"x"},{"isbn":null}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
