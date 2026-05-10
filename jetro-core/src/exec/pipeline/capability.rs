@@ -708,6 +708,11 @@ mod tests {
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert_eq!(flat_map.materialization(), ViewMaterialization::Never);
 
+        let remove = ViewStageCapability::RemoveValue(Val::Int(2));
+        assert_eq!(remove.input_mode(), ViewInputMode::ReadsView);
+        assert_eq!(remove.output_mode(), ViewOutputMode::PreservesInputView);
+        assert_eq!(remove.materialization(), ViewMaterialization::Never);
+
         let take = ViewStageCapability::Take(2);
         assert_eq!(take.input_mode(), ViewInputMode::SkipsViewRead);
         assert_eq!(take.output_mode(), ViewOutputMode::PreservesInputView);
@@ -747,6 +752,12 @@ mod tests {
         ))
         .view_capability(9, None)
         .unwrap();
+        let remove = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Remove,
+            crate::builtins::BuiltinArgs::Val(Val::Int(2)),
+        ))
+        .view_capability(10, None)
+        .unwrap();
 
         assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
@@ -754,6 +765,7 @@ mod tests {
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
         assert!(matches!(compact, ViewStageCapability::Compact));
+        assert!(matches!(remove, ViewStageCapability::RemoveValue(Val::Int(2))));
         let cancel = crate::builtins::BuiltinMethod::Reverse
             .spec()
             .cancellation
