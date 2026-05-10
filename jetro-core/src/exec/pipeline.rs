@@ -1334,6 +1334,20 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_accepts_object_key_builtin_stages() {
+        let stages = vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::HasKey,
+            crate::builtins::BuiltinArgs::Str(Arc::from("isbn")),
+        ))];
+        let projection = Pipeline::late_projection_for(&stages, &[]).unwrap();
+        assert_eq!(projection.prefix_len, 0);
+        assert!(matches!(
+            &projection.kernel,
+            BodyKernel::BuiltinCall { call, .. } if call.method == BuiltinMethod::HasKey
+        ));
+    }
+
+    #[test]
     fn late_projection_composes_chained_maps() {
         let query = "$.books.map(user).map(name).last()";
         let p = lower_query(query).unwrap();

@@ -1254,7 +1254,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
         }
         Stage::Builtin(call)
             if call.spec().pure
-                && call.spec().view_scalar
+                && call.method.is_view_projection_method()
                 && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
         {
             Some(BodyKernel::BuiltinCall {
