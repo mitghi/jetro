@@ -4,8 +4,6 @@
 //! builtin identities and the small amount of argument shape needed by demand
 //! propagation without tying the executor to parser syntax.
 
-#![allow(dead_code)]
-
 use crate::{
     builtins::registry::{BuiltinDemandArg, BuiltinId},
     builtins::BuiltinMethod,
@@ -39,6 +37,7 @@ pub enum MatchRole {
     /// Single-value transform: every input row yields exactly one output.
     Transform,
     /// Each input row produces zero or more output rows.
+    #[allow(dead_code)]
     Multi,
 }
 
