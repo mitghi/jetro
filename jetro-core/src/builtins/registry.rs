@@ -552,6 +552,7 @@ mod tests {
     #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
+        let map = BuiltinId::from_method(BuiltinMethod::Map);
         let remove = BuiltinId::from_method(BuiltinMethod::Remove);
         let take = BuiltinId::from_method(BuiltinMethod::Take);
         let count = BuiltinId::from_method(BuiltinMethod::Count);
@@ -591,6 +592,26 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(4),
+            value: ValueNeed::Predicate,
+            order: false,
+        };
+        let demand = propagate_demand(map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::NthInput(4));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::CountOnly,
+            order: true,
+        };
+        let demand = propagate_demand(map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
 
         let demand = propagate_demand(count, BuiltinDemandArg::None, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
