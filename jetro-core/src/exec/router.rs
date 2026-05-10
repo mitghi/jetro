@@ -804,11 +804,15 @@ mod tests {
         j.reset_tape_materialized_subtrees();
 
         let has = j.collect(r#"$.books.map(@.has("isbn")).last()"#).unwrap();
+        let has_key = j
+            .collect(r#"$.books.map(@.has_key("isbn")).last()"#)
+            .unwrap();
         let missing = j
             .collect(r#"$.books.map(@.missing("score")).last()"#)
             .unwrap();
 
         assert_eq!(has, json!(true));
+        assert_eq!(has_key, json!(true));
         assert_eq!(missing, json!(true));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
