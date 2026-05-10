@@ -314,9 +314,16 @@ mod tests {
 
     #[test]
     fn field_sets_prefix_nested_paths() {
-        let fields = FieldSet::chain(Arc::from([Arc::<str>::from("name")]));
+        let mut fields = FieldSet::chain(Arc::from([Arc::<str>::from("name")]));
+        fields.insert(super::FieldPath::chain(Arc::from([
+            Arc::<str>::from("address"),
+            Arc::<str>::from("city"),
+        ])));
         let prefixed = fields.prefixed(&[Arc::from("user")]);
-        assert_eq!(paths(FieldDemand::Fields(prefixed)), vec!["user.name"]);
+        assert_eq!(
+            paths(FieldDemand::Fields(prefixed)),
+            vec!["user.name", "user.address.city"]
+        );
     }
 }
 
