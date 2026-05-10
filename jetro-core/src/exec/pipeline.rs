@@ -1700,6 +1700,29 @@ mod tests {
     }
 
     #[test]
+    fn sort_filter_map_last_many_uses_lazy_until_output_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).filter(price > 20).map(isbn).last(2)";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(2)));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "top-fails", "score": 100, "price": 10},
+                    {"isbn": "high-pass", "score": 90, "price": 30},
+                    {"isbn": "mid-fails", "score": 80, "price": 5},
+                    {"isbn": "low-pass", "score": 70, "price": 40},
+                    {"isbn": "tail-pass", "score": 60, "price": 50}
+                ]
+            }),
+        );
+    }
+
+    #[test]
     fn sort_drop_while_filter_map_last_preserves_prefix_boundary() {
         use serde_json::json;
 
