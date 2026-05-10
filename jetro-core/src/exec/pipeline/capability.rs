@@ -1043,6 +1043,38 @@ mod tests {
         assert_eq!(prefix.consumed_stages, 2);
         assert_eq!(prefix.stages.len(), 2);
     }
+
+    #[test]
+    fn view_prefix_keeps_remove_value_before_materializing_stage() {
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Map,
+                ),
+                Stage::Builtin(crate::exec::pipeline::PipelineBuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Remove,
+                    args: crate::builtins::BuiltinArgs::Val(Val::Int(2)),
+                }),
+                Stage::Builtin(crate::exec::pipeline::PipelineBuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Upper,
+                    args: crate::builtins::BuiltinArgs::None,
+                }),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("id"))],
+            sink_kernels: Vec::new(),
+        };
+
+        let prefix = view_prefix_capabilities(&body).unwrap();
+        assert_eq!(prefix.consumed_stages, 2);
+        assert!(matches!(prefix.stages[0], ViewStageCapability::Map { kernel: 0 }));
+        assert!(matches!(
+            prefix.stages[1],
+            ViewStageCapability::RemoveValue(Val::Int(2))
+        ));
+    }
 }
 
 // short-circuits on the first incompatible stage, returning None rather than a partial list
