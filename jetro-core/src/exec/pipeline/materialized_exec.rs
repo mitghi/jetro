@@ -760,6 +760,45 @@ mod tests {
     }
 
     #[test]
+    fn materialized_streaming_stops_when_all_sink_fails() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::All,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(false));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_includes_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            Vec::new(),
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
     fn materialized_streaming_stops_when_index_sink_matches() {
         let reads = Rc::new(Cell::new(0));
         let pipeline = empty_pipeline(
