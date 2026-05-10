@@ -1940,6 +1940,32 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_tail_object_collection_helpers_stay_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let keys = j
+            .collect(r#"$.data.sort_by(-score).map(@.keys()).last()"#)
+            .unwrap();
+        let values = j
+            .collect(r#"$.data.sort_by(-score).map(@.values()).last()"#)
+            .unwrap();
+        let entries = j
+            .collect(r#"$.data.sort_by(-score).map(@.entries()).last()"#)
+            .unwrap();
+
+        assert_eq!(keys, json!(["isbn", "score"]));
+        assert_eq!(values, json!(["low", 10]));
+        assert_eq!(entries, json!([["isbn", "low"], ["score", 10]]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();
