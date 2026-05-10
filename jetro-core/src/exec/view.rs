@@ -387,9 +387,20 @@ where
     V: ValueView<'a>,
 {
     let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
-    let sink_spec = body.sink.builtin_sink_spec()?;
-    let crate::builtins::BuiltinSinkAccumulator::SelectOne(position) = sink_spec.accumulator else {
-        return None;
+    let position = match &body.sink {
+        pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
+        _ => {
+            let sink_spec = body.sink.builtin_sink_spec()?;
+            match sink_spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::First,
+                ) => TerminalSelectPosition::First,
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                ) => TerminalSelectPosition::Last,
+                _ => return None,
+            }
+        }
     };
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
     let source_demand =
@@ -409,13 +420,20 @@ where
             selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
             seen = true;
             Some(match position {
-                crate::builtins::BuiltinSelectionPosition::First => ViewRowAction::Stop,
-                crate::builtins::BuiltinSelectionPosition::Last => ViewRowAction::Emit,
+                TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
+                TerminalSelectPosition::Last => ViewRowAction::Emit,
             })
         },
     )?;
 
     Some(Ok(if seen { selected } else { Val::Null }))
+}
+
+#[derive(Clone, Copy)]
+enum TerminalSelectPosition {
+    First,
+    Last,
+    Nth,
 }
 
 /// Action returned by a sink observer after processing one view row.
@@ -1494,6 +1512,24 @@ mod tests {
         let take_json: serde_json::Value = take.into();
         assert_eq!(take_json, serde_json::json!([1, 2, 3]));
         assert_eq!(take_source.scalar_reads(), 3);
+
+        let nth_source = CountingView::root(&[1, 2, 3, 4]);
+        let nth_body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(2),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+        let nth = super::run_terminal_select_projection(nth_source.clone(), &nth_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(nth, Val::Int(3));
+        assert_eq!(nth_source.scalar_reads(), 2);
+        assert_eq!(nth_source.array_iter_reads(), 0);
     }
 
     #[test]
