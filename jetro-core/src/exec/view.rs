@@ -116,6 +116,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
@@ -326,6 +327,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix.stages,
         &body.stage_kernels,
         source_demand,
@@ -362,6 +364,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         source_demand,
@@ -398,6 +401,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix,
         &body.stage_kernels,
         source_demand,
@@ -437,6 +441,7 @@ enum ViewDriveFlow {
 /// Returns `None` when `source` cannot be iterated as an array.
 fn drive_view_frontier<'a, V, F>(
     source: V,
+    source_capabilities: pipeline::SourceCapabilities,
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
@@ -446,7 +451,7 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
-    let access = pipeline::SourceCapabilities::VIEW_ARRAY.choose_access(source_demand);
+    let access = source_capabilities.choose_access(source_demand);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
             let len = match source.scalar() {
@@ -771,6 +776,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         source_demand,
@@ -823,6 +829,7 @@ where
         pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
@@ -909,6 +916,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
