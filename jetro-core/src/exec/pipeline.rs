@@ -2414,6 +2414,7 @@ mod tests {
             any.source_demand().sink_result,
             crate::plan::demand::SinkResultDemand::UntilMatch
         );
+        assert!(any.source_demand().has_scalar_short_circuit());
         assert_eq!(
             any.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
@@ -2550,6 +2551,7 @@ mod tests {
             indices.source_demand().sink_result,
             crate::plan::demand::SinkResultDemand::None
         );
+        assert!(!indices.source_demand().has_scalar_short_circuit());
 
         let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
         assert!(matches!(dynamic.sink, Sink::Membership(ref spec)
