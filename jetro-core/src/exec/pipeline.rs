@@ -2411,6 +2411,10 @@ mod tests {
             crate::plan::demand::PullDemand::All
         );
         assert_eq!(
+            any.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
+        assert_eq!(
             any.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
         );
@@ -2421,6 +2425,10 @@ mod tests {
             all.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
         );
+        assert_eq!(
+            all.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilFailure
+        );
 
         let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
         assert!(
@@ -2429,6 +2437,10 @@ mod tests {
         assert_eq!(
             find_index.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
+        );
+        assert_eq!(
+            find_index.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
         );
 
         let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
@@ -2516,15 +2528,27 @@ mod tests {
             includes.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Whole
         );
+        assert_eq!(
+            includes.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
 
         let index = lower_query("$.xs.index(\"urgent\")").unwrap();
         assert!(
             matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index)
         );
+        assert_eq!(
+            index.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
 
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
             matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
+        );
+        assert_eq!(
+            indices.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::None
         );
 
         let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
