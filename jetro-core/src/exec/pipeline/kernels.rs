@@ -940,3 +940,59 @@ pub fn eval_cmp_op(lhs: &Val, op: crate::parse::ast::BinOp, rhs: &Val) -> bool {
         crate::util::JsonView::from_val(rhs),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
+    use crate::data::value::Val;
+    use crate::data::view::ValView;
+
+    use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
+
+    fn key_call(method: BuiltinMethod, key: &str) -> BodyKernel {
+        BodyKernel::BuiltinCall {
+            receiver: Box::new(BodyKernel::Current),
+            call: BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(key))),
+        }
+    }
+
+    fn owned_bool(value: Option<ViewKernelValue<ValView<'_>>>) -> Option<bool> {
+        match value? {
+            ViewKernelValue::Owned(Val::Bool(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn object_key_builtin_kernels_run_on_value_views() {
+        let value = Val::obj([
+            (Arc::from("isbn"), Val::Str(Arc::from("x"))),
+            (Arc::from("score"), Val::Int(10)),
+        ].into());
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Has, "isbn"),
+                &view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::HasKey, "isbn"),
+                &view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Missing, "title"),
+                &view
+            )),
+            Some(true)
+        );
+    }
+}
