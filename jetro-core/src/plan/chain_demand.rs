@@ -320,6 +320,14 @@ mod tests {
     }
 
     #[test]
+    fn scalar_missing_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::Missing), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
     fn filter_nth_falls_back_to_all_input() {
         let ops = [op(BuiltinMethod::Filter), op_usize(BuiltinMethod::Nth, 2)];
         let demand = source_demand(&ops, Demand::RESULT);
