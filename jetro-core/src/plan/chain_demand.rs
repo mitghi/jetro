@@ -430,6 +430,25 @@ mod tests {
     }
 
     #[test]
+    fn expanding_builtins_are_full_input_barriers_for_positional_sinks() {
+        for method in [
+            BuiltinMethod::Flatten,
+            BuiltinMethod::Explode,
+            BuiltinMethod::Split,
+            BuiltinMethod::Lines,
+            BuiltinMethod::Words,
+            BuiltinMethod::Chars,
+            BuiltinMethod::CharsOf,
+            BuiltinMethod::Bytes,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+        }
+    }
+
+    #[test]
     fn count_does_not_need_whole_values() {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);

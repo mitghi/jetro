@@ -880,7 +880,9 @@ impl Builtin for Pairwise {
 
 #[inline]
 fn expand_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding).cost(10.0)
+    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
 }
 
 /// `flatten` — concatenates nested arrays.
@@ -921,6 +923,7 @@ impl Builtin for Split {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
             .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Expanding,
@@ -943,6 +946,7 @@ impl Builtin for Split {
 fn expand_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
         .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
         .element()
 }
 
