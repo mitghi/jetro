@@ -247,8 +247,7 @@ impl BodyKernel {
         match self {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
-                receiver.is_view_native()
-                    && (call.spec().view_scalar || call.method.is_view_object_key_method())
+                receiver.is_view_native() && call.method.is_view_projection_method()
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -520,8 +519,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)]
-            if call.method.spec().view_scalar || call.method.is_view_object_key_method() =>
+        [receiver @ .., Opcode::CallMethod(call)] if call.method.is_view_projection_method() =>
         {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
@@ -551,9 +549,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
                 .ok()
                 .flatten()?
             };
-            if !builtin_call.spec().view_scalar
-                && !builtin_call.method.is_view_object_key_method()
-            {
+            if !builtin_call.method.is_view_projection_method() {
                 return None;
             }
             Some(BodyKernel::BuiltinCall {

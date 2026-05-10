@@ -773,9 +773,7 @@ fn terminal_projection_stage_kernel(
     }
 
     match stage {
-        pipeline::Stage::Builtin(call)
-            if call.spec().view_scalar || call.method.is_view_object_key_method() =>
-        {
+        pipeline::Stage::Builtin(call) if call.method.is_view_projection_method() => {
             Some(pipeline::BodyKernel::BuiltinCall {
                 receiver: Box::new(pipeline::BodyKernel::Current),
                 call: call.clone(),

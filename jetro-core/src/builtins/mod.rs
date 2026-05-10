@@ -1431,6 +1431,13 @@ impl BuiltinMethod {
         )
     }
 
+    /// Returns true when this builtin can be composed into a view-native
+    /// projection kernel without materialising the receiver row.
+    #[inline]
+    pub(crate) fn is_view_projection_method(self) -> bool {
+        self.spec().view_scalar || self.is_view_object_key_method()
+    }
+
     /// Returns the full capability descriptor for this builtin.
     /// Called by the pipeline planner and VM to query cardinality, cost, and feature flags.
     #[inline]
