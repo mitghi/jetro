@@ -2789,7 +2789,11 @@ pub(crate) struct Missing;
 impl Builtin for Missing {
     const METHOD: BuiltinMethod = BuiltinMethod::Missing;
     const NAME: &'static str = "missing";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Missing)
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+    }
     #[inline]
     fn apply_args(
         recv: &crate::data::value::Val,

@@ -688,6 +688,7 @@ mod tests {
             BuiltinMethod::FilterKeys,
             BuiltinMethod::Has,
             BuiltinMethod::HasKey,
+            BuiltinMethod::Missing,
             BuiltinMethod::GetPath,
         ] {
             let demand = propagate_demand(
