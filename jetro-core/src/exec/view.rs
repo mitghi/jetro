@@ -469,6 +469,12 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
+    if matches!(
+        source_demand,
+        PullDemand::FirstInput(0) | PullDemand::LastInput(0) | PullDemand::UntilOutput(0)
+    ) {
+        return Some(());
+    }
     let access = source_capabilities.choose_access(source_demand);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
@@ -1457,6 +1463,30 @@ mod tests {
         assert_eq!(nth_source.materialize_reads(), 1);
         assert_eq!(nth_source.scalar_reads(), 1);
         assert_eq!(nth_source.array_iter_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_zero_demand_does_not_touch_source() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let mut observed = 0usize;
+
+        super::drive_view_frontier(
+            source.clone(),
+            crate::exec::pipeline::SourceCapabilities::VIEW_ARRAY,
+            &[],
+            &[],
+            crate::plan::demand::PullDemand::LastInput(0),
+            |_| {
+                observed += 1;
+                Some(super::ViewRowAction::Emit)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed, 0);
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
