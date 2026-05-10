@@ -794,6 +794,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_missing_treats_null_as_missing_without_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"isbn":"x"},{"isbn":null}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map(@.missing("isbn")).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
