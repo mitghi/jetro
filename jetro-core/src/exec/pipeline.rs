@@ -1275,6 +1275,18 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_prefixes_object_projection_fields() {
+        let p = lower_query("$.books.map(@.user).map({name, city: address.city}).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(
+            demand_paths(&demand.result_need),
+            vec!["name", "address.city"]
+        );
+        assert!(p.source_payload_lanes_supported);
+    }
+
+    #[test]
     fn late_projection_guard_respects_prefix_and_barriers() {
         let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
         assert!(p.can_apply_late_projection_from(0));
