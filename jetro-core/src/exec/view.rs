@@ -1661,6 +1661,27 @@ mod tests {
     }
 
     #[test]
+    fn view_full_runner_stops_when_all_sink_fails() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::All,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(false));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
     fn view_full_runner_stops_when_membership_sink_result_is_decided() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let body = PipelineBody {
@@ -1678,6 +1699,28 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_index_sink_matches() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(2));
         assert_eq!(source.scalar_reads(), 3);
         assert_eq!(source.materialize_reads(), 0);
     }
