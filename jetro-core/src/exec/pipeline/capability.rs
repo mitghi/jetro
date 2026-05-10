@@ -712,6 +712,7 @@ mod tests {
         assert_eq!(flat_map.input_mode(), ViewInputMode::ReadsView);
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert_eq!(flat_map.materialization(), ViewMaterialization::Never);
+        assert!(!flat_map.preserves_cardinality());
 
         let remove = ViewStageCapability::RemoveValue(Val::Int(2));
         assert_eq!(remove.input_mode(), ViewInputMode::ReadsView);
@@ -727,6 +728,7 @@ mod tests {
 
         assert!(map.preserves_cardinality());
         assert!(!filter.preserves_cardinality());
+        assert!(!ViewStageCapability::Compact.preserves_cardinality());
     }
 
     #[test]
