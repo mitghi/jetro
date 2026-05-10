@@ -247,7 +247,10 @@ fn decode_method_chain(
                     continue;
                 }
                 let method = BuiltinMethod::from_name(name.as_str());
-                if matches!(method, BuiltinMethod::Compact | BuiltinMethod::Remove) {
+                if matches!(
+                    method.spec().view_stage,
+                    Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
+                ) {
                     if let Some(call) =
                         crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args)
                     {
