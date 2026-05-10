@@ -753,6 +753,12 @@ mod tests {
             BuiltinMethod::HasKey,
             BuiltinMethod::Missing,
             BuiltinMethod::GetPath,
+            BuiltinMethod::HasPath,
+            BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
+            BuiltinMethod::Keys,
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
