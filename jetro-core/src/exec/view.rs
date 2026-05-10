@@ -1210,6 +1210,7 @@ mod tests {
         rows: Arc<[i64]>,
         idx: Option<usize>,
         scalar_reads: Rc<Cell<usize>>,
+        array_iter_reads: Rc<Cell<usize>>,
         materialize_reads: Rc<Cell<usize>>,
     }
 
@@ -1219,6 +1220,7 @@ mod tests {
                 rows: rows.iter().copied().collect::<Vec<_>>().into(),
                 idx: None,
                 scalar_reads: Rc::new(Cell::new(0)),
+                array_iter_reads: Rc::new(Cell::new(0)),
                 materialize_reads: Rc::new(Cell::new(0)),
             }
         }
@@ -1229,6 +1231,10 @@ mod tests {
 
         fn materialize_reads(&self) -> usize {
             self.materialize_reads.get()
+        }
+
+        fn array_iter_reads(&self) -> usize {
+            self.array_iter_reads.get()
         }
     }
 
@@ -1249,6 +1255,7 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx: None,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
@@ -1283,21 +1290,26 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
 
         fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads
+                .set(self.array_iter_reads.get() + 1);
             if self.idx.is_some() {
                 return None;
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
+            let array_iter_reads = Rc::clone(&self.array_iter_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
             Some(Box::new((0..rows.len()).map(move |idx| Self {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
+                array_iter_reads: Rc::clone(&array_iter_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
             })))
         }
@@ -1395,6 +1407,7 @@ mod tests {
         let first_json: serde_json::Value = first.into();
         assert_eq!(first_json, serde_json::json!(1));
         assert_eq!(first_source.materialize_reads(), 1);
+        assert_eq!(first_source.array_iter_reads(), 1);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
@@ -1408,6 +1421,7 @@ mod tests {
         assert_eq!(last_json, serde_json::json!(4));
         assert_eq!(last_source.materialize_reads(), 1);
         assert_eq!(last_source.scalar_reads(), 1);
+        assert_eq!(last_source.array_iter_reads(), 0);
 
         let nth_source = CountingView::root(&[1, 2, 3, 4]);
         let nth_body = PipelineBody {
@@ -1424,6 +1438,7 @@ mod tests {
         assert_eq!(nth_json, serde_json::json!(3));
         assert_eq!(nth_source.materialize_reads(), 1);
         assert_eq!(nth_source.scalar_reads(), 1);
+        assert_eq!(nth_source.array_iter_reads(), 0);
     }
 
     #[test]
@@ -1457,6 +1472,7 @@ mod tests {
             .unwrap();
         assert_eq!(last, Val::Int(4));
         assert_eq!(last_source.scalar_reads(), 2);
+        assert_eq!(last_source.array_iter_reads(), 0);
 
         let take_source = CountingView::root(&[1, 2, 3, 4]);
         let take_body = PipelineBody {
