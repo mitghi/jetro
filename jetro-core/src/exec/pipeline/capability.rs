@@ -67,6 +67,7 @@ impl SourceCapabilities {
             PullDemand::LastInput(1) if self.indexed_array_child => {
                 SourceAccessMode::IndexedFromEnd(0)
             }
+            PullDemand::FirstInput(1) if self.indexed_array_child => SourceAccessMode::Indexed(0),
             PullDemand::LastInput(n) if self.reverse_stream => {
                 SourceAccessMode::Reverse { outputs: n }
             }
@@ -157,6 +158,10 @@ mod source_capability_tests {
             SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(4)),
             SourceAccessMode::ForwardBounded(4)
         );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(1)),
+            SourceAccessMode::Indexed(0)
+        );
     }
 
     #[test]
@@ -231,7 +236,7 @@ mod source_capability_tests {
     }
 
     #[test]
-    fn indexed_only_sources_seek_positional_demands_and_materialize_prefix_demands() {
+    fn indexed_only_sources_seek_single_positional_demands_and_materialize_ranges() {
         let indexed_only = SourceCapabilities {
             forward_stream: false,
             reverse_stream: false,
@@ -249,6 +254,10 @@ mod source_capability_tests {
         );
         assert_eq!(
             indexed_only.choose_access(PullDemand::FirstInput(1)),
+            SourceAccessMode::Indexed(0)
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::FirstInput(2)),
             SourceAccessMode::MaterializedFallback
         );
         assert_eq!(

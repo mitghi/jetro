@@ -1425,7 +1425,7 @@ mod tests {
         let first_json: serde_json::Value = first.into();
         assert_eq!(first_json, serde_json::json!(1));
         assert_eq!(first_source.materialize_reads(), 1);
-        assert_eq!(first_source.array_iter_reads(), 1);
+        assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
@@ -1479,6 +1479,7 @@ mod tests {
             .unwrap();
         assert_eq!(first, Val::Int(1));
         assert_eq!(first_source.scalar_reads(), 1);
+        assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
