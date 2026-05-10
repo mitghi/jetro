@@ -92,6 +92,10 @@ pub enum MembershipSinkOp {
 impl PredicateSinkSpec {
     /// Demand placed on the row stream by this terminal predicate sink.
     pub(crate) fn demand(&self) -> Demand {
+        // Predicate sinks can short-circuit inside their accumulator, but the shared
+        // pull model counts source rows emitted by the stage chain. Treating
+        // `any`/`find_index` as `UntilOutput(1)` would stop after one non-matching
+        // input row before the predicate sink has produced its scalar result.
         Demand {
             pull: PullDemand::All,
             value: if self.op == PredicateSinkOp::FindOne {
