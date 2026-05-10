@@ -84,6 +84,26 @@ pub(crate) fn get_path_impl(val: &Val, segs: &[PathSeg]) -> Val {
     get_path_impl(&next, &segs[1..])
 }
 
+#[inline]
+fn get_path_from_obj(m: &IndexMap<Arc<str>, Val>, segs: &[PathSeg]) -> Val {
+    let Some((first, rest)) = segs.split_first() else {
+        return Val::Null;
+    };
+    match first {
+        PathSeg::Field(key) => m
+            .get(key.as_str())
+            .map(|value| {
+                if rest.is_empty() {
+                    value.clone()
+                } else {
+                    get_path_impl(value, rest)
+                }
+            })
+            .unwrap_or(Val::Null),
+        PathSeg::Index(_) => Val::Null,
+    }
+}
+
 /// Returns a copy of `val` with the node at `segs` replaced by `new_val`; creates missing intermediate objects.
 pub(crate) fn set_path_impl(val: Val, segs: &[PathSeg], new_val: Val) -> Val {
     if segs.is_empty() {
@@ -325,7 +345,6 @@ pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
 pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
     fn pick_obj(m: &IndexMap<Arc<str>, Val>, specs: &[PickSpec]) -> Val {
         let mut out = IndexMap::with_capacity(specs.len());
-        let wrapped = Val::Obj(Arc::new(m.clone()));
         for spec in specs {
             match &spec.source {
                 PickSource::Field(src) => {
@@ -334,7 +353,7 @@ pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
                     }
                 }
                 PickSource::Path(segs) => {
-                    let v = get_path_impl(&wrapped, segs);
+                    let v = get_path_from_obj(m, segs);
                     if !v.is_null() {
                         out.insert(spec.out_key.clone(), v);
                     }
