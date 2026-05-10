@@ -1999,6 +1999,17 @@ mod tests {
 
         let last = lower_query("$.xs.map(@ + 1).last(2)").unwrap();
         assert_eq!(last.exec_path, PhysicalExecPath::Indexed);
+
+        let first_one = lower_query("$.xs.map(@ + 1).first(1)").unwrap();
+        assert_eq!(first_one.exec_path, PhysicalExecPath::Indexed);
+        assert!(matches!(first_one.source_access, SourceAccessMode::Indexed(0)));
+
+        let last_one = lower_query("$.xs.map(@ + 1).last(1)").unwrap();
+        assert_eq!(last_one.exec_path, PhysicalExecPath::Indexed);
+        assert!(matches!(
+            last_one.source_access,
+            SourceAccessMode::IndexedFromEnd(0)
+        ));
     }
 
     #[test]
