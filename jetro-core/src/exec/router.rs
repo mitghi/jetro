@@ -991,6 +991,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_compact_last_ignores_physical_null_tail() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":2},null],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.compact().map(id).last()"#).unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_map_first_reads_head_without_materializing_result_row() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
