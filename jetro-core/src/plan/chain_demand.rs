@@ -320,6 +320,14 @@ mod tests {
     }
 
     #[test]
+    fn scalar_has_key_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::HasKey), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
     fn scalar_missing_preserves_positional_demand() {
         let ops = [op(BuiltinMethod::Missing), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
