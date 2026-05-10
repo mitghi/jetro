@@ -441,6 +441,10 @@ pub struct Pipeline {
     #[allow(dead_code)]
     pub(crate) source_payload_lanes_supported: bool,
 
+    /// Whether bounded demand can materialize only selected source rows.
+    #[allow(dead_code)]
+    pub(crate) source_selected_materialization_supported: bool,
+
     /// Access mode selected from source capabilities plus propagated pull demand.
     pub(crate) source_access: SourceAccessMode,
 
@@ -490,6 +494,8 @@ impl PipelineBody {
         let source_access = source_capabilities.choose_access(source_demand.chain.pull);
         let source_payload_lanes_supported = source_capabilities
             .supports_payload_lanes(&payload_demand.scan_need, &payload_demand.result_need);
+        let source_selected_materialization_supported =
+            source_capabilities.supports_selected_materialization(source_demand.chain.pull);
         let fallback_boundary = Pipeline::fallback_boundary_for(&self.stages, exec_path);
         Pipeline {
             source,
@@ -499,6 +505,7 @@ impl PipelineBody {
             late_projection,
             source_capabilities,
             source_payload_lanes_supported,
+            source_selected_materialization_supported,
             source_access,
             fallback_boundary,
             stages: self.stages,

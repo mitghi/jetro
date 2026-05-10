@@ -87,6 +87,19 @@ impl SourceCapabilities {
                 self.selected_row_materialization,
             )
     }
+
+    /// Returns true when this source can defer owned materialization to only
+    /// rows selected by bounded or positional demand.
+    pub(crate) fn supports_selected_materialization(self, demand: PullDemand) -> bool {
+        self.selected_row_materialization
+            && matches!(
+                demand,
+                PullDemand::FirstInput(_)
+                    | PullDemand::LastInput(_)
+                    | PullDemand::NthInput(_)
+                    | PullDemand::UntilOutput(_)
+            )
+    }
 }
 
 fn payload_lane_supported(need: &FieldDemand, field_key_read: bool, whole_value_ok: bool) -> bool {
@@ -262,6 +275,21 @@ mod source_capability_tests {
             .supports_payload_lanes(&fields, &FieldDemand::Whole));
         assert!(!SourceCapabilities::MATERIALIZED_ARRAY
             .supports_payload_lanes(&FieldDemand::Whole, &fields));
+    }
+
+    #[test]
+    fn selected_materialization_requires_bounded_demand() {
+        assert!(SourceCapabilities::VIEW_ARRAY
+            .supports_selected_materialization(PullDemand::LastInput(1)));
+        assert!(SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_selected_materialization(PullDemand::UntilOutput(3)));
+        assert!(!SourceCapabilities::VIEW_ARRAY.supports_selected_materialization(PullDemand::All));
+
+        let no_selected = SourceCapabilities {
+            selected_row_materialization: false,
+            ..SourceCapabilities::MATERIALIZED_ARRAY
+        };
+        assert!(!no_selected.supports_selected_materialization(PullDemand::FirstInput(1)));
     }
 }
 
