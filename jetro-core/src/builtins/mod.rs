@@ -728,6 +728,8 @@ pub enum BuiltinViewStage {
     Filter,
     /// Null-removal filter stage.
     Compact,
+    /// Literal equality removal filter stage.
+    RemoveValue,
     /// Per-row projection stage.
     Map,
     /// Per-row expansion stage (one-to-many).
@@ -934,6 +936,7 @@ impl BuiltinViewStage {
         match self {
             Self::Filter
             | Self::Compact
+            | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -953,6 +956,7 @@ impl BuiltinViewStage {
             Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
             | Self::Compact
+            | Self::RemoveValue
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -965,7 +969,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
-            Self::Filter | Self::Compact => BuiltinCardinality::Filtering,
+            Self::Filter | Self::Compact | Self::RemoveValue => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
@@ -987,6 +991,7 @@ impl BuiltinViewStage {
         match self {
             Self::Filter
             | Self::Compact
+            | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -1001,7 +1006,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
-            Self::Filter | Self::Compact | Self::TakeWhile | Self::DropWhile => 0.5,
+            Self::Filter | Self::Compact | Self::RemoveValue | Self::TakeWhile | Self::DropWhile => 0.5,
             Self::Distinct => 1.0,
             Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,

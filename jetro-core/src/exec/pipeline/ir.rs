@@ -537,6 +537,17 @@ impl Stage {
     ) -> Option<ViewStageCapability> {
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
+        if stage == BuiltinViewStage::RemoveValue {
+            return match self {
+                Stage::Builtin(call) => match &call.args {
+                    crate::builtins::BuiltinArgs::Val(target) => {
+                        Some(ViewStageCapability::RemoveValue(target.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
         if stage == BuiltinViewStage::Distinct {
             return match desc.body {
                 Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {

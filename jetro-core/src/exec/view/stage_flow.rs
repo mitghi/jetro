@@ -145,6 +145,18 @@ where
                 Some(ViewStageFlow::Keep(item))
             }
         }
+        pipeline::ViewStageCapability::RemoveValue(ref target) => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            if super::view_matches_value(&item, &target) {
+                Some(ViewStageFlow::Drop)
+            } else {
+                Some(ViewStageFlow::Keep(item))
+            }
+        }
         pipeline::ViewStageCapability::TakeWhile { kernel } => {
             debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
             debug_assert_eq!(

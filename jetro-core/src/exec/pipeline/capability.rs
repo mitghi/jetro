@@ -369,7 +369,7 @@ pub(crate) struct ViewPrefixCapabilities {
 }
 
 /// Per-stage capability for the view execution path; each variant carries a kernel index into `stage_kernels`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum ViewStageCapability {
     /// Filter stage: evaluates the view-native predicate at `kernel`, keeping matching views.
     Filter {
@@ -378,6 +378,8 @@ pub(crate) enum ViewStageCapability {
     },
     /// Compact stage: keeps non-null views.
     Compact,
+    /// Remove stage: drops views equal to a literal target.
+    RemoveValue(Val),
     /// Map stage: evaluates the view-native projection at `kernel`, yielding a sub-view.
     Map {
         /// Index into `stage_kernels` for the projection kernel.
@@ -448,10 +450,11 @@ impl ViewStageCapability {
     }
 
     /// Returns the `BuiltinViewStage` tag that corresponds to this capability variant.
-    pub(crate) fn view_stage(self) -> BuiltinViewStage {
+    pub(crate) fn view_stage(&self) -> BuiltinViewStage {
         match self {
             Self::Filter { .. } => BuiltinViewStage::Filter,
             Self::Compact => BuiltinViewStage::Compact,
+            Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
@@ -464,17 +467,17 @@ impl ViewStageCapability {
     }
 
     /// Returns whether this stage reads the input view or only acts on position.
-    pub(crate) fn input_mode(self) -> ViewInputMode {
+    pub(crate) fn input_mode(&self) -> ViewInputMode {
         view_input_mode(self.view_stage().input_mode())
     }
 
     /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
-    pub(crate) fn output_mode(self) -> ViewOutputMode {
+    pub(crate) fn output_mode(&self) -> ViewOutputMode {
         view_output_mode(self.view_stage().output_mode())
     }
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
-    pub(crate) fn materialization(self) -> ViewMaterialization {
+    pub(crate) fn materialization(&self) -> ViewMaterialization {
         if matches!(self, Self::KeyedReduce { .. }) {
             return ViewMaterialization::StageFinalValue;
         }

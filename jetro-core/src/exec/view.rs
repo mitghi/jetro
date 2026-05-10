@@ -263,6 +263,13 @@ fn view_membership_matches<'a, V>(item: &V, target: &Val) -> bool
 where
     V: ValueView<'a>,
 {
+    view_matches_value(item, target)
+}
+
+fn view_matches_value<'a, V>(item: &V, target: &Val) -> bool
+where
+    V: ValueView<'a>,
+{
     let target_view = JsonView::from_val(target);
     if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
         return crate::util::json_vals_eq(item.scalar(), target_view);
@@ -583,7 +590,7 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
-    let Some(stage) = stages.get(stage_idx).copied() else {
+    let Some(stage) = stages.get(stage_idx).cloned() else {
         return match observe(&item)? {
             ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
             ViewRowAction::Emit => {
