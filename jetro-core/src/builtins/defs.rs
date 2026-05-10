@@ -145,6 +145,7 @@ impl Builtin for Compact {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_stage(BuiltinViewStage::Compact)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)

@@ -133,6 +133,18 @@ where
                 Some(ViewStageFlow::Drop)
             }
         }
+        pipeline::ViewStageCapability::Compact => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            if matches!(item.scalar(), crate::util::JsonView::Null) {
+                Some(ViewStageFlow::Drop)
+            } else {
+                Some(ViewStageFlow::Keep(item))
+            }
+        }
         pipeline::ViewStageCapability::TakeWhile { kernel } => {
             debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
             debug_assert_eq!(

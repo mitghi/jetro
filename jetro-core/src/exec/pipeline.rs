@@ -1274,6 +1274,19 @@ mod tests {
     }
 
     #[test]
+    fn compact_participates_in_filter_like_demand() {
+        use serde_json::json;
+        let p = lower_query("$.xs.compact().last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+
+        let root = Val::from(&json!({"xs": [null, 1, null, 2]}));
+        assert_eq!(p.run(&root).unwrap(), Val::Int(2));
+    }
+
+    #[test]
     fn payload_demand_splits_filter_scan_from_late_projection() {
         let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();

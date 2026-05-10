@@ -726,6 +726,8 @@ pub enum BuiltinStructural {
 pub enum BuiltinViewStage {
     /// Predicate-driven row filter stage.
     Filter,
+    /// Null-removal filter stage.
+    Compact,
     /// Per-row projection stage.
     Map,
     /// Per-row expansion stage (one-to-many).
@@ -931,6 +933,7 @@ impl BuiltinViewStage {
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
             Self::Filter
+            | Self::Compact
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -949,6 +952,7 @@ impl BuiltinViewStage {
             Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
             Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
+            | Self::Compact
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -961,7 +965,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
-            Self::Filter => BuiltinCardinality::Filtering,
+            Self::Filter | Self::Compact => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
@@ -982,6 +986,7 @@ impl BuiltinViewStage {
     pub fn cost(self) -> f64 {
         match self {
             Self::Filter
+            | Self::Compact
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -996,7 +1001,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
-            Self::Filter | Self::TakeWhile | Self::DropWhile => 0.5,
+            Self::Filter | Self::Compact | Self::TakeWhile | Self::DropWhile => 0.5,
             Self::Distinct => 1.0,
             Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,

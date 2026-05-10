@@ -376,6 +376,8 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the predicate kernel.
         kernel: usize,
     },
+    /// Compact stage: keeps non-null views.
+    Compact,
     /// Map stage: evaluates the view-native projection at `kernel`, yielding a sub-view.
     Map {
         /// Index into `stage_kernels` for the projection kernel.
@@ -426,6 +428,7 @@ impl ViewStageCapability {
             BuiltinViewStage::Filter if kernel_is_view_native => Some(Self::Filter {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::Compact => Some(Self::Compact),
             BuiltinViewStage::Map if kernel_is_view_native => Some(Self::Map {
                 kernel: kernel_index,
             }),
@@ -448,6 +451,7 @@ impl ViewStageCapability {
     pub(crate) fn view_stage(self) -> BuiltinViewStage {
         match self {
             Self::Filter { .. } => BuiltinViewStage::Filter,
+            Self::Compact => BuiltinViewStage::Compact,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
