@@ -738,12 +738,19 @@ mod tests {
         }
         .view_capability(8, None)
         .unwrap();
+        let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Compact,
+            crate::builtins::BuiltinArgs::None,
+        ))
+        .view_capability(9, None)
+        .unwrap();
 
         assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
+        assert!(matches!(compact, ViewStageCapability::Compact));
         let cancel = crate::builtins::BuiltinMethod::Reverse
             .spec()
             .cancellation
