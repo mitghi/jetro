@@ -829,10 +829,11 @@ where
                 (
                     crate::builtins::BuiltinMethod::Missing,
                     crate::builtins::BuiltinArgs::Str(key),
-                ) => view
-                    .has_key(key.as_ref())
-                    .map(|present| Val::Bool(!present))
-                    .map(ViewKernelValue::Owned),
+                ) => view.has_key(key.as_ref()).map(|present| {
+                    let missing = !present
+                        || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
+                    ViewKernelValue::Owned(Val::Bool(missing))
+                }),
                 (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
                     view.object_keys().map(ViewKernelValue::Owned)
                 }
@@ -990,6 +991,27 @@ mod tests {
         assert_eq!(
             owned_bool(eval_view_kernel(
                 &key_call(BuiltinMethod::Missing, "title"),
+                &view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Missing, "isbn"),
+                &view
+            )),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn missing_key_kernel_treats_null_as_missing_on_value_views() {
+        let value = Val::obj([(Arc::from("isbn"), Val::Null)].into());
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::Missing, "isbn"),
                 &view
             )),
             Some(true)
