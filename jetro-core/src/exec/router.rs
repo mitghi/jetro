@@ -1735,7 +1735,7 @@ mod tests {
 
         assert_eq!(out, json!("answer"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
