@@ -3047,7 +3047,13 @@ impl Builtin for HasKey {
     const METHOD: BuiltinMethod = BuiltinMethod::HasKey;
     const NAME: &'static str = "has_key";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec().view_scalar()
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
     }
     #[inline]
     fn apply_args(
@@ -3055,7 +3061,7 @@ impl Builtin for HasKey {
         args: &super::BuiltinArgs,
     ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => Some(super::has_apply(recv, p).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Str(p) => Some(super::has_key_apply(recv, p)),
             _ => None,
         }
     }

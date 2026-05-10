@@ -1667,9 +1667,10 @@ impl BuiltinCall {
             (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
                 apply_or_recv!(implode_apply(recv, field))
             }
-            (BuiltinMethod::Has | BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => {
+            (BuiltinMethod::Has, BuiltinArgs::Str(k)) => {
                 apply_or_recv!(has_apply(recv, k))
             }
+            (BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => return Some(has_key_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
             }

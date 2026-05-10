@@ -996,7 +996,7 @@ mod tests {
             BuiltinMethod::ParseInt,
             // `Has` was previously element-wise but the streaming pipeline
             // wrapped its boolean result into `[true]`. Spec is now whole-
-            // input scalar (not element-wise) — no wrap, no element-wise
+            // input scalar (not element-wise) - no wrap, no element-wise
             // vectorisation. Same for `Keys` / `Values` / `Entries`.
             BuiltinMethod::HasKey,
             BuiltinMethod::Lines,
@@ -1006,6 +1006,7 @@ mod tests {
         }
 
         for method in [
+            BuiltinMethod::Has,
             BuiltinMethod::Len,
             BuiltinMethod::FromJson,
             BuiltinMethod::Sort,

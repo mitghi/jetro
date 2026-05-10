@@ -264,6 +264,20 @@ pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
+/// Returns `Val::Bool(true)` when the receiver is an object containing `key`.
+///
+/// Unlike `has`, this is deliberately object-only: arrays use `has` for
+/// membership and strings use `has`/`contains` for substring checks.
+#[inline]
+pub fn has_key_apply(recv: &Val, key: &str) -> Val {
+    let found = match recv {
+        Val::Obj(m) => m.contains_key(key),
+        Val::ObjSmall(pairs) => pairs.iter().any(|(k, _)| k.as_ref() == key),
+        _ => false,
+    };
+    Val::Bool(found)
+}
+
 /// Keeps only the listed `keys` from an object (or each object in an array), dropping all others.
 #[inline]
 pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {

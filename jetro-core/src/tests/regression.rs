@@ -218,6 +218,16 @@ mod tests {
             vm_query("$.user.has_key(\"phone\")", &doc).unwrap(),
             json!(false)
         );
+
+        let doc = json!({"items": [{"email": "a@b.com"}], "text": "email"});
+        assert_eq!(
+            vm_query("$.items.has_key(\"email\")", &doc).unwrap(),
+            json!(false)
+        );
+        assert_eq!(
+            vm_query("$.text.has_key(\"email\")", &doc).unwrap(),
+            json!(false)
+        );
     }
 
     #[test]
