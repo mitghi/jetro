@@ -300,7 +300,7 @@ impl Demand {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FieldDemand, FieldSet};
+    use super::{FieldDemand, FieldSet, PullDemand};
 
     fn paths(need: FieldDemand) -> Vec<String> {
         match need {
@@ -331,6 +331,28 @@ mod tests {
         assert_eq!(
             paths(FieldDemand::Fields(prefixed)),
             vec!["user.name", "user.address.city"]
+        );
+    }
+
+    #[test]
+    fn pull_demand_caps_inputs_without_crossing_prefix_bounds() {
+        assert_eq!(PullDemand::All.cap_inputs(3), PullDemand::FirstInput(3));
+        assert_eq!(
+            PullDemand::UntilOutput(2).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(
+            PullDemand::LastInput(2).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(
+            PullDemand::FirstInput(5).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(PullDemand::NthInput(2).cap_inputs(3), PullDemand::NthInput(2));
+        assert_eq!(
+            PullDemand::NthInput(3).cap_inputs(3),
+            PullDemand::FirstInput(3)
         );
     }
 }
