@@ -472,6 +472,17 @@ where
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
         }
+        pipeline::SourceAccessMode::IndexedFromEnd(offset) => {
+            let len = match source.scalar() {
+                JsonView::ArrayLen(len) => len,
+                _ => return None,
+            };
+            let Some(idx) = len.checked_sub(offset + 1) else {
+                return Some(());
+            };
+            let items = std::iter::once(source.index(idx as i64));
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
+        }
         pipeline::SourceAccessMode::Forward
         | pipeline::SourceAccessMode::ForwardBounded(_)
         | pipeline::SourceAccessMode::MaterializedFallback => {}

@@ -64,6 +64,9 @@ impl SourceCapabilities {
     pub(crate) fn choose_access(self, demand: PullDemand) -> SourceAccessMode {
         match demand {
             PullDemand::NthInput(idx) if self.indexed_array_child => SourceAccessMode::Indexed(idx),
+            PullDemand::LastInput(1) if self.indexed_array_child => {
+                SourceAccessMode::IndexedFromEnd(0)
+            }
             PullDemand::LastInput(n) if self.reverse_stream => {
                 SourceAccessMode::Reverse { outputs: n }
             }
@@ -124,6 +127,8 @@ pub(crate) enum SourceAccessMode {
     },
     /// Seek directly to this array child.
     Indexed(usize),
+    /// Seek directly to this array child counted from the end.
+    IndexedFromEnd(usize),
     /// Conservative materialised fallback.
     MaterializedFallback,
 }
@@ -143,6 +148,10 @@ mod source_capability_tests {
         assert_eq!(
             SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(2)),
             SourceAccessMode::Reverse { outputs: 2 }
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::IndexedFromEnd(0)
         );
         assert_eq!(
             SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(4)),
@@ -167,7 +176,7 @@ mod source_capability_tests {
         );
         assert_eq!(
             caps.choose_access(PullDemand::LastInput(1)),
-            SourceAccessMode::Reverse { outputs: 1 }
+            SourceAccessMode::IndexedFromEnd(0)
         );
     }
 
@@ -217,12 +226,12 @@ mod source_capability_tests {
         );
         assert_eq!(
             indexed_forward.choose_access(PullDemand::LastInput(1)),
-            SourceAccessMode::Forward
+            SourceAccessMode::IndexedFromEnd(0)
         );
     }
 
     #[test]
-    fn indexed_only_sources_seek_nth_and_materialize_other_demands() {
+    fn indexed_only_sources_seek_positional_demands_and_materialize_prefix_demands() {
         let indexed_only = SourceCapabilities {
             forward_stream: false,
             reverse_stream: false,
@@ -244,7 +253,7 @@ mod source_capability_tests {
         );
         assert_eq!(
             indexed_only.choose_access(PullDemand::LastInput(1)),
-            SourceAccessMode::MaterializedFallback
+            SourceAccessMode::IndexedFromEnd(0)
         );
     }
 

@@ -1182,7 +1182,7 @@ mod tests {
         );
         assert!(matches!(
             p.source_access,
-            SourceAccessMode::Reverse { outputs: 1 }
+            SourceAccessMode::IndexedFromEnd(0)
         ));
         assert!(!p.source_capabilities.tape_view);
         assert!(matches!(
