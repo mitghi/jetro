@@ -570,7 +570,22 @@ fn object_key_view_call(method: crate::builtins::BuiltinMethod) -> bool {
         crate::builtins::BuiltinMethod::Has
             | crate::builtins::BuiltinMethod::HasKey
             | crate::builtins::BuiltinMethod::Missing
+            | crate::builtins::BuiltinMethod::GetPath
+            | crate::builtins::BuiltinMethod::HasPath
     )
+}
+
+fn walk_view_path<'a, V>(mut cur: V, segs: &[crate::builtins::PathSeg]) -> V
+where
+    V: ValueView<'a>,
+{
+    for seg in segs {
+        cur = match seg {
+            crate::builtins::PathSeg::Field(field) => cur.field(field.as_str()),
+            crate::builtins::PathSeg::Index(index) => cur.index(*index),
+        };
+    }
+    cur
 }
 
 fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
@@ -834,6 +849,24 @@ where
                         || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
                     ViewKernelValue::Owned(Val::Bool(missing))
                 }),
+                (
+                    crate::builtins::BuiltinMethod::GetPath,
+                    crate::builtins::BuiltinArgs::Str(path),
+                ) => Some(ViewKernelValue::View(walk_view_path(
+                    view,
+                    &crate::builtins::parse_path_segs(path.as_ref()),
+                ))),
+                (
+                    crate::builtins::BuiltinMethod::HasPath,
+                    crate::builtins::BuiltinArgs::Str(path),
+                ) => {
+                    let found = !matches!(
+                        walk_view_path(view, &crate::builtins::parse_path_segs(path.as_ref()))
+                            .scalar(),
+                        JsonView::Null
+                    );
+                    Some(ViewKernelValue::Owned(Val::Bool(found)))
+                }
                 (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
                     view.object_keys().map(ViewKernelValue::Owned)
                 }
@@ -948,7 +981,7 @@ mod tests {
 
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::data::value::Val;
-    use crate::data::view::ValView;
+    use crate::data::view::{ValView, ValueView};
 
     use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
 
@@ -1015,6 +1048,40 @@ mod tests {
                 &view
             )),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn path_builtin_kernels_run_on_value_views() {
+        let value = Val::obj(
+            [(
+                Arc::from("user"),
+                Val::obj([(Arc::from("name"), Val::Str(Arc::from("ada")))].into()),
+            )]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        let name = eval_view_kernel(&key_call(BuiltinMethod::GetPath, "user.name"), &view);
+        match name {
+            Some(ViewKernelValue::View(view)) => {
+                assert_eq!(view.materialize(), Val::Str(Arc::from("ada")))
+            }
+            _ => panic!("expected borrowed path view"),
+        }
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::HasPath, "user.name"),
+                &view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_call(BuiltinMethod::HasPath, "user.missing"),
+                &view
+            )),
+            Some(false)
         );
     }
 }
