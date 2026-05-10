@@ -1287,6 +1287,20 @@ mod tests {
     }
 
     #[test]
+    fn compact_first_scans_until_non_null_output() {
+        use serde_json::json;
+        let p = lower_query("$.xs.compact().first()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::UntilOutput(1)
+        );
+        assert!(matches!(p.source_access, SourceAccessMode::Forward));
+
+        let root = Val::from(&json!({"xs": [null, null, 3, 4]}));
+        assert_eq!(p.run(&root).unwrap(), Val::Int(3));
+    }
+
+    #[test]
     fn payload_demand_splits_filter_scan_from_late_projection() {
         let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();
