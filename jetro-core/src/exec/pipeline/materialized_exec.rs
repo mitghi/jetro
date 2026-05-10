@@ -683,3 +683,99 @@ pub(crate) fn apply_lambda_obj(
     }
     Ok(Val::obj(out))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use crate::data::context::Env;
+    use crate::data::value::Val;
+    use crate::parse::ast::BinOp;
+
+    use super::super::{
+        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody,
+        PredicateSinkOp, PredicateSinkSpec, Sink, Source,
+    };
+
+    struct CountingRows {
+        next: i64,
+        end: i64,
+        reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingRows {
+        fn new(end: i64, reads: Rc<Cell<usize>>) -> Self {
+            Self {
+                next: 1,
+                end,
+                reads,
+            }
+        }
+    }
+
+    impl Iterator for CountingRows {
+        type Item = Val;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.next > self.end {
+                return None;
+            }
+            self.reads.set(self.reads.get() + 1);
+            let value = self.next;
+            self.next += 1;
+            Some(Val::Int(value))
+        }
+    }
+
+    fn empty_pipeline(sink: Sink, sink_kernels: Vec<BodyKernel>) -> super::Pipeline {
+        PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink,
+            stage_kernels: Vec::new(),
+            sink_kernels,
+        }
+        .with_source(Source::Receiver(Val::Null))
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_any_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_index_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            Vec::new(),
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Int(2));
+        assert_eq!(reads.get(), 3);
+    }
+}
