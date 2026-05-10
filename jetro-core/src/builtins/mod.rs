@@ -486,6 +486,8 @@ pub enum BuiltinArgs {
     None,
     /// A single string argument (field name, separator, pattern, etc.).
     Str(Arc<str>),
+    /// A pre-parsed dot/bracket path used by hot path helpers.
+    Path(Arc<[PathSeg]>),
     /// Two string arguments (needle + replacement, pattern + replacement).
     StrPair { first: Arc<str>, second: Arc<str> },
     /// A list of string arguments (field list for `pick`, `omit`, etc.).
@@ -1674,8 +1676,14 @@ impl BuiltinCall {
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
             }
+            (BuiltinMethod::GetPath, BuiltinArgs::Path(path)) => {
+                return Some(get_path_impl(recv, path))
+            }
             (BuiltinMethod::HasPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(has_path_apply(recv, p))
+            }
+            (BuiltinMethod::HasPath, BuiltinArgs::Path(path)) => {
+                return Some(Val::Bool(!get_path_impl(recv, path).is_null()))
             }
             (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(del_path_apply(recv, p))
@@ -1922,9 +1930,11 @@ impl BuiltinCall {
                 }
                 Self::new(method, BuiltinArgs::StrVec(keys))
             }
-            BuiltinMethod::GetPath
-            | BuiltinMethod::HasPath
-            | BuiltinMethod::Has
+            BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
+                let path = args.str(0)?;
+                Self::new(method, BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()))
+            }
+            BuiltinMethod::Has
             | BuiltinMethod::HasKey
             | BuiltinMethod::Join
             | BuiltinMethod::Explode

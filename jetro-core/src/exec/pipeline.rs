@@ -1348,6 +1348,16 @@ mod tests {
     }
 
     #[test]
+    fn literal_path_helpers_store_preparsed_paths() {
+        let p = lower_query(r#"$.books.map(@.get_path("user.name")).last()"#).unwrap();
+        assert!(matches!(
+            p.late_projection.as_ref().map(|projection| &projection.kernel),
+            Some(BodyKernel::BuiltinCall { call, .. })
+                if matches!(call.args, crate::builtins::BuiltinArgs::Path(_))
+        ));
+    }
+
+    #[test]
     fn late_projection_composes_chained_maps() {
         let query = "$.books.map(user).map(name).last()";
         let p = lower_query(query).unwrap();

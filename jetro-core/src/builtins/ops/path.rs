@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use std::sync::Arc;
 
 /// A single resolved segment of a dot/bracket path string.
+#[derive(Debug, Clone)]
 pub(crate) enum PathSeg {
     /// A named object field (`.foo`).
     Field(String),

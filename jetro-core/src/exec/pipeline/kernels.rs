@@ -846,6 +846,10 @@ where
                     &crate::builtins::parse_path_segs(path.as_ref()),
                 ))),
                 (
+                    crate::builtins::BuiltinMethod::GetPath,
+                    crate::builtins::BuiltinArgs::Path(path),
+                ) => Some(ViewKernelValue::View(walk_view_path(view, path))),
+                (
                     crate::builtins::BuiltinMethod::HasPath,
                     crate::builtins::BuiltinArgs::Str(path),
                 ) => {
@@ -854,6 +858,13 @@ where
                             .scalar(),
                         JsonView::Null
                     );
+                    Some(ViewKernelValue::Owned(Val::Bool(found)))
+                }
+                (
+                    crate::builtins::BuiltinMethod::HasPath,
+                    crate::builtins::BuiltinArgs::Path(path),
+                ) => {
+                    let found = !matches!(walk_view_path(view, path).scalar(), JsonView::Null);
                     Some(ViewKernelValue::Owned(Val::Bool(found)))
                 }
                 (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {

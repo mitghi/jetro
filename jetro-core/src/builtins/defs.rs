@@ -2080,6 +2080,7 @@ impl Builtin for GetPath {
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::get_path_apply(recv, p) }
+            super::BuiltinArgs::Path(path) => Some(super::get_path_impl(recv, path)),
             _ => None,
         }
     }
@@ -2110,6 +2111,7 @@ impl Builtin for HasPath {
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::has_path_apply(recv, p) }
+            super::BuiltinArgs::Path(path) => Some(crate::data::value::Val::Bool(!super::get_path_impl(recv, path).is_null())),
             _ => None,
         }
     }
