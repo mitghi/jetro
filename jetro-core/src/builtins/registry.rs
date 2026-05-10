@@ -686,6 +686,7 @@ mod tests {
         for method in [
             BuiltinMethod::TransformValues,
             BuiltinMethod::FilterKeys,
+            BuiltinMethod::Has,
             BuiltinMethod::HasKey,
             BuiltinMethod::GetPath,
         ] {

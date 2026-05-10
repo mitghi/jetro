@@ -3016,6 +3016,8 @@ impl Builtin for Has {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(
