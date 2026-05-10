@@ -1616,6 +1616,28 @@ mod tests {
     }
 
     #[test]
+    fn ascending_sort_last_map_projects_only_after_bottomk_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(score).map(isbn).last(2)";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortBottomK(2)));
+
+        assert_pipeline_matches_vm_query(
+            query,
+            "$.rows.sort(score).map(isbn).last(2)",
+            json!({
+                "rows": [
+                    {"isbn": "low", "score": 10},
+                    {"isbn": "top", "score": 30},
+                    {"isbn": "mid", "score": 20}
+                ]
+            }),
+        );
+    }
+
+    #[test]
     fn sort_take_while_take_uses_prefix_demand_without_key_correlation() {
         let p = lower_query("$.rows.sort_by(-price).take_while(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
