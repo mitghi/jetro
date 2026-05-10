@@ -1966,6 +1966,28 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_tail_path_helpers_stay_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"user":{"name":"top"},"score":30},{"user":{"name":"low"},"score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let name = j
+            .collect(r#"$.data.sort_by(-score).map(@.get_path("user.name")).last()"#)
+            .unwrap();
+        let found = j
+            .collect(r#"$.data.sort_by(-score).map(@.has_path("user.name")).last()"#)
+            .unwrap();
+
+        assert_eq!(name, json!("low"));
+        assert_eq!(found, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();
