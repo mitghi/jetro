@@ -498,7 +498,7 @@ where
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
-            let Some(idx) = len.checked_sub(offset + 1) else {
+            let Some(idx) = index_from_end(len, offset) else {
                 return Some(());
             };
             let items = std::iter::once(source.index(idx as i64));
@@ -510,6 +510,10 @@ where
     }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
+}
+
+fn index_from_end(len: usize, offset: usize) -> Option<usize> {
+    len.checked_sub(offset.checked_add(1)?)
 }
 
 /// Drives an arbitrary `items` iterator through the view-stage frontier, calling
@@ -1484,6 +1488,14 @@ mod tests {
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_ignores_overflowing_from_end_offset() {
+        assert_eq!(super::index_from_end(4, 0), Some(3));
+        assert_eq!(super::index_from_end(4, 3), Some(0));
+        assert_eq!(super::index_from_end(4, 4), None);
+        assert_eq!(super::index_from_end(4, usize::MAX), None);
     }
 
     #[test]
