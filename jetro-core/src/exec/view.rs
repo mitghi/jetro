@@ -180,7 +180,7 @@ where
             }
             let sink_done = sink_acc.observe_builtin_lazy(
                 *accumulator,
-                || item.materialize(),
+                || scalar_view_to_owned_val(item.scalar()).unwrap_or_else(|| item.materialize()),
                 || {
                     let kernel = (*project_kernel)?;
                     let kernel = sink_kernels.get(kernel)?;
@@ -479,7 +479,7 @@ where
     if source_demand.is_zero() {
         return Some(());
     }
-    let access = source_capabilities.choose_access(source_demand);
+    let access = view_frontier_access(source_capabilities, source_demand, stages);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
             let len = match source.scalar() {
@@ -517,6 +517,31 @@ where
     }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
+}
+
+fn view_frontier_access(
+    source_capabilities: pipeline::SourceCapabilities,
+    source_demand: PullDemand,
+    stages: &[pipeline::ViewStageCapability],
+) -> pipeline::SourceAccessMode {
+    let access = source_capabilities.choose_access(source_demand);
+    if matches!(access, pipeline::SourceAccessMode::IndexedFromEnd(_))
+        && !view_stages_preserve_cardinality(stages)
+    {
+        if source_capabilities.reverse_stream {
+            return pipeline::SourceAccessMode::Reverse { outputs: 1 };
+        }
+        if source_capabilities.forward_stream {
+            return pipeline::SourceAccessMode::Forward;
+        }
+    }
+    access
+}
+
+fn view_stages_preserve_cardinality(stages: &[pipeline::ViewStageCapability]) -> bool {
+    stages
+        .iter()
+        .all(|stage| matches!(stage, pipeline::ViewStageCapability::Map { .. }))
 }
 
 fn index_from_end(len: usize, offset: usize) -> Option<usize> {
