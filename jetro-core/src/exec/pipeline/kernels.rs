@@ -1111,6 +1111,20 @@ mod tests {
         let picked_json: serde_json::Value = picked.expect("pick output").into();
         assert_eq!(picked_json, serde_json::json!({"title": "b", "score": 2}));
 
+        let omit = BodyKernel::BuiltinCall {
+            receiver: Box::new(BodyKernel::Current),
+            call: BuiltinCall::new(
+                BuiltinMethod::Omit,
+                BuiltinArgs::StrVec(vec![Arc::from("debug")]),
+            ),
+        };
+        let omitted = eval_view_kernel(&omit, &view).and_then(|value| match value {
+            ViewKernelValue::Owned(value) => Some(value),
+            _ => None,
+        });
+        let omitted_json: serde_json::Value = omitted.expect("omit output").into();
+        assert_eq!(omitted_json, serde_json::json!({"title": "b", "score": 2}));
+
         for method in [BuiltinMethod::Values, BuiltinMethod::Entries] {
             let kernel = BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
