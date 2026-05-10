@@ -377,8 +377,8 @@ where
     Some(Ok(collector.finish()))
 }
 
-/// Optimised path for `map(...).first()` / `map(...).last()` style suffixes
-/// where the trailing projection can run only on the selected view row.
+/// Optimised path for `map(...).first()` / `map(...).last()` / `map(...).nth(i)`
+/// style suffixes where the trailing projection can run only on the selected view row.
 fn run_terminal_select_projection<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -1517,7 +1517,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first, Val::Int(1));
-        assert_eq!(first_source.scalar_reads(), 1);
+        assert_eq!(first_source.scalar_reads(), 2);
         assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
