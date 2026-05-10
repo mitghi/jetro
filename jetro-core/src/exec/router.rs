@@ -1852,6 +1852,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_numeric_predicate_map_last_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":100,"delta":-1.2},{"isbn":"mid","score":90,"delta":-2.4},{"isbn":"answer","score":80,"delta":2.6}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).filter(delta.abs() > 2.0).map(isbn).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("answer"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();
