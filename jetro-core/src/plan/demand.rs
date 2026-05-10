@@ -355,6 +355,15 @@ mod tests {
             PullDemand::FirstInput(3)
         );
     }
+
+    #[test]
+    fn pull_demand_zero_only_matches_no_read_variants() {
+        assert!(PullDemand::FirstInput(0).is_zero());
+        assert!(PullDemand::LastInput(0).is_zero());
+        assert!(PullDemand::UntilOutput(0).is_zero());
+        assert!(!PullDemand::NthInput(0).is_zero());
+        assert!(!PullDemand::All.is_zero());
+    }
 }
 
 /// Adapter trait implemented by whichever operator representation a planner
