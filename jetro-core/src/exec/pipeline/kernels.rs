@@ -1084,4 +1084,42 @@ mod tests {
             Some(false)
         );
     }
+
+    #[test]
+    fn object_helper_builtin_kernels_run_on_value_views() {
+        let value = Val::obj(
+            [
+                (Arc::from("title"), Val::Str(Arc::from("b"))),
+                (Arc::from("score"), Val::Int(2)),
+                (Arc::from("debug"), Val::Bool(false)),
+            ]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        let pick = BodyKernel::BuiltinCall {
+            receiver: Box::new(BodyKernel::Current),
+            call: BuiltinCall::new(
+                BuiltinMethod::Pick,
+                BuiltinArgs::StrVec(vec![Arc::from("title"), Arc::from("score")]),
+            ),
+        };
+        let picked = eval_view_kernel(&pick, &view).and_then(|value| match value {
+                ViewKernelValue::Owned(value) => Some(value),
+                _ => None,
+            });
+        let picked_json: serde_json::Value = picked.expect("pick output").into();
+        assert_eq!(picked_json, serde_json::json!({"title": "b", "score": 2}));
+
+        for method in [BuiltinMethod::Values, BuiltinMethod::Entries] {
+            let kernel = BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: BuiltinCall::new(method, BuiltinArgs::None),
+            };
+            assert!(matches!(
+                eval_view_kernel(&kernel, &view),
+                Some(ViewKernelValue::Owned(_))
+            ));
+        }
+    }
 }
