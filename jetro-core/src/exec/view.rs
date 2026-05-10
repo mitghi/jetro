@@ -918,6 +918,18 @@ where
             &body.stage_kernels,
         );
     }
+    if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
+        winners.as_slice(),
+        body,
+        plan.sort_stage + 1,
+    ) {
+        return Some(out);
+    }
+    if let Some(out) =
+        run_sorted_rows_view_suffix(winners.as_slice(), body, plan.sort_stage + 1, base_env)
+    {
+        return Some(out);
+    }
     let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
 
     Some(run_materialized_suffix(
@@ -953,6 +965,96 @@ where
     )?;
 
     Some(Ok(collector.finish()))
+}
+
+/// Applies a trailing view-native projection only to the selected sorted row
+/// for bounded-sort suffixes such as `.sort_by(k).map(f).last()`.
+fn run_sorted_rows_terminal_select_projection_suffix<'a, V>(
+    rows: &[V],
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let (relative_prefix_len, project_kernel) = terminal_projection_run(body, suffix_start)?;
+    let prefix_end = suffix_start + relative_prefix_len;
+    let position = match &body.sink {
+        pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
+        _ => {
+            let sink_spec = body.sink.builtin_sink_spec()?;
+            match sink_spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::First,
+                ) => TerminalSelectPosition::First,
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                ) => TerminalSelectPosition::Last,
+                _ => return None,
+            }
+        }
+    };
+    let prefix =
+        terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(
+        &body.stages[suffix_start..prefix_end],
+        &body.sink,
+    )
+    .chain
+    .pull;
+    let mut selected = Val::Null;
+    let mut seen = false;
+
+    drive_view_iter(
+        rows.iter().cloned(),
+        &prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            seen = true;
+            Some(match position {
+                TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
+                TerminalSelectPosition::Last => ViewRowAction::Emit,
+            })
+        },
+    )?;
+
+    Some(Ok(if seen { selected } else { Val::Null }))
+}
+
+/// Feeds pre-sorted view rows through a fully view-native suffix and sink,
+/// avoiding the materialized boundary for bounded sort winners.
+fn run_sorted_rows_view_suffix<'a, V>(
+    rows: &[V],
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+    base_env: &Env,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let suffix = view_suffix_capabilities(body, suffix_start)?;
+    let sink = match resolve_view_sink(suffix.sink, Some(base_env)) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
+    let source_demand =
+        pipeline::Pipeline::segment_source_demand(&body.stages[suffix_start..], &body.sink)
+            .chain
+            .pull;
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
+
+    drive_view_iter(
+        rows.iter().cloned(),
+        &suffix.stages,
+        &body.stage_kernels,
+        source_demand,
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
+    )?;
+
+    Some(sink_acc.finish_result(false))
 }
 
 /// Handles `SortUntilOutput` strategy: sorts rows with an `OrderedKeySorter`
