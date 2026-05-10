@@ -1683,6 +1683,33 @@ mod tests {
     }
 
     #[test]
+    fn prefix_while_terminal_sinks_keep_safe_source_demand() {
+        let take_first = lower_query("$.rows.take_while(price > 20).first()").unwrap();
+        assert_eq!(
+            take_first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+
+        let take_last = lower_query("$.rows.take_while(price > 20).last()").unwrap();
+        assert_eq!(
+            take_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let drop_first = lower_query("$.rows.drop_while(price < 20).first()").unwrap();
+        assert_eq!(
+            drop_first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let drop_last = lower_query("$.rows.drop_while(price < 20).last()").unwrap();
+        assert_eq!(
+            drop_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+    }
+
+    #[test]
     fn sort_prefix_filter_last_does_not_shrink_before_filtering() {
         use serde_json::json;
 
