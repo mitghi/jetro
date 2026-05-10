@@ -2498,6 +2498,11 @@ mod tests {
             all.source_demand().sink_result,
             crate::plan::demand::SinkResultDemand::UntilFailure
         );
+        assert!(all.source_demand().has_scalar_short_circuit());
+        assert_eq!(
+            all.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
 
         let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
         assert!(
@@ -2511,11 +2516,21 @@ mod tests {
             find_index.source_demand().sink_result,
             crate::plan::demand::SinkResultDemand::UntilMatch
         );
+        assert!(find_index.source_demand().has_scalar_short_circuit());
+        assert_eq!(
+            find_index.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
 
         let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
         assert!(
             matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::IndicesWhere)
         );
+        assert_eq!(
+            indices_where.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::None
+        );
+        assert!(!indices_where.source_demand().has_scalar_short_circuit());
         assert_eq!(
             indices_where.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
@@ -2610,6 +2625,7 @@ mod tests {
             index.source_demand().sink_result,
             crate::plan::demand::SinkResultDemand::UntilMatch
         );
+        assert!(index.source_demand().has_scalar_short_circuit());
 
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
