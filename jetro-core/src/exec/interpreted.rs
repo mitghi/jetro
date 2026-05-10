@@ -234,6 +234,17 @@ impl ExecCtx<'_> {
         self.env_with_fast_locals(Val::Null)
     }
 
+    /// Constructs the environment needed by a view pipeline. Most view-native
+    /// pipelines can use a null root; dynamic membership targets may contain
+    /// root-relative expressions and therefore need the real document root.
+    fn view_pipeline_env(&self, body: &pipeline::PipelineBody) -> Result<Env, EvalError> {
+        if pipeline_body_has_dynamic_membership_target(body) {
+            self.j.root_val().map(|root| self.env_with_fast_locals(root))
+        } else {
+            Ok(self.null_env_with_fast_locals())
+        }
+    }
+
     /// Constructs an `Env` with the given `current` value and all fast-locals pre-populated.
     fn env_with_fast_locals(&self, current: Val) -> Env {
         let mut env = Env::new(current);
@@ -498,7 +509,10 @@ impl ExecCtx<'_> {
             } {
                 let root = crate::data::view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
-                let env = self.null_env_with_fast_locals();
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
                 return view_pipeline::run_with_env(source, body, Some(self.j), &env);
             }
         }
@@ -518,7 +532,10 @@ impl ExecCtx<'_> {
                 Ok(tape) => tape,
                 Err(err) => return Some(Err(err)),
             } {
-                let env = self.null_env_with_fast_locals();
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
                 return pipeline::run_tape_field_chain(body, tape, keys, &env);
             }
         }
@@ -547,7 +564,10 @@ impl ExecCtx<'_> {
                     .clone()
                     .with_source(pipeline::Source::Receiver(source.materialize()));
                 let root = Val::Null;
-                let env = self.null_env_with_fast_locals();
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
                 return Some(pipeline.run_with_env(
                     &root,
                     &env,
@@ -571,7 +591,10 @@ impl ExecCtx<'_> {
                 Err(err) => return Some(Err(err)),
             };
             let source = view_pipeline::walk_fields(ValView::new(&root), keys);
-            let env = self.null_env_with_fast_locals();
+            let env = match self.view_pipeline_env(body) {
+                Ok(env) => env,
+                Err(err) => return Some(Err(err)),
+            };
             if let Some(result) = view_pipeline::run_with_env(source, body, Some(self.j), &env) {
                 return Some(result);
             }
@@ -960,4 +983,14 @@ fn run_root_path(root: &Val, steps: &[PhysicalPathStep]) -> Val {
         };
     }
     cur
+}
+
+fn pipeline_body_has_dynamic_membership_target(body: &pipeline::PipelineBody) -> bool {
+    matches!(
+        &body.sink,
+        pipeline::Sink::Membership(pipeline::MembershipSinkSpec {
+            target: pipeline::MembershipSinkTarget::Program(_),
+            ..
+        })
+    )
 }
