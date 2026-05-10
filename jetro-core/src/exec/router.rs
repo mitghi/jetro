@@ -943,6 +943,22 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_remove_last_ignores_removed_physical_tail() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":3},{"id":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.map(id).remove(2).last()"#).unwrap();
+
+        assert_eq!(out, json!(3));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_remove_take_stays_borrowed() {
         let j = Jetro::from_bytes(
             br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":4}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
