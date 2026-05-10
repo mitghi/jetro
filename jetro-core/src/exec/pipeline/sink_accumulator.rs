@@ -666,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn scalar_short_circuit_decisions_match_sink_result_demand() {
+        use crate::plan::demand::SinkResultDemand;
+
+        for op in [PredicateSinkOp::Any, PredicateSinkOp::FindIndex] {
+            let sink = predicate_sink(op);
+            assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
+            let mut acc = SinkAccumulator::new(&sink);
+            assert!(!acc.observe_predicate_lazy(op, false, || Val::Null).unwrap());
+            assert!(acc.observe_predicate_lazy(op, true, || Val::Null).unwrap());
+        }
+
+        let sink = predicate_sink(PredicateSinkOp::All);
+        assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilFailure);
+        let mut acc = SinkAccumulator::new(&sink);
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::All, true, || Val::Null)
+            .unwrap());
+        assert!(acc
+            .observe_predicate_lazy(PredicateSinkOp::All, false, || Val::Null)
+            .unwrap());
+
+        for op in [MembershipSinkOp::Includes, MembershipSinkOp::Index] {
+            let sink = membership_sink(op);
+            assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
+            let mut acc = SinkAccumulator::new(&sink);
+            assert!(!acc.observe_membership_match(op, false));
+            assert!(acc.observe_membership_match(op, true));
+        }
+    }
+
+    #[test]
     fn membership_indices_sink_retains_all_matches_without_stopping() {
         let sink = membership_sink(MembershipSinkOp::IndicesOf);
         let mut acc = SinkAccumulator::new(&sink);
