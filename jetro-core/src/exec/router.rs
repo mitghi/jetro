@@ -825,9 +825,13 @@ mod tests {
         let found = j
             .collect(r#"$.books.map(@.has_path("user.name")).last()"#)
             .unwrap();
+        let missing = j
+            .collect(r#"$.books.map(@.has_path("user.missing")).last()"#)
+            .unwrap();
 
         assert_eq!(name, json!("bob"));
         assert_eq!(found, json!(true));
+        assert_eq!(missing, json!(false));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
