@@ -1497,6 +1497,28 @@ mod tests {
     }
 
     #[test]
+    fn view_full_runner_stops_when_membership_sink_result_is_decided() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
     fn view_full_runner_handles_select_many_first_and_last() {
         let first_source = CountingView::root(&[1, 2, 3, 4]);
         let first_body = PipelineBody {
