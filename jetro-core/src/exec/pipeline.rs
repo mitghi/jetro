@@ -2082,6 +2082,28 @@ mod tests {
     }
 
     #[test]
+    fn positional_terminal_sinks_respect_prefix_slices() {
+        use serde_json::json;
+        let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
+
+        let take_last = lower_query("$.xs.take(2).last()").unwrap();
+        assert_eq!(
+            take_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(2)
+        );
+        let out: serde_json::Value = take_last.run(&root).unwrap().into();
+        assert_eq!(out, json!(2));
+
+        let skip_last = lower_query("$.xs.skip(2).last()").unwrap();
+        assert_eq!(
+            skip_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        let out: serde_json::Value = skip_last.run(&root).unwrap().into();
+        assert_eq!(out, json!(4));
+    }
+
+    #[test]
     fn select_many_sink_demand_is_directional() {
         let first = Sink::SelectMany {
             n: 4,
