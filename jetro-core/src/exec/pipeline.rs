@@ -1254,6 +1254,7 @@ mod tests {
         assert!(p.source_capabilities.field_key_read);
         assert!(p.source_capabilities.selected_row_materialization);
         assert!(p.source_payload_lanes_supported);
+        assert!(p.source_selected_materialization_supported);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 0, .. })
@@ -1275,10 +1276,24 @@ mod tests {
         assert_eq!(demand_paths(&demand.scan_need), vec!["user.active"]);
         assert_eq!(demand_paths(&demand.result_need), vec!["name"]);
         assert!(p.source_payload_lanes_supported);
+        assert!(p.source_selected_materialization_supported);
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 1, .. })
         ));
+    }
+
+    #[test]
+    fn selected_materialization_planning_tracks_pull_demand() {
+        assert!(lower_query("$.books.map(isbn).first()")
+            .unwrap()
+            .source_selected_materialization_supported);
+        assert!(lower_query("$.books.filter(price > 20).map(isbn).take(2)")
+            .unwrap()
+            .source_selected_materialization_supported);
+        assert!(!lower_query("$.books.map(isbn)")
+            .unwrap()
+            .source_selected_materialization_supported);
     }
 
     #[test]
