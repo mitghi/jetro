@@ -1257,7 +1257,8 @@ mod tests {
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-        PipelineBody, Sink, SourceAccessMode, SourceCapabilities, Stage, ViewStageCapability,
+        PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceAccessMode,
+        SourceCapabilities, Stage, ViewStageCapability,
     };
     use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
@@ -1472,6 +1473,27 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
         assert_eq!(source.scalar_reads(), 2);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_predicate_sink_result_is_decided() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
