@@ -449,6 +449,27 @@ mod tests {
     }
 
     #[test]
+    fn barrier_builtins_request_full_ordered_input() {
+        for method in [
+            BuiltinMethod::Append,
+            BuiltinMethod::Prepend,
+            BuiltinMethod::Diff,
+            BuiltinMethod::Intersect,
+            BuiltinMethod::Union,
+            BuiltinMethod::Join,
+            BuiltinMethod::Zip,
+            BuiltinMethod::ZipLongest,
+            BuiltinMethod::Fold,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
     fn count_does_not_need_whole_values() {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);

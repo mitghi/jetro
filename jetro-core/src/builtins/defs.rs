@@ -1081,7 +1081,9 @@ impl Builtin for Collect {
 
 #[inline]
 fn barrier_default_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(20.0)
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
+        .cost(20.0)
+        .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `sort` — full-barrier comparison sort, optional key.
@@ -1555,7 +1557,9 @@ impl Builtin for Reverse {
 
 #[inline]
 fn barrier_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(10.0)
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `append(arr)` — concatenates barrier.
