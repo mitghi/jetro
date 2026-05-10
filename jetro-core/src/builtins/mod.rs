@@ -2847,9 +2847,13 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
         }
-        BuiltinMethod::GetPath
-        | BuiltinMethod::HasPath
-        | BuiltinMethod::Has
+        BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
+            BuiltinCall::new(
+                method,
+                BuiltinArgs::Path(parse_path_segs(str_arg!(0)?.as_ref()).into()),
+            )
+        }
+        BuiltinMethod::Has
         | BuiltinMethod::HasKey
         | BuiltinMethod::Missing
         | BuiltinMethod::Explode
