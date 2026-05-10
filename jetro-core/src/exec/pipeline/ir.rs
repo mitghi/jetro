@@ -19,7 +19,9 @@ use crate::builtins::{
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
-use crate::plan::demand::{Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, ValueNeed};
+use crate::plan::demand::{
+    Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, SinkResultDemand, ValueNeed,
+};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
@@ -42,6 +44,8 @@ pub enum Position {
 pub struct SinkDemand {
     /// Element-level pull/value/order requirements propagated to the source chain.
     pub chain: ChainDemand,
+    /// Scalar sink-result decision demand, separate from row-output pull demand.
+    pub sink_result: SinkResultDemand,
     /// Set when the sink selects exactly one element by position (first/last).
     pub positional: Option<Position>,
 }
@@ -51,6 +55,7 @@ impl SinkDemand {
     /// demand can be computed.
     pub const RESULT: SinkDemand = SinkDemand {
         chain: ChainDemand::RESULT,
+        sink_result: SinkResultDemand::None,
         positional: None,
     };
 }
@@ -110,30 +115,35 @@ impl Sink {
                     value: ValueNeed::Whole,
                     order: false,
                 },
+                sink_result: SinkResultDemand::None,
                 positional: Some(Position::First),
             };
         }
         if matches!(self, Sink::SelectMany { .. }) {
             return SinkDemand {
                 chain: self.select_many_demand().expect("checked SelectMany"),
+                sink_result: SinkResultDemand::None,
                 positional: None,
             };
         }
         if let Sink::Predicate(spec) = self {
             return SinkDemand {
                 chain: spec.demand(),
+                sink_result: spec.sink_result_demand(),
                 positional: None,
             };
         }
         if let Sink::Membership(spec) = self {
             return SinkDemand {
                 chain: spec.demand(),
+                sink_result: spec.sink_result_demand(),
                 positional: None,
             };
         }
         if let Sink::ArgExtreme(spec) = self {
             return SinkDemand {
                 chain: spec.demand(),
+                sink_result: SinkResultDemand::None,
                 positional: None,
             };
         }
@@ -282,6 +292,7 @@ fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<us
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
     SinkDemand {
         chain: builtin_sink_demand(spec),
+        sink_result: SinkResultDemand::None,
         positional: match spec.accumulator {
             BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
             _ => None,
@@ -780,7 +791,11 @@ impl Stage {
         } else {
             None
         };
-        SinkDemand { chain, positional }
+        SinkDemand {
+            chain,
+            sink_result: demand.sink_result,
+            positional,
+        }
     }
 
     pub(crate) fn ordered_prefix_effect(

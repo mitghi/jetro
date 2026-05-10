@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
-use crate::plan::demand::{Demand, PullDemand, ValueNeed};
+use crate::plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed};
 use crate::vm::Program;
 
 use super::NumOp;
@@ -107,6 +107,15 @@ impl PredicateSinkSpec {
         }
     }
 
+    /// Scalar sink-result demand for accumulator-level short-circuit planning.
+    pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
+        match self.op {
+            PredicateSinkOp::Any | PredicateSinkOp::FindIndex => SinkResultDemand::UntilMatch,
+            PredicateSinkOp::All => SinkResultDemand::UntilFailure,
+            PredicateSinkOp::IndicesWhere | PredicateSinkOp::FindOne => SinkResultDemand::None,
+        }
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.predicate)
@@ -129,6 +138,14 @@ impl MembershipSinkSpec {
             pull: PullDemand::All,
             value: ValueNeed::Whole,
             order: false,
+        }
+    }
+
+    /// Scalar sink-result demand for accumulator-level short-circuit planning.
+    pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
+        match self.op {
+            MembershipSinkOp::Includes | MembershipSinkOp::Index => SinkResultDemand::UntilMatch,
+            MembershipSinkOp::IndicesOf => SinkResultDemand::None,
         }
     }
 
@@ -236,6 +253,22 @@ mod tests {
         assert_eq!(any.pull, PullDemand::All);
         assert_eq!(any.value, ValueNeed::Predicate);
         assert!(!any.order);
+        assert_eq!(
+            PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: empty_program(),
+            }
+            .sink_result_demand(),
+            SinkResultDemand::UntilMatch
+        );
+        assert_eq!(
+            PredicateSinkSpec {
+                op: PredicateSinkOp::All,
+                predicate: empty_program(),
+            }
+            .sink_result_demand(),
+            SinkResultDemand::UntilFailure
+        );
 
         let find_one = PredicateSinkSpec {
             op: PredicateSinkOp::FindOne,
@@ -258,6 +291,15 @@ mod tests {
         assert_eq!(membership.pull, PullDemand::All);
         assert_eq!(membership.value, ValueNeed::Whole);
         assert!(!membership.order);
+        assert_eq!(
+            MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
+                method: BuiltinMethod::Includes,
+            }
+            .sink_result_demand(),
+            SinkResultDemand::UntilMatch
+        );
 
         let arg_extreme = ArgExtremeSinkSpec {
             want_max: true,

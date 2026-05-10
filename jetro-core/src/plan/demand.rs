@@ -226,6 +226,26 @@ pub enum PullDemand {
     UntilOutput(usize),
 }
 
+/// Demand for scalar terminal sinks whose result can be decided before all rows
+/// are consumed. This is intentionally separate from `PullDemand::UntilOutput`,
+/// which counts rows emitted by the stage chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkResultDemand {
+    /// The sink result cannot be decided early by a single row event.
+    None,
+    /// Stop once a predicate or membership row matches.
+    UntilMatch,
+    /// Stop once a predicate row fails.
+    UntilFailure,
+}
+
+impl SinkResultDemand {
+    /// Returns true when the sink result may allow executor-level short-circuiting.
+    pub(crate) fn can_short_circuit(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 impl PullDemand {
     /// Returns true when this demand can be satisfied without reading any input rows.
     pub(crate) fn is_zero(self) -> bool {
@@ -300,7 +320,7 @@ impl Demand {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FieldDemand, FieldSet, PullDemand};
+    use super::{FieldDemand, FieldSet, PullDemand, SinkResultDemand};
 
     fn paths(need: FieldDemand) -> Vec<String> {
         match need {
@@ -363,6 +383,13 @@ mod tests {
         assert!(PullDemand::UntilOutput(0).is_zero());
         assert!(!PullDemand::NthInput(0).is_zero());
         assert!(!PullDemand::All.is_zero());
+    }
+
+    #[test]
+    fn sink_result_demand_is_separate_from_row_output_demand() {
+        assert!(SinkResultDemand::UntilMatch.can_short_circuit());
+        assert!(SinkResultDemand::UntilFailure.can_short_circuit());
+        assert!(!SinkResultDemand::None.can_short_circuit());
     }
 }
 
