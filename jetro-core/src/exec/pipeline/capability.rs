@@ -483,6 +483,11 @@ impl ViewStageCapability {
         }
         ViewMaterialization::Never
     }
+
+    /// Returns true when this view stage emits exactly one row for every input row.
+    pub(crate) fn preserves_cardinality(&self) -> bool {
+        matches!(self, Self::Map { .. })
+    }
 }
 
 /// Describes how a pipeline sink interacts with the view domain.
@@ -712,11 +717,16 @@ mod tests {
         assert_eq!(remove.input_mode(), ViewInputMode::ReadsView);
         assert_eq!(remove.output_mode(), ViewOutputMode::PreservesInputView);
         assert_eq!(remove.materialization(), ViewMaterialization::Never);
+        assert!(!remove.preserves_cardinality());
 
         let take = ViewStageCapability::Take(2);
         assert_eq!(take.input_mode(), ViewInputMode::SkipsViewRead);
         assert_eq!(take.output_mode(), ViewOutputMode::PreservesInputView);
         assert_eq!(take.materialization(), ViewMaterialization::Never);
+        assert!(!take.preserves_cardinality());
+
+        assert!(map.preserves_cardinality());
+        assert!(!filter.preserves_cardinality());
     }
 
     #[test]

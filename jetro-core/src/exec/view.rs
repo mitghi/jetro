@@ -541,7 +541,7 @@ fn view_frontier_access(
 fn view_stages_preserve_cardinality(stages: &[pipeline::ViewStageCapability]) -> bool {
     stages
         .iter()
-        .all(|stage| matches!(stage, pipeline::ViewStageCapability::Map { .. }))
+        .all(pipeline::ViewStageCapability::preserves_cardinality)
 }
 
 fn index_from_end(len: usize, offset: usize) -> Option<usize> {
