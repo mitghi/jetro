@@ -61,6 +61,7 @@ impl SinkDemand {
 
     /// Returns true when the terminal scalar result can stop the executor loop
     /// before row-output pull demand is satisfied.
+    #[cfg(test)]
     pub(crate) fn has_scalar_short_circuit(self) -> bool {
         self.sink_result.can_short_circuit()
     }
