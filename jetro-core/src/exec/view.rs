@@ -979,6 +979,28 @@ where
 {
     let (relative_prefix_len, project_kernel) = terminal_projection_run(body, suffix_start)?;
     let prefix_end = suffix_start + relative_prefix_len;
+    let prefix =
+        terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
+    let source_demand = pipeline::Pipeline::segment_source_demand(
+        &body.stages[suffix_start..prefix_end],
+        &body.sink,
+    )
+    .chain
+    .pull;
+    if let pipeline::Sink::SelectMany { .. } = body.sink {
+        let mut selected = Vec::new();
+        drive_view_iter(
+            rows.iter().cloned(),
+            &prefix,
+            &body.stage_kernels,
+            source_demand,
+            |item| {
+                selected.push(eval_owned_scalar_or_value_kernel(item, &project_kernel)?);
+                Some(ViewRowAction::Emit)
+            },
+        )?;
+        return Some(Ok(Val::Arr(Arc::new(selected))));
+    }
     let position = match &body.sink {
         pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
         _ => {
@@ -994,14 +1016,6 @@ where
             }
         }
     };
-    let prefix =
-        terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(
-        &body.stages[suffix_start..prefix_end],
-        &body.sink,
-    )
-    .chain
-    .pull;
     let mut selected = Val::Null;
     let mut seen = false;
 
