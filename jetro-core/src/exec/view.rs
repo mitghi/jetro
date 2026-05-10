@@ -469,10 +469,7 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
-    if matches!(
-        source_demand,
-        PullDemand::FirstInput(0) | PullDemand::LastInput(0) | PullDemand::UntilOutput(0)
-    ) {
+    if source_demand.is_zero() {
         return Some(());
     }
     let access = source_capabilities.choose_access(source_demand);

@@ -1881,6 +1881,14 @@ mod tests {
         );
         let take_json: serde_json::Value = take.run(&doc).unwrap().into();
         assert_eq!(take_json, json!([40, 30]));
+
+        let take_zero = lower_query("$.xs.reverse().take(0)").unwrap();
+        assert_eq!(
+            take_zero.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(0)
+        );
+        let take_zero_json: serde_json::Value = take_zero.run(&doc).unwrap().into();
+        assert_eq!(take_zero_json, json!([]));
     }
 
     #[test]

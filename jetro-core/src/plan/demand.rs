@@ -227,6 +227,14 @@ pub enum PullDemand {
 }
 
 impl PullDemand {
+    /// Returns true when this demand can be satisfied without reading any input rows.
+    pub(crate) fn is_zero(self) -> bool {
+        matches!(
+            self,
+            PullDemand::FirstInput(0) | PullDemand::LastInput(0) | PullDemand::UntilOutput(0)
+        )
+    }
+
     /// Return a `PullDemand` capped to at most `n` input elements,
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {

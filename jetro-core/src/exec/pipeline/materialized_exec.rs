@@ -200,6 +200,9 @@ where
         Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
         _ => None,
     };
+    if source_demand.is_zero() {
+        return sink_acc.finish_result(false);
+    }
     let terminal_map_idx = if late_projection.is_none()
         && matches!(pipeline.sink, Sink::Collect)
         && pipeline
