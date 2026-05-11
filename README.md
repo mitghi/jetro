@@ -4,6 +4,10 @@
 [![docs.rs](https://img.shields.io/badge/docs-jetro-blue)](https://docs.rs/jetro)
 [![license](https://img.shields.io/crates/l/jetro.svg)](LICENSE)
 
+<p align="center">
+  <img src="media/jetro_logo.png" alt="Jetro" width="320">
+</p>
+
 📖 **[The Jetro Book](https://mitghi.github.io/jetro-book/)** is the best
 place to start, guided tour, full grammar reference, each builtin with
 working examples and some recipes.
