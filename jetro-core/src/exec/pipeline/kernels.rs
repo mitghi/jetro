@@ -80,6 +80,8 @@ pub enum BodyKernel {
     },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
+    /// Short-circuits through a list of predicates, returning `true` on the first success.
+    Or(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
     FieldCmpLit(Arc<str>, crate::parse::ast::BinOp, Val),
     /// Traverses a field chain and compares the result to a literal in one fused step.
@@ -230,7 +232,7 @@ impl BodyKernel {
             Self::ChildMapSum { .. } => FieldDemand::Whole,
             Self::ArraySelect { array, .. } => array.field_demand(),
             Self::Match { .. } => FieldDemand::Whole,
-            Self::And(predicates) => predicates
+            Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
                 .fold(FieldDemand::None, |need, predicate| {
                     need.merge(predicate.field_demand())
@@ -276,7 +278,7 @@ impl BodyKernel {
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
-            Self::And(predicates) => predicates
+            Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
             Self::FString(fstring) => fstring.parts.iter().any(|part| match part {
@@ -308,7 +310,9 @@ impl BodyKernel {
             Self::ChildMapSum { array, map } => array.is_view_native() && map.is_view_native(),
             Self::ArraySelect { array, .. } => array.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
-            Self::And(predicates) => predicates.iter().all(Self::is_view_native),
+            Self::And(predicates) | Self::Or(predicates) => {
+                predicates.iter().all(Self::is_view_native)
+            }
             _ => true,
         }
     }
@@ -540,6 +544,9 @@ impl BodyKernel {
         if let Some(kernel) = classify_and_kernel(ops) {
             return kernel;
         }
+        if let Some(kernel) = classify_or_kernel(ops) {
+            return kernel;
+        }
         Self::Generic
     }
 }
@@ -565,6 +572,31 @@ fn classify_and_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
 fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     match kernel {
         BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
+        other => out.push(other),
+    }
+}
+
+// returns None rather than wrapping a Generic sub-kernel, which would defeat specialisation
+fn classify_or_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
+    let (lhs_ops, rhs) = match ops {
+        [lhs @ .., crate::vm::Opcode::OrOp(rhs)] if !lhs.is_empty() => (lhs, rhs),
+        _ => return None,
+    };
+    let lhs_prog = crate::vm::Program::new(lhs_ops.to_vec(), "<pipeline-or-lhs>");
+    let lhs = BodyKernel::classify(&lhs_prog);
+    let rhs = BodyKernel::classify(rhs);
+    if matches!(lhs, BodyKernel::Generic) || matches!(rhs, BodyKernel::Generic) {
+        return None;
+    }
+    let mut predicates = Vec::new();
+    flatten_or_kernel(lhs, &mut predicates);
+    flatten_or_kernel(rhs, &mut predicates);
+    Some(BodyKernel::Or(predicates.into()))
+}
+
+fn flatten_or_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
+    match kernel {
+        BodyKernel::Or(predicates) => out.extend(predicates.iter().cloned()),
         other => out.push(other),
     }
 }
@@ -1009,6 +1041,14 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             }
             Ok(Val::Bool(true))
         }
+        BodyKernel::Or(predicates) => {
+            for predicate in predicates.iter() {
+                if crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
+                    return Ok(Val::Bool(true));
+                }
+            }
+            Ok(Val::Bool(false))
+        }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -1431,6 +1471,18 @@ where
             }
             Some(ViewKernelValue::Owned(Val::Bool(true)))
         }
+        BodyKernel::Or(predicates) => {
+            for predicate in predicates.iter() {
+                let passes = match eval_view_kernel(predicate, item)? {
+                    ViewKernelValue::View(view) => view.scalar().truthy(),
+                    ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+                };
+                if passes {
+                    return Some(ViewKernelValue::Owned(Val::Bool(true)));
+                }
+            }
+            Some(ViewKernelValue::Owned(Val::Bool(false)))
+        }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
             Some(ViewKernelValue::Owned(Val::Bool(
@@ -1693,6 +1745,40 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Str(Arc::from("delivered")))
+        );
+    }
+
+    #[test]
+    fn or_predicate_kernels_run_on_value_views() {
+        let src = r#"user.tier == "gold" or user.tier == "platinum""#;
+        let expr = parse(src).expect("parse or predicate");
+        let program = Compiler::compile(&expr, src);
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::Or(_)));
+        assert!(kernel.is_view_native());
+
+        let gold = Val::obj(
+            [(
+                Arc::from("user"),
+                Val::obj([(Arc::from("tier"), Val::Str(Arc::from("gold")))].into()),
+            )]
+            .into(),
+        );
+        let bronze = Val::obj(
+            [(
+                Arc::from("user"),
+                Val::obj([(Arc::from("tier"), Val::Str(Arc::from("bronze")))].into()),
+            )]
+            .into(),
+        );
+
+        assert_eq!(
+            owned_bool(eval_view_kernel(&kernel, &ValView::new(&gold))),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(&kernel, &ValView::new(&bronze))),
+            Some(false)
         );
     }
 
