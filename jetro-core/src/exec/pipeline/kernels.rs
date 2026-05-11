@@ -11,6 +11,7 @@ use crate::builtins::BuiltinCall;
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::parse::ast::{Expr, ObjField, Step};
 use crate::plan::demand::{FieldDemand, FieldSet};
 use crate::util::JsonView;
 
@@ -208,7 +209,148 @@ impl ObjectKernel {
     }
 }
 
+fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
+    let mut entries = Vec::with_capacity(fields.len());
+    for field in fields {
+        let (key, value, optional, omit_null) = match field {
+            ObjField::Short(name) => (
+                Arc::from(name.as_str()),
+                BodyKernel::FieldRead(Arc::from(name.as_str())),
+                false,
+                true,
+            ),
+            ObjField::Kv {
+                key,
+                val,
+                optional,
+                cond: None,
+            } => {
+                let value = BodyKernel::classify_expr(val);
+                if matches!(value, BodyKernel::Generic) {
+                    return BodyKernel::Generic;
+                }
+                (Arc::from(key.as_str()), value, *optional, false)
+            }
+            _ => return BodyKernel::Generic,
+        };
+        entries.push(ObjectKernelEntry {
+            key,
+            value,
+            optional,
+            omit_null,
+        });
+    }
+    BodyKernel::Object(ObjectKernel {
+        entries: entries.into(),
+    })
+}
+
+fn classify_fstring_expr(parts: &[crate::parse::ast::FStringPart]) -> BodyKernel {
+    let mut out = Vec::with_capacity(parts.len());
+    let mut base_capacity = 0usize;
+    for part in parts {
+        match part {
+            crate::parse::ast::FStringPart::Lit(value) => {
+                base_capacity += value.len();
+                out.push(FStringKernelPart::Lit(Arc::from(value.as_str())));
+            }
+            crate::parse::ast::FStringPart::Interp { expr, fmt: None } => {
+                let kernel = BodyKernel::classify_expr(expr);
+                if matches!(kernel, BodyKernel::Generic | BodyKernel::FString(_)) {
+                    return BodyKernel::Generic;
+                }
+                base_capacity += 8;
+                out.push(FStringKernelPart::Interp(kernel));
+            }
+            crate::parse::ast::FStringPart::Interp { .. } => return BodyKernel::Generic,
+        }
+    }
+    BodyKernel::FString(FStringKernel {
+        parts: out.into(),
+        base_capacity,
+    })
+}
+
+fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
+    let mut receiver = match base {
+        Expr::Current => BodyKernel::Current,
+        Expr::Ident(name) => BodyKernel::FieldRead(Arc::from(name.as_str())),
+        _ => return BodyKernel::Generic,
+    };
+
+    for step in steps {
+        match step {
+            Step::Field(key) => {
+                receiver = match receiver {
+                    BodyKernel::Current => BodyKernel::FieldRead(Arc::from(key.as_str())),
+                    BodyKernel::FieldRead(first) => {
+                        BodyKernel::FieldChain(vec![first, Arc::from(key.as_str())].into())
+                    }
+                    BodyKernel::FieldChain(keys) => {
+                        let mut next = keys.to_vec();
+                        next.push(Arc::from(key.as_str()));
+                        BodyKernel::FieldChain(next.into())
+                    }
+                    other => BodyKernel::Compose {
+                        first: Box::new(other),
+                        then: Box::new(BodyKernel::FieldRead(Arc::from(key.as_str()))),
+                    },
+                };
+            }
+            Step::Method(name, args) => {
+                let Some(call) =
+                    BuiltinCall::from_literal_ast_args(name.as_str(), args)
+                else {
+                    return BodyKernel::Generic;
+                };
+                if !call.method.is_view_projection_method() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::BuiltinCall {
+                    receiver: Box::new(receiver),
+                    call,
+                };
+            }
+            _ => return BodyKernel::Generic,
+        }
+    }
+
+    receiver
+}
+
 impl BodyKernel {
+    /// Classifies an AST expression into the generic row-kernel IR when it is row-local and
+    /// view-native. This complements opcode classification for object projections where the AST
+    /// still carries useful structure such as shorthand fields and method-chain literals.
+    pub(crate) fn classify_expr(expr: &Expr) -> Self {
+        match expr {
+            Expr::Current => Self::Current,
+            Expr::Ident(name) => Self::FieldRead(Arc::from(name.as_str())),
+            Expr::Null => Self::Const(Val::Null),
+            Expr::Bool(value) => Self::ConstBool(*value),
+            Expr::Int(value) => Self::Const(Val::Int(*value)),
+            Expr::Float(value) => Self::Const(Val::Float(*value)),
+            Expr::Str(value) => Self::Const(Val::Str(Arc::from(value.as_str()))),
+            Expr::BinOp(lhs, op, rhs) => {
+                let lhs = Self::classify_expr(lhs);
+                let rhs = Self::classify_expr(rhs);
+                if matches!(lhs, Self::Generic) || matches!(rhs, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::Binary {
+                        lhs: Box::new(lhs),
+                        op: *op,
+                        rhs: Box::new(rhs),
+                    }
+                }
+            }
+            Expr::FString(parts) => classify_fstring_expr(parts),
+            Expr::Object(fields) => classify_object_expr(fields),
+            Expr::Chain(base, steps) => classify_chain_expr(base, steps),
+            _ => Self::Generic,
+        }
+    }
+
     /// Returns the field payload needed from the current row to evaluate this kernel.
     #[allow(dead_code)]
     pub(crate) fn field_demand(&self) -> FieldDemand {
@@ -1772,6 +1914,28 @@ mod tests {
             )),
             Some(false)
         );
+    }
+
+    #[test]
+    fn ast_classifier_builds_deep_object_projection_kernel() {
+        let expr = crate::parse::parser::parse(
+            "{id, city: user.addr.city, item_count: items.len(), label: f\"#{id}-{user.name}\"}",
+        )
+        .unwrap();
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+
+        let row: Val = (&serde_json::json!({
+            "id": 42,
+            "user": {"name": "ada", "addr": {"city": "London"}},
+            "items": [{"sku": "a"}, {"sku": "b"}]
+        }))
+            .into();
+        let out = super::eval_native_kernel(&kernel, &row).unwrap();
+        assert_eq!(out.get_field("id"), Val::Int(42));
+        assert_eq!(out.get_field("city").as_str_ref(), Some("London"));
+        assert_eq!(out.get_field("item_count"), Val::Int(2));
+        assert_eq!(out.get_field("label").as_str_ref(), Some("#42-ada"));
     }
 
     #[test]

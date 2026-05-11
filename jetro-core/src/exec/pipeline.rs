@@ -488,9 +488,9 @@ impl PipelineBody {
         stage_exprs: Vec<Option<Arc<Expr>>>,
         sink: Sink,
     ) -> Self {
-        let kernels = Stage::body_kernels(&stages);
+        let kernels = classify_stage_kernels(&stages, &stage_exprs);
         let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
-        let stage_kernels = Stage::body_kernels(&plan_result.stages);
+        let stage_kernels = classify_stage_kernels(&plan_result.stages, &plan_result.stage_exprs);
         let sink_kernels = plan_result.sink.body_kernels();
         Self {
             stages: plan_result.stages,
@@ -540,6 +540,21 @@ impl PipelineBody {
             sink_kernels: self.sink_kernels,
         }
     }
+}
+
+fn classify_stage_kernels(stages: &[Stage], exprs: &[Option<Arc<Expr>>]) -> Vec<BodyKernel> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(idx, stage)| {
+            exprs
+                .get(idx)
+                .and_then(|expr| expr.as_ref())
+                .map(|expr| BodyKernel::classify_expr(expr))
+                .filter(|kernel| !matches!(kernel, BodyKernel::Generic))
+                .unwrap_or_else(|| stage.body_kernel())
+        })
+        .collect()
 }
 
 impl Pipeline {
