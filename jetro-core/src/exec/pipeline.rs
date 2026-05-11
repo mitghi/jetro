@@ -46,7 +46,7 @@ pub(crate) use common::{
     num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
     OrderedKeySorter,
 };
-pub(crate) use lower::compile_sort_spec;
+pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 #[cfg(test)]
 pub use ir::Strategy;
 pub use ir::{

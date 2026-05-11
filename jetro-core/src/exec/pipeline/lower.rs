@@ -474,6 +474,13 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
     )))
 }
 
+/// Compiles a pipeline stage body expression using the same current-row
+/// binding rules as method-chain lowering.
+pub(crate) fn compile_pipeline_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
+    compile_subexpr(&crate::parse::ast::Arg::Pos(expr.clone()))
+        .expect("positional pipeline expression must compile")
+}
+
 fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
     use crate::parse::ast::Arg;
     let expr = match arg {

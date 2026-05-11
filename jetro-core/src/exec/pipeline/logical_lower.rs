@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Expr, Step};
+use crate::parse::ast::Expr;
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::ir::logical::LogicalPlan;
 use crate::exec::pipeline::{
@@ -302,24 +302,8 @@ fn build_body(
 // Expression compilation
 // ---------------------------------------------------------------------------
 
-/// Compiles `expr` to a `Program`, rewriting a bare `Ident` to `@.<ident>` so that
-/// identifiers in stage body position resolve against the current row, not the document root.
-///
-/// This replicates the `Ident→@.field` rewrite that `compile_subexpr` performs in `lower.rs`,
-/// without requiring access to the `pub(super)` helper there.
+/// Compiles `expr` with the same current-row binding rules as direct pipeline
+/// method-chain lowering.
 fn compile_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
-    // Route single-param `Expr::Lambda` through `compile_lambda_arg` so
-    // the body is substituted and — when nested-lambda references to the
-    // param remain — wrapped in `BindLamCurrent` for correct outer-row
-    // binding under pipeline stages that advance via `swap_current`.
-    if matches!(expr, Expr::Lambda { params, .. } if params.len() == 1) {
-        return crate::compile::lambda_lower::compile_lambda_arg(expr, "");
-    }
-    let lowered: Expr = match expr {
-        Expr::Ident(name) => {
-            Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())])
-        }
-        other => other.clone(),
-    };
-    Arc::new(crate::compile::compiler::Compiler::compile(&lowered, ""))
+    crate::exec::pipeline::compile_pipeline_expr_body(expr)
 }
