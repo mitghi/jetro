@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use crate::builtins::{
-    registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId},
-    BuiltinMethod, BuiltinPipelineLowering,
+    registry::{logical_shape, pipeline_accepts_arity, BuiltinId, BuiltinLogicalShape},
+    BuiltinMethod,
 };
 use crate::exec::pipeline::{SortSpec, Source};
 use crate::ir::logical::LogicalPlan;
@@ -88,23 +88,15 @@ fn apply_method(
         return None;
     }
 
-    let plan = match method {
-        BuiltinMethod::Filter | BuiltinMethod::FindAll => {
+    let plan = match logical_shape(id)? {
+        BuiltinLogicalShape::Filter => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::Filter {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
-            if !matches!(
-                pipeline_lowering(id),
-                Some(BuiltinPipelineLowering::TerminalExprArg {
-                    terminal: BuiltinMethod::First,
-                })
-            ) {
-                return None;
-            }
+        BuiltinLogicalShape::FilterThenFirst => {
             let pred = single_expr_arg(args)?;
             let filtered = LogicalPlan::Filter {
                 input: Box::new(input),
@@ -116,96 +108,96 @@ fn apply_method(
                 filtered
             }
         }
-        BuiltinMethod::Map => {
+        BuiltinLogicalShape::Map => {
             let proj = single_expr_arg(args)?;
             LogicalPlan::Map {
                 input: Box::new(input),
                 projection: proj.clone(),
             }
         }
-        BuiltinMethod::FlatMap => {
+        BuiltinLogicalShape::FlatMap => {
             let exp = single_expr_arg(args)?;
             LogicalPlan::FlatMap {
                 input: Box::new(input),
                 expansion: exp.clone(),
             }
         }
-        BuiltinMethod::Take => {
+        BuiltinLogicalShape::Take => {
             let n = single_usize_arg(args)?;
             LogicalPlan::Take {
                 input: Box::new(input),
                 n,
             }
         }
-        BuiltinMethod::Skip => {
+        BuiltinLogicalShape::Skip => {
             let n = single_usize_arg(args)?;
             LogicalPlan::Skip {
                 input: Box::new(input),
                 n,
             }
         }
-        BuiltinMethod::First => {
+        BuiltinLogicalShape::First => {
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::First(Box::new(input))
         }
-        BuiltinMethod::Last => {
+        BuiltinLogicalShape::Last => {
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Last(Box::new(input))
         }
-        BuiltinMethod::Sum => {
+        BuiltinLogicalShape::Sum => {
             // sum() with no args — sum with projection arg is handled by Pipeline::lower
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Sum(Box::new(input))
         }
-        BuiltinMethod::Avg => {
+        BuiltinLogicalShape::Avg => {
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Avg(Box::new(input))
         }
-        BuiltinMethod::Min => {
+        BuiltinLogicalShape::Min => {
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Min(Box::new(input))
         }
-        BuiltinMethod::Max => {
+        BuiltinLogicalShape::Max => {
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Max(Box::new(input))
         }
-        BuiltinMethod::Count => {
+        BuiltinLogicalShape::Count => {
             // count() with no args; count(pred) falls through to Pipeline::lower
             if !args.is_empty() {
                 return None;
             }
             LogicalPlan::Count(Box::new(input))
         }
-        BuiltinMethod::Reverse => LogicalPlan::Reverse {
+        BuiltinLogicalShape::Reverse => LogicalPlan::Reverse {
             input: Box::new(input),
         },
-        BuiltinMethod::TakeWhile => {
+        BuiltinLogicalShape::TakeWhile => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::TakeWhile {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::DropWhile => {
+        BuiltinLogicalShape::DropWhile => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::DropWhile {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::Sort => match args.len() {
+        BuiltinLogicalShape::Sort => match args.len() {
             0 => LogicalPlan::Sort {
                 input: Box::new(input),
                 spec: SortSpec::identity(),
@@ -219,65 +211,51 @@ fn apply_method(
             }
             _ => return None,
         },
-        BuiltinMethod::Unique => LogicalPlan::Unique {
+        BuiltinLogicalShape::Unique => LogicalPlan::Unique {
             input: Box::new(input),
             key: None,
         },
-        BuiltinMethod::UniqueBy => {
+        BuiltinLogicalShape::UniqueBy => {
             let key = single_expr_arg(args)?;
             LogicalPlan::Unique {
                 input: Box::new(input),
                 key: Some(key.clone()),
             }
         }
-        BuiltinMethod::GroupBy => {
+        BuiltinLogicalShape::GroupBy => {
             let key = single_expr_arg(args)?;
             LogicalPlan::GroupBy {
                 input: Box::new(input),
                 key: key.clone(),
             }
         }
-        BuiltinMethod::CountBy => {
+        BuiltinLogicalShape::CountBy => {
             let key = single_expr_arg(args)?;
             let keyed = LogicalPlan::CountBy {
                 input: Box::new(input),
                 key: key.clone(),
             };
-            if is_last
-                && matches!(
-                    pipeline_lowering(id),
-                    Some(BuiltinPipelineLowering::TerminalExprArg {
-                        terminal: BuiltinMethod::First,
-                    })
-                )
-            {
+            if is_last {
                 LogicalPlan::First(Box::new(keyed))
             } else {
                 keyed
             }
         }
-        BuiltinMethod::IndexBy => {
+        BuiltinLogicalShape::IndexBy => {
             let key = single_expr_arg(args)?;
             let keyed = LogicalPlan::IndexBy {
                 input: Box::new(input),
                 key: key.clone(),
             };
-            if is_last
-                && matches!(
-                    pipeline_lowering(id),
-                    Some(BuiltinPipelineLowering::TerminalExprArg {
-                        terminal: BuiltinMethod::First,
-                    })
-                )
-            {
+            if is_last {
                 LogicalPlan::First(Box::new(keyed))
             } else {
                 keyed
             }
         }
-        BuiltinMethod::ApproxCountDistinct => LogicalPlan::ApproxCountDistinct(Box::new(input)),
-        // Not a recognised pipeline operator — fall through to existing path
-        _ => return None,
+        BuiltinLogicalShape::ApproxCountDistinct => {
+            LogicalPlan::ApproxCountDistinct(Box::new(input))
+        }
     };
     Some(plan)
 }

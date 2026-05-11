@@ -54,6 +54,116 @@ impl BuiltinPipelineArity {
     }
 }
 
+/// Logical planner shape for pipeline-position builtins.
+///
+/// This keeps method classification in the builtin registry while allowing
+/// `plan::logical` to own construction of `LogicalPlan` nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinLogicalShape {
+    /// `filter(expr)`-style streaming predicate.
+    Filter,
+    /// `filter(expr)` followed by `first()` when terminal.
+    FilterThenFirst,
+    /// `map(expr)` one-to-one projection.
+    Map,
+    /// `flat_map(expr)` expansion.
+    FlatMap,
+    /// `take(n)` positional prefix.
+    Take,
+    /// `skip(n)` positional offset.
+    Skip,
+    /// Nullary terminal first.
+    First,
+    /// Nullary terminal last.
+    Last,
+    /// Nullary numeric reducer.
+    Sum,
+    /// Nullary numeric reducer.
+    Avg,
+    /// Nullary numeric reducer.
+    Min,
+    /// Nullary numeric reducer.
+    Max,
+    /// Nullary count reducer.
+    Count,
+    /// Nullary reverse barrier.
+    Reverse,
+    /// Prefix predicate barrier.
+    TakeWhile,
+    /// Prefix predicate barrier.
+    DropWhile,
+    /// Sort with optional key.
+    Sort,
+    /// Nullary unique.
+    Unique,
+    /// `unique_by(expr)`.
+    UniqueBy,
+    /// `group_by(expr)`.
+    GroupBy,
+    /// `count_by(expr)` followed by first when terminal.
+    CountBy,
+    /// `index_by(expr)` followed by first when terminal.
+    IndexBy,
+    /// Nullary approximate distinct reducer.
+    ApproxCountDistinct,
+}
+
+/// Return the logical planner shape for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
+    let method = id.method()?;
+    match method {
+        BuiltinMethod::Filter | BuiltinMethod::FindAll => Some(BuiltinLogicalShape::Filter),
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::FilterThenFirst)
+        }
+        BuiltinMethod::Map => Some(BuiltinLogicalShape::Map),
+        BuiltinMethod::FlatMap => Some(BuiltinLogicalShape::FlatMap),
+        BuiltinMethod::Take => Some(BuiltinLogicalShape::Take),
+        BuiltinMethod::Skip => Some(BuiltinLogicalShape::Skip),
+        BuiltinMethod::First => Some(BuiltinLogicalShape::First),
+        BuiltinMethod::Last => Some(BuiltinLogicalShape::Last),
+        BuiltinMethod::Sum => Some(BuiltinLogicalShape::Sum),
+        BuiltinMethod::Avg => Some(BuiltinLogicalShape::Avg),
+        BuiltinMethod::Min => Some(BuiltinLogicalShape::Min),
+        BuiltinMethod::Max => Some(BuiltinLogicalShape::Max),
+        BuiltinMethod::Count => Some(BuiltinLogicalShape::Count),
+        BuiltinMethod::Reverse => Some(BuiltinLogicalShape::Reverse),
+        BuiltinMethod::TakeWhile => Some(BuiltinLogicalShape::TakeWhile),
+        BuiltinMethod::DropWhile => Some(BuiltinLogicalShape::DropWhile),
+        BuiltinMethod::Sort => Some(BuiltinLogicalShape::Sort),
+        BuiltinMethod::Unique => Some(BuiltinLogicalShape::Unique),
+        BuiltinMethod::UniqueBy => Some(BuiltinLogicalShape::UniqueBy),
+        BuiltinMethod::GroupBy => Some(BuiltinLogicalShape::GroupBy),
+        BuiltinMethod::CountBy => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::CountBy)
+        }
+        BuiltinMethod::IndexBy => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::IndexBy)
+        }
+        BuiltinMethod::ApproxCountDistinct => Some(BuiltinLogicalShape::ApproxCountDistinct),
+        _ => None,
+    }
+}
+
 /// Compute the upstream `Demand` that builtin `id` must place on its source
 /// given the `downstream` demand from the next stage and optional numeric `arg`.
 #[inline]
