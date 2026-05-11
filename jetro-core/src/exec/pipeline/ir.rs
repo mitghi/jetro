@@ -1379,6 +1379,20 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             scan_need: map_lane_payload(&downstream.scan_need, kernel),
             result_need: map_lane_payload(&downstream.result_need, kernel),
         },
+        Stage::ExprBuiltin {
+            method: BuiltinMethod::CountBy,
+            ..
+        } => DemandLanes {
+            scan_need: kernel.field_demand(),
+            result_need: FieldDemand::None,
+        },
+        Stage::ExprBuiltin {
+            method: BuiltinMethod::GroupBy | BuiltinMethod::IndexBy,
+            ..
+        } => DemandLanes {
+            scan_need: FieldDemand::Whole,
+            result_need: FieldDemand::None,
+        },
         Stage::Builtin(call)
             if call.method.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
         {

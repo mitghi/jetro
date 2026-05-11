@@ -1530,6 +1530,24 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_tracks_keyed_reducer_lanes() {
+        let count_by = lower_query("$.orders.count_by(status)").unwrap();
+        let demand = count_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["status"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
+
+        let group_by = lower_query("$.orders.group_by(status)").unwrap();
+        let demand = group_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["*"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
+
+        let index_by = lower_query("$.orders.index_by(id)").unwrap();
+        let demand = index_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["*"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
+    }
+
+    #[test]
     fn fallback_boundary_marks_legacy_barrier_stage() {
         let p = lower_query("$.books.flat_map(tags).last()").unwrap();
         assert_eq!(
