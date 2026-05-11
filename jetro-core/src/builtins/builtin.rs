@@ -24,7 +24,6 @@ use super::{BuiltinCancellation, BuiltinMethod, BuiltinSpec};
 /// and the optional terminal-map collector — by mutable reference so individual
 /// builtin streaming bodies can update counters and reach into VM state without
 /// allocating per-call.
-#[allow(dead_code)]
 pub(crate) struct StreamCtx<'a, 'b> {
     pub vm: &'a mut VM,
     pub env: &'a mut Env,
@@ -40,7 +39,6 @@ pub(crate) struct StreamCtx<'a, 'b> {
 /// Concrete context passed to `Builtin::apply_barrier`.
 /// Carries the materialised buffer plus VM/env/kernel/stage references so individual
 /// barrier bodies can run their full-buffer transforms without allocating per-call.
-#[allow(dead_code)]
 pub(crate) struct BarrierCtx<'a> {
     pub vm: &'a mut VM,
     pub env: &'a mut Env,
@@ -53,11 +51,11 @@ pub(crate) struct BarrierCtx<'a> {
 /// struct in `builtins::defs::*` that implements this trait.
 ///
 /// `METHOD`, `NAME`, and `ALIASES` are reserved for later migration phases (consumer code in
-/// `builtin_registry` will derive name lookups from them); `#[allow(dead_code)]` keeps the
-/// foundation intact while the spec piece is migrated first.
-#[allow(dead_code)]
+/// Registry and executor code consume the constants and runtime hooks through
+/// static dispatch; the trait remains object-free on the hot path.
 pub(crate) trait Builtin {
     /// The `BuiltinMethod` enum variant this struct corresponds to.
+    #[allow(dead_code)]
     const METHOD: BuiltinMethod;
 
     /// Canonical name used in source code (e.g. `"filter"`).
@@ -125,12 +123,4 @@ pub(crate) trait Builtin {
         None
     }
 
-    /// Returns `true` if this method is a terminal sink (Sum, Avg, Min, Max, Count,
-    /// First, Last, Any, All, ApproxCountDistinct, Collect, Nth, Len). Default:
-    /// derived from `spec().sink.is_some()` so concrete sinks need only set their
-    /// sink spec — no extra trait override required.
-    #[inline]
-    fn is_sink() -> bool {
-        Self::spec().sink.is_some()
-    }
 }
