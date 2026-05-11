@@ -1996,10 +1996,15 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let includes =
-            super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env))
-                .unwrap()
-                .unwrap();
+        let mut vm = crate::vm::VM::new();
+        let includes = super::run_full_with_env(
+            includes_source.clone(),
+            &includes_body,
+            Some(&env),
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(includes, Val::Bool(true));
         assert_eq!(includes_source.materialize_reads(), 0);
         assert_eq!(includes_source.scalar_reads(), 3);
@@ -2014,9 +2019,10 @@ mod tests {
             ..includes_body
         };
 
-        let index = super::run_full_with_env(index_source.clone(), &index_body, Some(&env))
-            .unwrap()
-            .unwrap();
+        let index =
+            super::run_full_with_env(index_source.clone(), &index_body, Some(&env), &mut vm)
+                .unwrap()
+                .unwrap();
         assert_eq!(index, Val::Int(2));
         assert_eq!(index_source.materialize_reads(), 0);
         assert_eq!(index_source.scalar_reads(), 3);
@@ -2031,9 +2037,10 @@ mod tests {
             ..index_body
         };
 
-        let indices = super::run_full_with_env(indices_source.clone(), &indices_body, Some(&env))
-            .unwrap()
-            .unwrap();
+        let indices =
+            super::run_full_with_env(indices_source.clone(), &indices_body, Some(&env), &mut vm)
+                .unwrap()
+                .unwrap();
         let indices_json: serde_json::Value = indices.into();
         assert_eq!(indices_json, serde_json::json!([0, 2]));
         assert_eq!(indices_source.materialize_reads(), 0);
@@ -2300,11 +2307,13 @@ mod tests {
         };
 
         let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
         let out = super::run_reducing_stage_prefix_then_materialized_suffix(
             source.clone(),
             &body,
             None,
             &env,
+            &mut vm,
         )
         .unwrap()
         .unwrap();
@@ -2330,11 +2339,13 @@ mod tests {
         };
 
         let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
         let out = super::run_reducing_stage_prefix_then_materialized_suffix(
             source.clone(),
             &body,
             None,
             &env,
+            &mut vm,
         )
         .unwrap()
         .unwrap();

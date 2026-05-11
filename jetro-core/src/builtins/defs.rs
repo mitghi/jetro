@@ -78,8 +78,8 @@ impl Builtin for Filter {
     ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
             })
         })?;
         Ok(if keep {
@@ -96,8 +96,8 @@ impl Builtin for Filter {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::filter_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -216,8 +216,8 @@ impl Builtin for Map {
             return Ok(crate::exec::pipeline::StageFlow::TerminalCollected);
         }
         let mapped = super::map_one(&item, |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
             })
         })?;
         Ok(crate::exec::pipeline::StageFlow::Continue(mapped))
@@ -231,8 +231,8 @@ impl Builtin for Map {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::map_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -267,8 +267,8 @@ impl Builtin for FlatMap {
         let prog = body?;
         let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
-            let inner = match crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            let inner = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             }) {
                 Ok(inner) => inner,
                 Err(err) => return Some(Err(err)),

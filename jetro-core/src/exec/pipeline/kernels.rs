@@ -352,12 +352,10 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
             map,
             op,
         }),
-        (BuiltinMethod::Count | BuiltinMethod::Len, None, None) => {
-            Some(BodyKernel::NestedArrayCount {
-                source: Box::new(source),
-                predicate,
-            })
-        }
+        (BuiltinMethod::Count, None, None) => Some(BodyKernel::NestedArrayCount {
+            source: Box::new(source),
+            predicate,
+        }),
         _ => None,
     }
 }
