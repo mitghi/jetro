@@ -330,7 +330,12 @@ where
     }
 
     let mut boundary_rows = Vec::new();
-    let source_demand = PullDemand::All;
+    let source_demand = pipeline::Pipeline::segment_source_demand(
+        &body.stages[..prefix.consumed_stages],
+        &body.sink,
+    )
+    .chain
+    .pull;
 
     drive_view_frontier(
         source,
