@@ -1353,14 +1353,39 @@ pub fn eval_kernel<F>(kernel: &BodyKernel, item: &Val, fallback: F) -> Result<Va
 where
     F: FnOnce(&Val) -> Result<Val, EvalError>,
 {
+    let mut vm = crate::vm::VM::new();
+    eval_kernel_with_vm(kernel, item, &mut vm, |item, _| fallback(item))
+}
+
+/// Evaluates `kernel` with caller-owned VM state for nested compiled match execution.
+#[inline]
+pub(crate) fn eval_kernel_with_vm<F>(
+    kernel: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+    fallback: F,
+) -> Result<Val, EvalError>
+where
+    F: FnOnce(&Val, &mut crate::vm::VM) -> Result<Val, EvalError>,
+{
     if matches!(kernel, BodyKernel::Generic) {
-        return fallback(item);
+        return fallback(item, vm);
     }
-    eval_native_kernel(kernel, item)
+    eval_native_kernel_with_vm(kernel, item, vm)
 }
 
 // panics on Generic — callers must route Generic through eval_kernel's fallback instead
 fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
+    let mut vm = crate::vm::VM::new();
+    eval_native_kernel_with_vm(kernel, item, &mut vm)
+}
+
+// panics on Generic — callers must route Generic through eval_kernel's fallback instead
+fn eval_native_kernel_with_vm(
+    kernel: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+) -> Result<Val, EvalError> {
     match kernel {
         BodyKernel::Current => Ok(item.clone()),
         BodyKernel::FieldRead(k) => Ok(item.get_field(k.as_ref())),
@@ -1377,10 +1402,10 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::ConstBool(b) => Ok(Val::Bool(*b)),
         BodyKernel::Const(v) => Ok(v.clone()),
         BodyKernel::FString(fstring) => {
-            eval_fstring_kernel(fstring, |kernel| eval_native_kernel(kernel, item))
+            eval_fstring_kernel(fstring, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
         }
         BodyKernel::Object(object) => {
-            eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
+            eval_object_kernel(object, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
         }
         BodyKernel::NestedArrayReducer {
             source,
@@ -1393,31 +1418,32 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             map.as_deref(),
             *op,
             item,
+            vm,
         ),
         BodyKernel::NestedArrayCount { source, predicate } => {
-            eval_nested_array_count_native(source, predicate.as_deref(), item)
+            eval_nested_array_count_native(source, predicate.as_deref(), item, vm)
         }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
-            let recv = eval_native_kernel(receiver, item)?;
+            let recv = eval_native_kernel_with_vm(receiver, item, vm)?;
             call.try_apply(&recv)?
                 .ok_or_else(|| EvalError(format!("{:?}: unsupported receiver", call.method)))
         }
         BodyKernel::Compose { first, then } => {
-            let recv = eval_native_kernel(first, item)?;
-            eval_native_kernel(then, &recv)
+            let recv = eval_native_kernel_with_vm(first, item, vm)?;
+            eval_native_kernel_with_vm(then, &recv, vm)
         }
         BodyKernel::CmpLit { lhs, op, lit } => {
-            let lhs = eval_native_kernel(lhs, item)?;
+            let lhs = eval_native_kernel_with_vm(lhs, item, vm)?;
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
         }
         BodyKernel::Binary { lhs, op, rhs } => {
-            let lhs = eval_native_kernel(lhs, item)?;
-            let rhs = eval_native_kernel(rhs, item)?;
+            let lhs = eval_native_kernel_with_vm(lhs, item, vm)?;
+            let rhs = eval_native_kernel_with_vm(rhs, item, vm)?;
             eval_binary_op(lhs, *op, rhs)
         }
         BodyKernel::ArraySelect { array, selector } => {
-            let array = eval_native_kernel(array, item)?;
+            let array = eval_native_kernel_with_vm(array, item, vm)?;
             Ok(eval_array_select_native(&array, *selector))
         }
         BodyKernel::Match {
@@ -1425,19 +1451,13 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             compiled,
             ..
         } => {
-            let scrutinee = eval_native_kernel(scrutinee, item)?;
+            let scrutinee = eval_native_kernel_with_vm(scrutinee, item, vm)?;
             let env = crate::data::context::Env::new(scrutinee.clone());
-            crate::with_vm(|cell| match cell.try_borrow_mut() {
-                Ok(mut vm) => vm.exec_match(compiled, &scrutinee, &env),
-                Err(_) => {
-                    let mut vm = crate::vm::VM::new();
-                    vm.exec_match(compiled, &scrutinee, &env)
-                }
-            })
+            vm.exec_match(compiled, &scrutinee, &env)
         }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
-                if !crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
+                if !crate::util::is_truthy(&eval_native_kernel_with_vm(predicate, item, vm)?) {
                     return Ok(Val::Bool(false));
                 }
             }
@@ -1445,7 +1465,7 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         }
         BodyKernel::Or(predicates) => {
             for predicate in predicates.iter() {
-                if crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
+                if crate::util::is_truthy(&eval_native_kernel_with_vm(predicate, item, vm)?) {
                     return Ok(Val::Bool(true));
                 }
             }
@@ -1476,8 +1496,9 @@ fn eval_nested_array_reducer_native(
     map: Option<&BodyKernel>,
     op: super::NumOp,
     item: &Val,
+    vm: &mut crate::vm::VM,
 ) -> Result<Val, EvalError> {
-    let source = eval_native_kernel(source, item)?;
+    let source = eval_native_kernel_with_vm(source, item, vm)?;
     let Some(items) = source.as_vals() else {
         return Ok(op.empty());
     };
@@ -1489,13 +1510,13 @@ fn eval_nested_array_reducer_native(
     let mut n_obs = 0usize;
 
     for child in items.iter() {
-        if !native_predicate_matches(predicate, child)? {
+        if !native_predicate_matches(predicate, child, vm)? {
             continue;
         }
         let value;
         let observed = match map {
             Some(map) => {
-                value = eval_native_kernel(map, child)?;
+                value = eval_native_kernel_with_vm(map, child, vm)?;
                 &value
             }
             None => child,
@@ -1521,8 +1542,9 @@ fn eval_nested_array_count_native(
     source: &BodyKernel,
     predicate: Option<&BodyKernel>,
     item: &Val,
+    vm: &mut crate::vm::VM,
 ) -> Result<Val, EvalError> {
-    let source = eval_native_kernel(source, item)?;
+    let source = eval_native_kernel_with_vm(source, item, vm)?;
     let Some(items) = source.as_vals() else {
         return Ok(Val::Int(0));
     };
@@ -1531,7 +1553,7 @@ fn eval_nested_array_count_native(
     };
     let mut count = 0i64;
     for child in items.iter() {
-        if native_predicate_matches(Some(predicate), child)? {
+        if native_predicate_matches(Some(predicate), child, vm)? {
             count += 1;
         }
     }
@@ -1539,10 +1561,14 @@ fn eval_nested_array_count_native(
 }
 
 #[inline]
-fn native_predicate_matches(predicate: Option<&BodyKernel>, item: &Val) -> Result<bool, EvalError> {
+fn native_predicate_matches(
+    predicate: Option<&BodyKernel>,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+) -> Result<bool, EvalError> {
     match predicate {
-        Some(predicate) => Ok(crate::util::is_truthy(&eval_native_kernel(
-            predicate, item,
+        Some(predicate) => Ok(crate::util::is_truthy(&eval_native_kernel_with_vm(
+            predicate, item, vm,
         )?)),
         None => Ok(true),
     }

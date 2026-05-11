@@ -56,7 +56,9 @@ pub use ir::{
     StageStrategy,
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
-pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
+pub(crate) use kernels::{
+    eval_kernel_with_vm, eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue,
+};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
     PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,

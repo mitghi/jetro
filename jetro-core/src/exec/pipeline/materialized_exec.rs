@@ -17,8 +17,8 @@ use super::row_source;
 use super::nested::PreparedPlan;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
-    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel, is_truthy,
-    BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
+    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
+    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
     TerminalMapCollector,
 };
 
@@ -307,13 +307,13 @@ where
         if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
         {
             if let Some(projection) = late_projection {
-                return eval_late_projection(&projection.kernel, &item);
+                return eval_late_projection(&projection.kernel, &item, vm);
             }
             return Ok(item);
         }
 
         if let Some(projection) = late_projection {
-            item = eval_late_projection(&projection.kernel, &item)?;
+            item = eval_late_projection(&projection.kernel, &item, vm)?;
         }
 
         let sink_done = match &pipeline.sink {
@@ -351,8 +351,12 @@ where
     sink_acc.finish_result(false)
 }
 
-fn eval_late_projection(projection: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
-    eval_kernel(projection, item, |_| {
+fn eval_late_projection(
+    projection: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+) -> Result<Val, EvalError> {
+    eval_kernel_with_vm(projection, item, vm, |_, _| {
         Err(EvalError(
             "late projection requires a native body kernel".to_string(),
         ))
@@ -462,7 +466,7 @@ fn apply_adapter_materialized(
                 Some(prog) => {
                     let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
                     for v in buf.iter() {
-                        let key = match eval_kernel(kernel, v, |item| {
+                        let key = match eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                             apply_item_in_env(vm, loop_env, item, prog)
                         }) {
                             Ok(key) => key,
@@ -553,7 +557,7 @@ fn observe_reducer_item(
             .sink_kernels
             .get(kernel_idx)
             .unwrap_or(&BodyKernel::Generic);
-        let keep = eval_kernel(kernel, &item, |item| {
+        let keep = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
             apply_item_in_env(vm, loop_env, item, predicate)
         })?;
         if !crate::util::is_truthy(&keep) {
@@ -567,7 +571,7 @@ fn observe_reducer_item(
             .sink_kernels
             .get(project_kernel_idx)
             .unwrap_or(&BodyKernel::Generic);
-        let reducer_item = eval_kernel(kernel, &item, |item| {
+        let reducer_item = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
             apply_item_in_env(vm, loop_env, item, project)
         })?;
         sink_acc.push_projected_numeric(&reducer_item);
@@ -624,7 +628,7 @@ fn observe_predicate_sink_item(
         .sink_kernels
         .get(kernel_idx)
         .unwrap_or(&BodyKernel::Generic);
-    let predicate = eval_kernel(kernel, &item, |item| {
+    let predicate = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
         apply_item_in_env(vm, loop_env, item, &spec.predicate)
     })?;
     sink_acc.observe_predicate_item(spec.op, crate::util::is_truthy(&predicate), item)
@@ -646,7 +650,7 @@ fn observe_arg_extreme_sink_item(
         .sink_kernels
         .get(kernel_idx)
         .unwrap_or(&BodyKernel::Generic);
-    let key = eval_kernel(kernel, &item, |item| {
+    let key = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
         apply_item_in_env(vm, loop_env, item, &spec.key)
     })?;
     sink_acc.observe_arg_extreme(spec.want_max, item, key);
@@ -675,7 +679,7 @@ pub(crate) fn apply_lambda_obj(
                 ..
             } => {
                 let k_val = Val::Str(k.clone());
-                let new_k = eval_kernel(kernel, &k_val, |item| {
+                let new_k = eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 let new_k_arc = match new_k {
@@ -688,7 +692,7 @@ pub(crate) fn apply_lambda_obj(
                 method: BuiltinMethod::TransformValues,
                 ..
             } => {
-                let new_v = eval_kernel(kernel, v, |item| {
+                let new_v = eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 out.insert(k.clone(), new_v);
@@ -698,7 +702,7 @@ pub(crate) fn apply_lambda_obj(
                 ..
             } => {
                 let k_val = Val::Str(k.clone());
-                if is_truthy(&eval_kernel(kernel, &k_val, |item| {
+                if is_truthy(&eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
                     out.insert(k.clone(), v.clone());
@@ -708,7 +712,7 @@ pub(crate) fn apply_lambda_obj(
                 method: BuiltinMethod::FilterValues,
                 ..
             } => {
-                if is_truthy(&eval_kernel(kernel, v, |item| {
+                if is_truthy(&eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
                     out.insert(k.clone(), v.clone());
