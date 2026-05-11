@@ -61,8 +61,6 @@ pub enum BodyKernel {
     ChildMapSum {
         /// Kernel that yields the child array.
         array: Box<BodyKernel>,
-        /// Optional child predicate evaluated before the map.
-        predicate: Option<Box<BodyKernel>>,
         /// Kernel evaluated for every child row.
         map: Box<BodyKernel>,
     },
@@ -277,15 +275,8 @@ impl BodyKernel {
             Self::Binary { lhs, rhs, .. } => {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
-            Self::ChildMapSum {
-                array,
-                predicate,
-                map,
-            } => {
+            Self::ChildMapSum { array, map } => {
                 array.mentions_any_field_like_ident(names)
-                    || predicate
-                        .as_ref()
-                        .is_some_and(|predicate| predicate.mentions_any_field_like_ident(names))
                     || map.mentions_any_field_like_ident(names)
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
@@ -319,17 +310,7 @@ impl BodyKernel {
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
-            Self::ChildMapSum {
-                array,
-                predicate,
-                map,
-            } => {
-                array.is_view_native()
-                    && predicate
-                        .as_ref()
-                        .is_none_or(|predicate| predicate.is_view_native())
-                    && map.is_view_native()
-            }
+            Self::ChildMapSum { array, map } => array.is_view_native() && map.is_view_native(),
             Self::ArraySelect { array, .. } => array.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
@@ -374,41 +355,6 @@ impl BodyKernel {
                     };
                 }
             }
-            [
-                receiver @ ..,
-                Opcode::CallMethod(filter_call),
-                Opcode::CallMethod(map_call),
-                Opcode::CallMethod(sum_call),
-            ] if filter_call.method == crate::builtins::BuiltinMethod::Filter
-                && map_call.method == crate::builtins::BuiltinMethod::Map
-                && sum_call.method == crate::builtins::BuiltinMethod::Sum
-                && filter_call.sub_kernels.len() == 1
-                && map_call.sub_kernels.len() == 1 =>
-            {
-                let array = if receiver.is_empty() {
-                    BodyKernel::Current
-                } else {
-                    BodyKernel::classify(&crate::vm::Program::new(
-                        receiver.to_vec(),
-                        "<child-filter-map-sum-receiver>",
-                    ))
-                };
-                let predicate = filter_call.sub_kernels[0].clone();
-                let map = map_call.sub_kernels[0].clone();
-                if !matches!(array, BodyKernel::Generic)
-                    && !matches!(predicate, BodyKernel::Generic)
-                    && !matches!(map, BodyKernel::Generic)
-                    && array.is_view_native()
-                    && predicate.is_view_native()
-                    && map.is_view_native()
-                {
-                    return Self::ChildMapSum {
-                        array: Box::new(array),
-                        predicate: Some(Box::new(predicate)),
-                        map: Box::new(map),
-                    };
-                }
-            }
             [receiver @ .., Opcode::CallMethod(map_call), Opcode::CallMethod(sum_call)]
                 if map_call.method == crate::builtins::BuiltinMethod::Map
                     && sum_call.method == crate::builtins::BuiltinMethod::Sum
@@ -430,7 +376,6 @@ impl BodyKernel {
                 {
                     return Self::ChildMapSum {
                         array: Box::new(array),
-                        predicate: None,
                         map: Box::new(map),
                     };
                 }
@@ -1140,13 +1085,9 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             let rhs = eval_native_kernel(rhs, item)?;
             eval_binary_op(lhs, *op, rhs)
         }
-        BodyKernel::ChildMapSum {
-            array,
-            predicate,
-            map,
-        } => {
+        BodyKernel::ChildMapSum { array, map } => {
             let array = eval_native_kernel(array, item)?;
-            eval_child_map_sum_native(&array, predicate.as_deref(), map)
+            eval_child_map_sum_native(&array, map)
         }
         BodyKernel::ArraySelect { array, selector } => {
             let array = eval_native_kernel(array, item)?;
@@ -1300,45 +1241,23 @@ fn eval_binary_op(lhs: Val, op: crate::parse::ast::BinOp, rhs: Val) -> Result<Va
     }
 }
 
-fn eval_child_map_sum_native(
-    array: &Val,
-    predicate: Option<&BodyKernel>,
-    map: &BodyKernel,
-) -> Result<Val, EvalError> {
+fn eval_child_map_sum_native(array: &Val, map: &BodyKernel) -> Result<Val, EvalError> {
     let mut sum = NumericSum::default();
     let items = array
         .as_vals()
         .ok_or_else(|| EvalError("sum receiver is not an array".into()))?;
     for item in items.iter() {
-        if let Some(predicate) = predicate {
-            if !crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
-                continue;
-            }
-        }
         sum.observe(&eval_native_kernel(map, item)?)?;
     }
     Ok(sum.finish())
 }
 
-fn eval_child_map_sum_view<'a, V>(
-    array: V,
-    predicate: Option<&BodyKernel>,
-    map: &BodyKernel,
-) -> Option<Val>
+fn eval_child_map_sum_view<'a, V>(array: V, map: &BodyKernel) -> Option<Val>
 where
     V: ValueView<'a>,
 {
     let mut sum = NumericSum::default();
     for item in array.array_iter()? {
-        if let Some(predicate) = predicate {
-            let passes = match eval_view_kernel(predicate, &item)? {
-                ViewKernelValue::View(view) => view.scalar().truthy(),
-                ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
-            };
-            if !passes {
-                continue;
-            }
-        }
         let value = view_kernel_value_to_owned(eval_view_kernel(map, &item)?);
         sum.observe(&value).ok()?;
     }
@@ -1573,15 +1492,11 @@ where
                 .ok()
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::ChildMapSum {
-            array,
-            predicate,
-            map,
-        } => match eval_view_kernel(array, item)? {
+        BodyKernel::ChildMapSum { array, map } => match eval_view_kernel(array, item)? {
             ViewKernelValue::View(view) => {
-                eval_child_map_sum_view(view, predicate.as_deref(), map).map(ViewKernelValue::Owned)
+                eval_child_map_sum_view(view, map).map(ViewKernelValue::Owned)
             }
-            ViewKernelValue::Owned(value) => eval_child_map_sum_native(&value, predicate.as_deref(), map)
+            ViewKernelValue::Owned(value) => eval_child_map_sum_native(&value, map)
                 .ok()
                 .map(ViewKernelValue::Owned),
         },
@@ -1835,51 +1750,6 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Float(36.5))
-        );
-    }
-
-    #[test]
-    fn child_filter_map_sum_kernel_runs_on_value_views() {
-        let src = "items.filter(price > 8).map(qty * price).sum()";
-        let expr = parse(src).expect("parse filtered child sum");
-        let program = Compiler::compile(&expr, src);
-        let kernel = BodyKernel::classify(&program);
-        assert!(matches!(
-            kernel,
-            BodyKernel::ChildMapSum {
-                predicate: Some(_),
-                ..
-            }
-        ));
-        assert!(kernel.is_view_native());
-
-        let value = Val::obj(
-            [(
-                Arc::from("items"),
-                Val::arr(vec![
-                    Val::obj(
-                        [
-                            (Arc::from("qty"), Val::Int(2)),
-                            (Arc::from("price"), Val::Float(10.0)),
-                        ]
-                        .into(),
-                    ),
-                    Val::obj(
-                        [
-                            (Arc::from("qty"), Val::Int(3)),
-                            (Arc::from("price"), Val::Float(5.5)),
-                        ]
-                        .into(),
-                    ),
-                ]),
-            )]
-            .into(),
-        );
-        let view = ValView::new(&value);
-
-        assert_eq!(
-            owned_value(eval_view_kernel(&kernel, &view)),
-            Some(Val::Float(20.0))
         );
     }
 
