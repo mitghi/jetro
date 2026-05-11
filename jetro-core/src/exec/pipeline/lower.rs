@@ -866,13 +866,8 @@ fn arg_extreme_sink_for_method(
     let [arg] = args else {
         return None;
     };
-    let want_max = match method {
-        BuiltinMethod::MaxBy => true,
-        BuiltinMethod::MinBy => false,
-        _ => return None,
-    };
-    Some(Sink::ArgExtreme(ArgExtremeSinkSpec {
-        want_max,
-        key: compile_subexpr(arg)?,
-    }))
+    Some(Sink::ArgExtreme(ArgExtremeSinkSpec::from_method(
+        method,
+        compile_subexpr(arg)?,
+    )?))
 }

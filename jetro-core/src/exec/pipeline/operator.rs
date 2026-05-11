@@ -160,6 +160,18 @@ impl MembershipSinkSpec {
 }
 
 impl ArgExtremeSinkSpec {
+    /// Constructs an arg-extreme sink from the terminal builtin method.
+    pub(crate) fn from_method(method: BuiltinMethod, key: Arc<Program>) -> Option<Self> {
+        Some(Self {
+            want_max: match method {
+                BuiltinMethod::MaxBy => true,
+                BuiltinMethod::MinBy => false,
+                _ => return None,
+            },
+            key,
+        })
+    }
+
     /// Demand placed on the row stream by this terminal arg-extreme sink.
     pub(crate) fn demand(&self) -> Demand {
         Demand {
