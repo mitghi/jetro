@@ -48,6 +48,15 @@ pub enum BodyKernel {
         /// The literal right-hand side value.
         lit: Val,
     },
+    /// Applies a binary arithmetic/string/array operation to two sub-kernels.
+    Binary {
+        /// The left-hand side kernel.
+        lhs: Box<BodyKernel>,
+        /// The binary operator.
+        op: crate::parse::ast::BinOp,
+        /// The right-hand side kernel.
+        rhs: Box<BodyKernel>,
+    },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
@@ -185,6 +194,7 @@ impl BodyKernel {
             Self::BuiltinCall { receiver, .. } => receiver.field_demand(),
             Self::Compose { first, then } => first.field_demand().merge(then.field_demand()),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
+            Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::And(predicates) => predicates
                 .iter()
                 .fold(FieldDemand::None, |need, predicate| {
@@ -223,6 +233,9 @@ impl BodyKernel {
                     || then.mentions_any_field_like_ident(names)
             }
             Self::CmpLit { lhs, .. } => lhs.mentions_any_field_like_ident(names),
+            Self::Binary { lhs, rhs, .. } => {
+                lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
+            }
             Self::And(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
@@ -251,6 +264,7 @@ impl BodyKernel {
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
+            Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
             Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
         }
@@ -403,6 +417,18 @@ impl BodyKernel {
                     if let Some(bo) = cmp_to_binop(&rest[2]) {
                         return Self::FieldChainCmpLit(fc.keys.clone(), bo, lit);
                     }
+                }
+            }
+            if let Some(op) = arithmetic_binop(&rest[2]) {
+                if let (Some(lhs), Some(rhs)) = (
+                    classify_structural_view_kernel(&rest[..1]),
+                    classify_structural_view_kernel(&rest[1..2]),
+                ) {
+                    return Self::Binary {
+                        lhs: Box::new(lhs),
+                        op,
+                        rhs: Box::new(rhs),
+                    };
                 }
             }
         }
@@ -606,6 +632,19 @@ fn static_positional_pick_call(call: &crate::vm::CompiledCall) -> Option<Builtin
     ))
 }
 
+fn arithmetic_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
+    use crate::parse::ast::BinOp as B;
+    use crate::vm::Opcode as O;
+    match op {
+        O::Add => Some(B::Add),
+        O::Sub => Some(B::Sub),
+        O::Mul => Some(B::Mul),
+        O::Div => Some(B::Div),
+        O::Mod => Some(B::Mod),
+        _ => None,
+    }
+}
+
 #[inline]
 fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
     use crate::parse::ast::BinOp as B;
@@ -668,6 +707,11 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::CmpLit { lhs, op, lit } => {
             let lhs = eval_native_kernel(lhs, item)?;
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
+        }
+        BodyKernel::Binary { lhs, op, rhs } => {
+            let lhs = eval_native_kernel(lhs, item)?;
+            let rhs = eval_native_kernel(rhs, item)?;
+            eval_binary_op(lhs, *op, rhs)
         }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
@@ -762,6 +806,40 @@ where
         }
     }
     Ok(())
+}
+
+fn view_kernel_value_to_owned<'a, V>(value: ViewKernelValue<V>) -> Val
+where
+    V: ValueView<'a>,
+{
+    match value {
+        ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
+        }
+        ViewKernelValue::Owned(value) => value,
+    }
+}
+
+fn eval_binary_op(
+    lhs: Val,
+    op: crate::parse::ast::BinOp,
+    rhs: Val,
+) -> Result<Val, EvalError> {
+    use crate::parse::ast::BinOp;
+    match op {
+        BinOp::Add => crate::util::add_vals(lhs, rhs),
+        BinOp::Sub => crate::util::num_op(lhs, rhs, |a, b| a - b, |a, b| a - b),
+        BinOp::Mul => crate::util::num_op(lhs, rhs, |a, b| a * b, |a, b| a * b),
+        BinOp::Div => {
+            let b = rhs.as_f64().unwrap_or(0.0);
+            if b == 0.0 {
+                return Err(EvalError("division by zero".into()));
+            }
+            Ok(Val::Float(lhs.as_f64().unwrap_or(0.0) / b))
+        }
+        BinOp::Mod => crate::util::num_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
+        _ => Err(EvalError("unsupported binary kernel operator".into())),
+    }
 }
 
 /// Result of a view-native kernel evaluation: a borrowed sub-view or a newly-owned `Val`.
@@ -915,6 +993,11 @@ where
             };
             Some(ViewKernelValue::Owned(Val::Bool(passes)))
         }
+        BodyKernel::Binary { lhs, op, rhs } => {
+            let lhs = view_kernel_value_to_owned(eval_view_kernel(lhs, item)?);
+            let rhs = view_kernel_value_to_owned(eval_view_kernel(rhs, item)?);
+            eval_binary_op(lhs, *op, rhs).ok().map(ViewKernelValue::Owned)
+        }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
                 let passes = match eval_view_kernel(predicate, item)? {
@@ -1010,8 +1093,10 @@ mod tests {
     use std::sync::Arc;
 
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
+    use crate::compile::compiler::Compiler;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
+    use crate::parse::parser::parse;
 
     use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
 
@@ -1027,6 +1112,36 @@ mod tests {
             ViewKernelValue::Owned(Val::Bool(value)) => Some(value),
             _ => None,
         }
+    }
+
+    fn owned_value(value: Option<ViewKernelValue<ValView<'_>>>) -> Option<Val> {
+        match value? {
+            ViewKernelValue::Owned(value) => Some(value),
+            ViewKernelValue::View(view) => Some(view.materialize()),
+        }
+    }
+
+    #[test]
+    fn arithmetic_kernels_run_on_value_views() {
+        let expr = parse("qty * price").expect("parse arithmetic");
+        let program = Compiler::compile(&expr, "qty * price");
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::Binary { .. }));
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [
+                (Arc::from("qty"), Val::Int(3)),
+                (Arc::from("price"), Val::Float(12.5)),
+            ]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &view)),
+            Some(Val::Float(37.5))
+        );
     }
 
     #[test]
