@@ -143,6 +143,23 @@ impl PredicateSinkSpec {
 }
 
 impl MembershipSinkSpec {
+    /// Constructs a membership terminal sink from the builtin method.
+    pub(crate) fn from_method(
+        method: BuiltinMethod,
+        target: MembershipSinkTarget,
+    ) -> Option<Self> {
+        Some(Self {
+            op: match method {
+                BuiltinMethod::Includes => MembershipSinkOp::Includes,
+                BuiltinMethod::Index => MembershipSinkOp::Index,
+                BuiltinMethod::IndicesOf => MembershipSinkOp::IndicesOf,
+                _ => return None,
+            },
+            target,
+            method,
+        })
+    }
+
     /// Demand placed on the row stream by this terminal membership sink.
     pub(crate) fn demand(&self) -> Demand {
         // `includes` and `index` can stop once their accumulator observes a match,
