@@ -461,12 +461,6 @@ pub fn select_exec_path(stages: &[Stage], sink: &Sink) -> PhysicalExecPath {
         return PhysicalExecPath::Indexed;
     }
 
-    // Nested compiled plans are executed by the generic materialized path today. Other physical
-    // paths can support them once they can run a nested `Plan` as a first-class stage.
-    if stages.iter().any(|s| matches!(s, Stage::CompiledMap(_))) {
-        return PhysicalExecPath::Legacy;
-    }
-
     // Columnar: at least one stage has a BuiltinColumnarStage variant, meaning an ObjVec /
     // IntVec / StrVec / FloatVec fast path exists for it.
     let columnar_eligible = stages

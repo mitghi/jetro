@@ -999,6 +999,7 @@ mod tests {
         use serde_json::json;
 
         let p = lower_query("$.rows.map(items.map(qty * price).sum())").unwrap();
+        assert_eq!(p.exec_path, PhysicalExecPath::Composed);
         let Stage::CompiledMap(plan) = &p.stages[0] else {
             panic!("expected compiled nested map stage");
         };

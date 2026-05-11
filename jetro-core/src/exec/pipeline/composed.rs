@@ -6,7 +6,7 @@
 //! This module consolidates the composed-execution helpers: barrier-stage handling,
 //! segment chain building, sink dispatch, and the per-stage builder.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -23,7 +23,7 @@ use crate::vm::Program;
 use super::ir::program_match_only;
 use super::{
     compute_strategies_with_kernels, eval_kernel, ordered_by_key_cmp, row_source, BodyKernel,
-    Pipeline, Sink, Source, Stage, StageStrategy,
+    Pipeline, Plan, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -50,6 +50,9 @@ impl<'a> ComposedStageBuilder<'a> {
     /// Builds a specialised `composed::Stage` for `(stage, kernel)`; returns `None` for barrier stages.
     pub(super) fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
         Some(match (stage, kernel) {
+            (Stage::CompiledMap(plan), _) => Box::new(NestedPlanStage {
+                plan: Arc::clone(plan),
+            }),
             (Stage::Filter(_, _), BodyKernel::FieldCmpLit(field, op, lit))
                 if matches!(op, crate::parse::ast::BinOp::Eq) =>
             {
@@ -197,6 +200,19 @@ impl<'a> ComposedStageBuilder<'a> {
                 env: self.base_env.clone(),
             }))
         }))
+    }
+}
+
+struct NestedPlanStage {
+    plan: Arc<Plan>,
+}
+
+impl cmp::Stage for NestedPlanStage {
+    fn apply<'a>(&self, x: &'a Val) -> cmp::StageOutput<'a> {
+        match super::nested::run_plan(&self.plan, x.clone()) {
+            Ok(value) => cmp::StageOutput::Pass(Cow::Owned(value)),
+            Err(_) => cmp::StageOutput::Filtered,
+        }
     }
 }
 
