@@ -147,7 +147,7 @@ fn resolve_view_sink(
 }
 
 fn segment_pull_demand(stages: &[pipeline::Stage], sink: &pipeline::Sink) -> PullDemand {
-    pipeline::Pipeline::segment_source_demand(stages, sink).chain.pull
+    pipeline::Pipeline::segment_pull_demand(stages, sink)
 }
 
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.

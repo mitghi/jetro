@@ -1186,7 +1186,7 @@ impl PipelineBody {
 
     /// Returns only the pull lane of this body's source demand.
     pub(crate) fn pull_demand(&self) -> PullDemand {
-        self.source_demand().chain.pull
+        Pipeline::segment_pull_demand(&self.stages, &self.sink)
     }
 }
 
@@ -1198,6 +1198,11 @@ impl Pipeline {
             .iter()
             .rev()
             .fold(sink.demand(), |demand, stage| stage.upstream_demand(demand))
+    }
+
+    /// Returns only the pull lane of `segment_source_demand`.
+    pub fn segment_pull_demand(stages: &[Stage], sink: &Sink) -> PullDemand {
+        Self::segment_source_demand(stages, sink).chain.pull
     }
 
     /// Returns the `SinkDemand` that the pipeline's source must satisfy after propagating the
