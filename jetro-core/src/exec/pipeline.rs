@@ -45,7 +45,7 @@ pub(crate) use capability::{
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
-    num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
+    num_finalise, num_fold, num_fold_f64, num_fold_i64, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
     OrderedKeySorter,
 };
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};

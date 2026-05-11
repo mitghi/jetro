@@ -22,38 +22,78 @@ pub(crate) fn num_fold(
     op: NumOp,
     v: &Val,
 ) {
-    let f = match v {
-        Val::Int(n) => *n as f64,
-        Val::Float(x) => *x,
+    match v {
+        Val::Int(n) => num_fold_i64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, *n),
+        Val::Float(x) => num_fold_f64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, *x),
         _ => return,
-    };
+    }
+}
+
+/// Accumulates one integer value into numeric aggregate state.
+#[inline]
+pub(crate) fn num_fold_i64(
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: NumOp,
+    n: i64,
+) {
     *n_obs += 1;
     match op {
-        NumOp::Sum | NumOp::Avg => match v {
-            Val::Int(n) => {
-                if *floated {
-                    *acc_f += *n as f64
-                } else {
-                    *acc_i += *n
-                }
+        NumOp::Sum | NumOp::Avg => {
+            if *floated {
+                *acc_f += n as f64
+            } else {
+                *acc_i += n
             }
-            Val::Float(x) => {
-                if !*floated {
-                    *acc_f = *acc_i as f64;
-                    *floated = true;
-                }
-                *acc_f += *x;
-            }
-            _ => {}
-        },
+        }
         NumOp::Min => {
+            let f = n as f64;
             if f < *min_f {
                 *min_f = f;
             }
         }
         NumOp::Max => {
+            let f = n as f64;
             if f > *max_f {
                 *max_f = f;
+            }
+        }
+    }
+}
+
+/// Accumulates one floating-point value into numeric aggregate state.
+#[inline]
+pub(crate) fn num_fold_f64(
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: NumOp,
+    x: f64,
+) {
+    *n_obs += 1;
+    match op {
+        NumOp::Sum | NumOp::Avg => {
+            if !*floated {
+                *acc_f = *acc_i as f64;
+                *floated = true;
+            }
+            *acc_f += x;
+        }
+        NumOp::Min => {
+            if x < *min_f {
+                *min_f = x;
+            }
+        }
+        NumOp::Max => {
+            if x > *max_f {
+                *max_f = x;
             }
         }
     }
@@ -89,7 +129,6 @@ pub(crate) fn num_finalise(
         NumOp::Max => Val::Float(max_f),
     }
 }
-
 
 /// Total-order comparator for `Val`, promoting mixed numeric types to `f64` and falling back to debug-string comparison.
 pub(crate) fn cmp_val_total(a: &Val, b: &Val) -> std::cmp::Ordering {
@@ -404,7 +443,6 @@ impl<T> Ord for OrderedEntry<T> {
     }
 }
 
-
 /// Traverses `keys` on `root`, returning the nested value or `Val::Null` when any step yields a missing field.
 pub(crate) fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
     let mut cur = root.clone();
@@ -413,7 +451,6 @@ pub(crate) fn walk_field_chain(root: &Val, keys: &[Arc<str>]) -> Val {
     }
     cur
 }
-
 
 /// Sets `item` as the current value in `env`, executes `prog`, then restores the previous current value.
 #[inline]

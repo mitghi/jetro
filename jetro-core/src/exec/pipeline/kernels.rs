@@ -1505,13 +1505,11 @@ enum NumericKernelValue {
     Float(f64),
 }
 
-impl NumericKernelValue {
-    #[inline]
-    fn to_val(self) -> Val {
-        match self {
-            Self::Int(value) => Val::Int(value),
-            Self::Float(value) => Val::Float(value),
-        }
+#[inline]
+fn numeric_kernel_value_to_val(value: NumericKernelValue) -> Val {
+    match value {
+        NumericKernelValue::Int(value) => Val::Int(value),
+        NumericKernelValue::Float(value) => Val::Float(value),
     }
 }
 
@@ -1797,16 +1795,14 @@ fn fold_numeric_kernel_value(
     n_obs: &mut usize,
     op: super::NumOp,
 ) {
-    super::num_fold(
-        acc_i,
-        acc_f,
-        floated,
-        min_f,
-        max_f,
-        n_obs,
-        op,
-        &value.to_val(),
-    );
+    match value {
+        NumericKernelValue::Int(value) => {
+            super::num_fold_i64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, value)
+        }
+        NumericKernelValue::Float(value) => {
+            super::num_fold_f64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, value)
+        }
+    }
 }
 
 fn eval_nested_array_reducer_native_owned(
@@ -2065,7 +2061,7 @@ where
         }
         BodyKernel::Binary { lhs, op, rhs } => {
             if let Some(value) = eval_view_numeric_kernel(kernel, item) {
-                return Some(ViewKernelValue::Owned(value.to_val()));
+                return Some(ViewKernelValue::Owned(numeric_kernel_value_to_val(value)));
             }
             let lhs = view_kernel_value_to_owned(eval_view_kernel(lhs, item)?);
             let rhs = view_kernel_value_to_owned(eval_view_kernel(rhs, item)?);
