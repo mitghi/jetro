@@ -1090,6 +1090,35 @@ mod tests {
     }
 
     #[test]
+    fn keyed_reducer_pipelines_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": 1},
+                {"status": "shipped", "id": 2},
+                {"status": "pending", "id": 3}
+            ]
+        });
+        assert_pipeline_matches_vm("$.orders.group_by(status)", doc.clone());
+        assert_pipeline_matches_vm("$.orders.count_by(status)", doc.clone());
+        assert_pipeline_matches_vm("$.orders.index_by(id)", doc);
+    }
+
+    #[test]
+    fn keyed_reducer_materialized_fallback_matches_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": "a"},
+                {"status": "shipped", "id": "b"},
+                {"status": "pending", "id": "c"}
+            ]
+        });
+        assert_pipeline_matches_vm("$.orders.count_by(status.upper())", doc.clone());
+        assert_pipeline_matches_vm("$.orders.index_by(id.upper())", doc);
+    }
+
+    #[test]
     fn demand_optimizer_pulls_filter_through_map_for_count() {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);

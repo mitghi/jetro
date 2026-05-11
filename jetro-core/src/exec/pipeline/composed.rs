@@ -289,15 +289,25 @@ fn run_barrier(
             let key = key_from_kernel(kernel)?;
             cmp::barrier_unique_by(buf, &key)
         }
-        Stage::ExprBuiltin {
-            method: crate::builtins::BuiltinMethod::GroupBy,
-            ..
-        } => {
-            if !matches!(sink, Sink::Collect) || !is_terminal {
-                return None;
-            }
+        Stage::ExprBuiltin { method, .. }
+            if matches!(
+                method,
+                crate::builtins::BuiltinMethod::GroupBy
+                    | crate::builtins::BuiltinMethod::CountBy
+                    | crate::builtins::BuiltinMethod::IndexBy
+            ) =>
+        {
             let key = key_from_kernel(kernel)?;
-            return Some(BarrierOutput::Done(cmp::barrier_group_by(buf, &key)));
+            let value = match method {
+                crate::builtins::BuiltinMethod::GroupBy => cmp::barrier_group_by(buf, &key),
+                crate::builtins::BuiltinMethod::CountBy => cmp::barrier_count_by(buf, &key),
+                crate::builtins::BuiltinMethod::IndexBy => cmp::barrier_index_by(buf, &key),
+                _ => unreachable!("keyed reducer match guard"),
+            };
+            if matches!(sink, Sink::Collect) && is_terminal {
+                return Some(BarrierOutput::Done(value));
+            }
+            return Some(BarrierOutput::Rows(vec![value]));
         }
         _ => return None,
     };

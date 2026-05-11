@@ -1107,6 +1107,37 @@ pub fn barrier_group_by(buf: Vec<Val>, key: &KeySource) -> Val {
     Val::Obj(std::sync::Arc::new(m))
 }
 
+/// Barrier operation: count rows by key, preserving first-seen key order.
+pub fn barrier_count_by(buf: Vec<Val>, key: &KeySource) -> Val {
+    use indexmap::IndexMap;
+    use std::sync::Arc;
+
+    let mut counts: IndexMap<Arc<str>, Val> = IndexMap::new();
+    for v in buf.into_iter() {
+        let extracted = key.extract(&v);
+        let key = Arc::from(crate::util::val_to_key(&extracted).as_str());
+        let counter = counts.entry(key).or_insert(Val::Int(0));
+        if let Val::Int(n) = counter {
+            *n += 1;
+        }
+    }
+    Val::Obj(Arc::new(counts))
+}
+
+/// Barrier operation: index rows by key, keeping the last row for duplicate keys.
+pub fn barrier_index_by(buf: Vec<Val>, key: &KeySource) -> Val {
+    use indexmap::IndexMap;
+    use std::sync::Arc;
+
+    let mut index: IndexMap<Arc<str>, Val> = IndexMap::new();
+    for v in buf.into_iter() {
+        let extracted = key.extract(&v);
+        let key = Arc::from(crate::util::val_to_key(&extracted).as_str());
+        index.insert(key, v);
+    }
+    Val::Obj(Arc::new(index))
+}
+
 /// A `Val`-based hash wrapper used as the deduplication key inside `barrier_unique_by`.
 /// Stores the key in a canonical `KeyRepr` to enable `HashSet` membership tests.
 #[derive(Eq, PartialEq, Hash)]

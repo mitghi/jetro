@@ -1352,6 +1352,7 @@ impl Builtin for CountBy {
             .keyed_reducer(BuiltinKeyedReducer::Count)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
                 true,
@@ -1396,6 +1397,7 @@ impl Builtin for IndexBy {
             .keyed_reducer(BuiltinKeyedReducer::Index)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
                 true,

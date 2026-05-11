@@ -137,12 +137,16 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
     }
 
-    // group_by wraps its output in a single-element array; unwrap it so the caller sees the map
+    // Keyed reducers wrap their output in a single-element array; unwrap it so
+    // terminal collection returns the reducer object.
     let unwrap_single_collect_obj = pipeline
         .stages
         .last()
         .and_then(Stage::descriptor)
-        .is_some_and(|desc| desc.method == Some(BuiltinMethod::GroupBy));
+        .is_some_and(|desc| {
+            desc.method
+                .is_some_and(|method| method.spec().keyed_reducer.is_some())
+        });
     sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
