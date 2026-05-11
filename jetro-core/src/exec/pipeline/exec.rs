@@ -6,6 +6,7 @@
 use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
+    vm::VM,
 };
 
 use super::columnar;
@@ -23,7 +24,8 @@ impl Pipeline {
     /// Executes the pipeline against `root`, optionally with a `PipelineData` cache for columnar promotion.
     pub fn run_with(&self, root: &Val, cache: Option<&dyn PipelineData>) -> Result<Val, EvalError> {
         let env = Env::new(root.clone());
-        self.run_with_env(root, &env, cache)
+        let mut vm = VM::new();
+        self.run_with_env_and_vm(root, &env, cache, &mut vm)
     }
 
     /// Dispatches to the first applicable backend for this pipeline shape.
@@ -34,17 +36,29 @@ impl Pipeline {
         base_env: &Env,
         cache: Option<&dyn PipelineData>,
     ) -> Result<Val, EvalError> {
+        let mut vm = VM::new();
+        self.run_with_env_and_vm(root, base_env, cache, &mut vm)
+    }
+
+    /// Dispatches with caller-owned VM state for compiled fallback programs.
+    pub(crate) fn run_with_env_and_vm(
+        &self,
+        root: &Val,
+        base_env: &Env,
+        cache: Option<&dyn PipelineData>,
+        vm: &mut VM,
+    ) -> Result<Val, EvalError> {
         match self.exec_path {
             PhysicalExecPath::Indexed => {
-                if let Some(out) = indexed_exec::run(self, root, base_env) {
+                if let Some(out) = indexed_exec::run(self, root, base_env, vm) {
                     return out;
                 }
-                self.run_columnar_or_below(root, base_env, cache)
+                self.run_columnar_or_below(root, base_env, cache, vm)
             }
-            PhysicalExecPath::Columnar => self.run_columnar_or_below(root, base_env, cache),
+            PhysicalExecPath::Columnar => self.run_columnar_or_below(root, base_env, cache, vm),
             PhysicalExecPath::Composed => composed::run(self, root, base_env)
-                .unwrap_or_else(|| materialized_exec::run(self, root, base_env)),
-            PhysicalExecPath::Legacy => materialized_exec::run(self, root, base_env),
+                .unwrap_or_else(|| materialized_exec::run(self, root, base_env, vm)),
+            PhysicalExecPath::Legacy => materialized_exec::run(self, root, base_env, vm),
         }
     }
 
@@ -55,6 +69,7 @@ impl Pipeline {
         root: &Val,
         base_env: &Env,
         cache: Option<&dyn PipelineData>,
+        vm: &mut VM,
     ) -> Result<Val, EvalError> {
         if let Some(out) = columnar::run_cached(self, root, cache) {
             return out;
@@ -65,6 +80,6 @@ impl Pipeline {
             }
         }
         composed::run(self, root, base_env)
-            .unwrap_or_else(|| materialized_exec::run(self, root, base_env))
+            .unwrap_or_else(|| materialized_exec::run(self, root, base_env, vm))
     }
 }

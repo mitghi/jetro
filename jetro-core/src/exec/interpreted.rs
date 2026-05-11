@@ -112,7 +112,12 @@ impl ExecCtx<'_, '_> {
                 let pipeline = body.clone().with_source(source.into_pipeline_source());
                 let root = self.root()?;
                 let env = self.env()?.clone();
-                pipeline.run_with_env(&root, &env, Some(self.j as &dyn pipeline::PipelineData))
+                pipeline.run_with_env_and_vm(
+                    &root,
+                    &env,
+                    Some(self.j as &dyn pipeline::PipelineData),
+                    self.vm,
+                )
             }
             PlanNode::RootPath(steps) => Ok(run_root_path(&self.root()?, steps)),
             PlanNode::Chain { base, steps } => self.eval_chain(*base, steps),
@@ -476,10 +481,11 @@ impl ExecCtx<'_, '_> {
                 let pipeline = body.clone().with_source(pipeline::Source::Receiver(source));
                 let root = Val::Null;
                 let env = self.null_env_with_fast_locals();
-                Some(pipeline.run_with_env(
+                Some(pipeline.run_with_env_and_vm(
                     &root,
                     &env,
                     Some(self.j as &dyn pipeline::PipelineData),
+                    self.vm,
                 ))
             }
             _ => None,
@@ -579,10 +585,11 @@ impl ExecCtx<'_, '_> {
                     Ok(env) => env,
                     Err(err) => return Some(Err(err)),
                 };
-                return Some(pipeline.run_with_env(
+                return Some(pipeline.run_with_env_and_vm(
                     &root,
                     &env,
                     Some(self.j as &dyn pipeline::PipelineData),
+                    self.vm,
                 ));
             }
         }

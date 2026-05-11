@@ -10,6 +10,7 @@ use std::sync::Arc;
 use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
+    vm::VM,
 };
 
 use super::row_source;
@@ -25,8 +26,12 @@ use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
 use crate::plan::demand::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
-pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {
-    let mut vm = crate::vm::VM::new();
+pub(super) fn run(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Result<Val, EvalError> {
     let mut loop_env = base_env.clone();
 
     let recv = row_source::resolve(&pipeline.source, root);
@@ -37,7 +42,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
-        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
         _ => None,
     };
     if let Sink::Membership(spec) = &pipeline.sink {
@@ -55,7 +60,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         .iter()
         .any(Stage::requires_legacy_materialization);
     if !needs_barrier {
-        return run_streaming_rows(pipeline, base_env, row_source::source_iter(&recv));
+        return run_streaming_rows_with_vm(pipeline, base_env, row_source::source_iter(&recv), vm);
     }
 
     let pre_iter: LegacyPreIter = {
@@ -90,7 +95,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             if let Some(applied) = apply_adapter_materialized(
                 stage,
                 &mut buf,
-                &mut vm,
+                vm,
                 &mut loop_env,
                 kernel,
                 strategy,
@@ -111,7 +116,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
         let sink_done = match &pipeline.sink {
             Sink::Predicate(_) => {
-                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
@@ -119,10 +124,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 membership_target.as_ref().expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
-                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Reducer(_) => {
-                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
                     ReducerItemFlow::Skipped => continue 'outer,
                 }
@@ -174,18 +179,33 @@ pub(super) fn run_tape_field_chain(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    Some(run_streaming_rows(
+    let mut vm = VM::new();
+    Some(run_streaming_rows_with_vm(
         &pipeline,
         base_env,
         source.iter_materialized(),
+        &mut vm,
     ))
 }
 
+#[cfg(test)]
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
 where
     I: IntoIterator<Item = Val>,
 {
-    let mut vm = crate::vm::VM::new();
+    let mut vm = VM::new();
+    run_streaming_rows_with_vm(pipeline, base_env, iter, &mut vm)
+}
+
+fn run_streaming_rows_with_vm<I>(
+    pipeline: &Pipeline,
+    base_env: &Env,
+    iter: I,
+    vm: &mut VM,
+) -> Result<Val, EvalError>
+where
+    I: IntoIterator<Item = Val>,
+{
     let mut loop_env = base_env.clone();
     let source_demand = pipeline.source_demand().chain.pull;
     let late_projection = pipeline
@@ -202,7 +222,7 @@ where
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
-        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
         _ => None,
     };
     if source_demand.is_zero() {
@@ -261,7 +281,7 @@ where
                     stage,
                     stage_idx,
                     item,
-                    &mut vm,
+                    vm,
                     &mut loop_env,
                     kernel,
                     &mut stage_taken,
@@ -298,7 +318,7 @@ where
 
         let sink_done = match &pipeline.sink {
             Sink::Predicate(_) => {
-                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
@@ -306,10 +326,10 @@ where
                 membership_target.as_ref().expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
-                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Reducer(_) => {
-                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
                     ReducerItemFlow::Skipped => continue 'outer,
                 }
