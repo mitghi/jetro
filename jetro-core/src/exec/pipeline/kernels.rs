@@ -64,6 +64,13 @@ pub enum BodyKernel {
         /// Kernel evaluated for every child row.
         map: Box<BodyKernel>,
     },
+    /// Selects one child from an array-like sub-kernel.
+    ArraySelect {
+        /// Kernel that yields the child array.
+        array: Box<BodyKernel>,
+        /// Position to select from the child array.
+        selector: ArraySelector,
+    },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
@@ -118,6 +125,17 @@ pub struct ObjectKernelEntry {
     optional: bool,
     // when true, null values are omitted regardless of the optional flag
     omit_null: bool,
+}
+
+/// Positional selector used by `BodyKernel::ArraySelect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArraySelector {
+    /// First child.
+    First,
+    /// Last child.
+    Last,
+    /// Zero-based child index.
+    Nth(usize),
 }
 
 impl ObjectKernel {
@@ -203,6 +221,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ChildMapSum { .. } => FieldDemand::Whole,
+            Self::ArraySelect { array, .. } => array.field_demand(),
             Self::And(predicates) => predicates
                 .iter()
                 .fold(FieldDemand::None, |need, predicate| {
@@ -247,6 +266,7 @@ impl BodyKernel {
             Self::ChildMapSum { array, map } => {
                 array.mentions_any_field_like_ident(names) || map.mentions_any_field_like_ident(names)
             }
+            Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
             Self::And(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
@@ -277,6 +297,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
             Self::ChildMapSum { array, map } => array.is_view_native() && map.is_view_native(),
+            Self::ArraySelect { array, .. } => array.is_view_native(),
             Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
         }
@@ -325,6 +346,24 @@ impl BodyKernel {
                     return Self::ChildMapSum {
                         array: Box::new(array),
                         map: Box::new(map),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::CallMethod(call)]
+                if array_selector_call(call).is_some() =>
+            {
+                let array = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<array-select-receiver>",
+                    ))
+                };
+                if !matches!(array, BodyKernel::Generic) && array.is_view_native() {
+                    return Self::ArraySelect {
+                        array: Box::new(array),
+                        selector: array_selector_call(call).expect("selector checked"),
                     };
                 }
             }
@@ -522,6 +561,16 @@ fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKerne
             Opcode::FieldChain(chain) => {
                 let receiver = stack.pop().unwrap_or(BodyKernel::Current);
                 stack.push(compose_field_chain_kernel(receiver, Arc::clone(&chain.keys)));
+            }
+            Opcode::CallMethod(call) if array_selector_call(call).is_some() => {
+                let receiver = stack.pop().unwrap_or(BodyKernel::Current);
+                if !receiver.is_view_native() {
+                    return None;
+                }
+                stack.push(BodyKernel::ArraySelect {
+                    array: Box::new(receiver),
+                    selector: array_selector_call(call)?,
+                });
             }
             op if trivial_lit(op).is_some() => stack.push(BodyKernel::Const(trivial_lit(op)?)),
             op if arithmetic_binop(op).is_some() => {
@@ -746,6 +795,21 @@ fn static_positional_pick_call(call: &crate::vm::CompiledCall) -> Option<Builtin
     ))
 }
 
+fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> {
+    match call.method {
+        crate::builtins::BuiltinMethod::First => Some(ArraySelector::First),
+        crate::builtins::BuiltinMethod::Last => Some(ArraySelector::Last),
+        crate::builtins::BuiltinMethod::Nth => match call.sub_progs.as_ref() {
+            [prog] => match static_prog_val(prog)? {
+                Val::Int(index) if index >= 0 => Some(ArraySelector::Nth(index as usize)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn arithmetic_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
     use crate::parse::ast::BinOp as B;
     use crate::vm::Opcode as O;
@@ -830,6 +894,10 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::ChildMapSum { array, map } => {
             let array = eval_native_kernel(array, item)?;
             eval_child_map_sum_native(&array, map)
+        }
+        BodyKernel::ArraySelect { array, selector } => {
+            let array = eval_native_kernel(array, item)?;
+            Ok(eval_array_select_native(&array, *selector))
         }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
@@ -986,6 +1054,37 @@ where
         sum.observe(&value).ok()?;
     }
     Some(sum.finish())
+}
+
+fn eval_array_select_native(array: &Val, selector: ArraySelector) -> Val {
+    let Some(items) = array.as_vals() else {
+        return Val::Null;
+    };
+    let idx = match selector {
+        ArraySelector::First => 0,
+        ArraySelector::Last => match items.len().checked_sub(1) {
+            Some(idx) => idx,
+            None => return Val::Null,
+        },
+        ArraySelector::Nth(idx) => idx,
+    };
+    items.get(idx).cloned().unwrap_or(Val::Null)
+}
+
+fn eval_array_select_view<'a, V>(array: V, selector: ArraySelector) -> V
+where
+    V: ValueView<'a>,
+{
+    let idx = match selector {
+        ArraySelector::First => Some(0),
+        ArraySelector::Last => match array.scalar() {
+            JsonView::ArrayLen(len) => len.checked_sub(1),
+            _ => None,
+        },
+        ArraySelector::Nth(idx) => Some(idx),
+    };
+    idx.map(|idx| array.index(idx as i64))
+        .unwrap_or_else(|| array.index(-1))
 }
 
 #[derive(Default)]
@@ -1190,6 +1289,14 @@ where
             ViewKernelValue::Owned(value) => eval_child_map_sum_native(&value, map)
                 .ok()
                 .map(ViewKernelValue::Owned),
+        },
+        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel(array, item)? {
+            ViewKernelValue::View(view) => {
+                Some(ViewKernelValue::View(eval_array_select_view(view, *selector)))
+            }
+            ViewKernelValue::Owned(value) => {
+                Some(ViewKernelValue::Owned(eval_array_select_native(&value, *selector)))
+            }
         },
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
@@ -1440,6 +1547,32 @@ mod tests {
         let json: serde_json::Value = out.into();
 
         assert_eq!(json, serde_json::json!({"id": 7, "line_total": 23.5}));
+    }
+
+    #[test]
+    fn array_select_kernels_run_on_value_views() {
+        let expr = parse("events.last().kind").expect("parse array select");
+        let program = Compiler::compile(&expr, "events.last().kind");
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::Compose { .. }));
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [(
+                Arc::from("events"),
+                Val::arr(vec![
+                    Val::obj([(Arc::from("kind"), Val::Str(Arc::from("placed")))].into()),
+                    Val::obj([(Arc::from("kind"), Val::Str(Arc::from("delivered")))].into()),
+                ]),
+            )]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &view)),
+            Some(Val::Str(Arc::from("delivered")))
+        );
     }
 
     #[test]
