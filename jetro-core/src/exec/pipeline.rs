@@ -1119,6 +1119,26 @@ mod tests {
     }
 
     #[test]
+    fn keyed_reducers_preserve_upstream_projection_rows() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": 1, "price": 10},
+                {"status": "shipped", "id": 2, "price": 20},
+                {"status": "pending", "id": 3, "price": 30}
+            ]
+        });
+        assert_pipeline_matches_vm(
+            "$.orders.map({status: status, label: id}).group_by(status)",
+            doc.clone(),
+        );
+        assert_pipeline_matches_vm(
+            "$.orders.map({id: id, label: status}).index_by(id)",
+            doc,
+        );
+    }
+
+    #[test]
     fn demand_optimizer_pulls_filter_through_map_for_count() {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
