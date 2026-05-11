@@ -91,7 +91,7 @@ where
 {
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-    let source_demand = body_pull_demand(body);
+    let source_demand = body.pull_demand();
     let sink = match (source_demand, capabilities.sink) {
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
             pipeline::ViewSinkCapability::Nth { index: 0 }
@@ -144,10 +144,6 @@ fn resolve_view_sink(
         }
         sink => Some(Ok(sink)),
     }
-}
-
-fn body_pull_demand(body: &pipeline::PipelineBody) -> PullDemand {
-    segment_pull_demand(&body.stages, &body.sink)
 }
 
 fn segment_pull_demand(stages: &[pipeline::Stage], sink: &pipeline::Sink) -> PullDemand {
@@ -842,7 +838,7 @@ where
     if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
         return None;
     }
-    let source_demand = body_pull_demand(body);
+    let source_demand = body.pull_demand();
 
     drive_view_frontier(
         source,

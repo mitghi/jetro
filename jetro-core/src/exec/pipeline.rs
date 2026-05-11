@@ -502,7 +502,7 @@ impl PipelineBody {
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
         let exec_path = select_exec_path(&self.stages, &self.sink);
-        let source_demand = Pipeline::segment_source_demand(&self.stages, &self.sink);
+        let source_demand = self.source_demand();
         let payload_demand = Pipeline::segment_payload_demand(
             &self.stages,
             &self.stage_kernels,

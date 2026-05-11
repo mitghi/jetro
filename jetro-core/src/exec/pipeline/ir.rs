@@ -1177,6 +1177,17 @@ impl PipelineBody {
                 .sink
                 .can_run_with_receiver_only(program_is_current_only)
     }
+
+    /// Returns the source demand for this body after propagating the sink demand
+    /// through all planned stages.
+    pub(crate) fn source_demand(&self) -> SinkDemand {
+        Pipeline::segment_source_demand(&self.stages, &self.sink)
+    }
+
+    /// Returns only the pull lane of this body's source demand.
+    pub(crate) fn pull_demand(&self) -> PullDemand {
+        self.source_demand().chain.pull
+    }
 }
 
 impl Pipeline {
