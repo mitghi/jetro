@@ -12,7 +12,7 @@
 //! write so the scheduler can recognise it as targeting `$`.
 
 use crate::parse::ast::{
-    Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step,
+    Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
 use crate::parse::write_terminal::{
     build_patch_op as build_write_patch_op, is_pipeline_fusion_terminal,
@@ -757,12 +757,6 @@ fn match_arm_reads_update_focus(arm: &crate::parse::ast::MatchArm) -> bool {
         .is_some_and(|expr| expr_reads_update_focus(expr))
         || expr_reads_update_focus(&arm.body)
 }
-
-// Suppress dead-code lints for the `BindTarget` import that exists
-// solely so future Phase B code can match on bind shapes without
-// re-importing. Keeping it here documents the dependency.
-#[allow(dead_code)]
-fn _bind_target_witness(_b: &BindTarget) {}
 
 // ---------------------------------------------------------------------------
 // Phase B: contiguous same-root write fusion (IR rewrite)
