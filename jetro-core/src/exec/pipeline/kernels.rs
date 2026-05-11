@@ -1489,10 +1489,8 @@ fn eval_nested_array_reducer_native(
     let mut n_obs = 0usize;
 
     for child in items.iter() {
-        if let Some(predicate) = predicate {
-            if !crate::util::is_truthy(&eval_native_kernel(predicate, child)?) {
-                continue;
-            }
+        if !native_predicate_matches(predicate, child)? {
+            continue;
         }
         let value;
         let observed = match map {
@@ -1533,11 +1531,21 @@ fn eval_nested_array_count_native(
     };
     let mut count = 0i64;
     for child in items.iter() {
-        if crate::util::is_truthy(&eval_native_kernel(predicate, child)?) {
+        if native_predicate_matches(Some(predicate), child)? {
             count += 1;
         }
     }
     Ok(Val::Int(count))
+}
+
+#[inline]
+fn native_predicate_matches(predicate: Option<&BodyKernel>, item: &Val) -> Result<bool, EvalError> {
+    match predicate {
+        Some(predicate) => Ok(crate::util::is_truthy(&eval_native_kernel(
+            predicate, item,
+        )?)),
+        None => Ok(true),
+    }
 }
 
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
@@ -1721,14 +1729,8 @@ where
     let mut n_obs = 0usize;
 
     iter.try_for_each(|child| {
-        if let Some(predicate) = predicate {
-            let passes = match eval_view_kernel(predicate, &child)? {
-                ViewKernelValue::View(view) => view.scalar().truthy(),
-                ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
-            };
-            if !passes {
-                return Some(());
-            }
+        if !view_predicate_matches(predicate, &child)? {
+            return Some(());
         }
         match map {
             Some(map) => {
@@ -1817,16 +1819,26 @@ where
     let mut count = 0i64;
     let mut iter = source.array_iter()?;
     iter.try_for_each(|child| {
-        let passes = match eval_view_kernel(predicate, &child)? {
-            ViewKernelValue::View(view) => view.scalar().truthy(),
-            ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
-        };
-        if passes {
+        if view_predicate_matches(Some(predicate), &child)? {
             count += 1;
         }
         Some(())
     })?;
     Some(Val::Int(count))
+}
+
+#[inline]
+fn view_predicate_matches<'a, V>(predicate: Option<&BodyKernel>, item: &V) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    match predicate {
+        Some(predicate) => match eval_view_kernel(predicate, item)? {
+            ViewKernelValue::View(view) => Some(view.scalar().truthy()),
+            ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
+        },
+        None => Some(true),
+    }
 }
 
 fn eval_view_numeric_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<NumericKernelValue>
@@ -1992,10 +2004,8 @@ fn eval_nested_array_reducer_native_owned(
     let mut max_f = f64::NEG_INFINITY;
     let mut n_obs = 0usize;
     for child in items.iter() {
-        if let Some(predicate) = predicate {
-            if !crate::util::is_truthy(&eval_native_kernel(predicate, child).ok()?) {
-                continue;
-            }
+        if !native_predicate_matches_opt(predicate, child)? {
+            continue;
         }
         let value;
         let observed = match map {
@@ -2033,11 +2043,21 @@ fn eval_nested_array_count_native_owned(
     };
     let mut count = 0i64;
     for child in items.iter() {
-        if crate::util::is_truthy(&eval_native_kernel(predicate, child).ok()?) {
+        if native_predicate_matches_opt(Some(predicate), child)? {
             count += 1;
         }
     }
     Some(Val::Int(count))
+}
+
+#[inline]
+fn native_predicate_matches_opt(predicate: Option<&BodyKernel>, item: &Val) -> Option<bool> {
+    match predicate {
+        Some(predicate) => eval_native_kernel(predicate, item)
+            .ok()
+            .map(|value| crate::util::is_truthy(&value)),
+        None => Some(true),
+    }
 }
 
 #[inline]
