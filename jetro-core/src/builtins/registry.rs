@@ -814,6 +814,17 @@ mod tests {
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Reverse)),
             BuiltinPipelineMaterialization::ComposedBarrier
         );
+        for method in [
+            BuiltinMethod::GroupBy,
+            BuiltinMethod::CountBy,
+            BuiltinMethod::IndexBy,
+        ] {
+            assert_eq!(
+                pipeline_materialization(BuiltinId::from_method(method)),
+                BuiltinPipelineMaterialization::ComposedBarrier,
+                "{method:?}"
+            );
+        }
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Split)),
             BuiltinPipelineMaterialization::LegacyMaterialized
