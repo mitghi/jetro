@@ -69,25 +69,11 @@ fn collect(
         }
 
         LogicalPlan::TakeWhile { input, predicate } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&predicate);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::TakeWhile,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(predicate)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::TakeWhile, predicate)
         }
 
         LogicalPlan::DropWhile { input, predicate } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&predicate);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::DropWhile,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(predicate)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::DropWhile, predicate)
         }
 
         // ── Positional ─────────────────────────────────────────────────────
@@ -148,36 +134,15 @@ fn collect(
 
         // ── Keyed reducers ─────────────────────────────────────────────────
         LogicalPlan::GroupBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::GroupBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::GroupBy, key)
         }
 
         LogicalPlan::CountBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::CountBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::CountBy, key)
         }
 
         LogicalPlan::IndexBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::IndexBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::IndexBy, key)
         }
 
         // ── Terminal sinks — strip the default Collect, install the real one ──
@@ -213,6 +178,20 @@ fn collect(
         // ── VM fallback — cannot lower to a Pipeline ───────────────────────
         LogicalPlan::ScalarExpr(_) => None,
     }
+}
+
+fn collect_expr_builtin_stage(
+    input: LogicalPlan,
+    method: BuiltinMethod,
+    body_expr: Expr,
+) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+    let (source, mut stages, mut exprs, sink) = collect(input)?;
+    stages.push(Stage::ExprBuiltin {
+        method,
+        body: compile_expr_body(&body_expr),
+    });
+    exprs.push(Some(Arc::new(body_expr)));
+    Some((source, stages, exprs, sink))
 }
 
 fn collect_numeric_sink(
