@@ -430,7 +430,6 @@ pub struct Pipeline {
     pub payload_demand: PayloadDemand,
 
     /// Tail projection that can be delayed until rows have been selected.
-    #[allow(dead_code)]
     pub late_projection: Option<LateProjection>,
 
     /// Static source traversal capabilities used to choose the access mode.
