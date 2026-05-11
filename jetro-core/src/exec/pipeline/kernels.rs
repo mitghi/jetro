@@ -1332,9 +1332,14 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             ..
         } => {
             let scrutinee = eval_native_kernel(scrutinee, item)?;
-            let mut vm = crate::vm::VM::new();
             let env = crate::data::context::Env::new(scrutinee.clone());
-            vm.exec_match(compiled, &scrutinee, &env)
+            crate::with_vm(|cell| match cell.try_borrow_mut() {
+                Ok(mut vm) => vm.exec_match(compiled, &scrutinee, &env),
+                Err(_) => {
+                    let mut vm = crate::vm::VM::new();
+                    vm.exec_match(compiled, &scrutinee, &env)
+                }
+            })
         }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
@@ -2083,23 +2088,37 @@ where
             body_needs_current,
         } => match eval_view_kernel(scrutinee, item)? {
             ViewKernelValue::View(view) => {
-                let mut vm = crate::vm::VM::new();
                 let current = if *body_needs_current {
                     view.materialize()
                 } else {
                     Val::Null
                 };
                 let env = crate::data::context::Env::new(current);
-                crate::vm::exec_match_view(&mut vm, compiled, view, &env)
+                crate::with_vm(|cell| {
+                    match cell.try_borrow_mut() {
+                        Ok(mut vm) => crate::vm::exec_match_view(&mut vm, compiled, view, &env),
+                        Err(_) => {
+                            let mut vm = crate::vm::VM::new();
+                            crate::vm::exec_match_view(&mut vm, compiled, view, &env)
+                        }
+                    }
                     .ok()
                     .map(ViewKernelValue::Owned)
+                })
             }
             ViewKernelValue::Owned(value) => {
-                let mut vm = crate::vm::VM::new();
                 let env = crate::data::context::Env::new(value.clone());
-                vm.exec_match(compiled, &value, &env)
+                crate::with_vm(|cell| {
+                    match cell.try_borrow_mut() {
+                        Ok(mut vm) => vm.exec_match(compiled, &value, &env),
+                        Err(_) => {
+                            let mut vm = crate::vm::VM::new();
+                            vm.exec_match(compiled, &value, &env)
+                        }
+                    }
                     .ok()
                     .map(ViewKernelValue::Owned)
+                })
             }
         },
         BodyKernel::And(predicates) => {
