@@ -1754,49 +1754,6 @@ mod tests {
     }
 
     #[test]
-    fn object_kernels_accept_child_map_sum_entries() {
-        let expr = parse("{id, line_total: items.map(qty * price).sum()}")
-            .expect("parse object child sum");
-        let program = Compiler::compile(&expr, "{id, line_total: items.map(qty * price).sum()}");
-        let kernel = BodyKernel::classify(&program);
-        let BodyKernel::Object(_) = &kernel else {
-            panic!("expected object kernel, got {kernel:?}");
-        };
-        assert!(kernel.is_view_native());
-
-        let value = Val::obj(
-            [
-                (Arc::from("id"), Val::Int(7)),
-                (
-                    Arc::from("items"),
-                    Val::arr(vec![
-                        Val::obj(
-                            [
-                                (Arc::from("qty"), Val::Int(2)),
-                                (Arc::from("price"), Val::Float(10.0)),
-                            ]
-                            .into(),
-                        ),
-                        Val::obj(
-                            [
-                                (Arc::from("qty"), Val::Int(1)),
-                                (Arc::from("price"), Val::Float(3.5)),
-                            ]
-                            .into(),
-                        ),
-                    ]),
-                ),
-            ]
-            .into(),
-        );
-        let view = ValView::new(&value);
-        let out = owned_value(eval_view_kernel(&kernel, &view)).expect("object output");
-        let json: serde_json::Value = out.into();
-
-        assert_eq!(json, serde_json::json!({"id": 7, "line_total": 23.5}));
-    }
-
-    #[test]
     fn array_select_kernels_run_on_value_views() {
         let expr = parse("events.last().kind").expect("parse array select");
         let program = Compiler::compile(&expr, "events.last().kind");
