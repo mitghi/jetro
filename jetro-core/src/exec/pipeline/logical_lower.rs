@@ -22,7 +22,7 @@ use crate::parse::ast::Expr;
 /// linear pipeline (e.g. `ScalarExpr`).
 pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
     let (source, stages, stage_exprs, sink) = collect(plan)?;
-    let body = build_body(stages, stage_exprs, sink);
+    let body = PipelineBody::planned(stages, stage_exprs, sink);
     Some(body.with_source(source))
 }
 
@@ -192,15 +192,6 @@ fn collect_numeric_sink(
         exprs,
         Sink::Reducer(ReducerSpec::numeric(method, None, None)?),
     ))
-}
-
-// ---------------------------------------------------------------------------
-// Body assembly
-// ---------------------------------------------------------------------------
-
-/// Runs the shared pipeline planner and fills in kernel vectors required by `PipelineBody`.
-fn build_body(stages: Vec<Stage>, stage_exprs: Vec<Option<Arc<Expr>>>, sink: Sink) -> PipelineBody {
-    PipelineBody::planned(stages, stage_exprs, sink)
 }
 
 // ---------------------------------------------------------------------------
