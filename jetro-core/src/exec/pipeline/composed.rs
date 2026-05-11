@@ -23,7 +23,7 @@ use crate::vm::Program;
 use super::ir::program_match_only;
 use super::{
     compute_strategies_with_kernels, eval_kernel, ordered_by_key_cmp, row_source, BodyKernel,
-    Pipeline, Plan, Sink, Source, Stage, StageStrategy,
+    Pipeline, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ impl<'a> ComposedStageBuilder<'a> {
     pub(super) fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
         Some(match (stage, kernel) {
             (Stage::CompiledMap(plan), _) => Box::new(NestedPlanStage {
-                plan: Arc::clone(plan),
+                plan: super::nested::PreparedPlan::new(plan),
             }),
             (Stage::Filter(_, _), BodyKernel::FieldCmpLit(field, op, lit))
                 if matches!(op, crate::parse::ast::BinOp::Eq) =>
@@ -204,12 +204,12 @@ impl<'a> ComposedStageBuilder<'a> {
 }
 
 struct NestedPlanStage {
-    plan: Arc<Plan>,
+    plan: super::nested::PreparedPlan,
 }
 
 impl cmp::Stage for NestedPlanStage {
     fn apply<'a>(&self, x: &'a Val) -> cmp::StageOutput<'a> {
-        match super::nested::run_plan(&self.plan, x.clone()) {
+        match self.plan.run(x.clone()) {
             Ok(value) => cmp::StageOutput::Pass(Cow::Owned(value)),
             Err(_) => cmp::StageOutput::Filtered,
         }
