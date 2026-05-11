@@ -1640,6 +1640,69 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_readme_showcase_stays_on_tape_through_or_filter_and_projection() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"id":1,"status":"paid","score":10,"user":{"name":"low","tier":"silver"},"items":[{"qty":1,"price":2.0}],"events":[{"kind":"placed"}]},{"id":2,"status":"paid","score":30,"user":{"name":"top","tier":"gold"},"items":[{"qty":2,"price":10.0},{"qty":1,"price":3.5}],"events":[{"kind":"placed"},{"kind":"delivered","at":"2025-04-03"}]},{"id":3,"status":"paid","score":20,"user":{"name":"mid","tier":"platinum"},"items":[{"qty":4,"price":5.0}],"events":[{"kind":"placed"},{"kind":"shipped","at":"2025-04-02"}]},{"id":4,"status":"cancelled","score":40,"user":{"name":"skip","tier":"gold"},"items":[{"qty":9,"price":9.0}],"events":[{"kind":"refund","reason":"x"}]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(
+                r##"$.data
+                    .filter(status == "paid")
+                    .filter(score >= 20)
+                    .filter(user.tier == "gold" or user.tier == "platinum")
+                    .sort_by(-score)
+                    .take(2)
+                    .map({
+                        id,
+                        who: user.name,
+                        tier: user.tier,
+                        score_val: score,
+                        label: f"order {@.id}: {user.name} ({user.tier}) score {@.score}",
+                        line_total: items.map(qty * price).sum(),
+                        last_event: match events.last() with {
+                            {kind: "delivered", at: t} -> {state: "ok", at: t},
+                            {kind: "shipped", at: t} -> {state: "moving", at: t},
+                            _ -> {state: "unknown"}
+                        }
+                    })"##,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {
+                    "id": 2,
+                    "who": "top",
+                    "tier": "gold",
+                    "score_val": 30,
+                    "label": "order 2: top (gold) score 30",
+                    "line_total": 23.5,
+                    "last_event": {"state": "ok", "at": "2025-04-03"}
+                },
+                {
+                    "id": 3,
+                    "who": "mid",
+                    "tier": "platinum",
+                    "score_val": 20,
+                    "label": "order 3: mid (platinum) score 20",
+                    "line_total": 20.0,
+                    "last_event": {"state": "moving", "at": "2025-04-02"}
+                }
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert!(
+            j.tape_materialized_subtrees() <= 4,
+            "only selected match/binding values should materialize"
+        );
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_sort_topk_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"low","score":10},{"name":"top","score":30},{"name":"mid","score":20}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
