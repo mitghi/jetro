@@ -890,11 +890,16 @@ where
     V: ValueView<'a>,
 {
     match value {
-        ViewKernelValue::View(view) => {
-            scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
-        }
+        ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
         ViewKernelValue::Owned(value) => value,
     }
+}
+
+fn view_kernel_view_to_owned<'a, V>(view: V) -> Val
+where
+    V: ValueView<'a>,
+{
+    scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
 }
 
 fn eval_binary_op(
@@ -963,7 +968,7 @@ where
             let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
                 let value = match eval_view_kernel(&entry.value, item)? {
-                    ViewKernelValue::View(view) => view.materialize(),
+                    ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
                     ViewKernelValue::Owned(value) => value,
                 };
                 if (entry.optional || entry.omit_null) && value.is_null() {
