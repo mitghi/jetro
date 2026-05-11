@@ -144,8 +144,18 @@ fn apply_method(
                 n,
             }
         }
-        BuiltinMethod::First => LogicalPlan::First(Box::new(input)),
-        BuiltinMethod::Last => LogicalPlan::Last(Box::new(input)),
+        BuiltinMethod::First => {
+            if !args.is_empty() {
+                return None;
+            }
+            LogicalPlan::First(Box::new(input))
+        }
+        BuiltinMethod::Last => {
+            if !args.is_empty() {
+                return None;
+            }
+            LogicalPlan::Last(Box::new(input))
+        }
         BuiltinMethod::Sum => {
             // sum() with no args — sum with projection arg is handled by Pipeline::lower
             if !args.is_empty() {
@@ -330,6 +340,15 @@ mod tests {
     fn terminal_only_sinks_do_not_lower_mid_chain() {
         let expr = parse("$.xs.first().map(name)").expect("parse");
         assert!(try_lower(&expr).is_none());
+    }
+
+    #[test]
+    fn select_many_first_last_fall_back_to_pipeline_lowerer() {
+        let first = parse("$.xs.first(2)").expect("parse");
+        assert!(try_lower(&first).is_none());
+
+        let last = parse("$.xs.last(2)").expect("parse");
+        assert!(try_lower(&last).is_none());
     }
 
     #[test]
