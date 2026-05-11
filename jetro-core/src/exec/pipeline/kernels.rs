@@ -71,6 +71,13 @@ pub enum BodyKernel {
         /// Position to select from the child array.
         selector: ArraySelector,
     },
+    /// Runs a compiled pattern match against a view-native scrutinee.
+    Match {
+        /// Kernel that yields the match scrutinee.
+        scrutinee: Box<BodyKernel>,
+        /// Compiled match program.
+        compiled: Arc<crate::vm::CompiledMatch>,
+    },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
@@ -222,6 +229,7 @@ impl BodyKernel {
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ChildMapSum { .. } => FieldDemand::Whole,
             Self::ArraySelect { array, .. } => array.field_demand(),
+            Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) => predicates
                 .iter()
                 .fold(FieldDemand::None, |need, predicate| {
@@ -267,6 +275,7 @@ impl BodyKernel {
                 array.mentions_any_field_like_ident(names) || map.mentions_any_field_like_ident(names)
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
+            Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
             Self::And(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
@@ -298,6 +307,7 @@ impl BodyKernel {
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
             Self::ChildMapSum { array, map } => array.is_view_native() && map.is_view_native(),
             Self::ArraySelect { array, .. } => array.is_view_native(),
+            Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
         }
@@ -324,6 +334,19 @@ impl BodyKernel {
             }
         }
         match ops {
+            [Opcode::Match(cm)] if match_is_receiver_local(cm) => {
+                let scrutinee = match &cm.scrutinee {
+                    crate::vm::MatchScrutinee::Current => BodyKernel::Current,
+                    crate::vm::MatchScrutinee::Program(program) => BodyKernel::classify(program),
+                    crate::vm::MatchScrutinee::Root => BodyKernel::Generic,
+                };
+                if !matches!(scrutinee, BodyKernel::Generic) && scrutinee.is_view_native() {
+                    return Self::Match {
+                        scrutinee: Box::new(scrutinee),
+                        compiled: Arc::clone(cm),
+                    };
+                }
+            }
             [receiver @ .., Opcode::CallMethod(map_call), Opcode::CallMethod(sum_call)]
                 if map_call.method == crate::builtins::BuiltinMethod::Map
                     && sum_call.method == crate::builtins::BuiltinMethod::Sum
@@ -543,6 +566,76 @@ fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     match kernel {
         BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
         other => out.push(other),
+    }
+}
+
+fn match_is_receiver_local(cm: &crate::vm::CompiledMatch) -> bool {
+    matches!(
+        cm.scrutinee,
+        crate::vm::MatchScrutinee::Current | crate::vm::MatchScrutinee::Program(_)
+    ) && cm.guards.is_empty()
+        && cm
+            .bodies
+            .iter()
+            .all(|program| program_is_receiver_local(program))
+}
+
+fn program_is_receiver_local(program: &crate::vm::Program) -> bool {
+    program.ops.iter().all(opcode_is_receiver_local)
+}
+
+fn opcode_is_receiver_local(opcode: &crate::vm::Opcode) -> bool {
+    use crate::vm::Opcode;
+    match opcode {
+        Opcode::PushRoot | Opcode::RootChain(_) => false,
+        Opcode::PipelineRun { .. }
+        | Opcode::ListComp(_)
+        | Opcode::DictComp(_)
+        | Opcode::SetComp(_)
+        | Opcode::PatchEval(_)
+        | Opcode::UpdateBatchEval(_)
+        | Opcode::DeepMatchAll(_)
+        | Opcode::DeepMatchFirst(_) => false,
+        Opcode::Match(cm) => match_is_receiver_local(cm),
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_is_receiver_local(prog),
+        Opcode::BindLamCurrent { body, .. } => program_is_receiver_local(body),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => {
+            call.sub_progs.iter().all(|prog| program_is_receiver_local(prog))
+        }
+        Opcode::MakeObj(entries) => entries.iter().all(|entry| match entry {
+            crate::vm::CompiledObjEntry::Short { .. }
+            | crate::vm::CompiledObjEntry::KvPath { .. } => true,
+            crate::vm::CompiledObjEntry::Kv { prog, cond, .. } => {
+                program_is_receiver_local(prog)
+                    && cond
+                        .as_ref()
+                        .is_none_or(|cond| program_is_receiver_local(cond))
+            }
+            crate::vm::CompiledObjEntry::Dynamic { key, val } => {
+                program_is_receiver_local(key) && program_is_receiver_local(val)
+            }
+            crate::vm::CompiledObjEntry::Spread(prog)
+            | crate::vm::CompiledObjEntry::SpreadDeep(prog) => program_is_receiver_local(prog),
+        }),
+        Opcode::MakeArr(items) => items
+            .iter()
+            .all(|(program, _)| program_is_receiver_local(program)),
+        Opcode::FString(parts) => parts.iter().all(|part| match part {
+            crate::vm::CompiledFSPart::Lit(_) => true,
+            crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_receiver_local(prog),
+        }),
+        Opcode::LetExpr { body, .. } => program_is_receiver_local(body),
+        Opcode::IfElse { then_, else_ } => {
+            program_is_receiver_local(then_) && program_is_receiver_local(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_is_receiver_local(body) && program_is_receiver_local(default)
+        }
+        _ => true,
     }
 }
 
@@ -898,6 +991,15 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::ArraySelect { array, selector } => {
             let array = eval_native_kernel(array, item)?;
             Ok(eval_array_select_native(&array, *selector))
+        }
+        BodyKernel::Match {
+            scrutinee,
+            compiled,
+        } => {
+            let scrutinee = eval_native_kernel(scrutinee, item)?;
+            let mut vm = crate::vm::VM::new();
+            let env = crate::data::context::Env::new(scrutinee.clone());
+            vm.exec_match(compiled, &scrutinee, &env)
         }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
@@ -1298,6 +1400,25 @@ where
                 Some(ViewKernelValue::Owned(eval_array_select_native(&value, *selector)))
             }
         },
+        BodyKernel::Match {
+            scrutinee,
+            compiled,
+        } => match eval_view_kernel(scrutinee, item)? {
+            ViewKernelValue::View(view) => {
+                let mut vm = crate::vm::VM::new();
+                let env = crate::data::context::Env::new(view.materialize());
+                crate::vm::exec_match_view(&mut vm, compiled, view, &env)
+                    .ok()
+                    .map(ViewKernelValue::Owned)
+            }
+            ViewKernelValue::Owned(value) => {
+                let mut vm = crate::vm::VM::new();
+                let env = crate::data::context::Env::new(value.clone());
+                vm.exec_match(compiled, &value, &env)
+                    .ok()
+                    .map(ViewKernelValue::Owned)
+            }
+        },
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
                 let passes = match eval_view_kernel(predicate, item)? {
@@ -1573,6 +1694,42 @@ mod tests {
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Str(Arc::from("delivered")))
         );
+    }
+
+    #[test]
+    fn match_kernels_run_on_selected_value_views() {
+        let src = r#"match events.last() with {
+            {kind: "delivered", at: t} -> {state: "ok", at: t},
+            {kind: "refund", reason: r} -> {state: "refund", reason: r},
+            _ -> {state: "unknown"}
+        }"#;
+        let expr = parse(src).expect("parse match");
+        let program = Compiler::compile(&expr, src);
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::Match { .. }));
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [(
+                Arc::from("events"),
+                Val::arr(vec![
+                    Val::obj([(Arc::from("kind"), Val::Str(Arc::from("placed")))].into()),
+                    Val::obj(
+                        [
+                            (Arc::from("kind"), Val::Str(Arc::from("delivered"))),
+                            (Arc::from("at"), Val::Str(Arc::from("2025-04-14"))),
+                        ]
+                        .into(),
+                    ),
+                ]),
+            )]
+            .into(),
+        );
+        let view = ValView::new(&value);
+        let out = owned_value(eval_view_kernel(&kernel, &view)).expect("match output");
+        let json: serde_json::Value = out.into();
+
+        assert_eq!(json, serde_json::json!({"state": "ok", "at": "2025-04-14"}));
     }
 
     #[test]
