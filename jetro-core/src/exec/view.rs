@@ -534,9 +534,17 @@ where
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
         }
-        pipeline::SourceAccessMode::Forward
-        | pipeline::SourceAccessMode::ForwardBounded(_)
-        | pipeline::SourceAccessMode::MaterializedFallback => {}
+        pipeline::SourceAccessMode::ForwardBounded(inputs) => {
+            let items = source.array_iter()?;
+            return drive_view_iter(
+                items,
+                stages,
+                stage_kernels,
+                PullDemand::FirstInput(inputs),
+                observe,
+            );
+        }
+        pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
     }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
