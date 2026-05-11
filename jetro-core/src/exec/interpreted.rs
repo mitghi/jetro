@@ -559,7 +559,7 @@ impl ExecCtx<'_, '_> {
                     Ok(env) => env,
                     Err(err) => return Some(Err(err)),
                 };
-                return pipeline::run_tape_field_chain(body, tape, keys, &env);
+                return pipeline::run_tape_field_chain_with_vm(body, tape, keys, &env, self.vm);
             }
         }
         None

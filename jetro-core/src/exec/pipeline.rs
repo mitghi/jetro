@@ -96,13 +96,27 @@ pub(crate) enum StageFlow<T> {
 #[cfg(feature = "simd-json")]
 /// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning
 /// the first matching value or `None` if the shape is not tape-compatible.
+#[allow(dead_code)]
 pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    materialized_exec::run_tape_field_chain(body, tape, keys, base_env)
+    let mut vm = crate::vm::VM::new();
+    materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
+}
+
+#[cfg(feature = "simd-json")]
+/// Executes tape row streaming with caller-owned VM state.
+pub(crate) fn run_tape_field_chain_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    keys: &[Arc<str>],
+    base_env: &Env,
+    vm: &mut crate::vm::VM,
+) -> Option<Result<Val, EvalError>> {
+    materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, vm)
 }
 
 /// Extension point allowing the host (e.g. `Jetro`) to upgrade a flat `Arc<Vec<Val>>` array

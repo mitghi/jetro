@@ -158,11 +158,25 @@ pub(super) fn run(
 
 /// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
 #[cfg(feature = "simd-json")]
+#[allow(dead_code)]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
+) -> Option<Result<Val, EvalError>> {
+    let mut vm = VM::new();
+    run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
+}
+
+/// Streams a pipeline directly from a `simd-json` tape using caller-owned VM state.
+#[cfg(feature = "simd-json")]
+pub(super) fn run_tape_field_chain_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    keys: &[Arc<str>],
+    base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>> {
     if body
         .stages
@@ -179,12 +193,11 @@ pub(super) fn run_tape_field_chain(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    let mut vm = VM::new();
     Some(run_streaming_rows_with_vm(
         &pipeline,
         base_env,
         source.iter_materialized(),
-        &mut vm,
+        vm,
     ))
 }
 
