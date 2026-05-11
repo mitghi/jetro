@@ -898,7 +898,7 @@ where
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            let key = view_sort_key(item, plan.key_program.as_ref())?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -1114,7 +1114,7 @@ where
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            let key = view_sort_key(item, plan.key_program.as_ref())?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -1167,8 +1167,8 @@ struct SortBarrierPlan {
     prefix: Vec<pipeline::ViewStageCapability>,
     /// Index of the `Sort` stage within `body.stages`.
     sort_stage: usize,
-    /// Stage-kernel index for the sort key, or `None` for a natural (identity) sort.
-    key_kernel: Option<usize>,
+    /// Row program for the sort key, or `None` for a natural (identity) sort.
+    key_program: Option<pipeline::RowProgram>,
     /// Whether the sort order is descending.
     descending: bool,
 }
@@ -1207,20 +1207,18 @@ fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
     for (idx, stage) in body.stages.iter().enumerate() {
         match stage {
             pipeline::Stage::Sort(spec) => {
-                let key_kernel = if spec.key.is_some() {
-                    Some(
-                        body.stage_kernels
-                            .get(idx)?
-                            .is_view_native()
-                            .then_some(idx)?,
-                    )
+                let key_program = if spec.key.is_some() {
+                    let kernel = body.stage_kernels.get(idx)?;
+                    kernel
+                        .is_view_native()
+                        .then(|| pipeline::RowProgram::from_kernel(kernel.clone()))?
                 } else {
                     None
                 };
                 return Some(SortBarrierPlan {
                     prefix,
                     sort_stage: idx,
-                    key_kernel,
+                    key_program,
                     descending: spec.descending,
                 });
             }
@@ -1379,18 +1377,19 @@ where
     }
 }
 
-/// Extracts a sort key `Val` from `item`, optionally applying `stage_kernels[kernel_idx]`
-/// as a projection. Falls back to `item.materialize()` when no kernel is specified.
-fn view_sort_key<'a, V>(
-    item: &V,
-    kernel_idx: Option<usize>,
-    stage_kernels: &[pipeline::BodyKernel],
-) -> Option<Val>
+/// Extracts a sort key `Val` from `item`, optionally applying a row program.
+/// Falls back to `item.materialize()` when no key program is specified.
+fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    match kernel_idx {
-        Some(idx) => eval_owned_scalar_or_value_kernel(item, stage_kernels.get(idx)?),
+    match key {
+        Some(program) => match program.eval_view(item)? {
+            pipeline::ViewKernelValue::View(view) => {
+                scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+            }
+            pipeline::ViewKernelValue::Owned(value) => Some(value),
+        },
         None => Some(item.materialize()),
     }
 }
