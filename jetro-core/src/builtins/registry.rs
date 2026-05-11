@@ -751,8 +751,10 @@ mod tests {
         };
 
         for method in [
+            BuiltinMethod::TransformKeys,
             BuiltinMethod::TransformValues,
             BuiltinMethod::FilterKeys,
+            BuiltinMethod::FilterValues,
             BuiltinMethod::Has,
             BuiltinMethod::HasKey,
             BuiltinMethod::Missing,
