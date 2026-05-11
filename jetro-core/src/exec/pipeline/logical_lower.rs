@@ -7,13 +7,12 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Expr;
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
-use crate::ir::logical::LogicalPlan;
 use crate::exec::pipeline::{
-    plan_with_exprs, BodyKernel, NumOp, Pipeline, PipelineBody, ReducerOp, ReducerSpec, Sink,
-    Source, Stage,
+    plan_with_exprs, BodyKernel, Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage,
 };
+use crate::ir::logical::LogicalPlan;
+use crate::parse::ast::Expr;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -36,9 +35,7 @@ pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
 /// Walks `plan` top-down, collecting the source, an ordered list of stages (with parallel
 /// expression slots), and the terminal sink.  Returns `None` for plan shapes that cannot be
 /// lowered to a linear pipeline.
-fn collect(
-    plan: LogicalPlan,
-) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     match plan {
         // ── Leaf: the row source ───────────────────────────────────────────
         LogicalPlan::Source(source) => Some((source, vec![], vec![], Sink::Collect)),
@@ -158,18 +155,10 @@ fn collect(
             let (source, stages, exprs, _) = collect(*inner)?;
             Some((source, stages, exprs, Sink::Reducer(ReducerSpec::count())))
         }
-        LogicalPlan::Sum(inner) => {
-            collect_numeric_sink(*inner, BuiltinMethod::Sum)
-        }
-        LogicalPlan::Avg(inner) => {
-            collect_numeric_sink(*inner, BuiltinMethod::Avg)
-        }
-        LogicalPlan::Min(inner) => {
-            collect_numeric_sink(*inner, BuiltinMethod::Min)
-        }
-        LogicalPlan::Max(inner) => {
-            collect_numeric_sink(*inner, BuiltinMethod::Max)
-        }
+        LogicalPlan::Sum(inner) => collect_numeric_sink(*inner, BuiltinMethod::Sum),
+        LogicalPlan::Avg(inner) => collect_numeric_sink(*inner, BuiltinMethod::Avg),
+        LogicalPlan::Min(inner) => collect_numeric_sink(*inner, BuiltinMethod::Min),
+        LogicalPlan::Max(inner) => collect_numeric_sink(*inner, BuiltinMethod::Max),
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
             Some((source, stages, exprs, Sink::ApproxCountDistinct))
@@ -203,15 +192,7 @@ fn collect_numeric_sink(
         source,
         stages,
         exprs,
-        Sink::Reducer(ReducerSpec {
-            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(
-                method.spec().numeric_reducer?,
-            )),
-            predicate: None,
-            projection: None,
-            predicate_expr: None,
-            projection_expr: None,
-        }),
+        Sink::Reducer(ReducerSpec::numeric(method, None, None)?),
     ))
 }
 
@@ -221,11 +202,7 @@ fn collect_numeric_sink(
 
 /// Classifies stages into `BodyKernel`s, runs `plan_with_exprs` for filter reordering/fusion,
 /// and fills in the kernel vectors required by `PipelineBody`.
-fn build_body(
-    stages: Vec<Stage>,
-    stage_exprs: Vec<Option<Arc<Expr>>>,
-    sink: Sink,
-) -> PipelineBody {
+fn build_body(stages: Vec<Stage>, stage_exprs: Vec<Option<Arc<Expr>>>, sink: Sink) -> PipelineBody {
     let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
         stages
             .iter()

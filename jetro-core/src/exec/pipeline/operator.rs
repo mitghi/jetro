@@ -201,6 +201,21 @@ impl ReducerSpec {
         }
     }
 
+    /// Constructs a numeric reducer from builtin metadata.
+    pub fn numeric(
+        method: BuiltinMethod,
+        projection: Option<Arc<Program>>,
+        projection_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Some(Self {
+            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(method.spec().numeric_reducer?)),
+            predicate: None,
+            projection,
+            predicate_expr: None,
+            projection_expr,
+        })
+    }
+
     /// Returns the `NumOp` for a `Numeric` reducer, or `None` for `Count`.
     pub fn numeric_op(&self) -> Option<NumOp> {
         match self.op {

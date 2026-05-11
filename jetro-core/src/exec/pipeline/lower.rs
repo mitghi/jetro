@@ -532,7 +532,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // ---------------------------------------------------------------------------
 
 use super::{
-    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
+    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
     PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
 };
 
@@ -817,21 +817,23 @@ fn terminal_sink_for_method(
             })),
             _ => None,
         },
-        BuiltinSinkAccumulator::Numeric => Some(Sink::Reducer(ReducerSpec {
-            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(spec.numeric_reducer?)),
-            predicate: None,
-            projection: match args {
+        BuiltinSinkAccumulator::Numeric => {
+            let projection = match args {
                 [] => None,
                 [arg] => Some(compile_subexpr(arg)?),
                 _ => return None,
-            },
-            predicate_expr: None,
-            projection_expr: match args {
+            };
+            let projection_expr = match args {
                 [] => None,
                 [arg] => arg_expr(arg),
                 _ => return None,
-            },
-        })),
+            };
+            Some(Sink::Reducer(ReducerSpec::numeric(
+                method,
+                projection,
+                projection_expr,
+            )?))
+        }
         BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::First => match args {
             [] => Some(Sink::Terminal(method)),
             [arg] => Some(Sink::SelectMany {
