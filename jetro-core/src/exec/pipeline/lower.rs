@@ -123,7 +123,7 @@ impl Pipeline {
         p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
         p.stage_kernels = classify_kernels(&p.stages);
-        p.sink_kernels = sink_kernels(&p.sink);
+        p.sink_kernels = p.sink.body_kernels();
         Some(p)
     }
 
@@ -910,26 +910,4 @@ fn arg_extreme_sink_for_method(
         want_max,
         key: compile_subexpr(arg)?,
     }))
-}
-
-fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
-    match sink {
-        Sink::Reducer(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Predicate(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Membership(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::ArgExtreme(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        _ => Vec::new(),
-    }
 }

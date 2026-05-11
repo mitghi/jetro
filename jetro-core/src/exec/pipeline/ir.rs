@@ -192,6 +192,29 @@ impl Sink {
         }
     }
 
+    /// Classifies embedded sink programs into body kernels for payload planning and view routing.
+    pub(crate) fn body_kernels(&self) -> Vec<BodyKernel> {
+        match self {
+            Sink::Reducer(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::Predicate(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::Membership(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::ArgExtreme(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Returns the `ViewSinkCapability` if the sink can operate in the borrowed `ValueView`
     /// domain, or `None` if full materialisation is required.
     pub(crate) fn view_capability(

@@ -218,25 +218,7 @@ fn build_body(stages: Vec<Stage>, stage_exprs: Vec<Option<Arc<Expr>>>, sink: Sin
     let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
 
     let stage_kernels = classify_kernels(&plan_result.stages);
-    let sink_kernels = match &plan_result.sink {
-        Sink::Reducer(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Predicate(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Membership(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::ArgExtreme(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        _ => Vec::new(),
-    };
+    let sink_kernels = plan_result.sink.body_kernels();
 
     PipelineBody {
         stages: plan_result.stages,
