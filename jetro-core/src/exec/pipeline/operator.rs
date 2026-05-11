@@ -317,6 +317,34 @@ mod tests {
     }
 
     #[test]
+    fn terminal_sink_specs_construct_from_methods() {
+        let predicate = PredicateSinkSpec::from_method(BuiltinMethod::Any, empty_program())
+            .expect("any predicate sink");
+        assert_eq!(predicate.op, PredicateSinkOp::Any);
+        assert!(PredicateSinkSpec::from_method(BuiltinMethod::Count, empty_program()).is_none());
+
+        let membership = MembershipSinkSpec::from_method(
+            BuiltinMethod::IndicesOf,
+            MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
+        )
+        .expect("indices_of membership sink");
+        assert_eq!(membership.op, MembershipSinkOp::IndicesOf);
+        assert!(MembershipSinkSpec::from_method(
+            BuiltinMethod::Count,
+            MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
+        )
+        .is_none());
+
+        let max_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MaxBy, empty_program())
+            .expect("max_by arg-extreme sink");
+        assert!(max_by.want_max);
+        let min_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MinBy, empty_program())
+            .expect("min_by arg-extreme sink");
+        assert!(!min_by.want_max);
+        assert!(ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program()).is_none());
+    }
+
+    #[test]
     fn predicate_sink_demand_matches_terminal_semantics() {
         let any = PredicateSinkSpec {
             op: PredicateSinkOp::Any,
