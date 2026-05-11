@@ -91,9 +91,7 @@ where
 {
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = body_pull_demand(body);
     let sink = match (source_demand, capabilities.sink) {
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
             pipeline::ViewSinkCapability::Nth { index: 0 }
@@ -146,6 +144,14 @@ fn resolve_view_sink(
         }
         sink => Some(Ok(sink)),
     }
+}
+
+fn body_pull_demand(body: &pipeline::PipelineBody) -> PullDemand {
+    segment_pull_demand(&body.stages, &body.sink)
+}
+
+fn segment_pull_demand(stages: &[pipeline::Stage], sink: &pipeline::Sink) -> PullDemand {
+    pipeline::Pipeline::segment_source_demand(stages, sink).chain.pull
 }
 
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.
@@ -330,12 +336,7 @@ where
     }
 
     let mut boundary_rows = Vec::new();
-    let source_demand = pipeline::Pipeline::segment_source_demand(
-        &body.stages[..prefix.consumed_stages],
-        &body.sink,
-    )
-    .chain
-    .pull;
+    let source_demand = segment_pull_demand(&body.stages[..prefix.consumed_stages], &body.sink);
 
     drive_view_frontier(
         source,
@@ -370,9 +371,7 @@ where
 {
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = body_pull_demand(body);
 
     drive_view_frontier(
         source,
@@ -415,10 +414,7 @@ where
         }
     };
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
-    let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
-            .chain
-            .pull;
+    let source_demand = segment_pull_demand(&body.stages[..prefix_len], &body.sink);
     let mut selected = Val::Null;
     let mut seen = false;
     let mut nth_seen = 0usize;
@@ -737,9 +733,7 @@ fn terminal_collect_plan_from(
     }
 
     let suffix_stages = body.stages.get(start..)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(suffix_stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = segment_pull_demand(suffix_stages, &body.sink);
     if let Some((prefix_len, collect_kernel)) = terminal_projection_run(body, start) {
         return Some(TerminalCollectPlan {
             prefix: terminal_collect_prefix_from(&suffix_stages[..prefix_len], body, start)?,
@@ -867,9 +861,7 @@ where
     if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
         return None;
     }
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = body_pull_demand(body);
 
     drive_view_frontier(
         source,
@@ -1010,12 +1002,7 @@ where
     let prefix_end = suffix_start + relative_prefix_len;
     let prefix =
         terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(
-        &body.stages[suffix_start..prefix_end],
-        &body.sink,
-    )
-    .chain
-    .pull;
+    let source_demand = segment_pull_demand(&body.stages[suffix_start..prefix_end], &body.sink);
     if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
         let mut selected = Vec::new();
         drive_view_iter(
@@ -1092,10 +1079,7 @@ where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, suffix_start)?;
-    let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[suffix_start..], &body.sink)
-            .chain
-            .pull;
+    let source_demand = segment_pull_demand(&body.stages[suffix_start..], &body.sink);
     let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
     let sink = match resolve_view_sink(sink, Some(base_env)) {
         Some(Ok(sink)) => sink,
@@ -1128,10 +1112,7 @@ where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
-    let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
-            .chain
-            .pull;
+    let source_demand = segment_pull_demand(&body.stages[plan.sort_stage + 1..], &body.sink);
     let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
     let sink = match resolve_view_sink(sink, Some(base_env)) {
         Some(Ok(sink)) => sink,
