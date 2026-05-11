@@ -2,6 +2,24 @@
 
 ## 0.5.6
 
+### Release focus
+
+- **Demand/tape execution is now metadata-driven end to end**. This release
+  moves more query behavior out of handwritten shape fusions and into shared
+  builtin metadata, planner demand propagation, source capabilities, and common
+  executor paths. New builtin execution facts cover logical shape, lowering,
+  sink/reducer behavior, view support, order/cardinality effects,
+  materialization policy, and demand behavior.
+- **Cold-path performance is restored and guarded**. The release benchmark
+  suite is back near native Rust for the showcase workloads after fixing a
+  view-kernel VM allocation regression. The current `bench_cold` profile keeps
+  most cases around 1.0x-1.4x native, with the README showcase around 1.17x in
+  the latest validation run.
+- **Documentation and benchmark coverage expanded**. The README/showcase was
+  refreshed, `bench_cold` covers more representative chains, and a Go benchmark
+  harness was added for cross-runtime comparison. The release also includes the
+  updated logo asset.
+
 ### Demand/tape architecture cleanup
 
 - **Demand metadata stays in planner/executor APIs**. Pipeline bodies now expose
