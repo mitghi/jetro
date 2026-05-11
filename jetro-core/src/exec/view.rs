@@ -420,7 +420,7 @@ where
     let nth_target = match body.sink {
         pipeline::Sink::Nth(_)
             if matches!(source_demand, PullDemand::NthInput(_))
-                && view_stages_preserve_cardinality(&prefix) =>
+                && pipeline::ViewStageCapability::all_preserve_cardinality(&prefix) =>
         {
             Some(0)
         }
@@ -496,7 +496,7 @@ where
     if source_demand.is_zero() {
         return Some(());
     }
-    let access = view_frontier_access(source_capabilities, source_demand, stages);
+    let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
             let len = match source.scalar() {
@@ -534,38 +534,6 @@ where
     }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
-}
-
-fn view_frontier_access(
-    source_capabilities: pipeline::SourceCapabilities,
-    source_demand: PullDemand,
-    stages: &[pipeline::ViewStageCapability],
-) -> pipeline::SourceAccessMode {
-    let access = source_capabilities.choose_access(source_demand);
-    if matches!(access, pipeline::SourceAccessMode::IndexedFromEnd(_))
-        && !view_stages_preserve_cardinality(stages)
-    {
-        if source_capabilities.reverse_stream {
-            return pipeline::SourceAccessMode::Reverse { outputs: 1 };
-        }
-        if source_capabilities.forward_stream {
-            return pipeline::SourceAccessMode::Forward;
-        }
-    }
-    if matches!(access, pipeline::SourceAccessMode::Indexed(_))
-        && !view_stages_preserve_cardinality(stages)
-    {
-        if source_capabilities.forward_stream {
-            return pipeline::SourceAccessMode::Forward;
-        }
-    }
-    access
-}
-
-fn view_stages_preserve_cardinality(stages: &[pipeline::ViewStageCapability]) -> bool {
-    stages
-        .iter()
-        .all(pipeline::ViewStageCapability::preserves_cardinality)
 }
 
 fn index_from_end(len: usize, offset: usize) -> Option<usize> {
@@ -1437,8 +1405,7 @@ mod tests {
 
     #[test]
     fn selective_view_prefix_demotes_indexed_last_to_reverse_scan() {
-        let access = super::view_frontier_access(
-            SourceCapabilities::VIEW_ARRAY,
+        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
             PullDemand::LastInput(1),
             &[ViewStageCapability::Filter { kernel: 0 }],
         );
@@ -1453,8 +1420,7 @@ mod tests {
             ..SourceCapabilities::VIEW_ARRAY
         };
 
-        let access = super::view_frontier_access(
-            caps,
+        let access = caps.choose_view_access(
             PullDemand::LastInput(1),
             &[ViewStageCapability::RemoveValue(Val::Int(2))],
         );
@@ -1464,8 +1430,7 @@ mod tests {
 
     #[test]
     fn map_only_view_prefix_keeps_indexed_last_seek() {
-        let access = super::view_frontier_access(
-            SourceCapabilities::VIEW_ARRAY,
+        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
             PullDemand::LastInput(1),
             &[ViewStageCapability::Map { kernel: 0 }],
         );

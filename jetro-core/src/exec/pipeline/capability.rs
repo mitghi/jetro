@@ -77,6 +77,35 @@ impl SourceCapabilities {
         }
     }
 
+    /// Chooses source access for a view prefix, demoting direct seeks when the
+    /// prefix can change cardinality and physical positions no longer match
+    /// semantic output positions.
+    pub(crate) fn choose_view_access(
+        self,
+        demand: PullDemand,
+        stages: &[ViewStageCapability],
+    ) -> SourceAccessMode {
+        let access = self.choose_access(demand);
+        if matches!(access, SourceAccessMode::IndexedFromEnd(_))
+            && !ViewStageCapability::all_preserve_cardinality(stages)
+        {
+            if self.reverse_stream {
+                return SourceAccessMode::Reverse { outputs: 1 };
+            }
+            if self.forward_stream {
+                return SourceAccessMode::Forward;
+            }
+        }
+        if matches!(access, SourceAccessMode::Indexed(_))
+            && !ViewStageCapability::all_preserve_cardinality(stages)
+        {
+            if self.forward_stream {
+                return SourceAccessMode::Forward;
+            }
+        }
+        access
+    }
+
     /// Returns true when this source can satisfy split payload lanes without
     /// materialising every row as a full owned value.
     pub(crate) fn supports_payload_lanes(
@@ -487,6 +516,11 @@ impl ViewStageCapability {
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
         matches!(self, Self::Map { .. })
+    }
+
+    /// Returns true when every stage in a prefix preserves input/output cardinality.
+    pub(crate) fn all_preserve_cardinality(stages: &[Self]) -> bool {
+        stages.iter().all(Self::preserves_cardinality)
     }
 }
 
