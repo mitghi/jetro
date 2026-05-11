@@ -57,6 +57,13 @@ pub enum BodyKernel {
         /// The right-hand side kernel.
         rhs: Box<BodyKernel>,
     },
+    /// Runs a one-to-one child-array map and sums the mapped numeric values.
+    ChildMapSum {
+        /// Kernel that yields the child array.
+        array: Box<BodyKernel>,
+        /// Kernel evaluated for every child row.
+        map: Box<BodyKernel>,
+    },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
     /// Reads a single field and compares it to a literal in one fused step.
@@ -195,6 +202,7 @@ impl BodyKernel {
             Self::Compose { first, then } => first.field_demand().merge(then.field_demand()),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
+            Self::ChildMapSum { .. } => FieldDemand::Whole,
             Self::And(predicates) => predicates
                 .iter()
                 .fold(FieldDemand::None, |need, predicate| {
@@ -236,6 +244,9 @@ impl BodyKernel {
             Self::Binary { lhs, rhs, .. } => {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
+            Self::ChildMapSum { array, map } => {
+                array.mentions_any_field_like_ident(names) || map.mentions_any_field_like_ident(names)
+            }
             Self::And(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
@@ -265,6 +276,7 @@ impl BodyKernel {
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
+            Self::ChildMapSum { array, map } => array.is_view_native() && map.is_view_native(),
             Self::And(predicates) => predicates.iter().all(Self::is_view_native),
             _ => true,
         }
@@ -291,6 +303,31 @@ impl BodyKernel {
             }
         }
         match ops {
+            [receiver @ .., Opcode::CallMethod(map_call), Opcode::CallMethod(sum_call)]
+                if map_call.method == crate::builtins::BuiltinMethod::Map
+                    && sum_call.method == crate::builtins::BuiltinMethod::Sum
+                    && map_call.sub_kernels.len() == 1 =>
+            {
+                let array = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<child-map-sum-receiver>",
+                    ))
+                };
+                let map = map_call.sub_kernels[0].clone();
+                if !matches!(array, BodyKernel::Generic)
+                    && !matches!(map, BodyKernel::Generic)
+                    && array.is_view_native()
+                    && map.is_view_native()
+                {
+                    return Self::ChildMapSum {
+                        array: Box::new(array),
+                        map: Box::new(map),
+                    };
+                }
+            }
             [Opcode::MakeObj(entries)] => {
                 let mut out = Vec::with_capacity(entries.len());
                 for entry in entries.iter() {
@@ -790,6 +827,10 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             let rhs = eval_native_kernel(rhs, item)?;
             eval_binary_op(lhs, *op, rhs)
         }
+        BodyKernel::ChildMapSum { array, map } => {
+            let array = eval_native_kernel(array, item)?;
+            eval_child_map_sum_native(&array, map)
+        }
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
                 if !crate::util::is_truthy(&eval_native_kernel(predicate, item)?) {
@@ -921,6 +962,68 @@ fn eval_binary_op(
         }
         BinOp::Mod => crate::util::num_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
         _ => Err(EvalError("unsupported binary kernel operator".into())),
+    }
+}
+
+fn eval_child_map_sum_native(array: &Val, map: &BodyKernel) -> Result<Val, EvalError> {
+    let mut sum = NumericSum::default();
+    let items = array
+        .as_vals()
+        .ok_or_else(|| EvalError("sum receiver is not an array".into()))?;
+    for item in items.iter() {
+        sum.observe(&eval_native_kernel(map, item)?)?;
+    }
+    Ok(sum.finish())
+}
+
+fn eval_child_map_sum_view<'a, V>(array: V, map: &BodyKernel) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    let mut sum = NumericSum::default();
+    for item in array.array_iter()? {
+        let value = view_kernel_value_to_owned(eval_view_kernel(map, &item)?);
+        sum.observe(&value).ok()?;
+    }
+    Some(sum.finish())
+}
+
+#[derive(Default)]
+struct NumericSum {
+    int_sum: i64,
+    float_sum: f64,
+    has_float: bool,
+}
+
+impl NumericSum {
+    fn observe(&mut self, value: &Val) -> Result<(), EvalError> {
+        match value {
+            Val::Int(value) if !self.has_float => {
+                self.int_sum = self.int_sum.wrapping_add(*value);
+                Ok(())
+            }
+            Val::Int(value) => {
+                self.float_sum += *value as f64;
+                Ok(())
+            }
+            Val::Float(value) => {
+                if !self.has_float {
+                    self.float_sum = self.int_sum as f64;
+                    self.has_float = true;
+                }
+                self.float_sum += *value;
+                Ok(())
+            }
+            _ => Err(EvalError("sum on non-number".into())),
+        }
+    }
+
+    fn finish(self) -> Val {
+        if self.has_float {
+            Val::Float(self.float_sum)
+        } else {
+            Val::Int(self.int_sum)
+        }
     }
 }
 
@@ -1080,6 +1183,14 @@ where
             let rhs = view_kernel_value_to_owned(eval_view_kernel(rhs, item)?);
             eval_binary_op(lhs, *op, rhs).ok().map(ViewKernelValue::Owned)
         }
+        BodyKernel::ChildMapSum { array, map } => match eval_view_kernel(array, item)? {
+            ViewKernelValue::View(view) => {
+                eval_child_map_sum_view(view, map).map(ViewKernelValue::Owned)
+            }
+            ViewKernelValue::Owned(value) => eval_child_map_sum_native(&value, map)
+                .ok()
+                .map(ViewKernelValue::Owned),
+        },
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
                 let passes = match eval_view_kernel(predicate, item)? {
@@ -1247,6 +1358,44 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Float(39.75))
+        );
+    }
+
+    #[test]
+    fn child_map_sum_kernel_runs_on_value_views() {
+        let expr = parse("items.map(qty * price).sum()").expect("parse child sum");
+        let program = Compiler::compile(&expr, "items.map(qty * price).sum()");
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::ChildMapSum { .. }));
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [(
+                Arc::from("items"),
+                Val::arr(vec![
+                    Val::obj(
+                        [
+                            (Arc::from("qty"), Val::Int(2)),
+                            (Arc::from("price"), Val::Float(10.0)),
+                        ]
+                        .into(),
+                    ),
+                    Val::obj(
+                        [
+                            (Arc::from("qty"), Val::Int(3)),
+                            (Arc::from("price"), Val::Float(5.5)),
+                        ]
+                        .into(),
+                    ),
+                ]),
+            )]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &view)),
+            Some(Val::Float(36.5))
         );
     }
 
