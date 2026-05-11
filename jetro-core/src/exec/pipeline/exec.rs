@@ -30,6 +30,7 @@ impl Pipeline {
 
     /// Dispatches to the first applicable backend for this pipeline shape.
     /// The path was classified at lower time; no stage-list re-inspection occurs here.
+    #[allow(dead_code)]
     pub fn run_with_env(
         &self,
         root: &Val,

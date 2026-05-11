@@ -530,7 +530,13 @@ impl ExecCtx<'_, '_> {
                     Ok(env) => env,
                     Err(err) => return Some(Err(err)),
                 };
-                return view_pipeline::run_with_env(source, body, Some(self.j), &env);
+                return view_pipeline::run_with_env_and_vm(
+                    source,
+                    body,
+                    Some(self.j),
+                    &env,
+                    self.vm,
+                );
             }
         }
         None
@@ -613,7 +619,9 @@ impl ExecCtx<'_, '_> {
                 Ok(env) => env,
                 Err(err) => return Some(Err(err)),
             };
-            if let Some(result) = view_pipeline::run_with_env(source, body, Some(self.j), &env) {
+            if let Some(result) =
+                view_pipeline::run_with_env_and_vm(source, body, Some(self.j), &env, self.vm)
+            {
                 return Some(result);
             }
         }

@@ -14,6 +14,7 @@ use crate::data::view::{scalar_view_to_owned_val, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
+use crate::vm::VM;
 
 mod key;
 mod reducer_stage;
@@ -39,11 +40,28 @@ where
 /// `terminal_collect`, `full`, `reducing_stage_prefix`, `sort_prefix`, then a
 /// generic `prefix_then_materialized_suffix` fallback. Returns `None` when no
 /// path can handle the pipeline shape, allowing the caller to fall back to `Val`-based execution.
+#[allow(dead_code)]
 pub(crate) fn run_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut vm = VM::new();
+    run_with_env_and_vm(source, body, cache, base_env, &mut vm)
+}
+
+/// Top-level view-pipeline runner using caller-owned VM state for fallback suffixes
+/// and VM-backed sink targets.
+pub(crate) fn run_with_env_and_vm<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -54,20 +72,20 @@ where
     if let Some(result) = run_terminal_select_projection(source.clone(), body) {
         return Some(result);
     }
-    if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env)) {
+    if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
         return Some(result);
     }
     if let Some(result) =
-        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
+        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env, vm)
     {
         return Some(result);
     }
     if let Some(result) =
-        run_sort_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
+        run_sort_prefix_then_materialized_suffix(source.clone(), body, cache, base_env, vm)
     {
         return Some(result);
     }
-    run_prefix_then_materialized_suffix(source, body, cache, base_env)
+    run_prefix_then_materialized_suffix(source, body, cache, base_env, vm)
 }
 
 /// Runs the complete pipeline entirely in the view domain when all stages and
@@ -78,13 +96,15 @@ fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Va
 where
     V: ValueView<'a>,
 {
-    run_full_with_env(source, body, None)
+    let mut vm = VM::new();
+    run_full_with_env(source, body, None, &mut vm)
 }
 
 fn run_full_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     base_env: Option<&Env>,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -106,7 +126,7 @@ where
         },
         (_, sink) => sink,
     };
-    let sink = match resolve_view_sink(sink, base_env) {
+    let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
@@ -127,6 +147,7 @@ where
 fn resolve_view_sink(
     sink: pipeline::ViewSinkCapability,
     base_env: Option<&Env>,
+    vm: &mut VM,
 ) -> Option<Result<pipeline::ViewSinkCapability, EvalError>> {
     match sink {
         pipeline::ViewSinkCapability::Membership {
@@ -134,7 +155,6 @@ fn resolve_view_sink(
             target: pipeline::ViewMembershipTarget::Program(program),
         } => {
             let env = base_env?;
-            let mut vm = crate::vm::VM::new();
             Some(vm.exec_in_env(&program, env).map(|target| {
                 pipeline::ViewSinkCapability::Membership {
                     op,
@@ -313,6 +333,7 @@ fn run_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -349,6 +370,7 @@ where
         boundary_rows,
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -828,6 +850,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -856,6 +879,7 @@ where
         plan.reducer.finish(),
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -868,6 +892,7 @@ fn run_sort_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -880,7 +905,7 @@ where
         .copied()
         .unwrap_or(pipeline::StageStrategy::Default);
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
-        return run_sort_prefix_then_view_suffix(source, body, &plan, base_env);
+        return run_sort_prefix_then_view_suffix(source, body, &plan, base_env, vm);
     }
     let collect_suffix = terminal_collect_plan_from(body, plan.sort_stage + 1);
     if collect_suffix.is_none()
@@ -921,7 +946,7 @@ where
         return Some(out);
     }
     if let Some(out) =
-        run_sorted_rows_view_suffix(winners.as_slice(), body, plan.sort_stage + 1, base_env)
+        run_sorted_rows_view_suffix(winners.as_slice(), body, plan.sort_stage + 1, base_env, vm)
     {
         return Some(out);
     }
@@ -933,6 +958,7 @@ where
         boundary_rows,
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -1052,6 +1078,7 @@ fn run_sorted_rows_view_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     suffix_start: usize,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -1060,7 +1087,7 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
     let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
-    let sink = match resolve_view_sink(sink, Some(base_env)) {
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
@@ -1086,6 +1113,7 @@ fn run_sort_prefix_then_view_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     plan: &SortBarrierPlan,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -1094,7 +1122,7 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[plan.sort_stage + 1..], &body.sink);
     let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
-    let sink = match resolve_view_sink(sink, Some(base_env)) {
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
@@ -1245,11 +1273,12 @@ fn run_materialized_suffix(
     boundary_rows: Vec<Val>,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Result<Val, EvalError> {
     let suffix = suffix_body(body, consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
     let root = Val::Null;
-    suffix.run_with_env(&root, base_env, cache)
+    suffix.run_with_env_and_vm(&root, base_env, cache, vm)
 }
 
 /// Runs the suffix of `body` against a single `boundary_value` (e.g. the
@@ -1261,6 +1290,7 @@ fn run_materialized_value_suffix(
     boundary_value: Val,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Result<Val, EvalError> {
     if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
         return Ok(boundary_value);
@@ -1268,7 +1298,7 @@ fn run_materialized_value_suffix(
     let suffix =
         suffix_body(body, consumed_stages).with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
-    suffix.run_with_env(&root, base_env, cache)
+    suffix.run_with_env_and_vm(&root, base_env, cache, vm)
 }
 
 /// Applies a single view stage to `item`, returning the control flow decision
