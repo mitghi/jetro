@@ -77,6 +77,8 @@ pub enum BodyKernel {
         scrutinee: Box<BodyKernel>,
         /// Compiled match program.
         compiled: Arc<crate::vm::CompiledMatch>,
+        /// Whether arm bodies can read `@` and therefore need the scrutinee as `Env::current`.
+        body_needs_current: bool,
     },
     /// Short-circuits through a list of predicates, returning `false` on the first failure.
     And(Arc<[BodyKernel]>),
@@ -274,7 +276,8 @@ impl BodyKernel {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
             Self::ChildMapSum { array, map } => {
-                array.mentions_any_field_like_ident(names) || map.mentions_any_field_like_ident(names)
+                array.mentions_any_field_like_ident(names)
+                    || map.mentions_any_field_like_ident(names)
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
@@ -348,6 +351,7 @@ impl BodyKernel {
                     return Self::Match {
                         scrutinee: Box::new(scrutinee),
                         compiled: Arc::clone(cm),
+                        body_needs_current: match_bodies_need_current(cm),
                     };
                 }
             }
@@ -376,9 +380,7 @@ impl BodyKernel {
                     };
                 }
             }
-            [receiver @ .., Opcode::CallMethod(call)]
-                if array_selector_call(call).is_some() =>
-            {
+            [receiver @ .., Opcode::CallMethod(call)] if array_selector_call(call).is_some() => {
                 let array = if receiver.is_empty() {
                     BodyKernel::Current
                 } else {
@@ -612,6 +614,70 @@ fn match_is_receiver_local(cm: &crate::vm::CompiledMatch) -> bool {
             .all(|program| program_is_receiver_local(program))
 }
 
+fn match_bodies_need_current(cm: &crate::vm::CompiledMatch) -> bool {
+    cm.bodies
+        .iter()
+        .any(|program| program_uses_current(program))
+}
+
+fn program_uses_current(program: &crate::vm::Program) -> bool {
+    program.ops.iter().any(opcode_uses_current)
+}
+
+fn opcode_uses_current(opcode: &crate::vm::Opcode) -> bool {
+    use crate::vm::Opcode;
+    match opcode {
+        Opcode::PushCurrent | Opcode::SetCurrent | Opcode::BindLamCurrent { .. } => true,
+        Opcode::DynIndex(prog)
+        | Opcode::InlineFilter(prog)
+        | Opcode::AndOp(prog)
+        | Opcode::OrOp(prog)
+        | Opcode::CoalesceOp(prog) => program_uses_current(prog),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => {
+            call.sub_progs.iter().any(|prog| program_uses_current(prog))
+        }
+        Opcode::MakeObj(entries) => entries.iter().any(|entry| match entry {
+            crate::vm::CompiledObjEntry::Short { .. }
+            | crate::vm::CompiledObjEntry::KvPath { .. } => true,
+            crate::vm::CompiledObjEntry::Kv { prog, cond, .. } => {
+                program_uses_current(prog)
+                    || cond.as_ref().is_some_and(|cond| program_uses_current(cond))
+            }
+            crate::vm::CompiledObjEntry::Dynamic { key, val } => {
+                program_uses_current(key) || program_uses_current(val)
+            }
+            crate::vm::CompiledObjEntry::Spread(prog)
+            | crate::vm::CompiledObjEntry::SpreadDeep(prog) => program_uses_current(prog),
+        }),
+        Opcode::MakeArr(items) => items
+            .iter()
+            .any(|(program, _)| program_uses_current(program)),
+        Opcode::FString(parts) => parts.iter().any(|part| match part {
+            crate::vm::CompiledFSPart::Lit(_) => false,
+            crate::vm::CompiledFSPart::Interp { prog, .. } => program_uses_current(prog),
+        }),
+        Opcode::LetExpr { body, .. } => program_uses_current(body),
+        Opcode::IfElse { then_, else_ } => {
+            program_uses_current(then_) || program_uses_current(else_)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_uses_current(body) || program_uses_current(default)
+        }
+        Opcode::Match(cm) | Opcode::DeepMatchAll(cm) | Opcode::DeepMatchFirst(cm) => {
+            matches!(cm.scrutinee, crate::vm::MatchScrutinee::Current)
+                || cm
+                    .guards
+                    .iter()
+                    .any(|program| program_uses_current(program))
+                || cm
+                    .bodies
+                    .iter()
+                    .any(|program| program_uses_current(program))
+        }
+        _ => false,
+    }
+}
+
 fn program_is_receiver_local(program: &crate::vm::Program) -> bool {
     program.ops.iter().all(opcode_is_receiver_local)
 }
@@ -635,9 +701,10 @@ fn opcode_is_receiver_local(opcode: &crate::vm::Opcode) -> bool {
         | Opcode::OrOp(prog)
         | Opcode::CoalesceOp(prog) => program_is_receiver_local(prog),
         Opcode::BindLamCurrent { body, .. } => program_is_receiver_local(body),
-        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => {
-            call.sub_progs.iter().all(|prog| program_is_receiver_local(prog))
-        }
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .all(|prog| program_is_receiver_local(prog)),
         Opcode::MakeObj(entries) => entries.iter().all(|entry| match entry {
             crate::vm::CompiledObjEntry::Short { .. }
             | crate::vm::CompiledObjEntry::KvPath { .. } => true,
@@ -685,7 +752,10 @@ fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKerne
             }
             Opcode::FieldChain(chain) => {
                 let receiver = stack.pop().unwrap_or(BodyKernel::Current);
-                stack.push(compose_field_chain_kernel(receiver, Arc::clone(&chain.keys)));
+                stack.push(compose_field_chain_kernel(
+                    receiver,
+                    Arc::clone(&chain.keys),
+                ));
             }
             Opcode::CallMethod(call) if array_selector_call(call).is_some() => {
                 let receiver = stack.pop().unwrap_or(BodyKernel::Current);
@@ -833,8 +903,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)] if call.method.is_view_projection_method() =>
-        {
+        [receiver @ .., Opcode::CallMethod(call)] if call.method.is_view_projection_method() => {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
             } else {
@@ -1027,6 +1096,7 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::Match {
             scrutinee,
             compiled,
+            ..
         } => {
             let scrutinee = eval_native_kernel(scrutinee, item)?;
             let mut vm = crate::vm::VM::new();
@@ -1153,11 +1223,7 @@ where
     scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
 }
 
-fn eval_binary_op(
-    lhs: Val,
-    op: crate::parse::ast::BinOp,
-    rhs: Val,
-) -> Result<Val, EvalError> {
+fn eval_binary_op(lhs: Val, op: crate::parse::ast::BinOp, rhs: Val) -> Result<Val, EvalError> {
     use crate::parse::ast::BinOp;
     match op {
         BinOp::Add => crate::util::add_vals(lhs, rhs),
@@ -1422,7 +1488,9 @@ where
         BodyKernel::Binary { lhs, op, rhs } => {
             let lhs = view_kernel_value_to_owned(eval_view_kernel(lhs, item)?);
             let rhs = view_kernel_value_to_owned(eval_view_kernel(rhs, item)?);
-            eval_binary_op(lhs, *op, rhs).ok().map(ViewKernelValue::Owned)
+            eval_binary_op(lhs, *op, rhs)
+                .ok()
+                .map(ViewKernelValue::Owned)
         }
         BodyKernel::ChildMapSum { array, map } => match eval_view_kernel(array, item)? {
             ViewKernelValue::View(view) => {
@@ -1433,20 +1501,26 @@ where
                 .map(ViewKernelValue::Owned),
         },
         BodyKernel::ArraySelect { array, selector } => match eval_view_kernel(array, item)? {
-            ViewKernelValue::View(view) => {
-                Some(ViewKernelValue::View(eval_array_select_view(view, *selector)))
-            }
-            ViewKernelValue::Owned(value) => {
-                Some(ViewKernelValue::Owned(eval_array_select_native(&value, *selector)))
-            }
+            ViewKernelValue::View(view) => Some(ViewKernelValue::View(eval_array_select_view(
+                view, *selector,
+            ))),
+            ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(
+                eval_array_select_native(&value, *selector),
+            )),
         },
         BodyKernel::Match {
             scrutinee,
             compiled,
+            body_needs_current,
         } => match eval_view_kernel(scrutinee, item)? {
             ViewKernelValue::View(view) => {
                 let mut vm = crate::vm::VM::new();
-                let env = crate::data::context::Env::new(view.materialize());
+                let current = if *body_needs_current {
+                    view.materialize()
+                } else {
+                    Val::Null
+                };
+                let env = crate::data::context::Env::new(current);
                 crate::vm::exec_match_view(&mut vm, compiled, view, &env)
                     .ok()
                     .map(ViewKernelValue::Owned)
@@ -1819,6 +1893,40 @@ mod tests {
     }
 
     #[test]
+    fn match_kernel_tracks_whether_bodies_need_current() {
+        let binding_only = r#"match events.last() with {
+            {kind: "delivered", at: t} -> {state: "ok", at: t},
+            _ -> {state: "unknown"}
+        }"#;
+        let expr = parse(binding_only).expect("parse binding-only match");
+        let program = Compiler::compile(&expr, binding_only);
+        let kernel = BodyKernel::classify(&program);
+        let BodyKernel::Match {
+            body_needs_current,
+            ..
+        } = kernel
+        else {
+            panic!("expected match kernel");
+        };
+        assert!(!body_needs_current);
+
+        let current_body = r#"match events.last() with {
+            _ -> @.kind
+        }"#;
+        let expr = parse(current_body).expect("parse current-body match");
+        let program = Compiler::compile(&expr, current_body);
+        let kernel = BodyKernel::classify(&program);
+        let BodyKernel::Match {
+            body_needs_current,
+            ..
+        } = kernel
+        else {
+            panic!("expected match kernel");
+        };
+        assert!(body_needs_current);
+    }
+
+    #[test]
     fn showcase_projection_classifies_as_view_native_object_kernel() {
         let src = r##"{
             id,
@@ -1900,10 +2008,13 @@ mod tests {
 
     #[test]
     fn object_key_builtin_kernels_run_on_value_views() {
-        let value = Val::obj([
-            (Arc::from("isbn"), Val::Str(Arc::from("x"))),
-            (Arc::from("score"), Val::Int(10)),
-        ].into());
+        let value = Val::obj(
+            [
+                (Arc::from("isbn"), Val::Str(Arc::from("x"))),
+                (Arc::from("score"), Val::Int(10)),
+            ]
+            .into(),
+        );
         let view = ValView::new(&value);
 
         assert_eq!(
@@ -2034,9 +2145,9 @@ mod tests {
             ),
         };
         let picked = eval_view_kernel(&pick, &view).and_then(|value| match value {
-                ViewKernelValue::Owned(value) => Some(value),
-                _ => None,
-            });
+            ViewKernelValue::Owned(value) => Some(value),
+            _ => None,
+        });
         let picked_json: serde_json::Value = picked.expect("pick output").into();
         assert_eq!(picked_json, serde_json::json!({"title": "b", "score": 2}));
 
