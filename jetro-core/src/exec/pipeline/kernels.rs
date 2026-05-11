@@ -426,6 +426,10 @@ impl BodyKernel {
             Expr::FString(parts) => classify_fstring_expr(parts),
             Expr::Object(fields) => classify_object_expr(fields),
             Expr::Chain(base, steps) => classify_chain_expr(base, steps),
+            Expr::Match { .. } => {
+                let program = crate::compile::compiler::Compiler::compile(expr, "<match-kernel>");
+                Self::classify(&program)
+            }
             _ => Self::Generic,
         }
     }
@@ -2312,6 +2316,34 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &ValView::new(&row))),
             Some(Val::Int(35))
+        );
+    }
+
+    #[test]
+    fn ast_object_classifier_preserves_match_kernels() {
+        let expr = parse(
+            r#"{last_event: match events.last() with {
+                {kind: "delivered", at: t} -> {state: "ok", at: t},
+                _ -> {state: "unknown"}
+            }}"#,
+        )
+        .expect("parse object match");
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native());
+
+        let row: Val = (&serde_json::json!({
+            "events": [
+                {"kind": "placed"},
+                {"kind": "delivered", "at": "2025-04-14"}
+            ]
+        }))
+            .into();
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&row))).expect("output");
+        let json: serde_json::Value = out.into();
+        assert_eq!(
+            json,
+            serde_json::json!({"last_event": {"state": "ok", "at": "2025-04-14"}})
         );
     }
 
