@@ -57,7 +57,7 @@ impl Pipeline {
                 self.run_columnar_or_below(root, base_env, cache, vm)
             }
             PhysicalExecPath::Columnar => self.run_columnar_or_below(root, base_env, cache, vm),
-            PhysicalExecPath::Composed => composed::run(self, root, base_env)
+            PhysicalExecPath::Composed => composed::run_with_vm(self, root, base_env, vm)
                 .unwrap_or_else(|| materialized_exec::run(self, root, base_env, vm)),
             PhysicalExecPath::Legacy => materialized_exec::run(self, root, base_env, vm),
         }
@@ -80,7 +80,7 @@ impl Pipeline {
                 return out;
             }
         }
-        composed::run(self, root, base_env)
+        composed::run_with_vm(self, root, base_env, vm)
             .unwrap_or_else(|| materialized_exec::run(self, root, base_env, vm))
     }
 }

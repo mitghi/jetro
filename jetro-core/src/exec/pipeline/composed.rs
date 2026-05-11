@@ -18,7 +18,7 @@ use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
 use crate::exec::composed as cmp;
 use crate::plan::demand::PullDemand;
-use crate::vm::Program;
+use crate::vm::{Program, VM};
 
 use super::ir::program_match_only;
 use super::{
@@ -36,14 +36,16 @@ pub(super) struct ComposedStageBuilder<'a> {
     base_env: &'a Env,
     // lazily allocated; shared by all generic program-based stages so it is created at most once
     vm_ctx: OnceCell<Rc<RefCell<cmp::VmCtx>>>,
+    vm_seed: RefCell<Option<VM>>,
 }
 
 impl<'a> ComposedStageBuilder<'a> {
     /// Creates a builder that borrows `base_env` for the duration of pipeline compilation.
-    pub(super) fn new(base_env: &'a Env) -> Self {
+    pub(super) fn new(base_env: &'a Env, vm: &mut VM) -> Self {
         Self {
             base_env,
             vm_ctx: OnceCell::new(),
+            vm_seed: RefCell::new(Some(std::mem::take(vm))),
         }
     }
 
@@ -196,10 +198,18 @@ impl<'a> ComposedStageBuilder<'a> {
     fn vm_ctx(&self) -> Rc<RefCell<cmp::VmCtx>> {
         Rc::clone(self.vm_ctx.get_or_init(|| {
             Rc::new(RefCell::new(cmp::VmCtx {
-                vm: crate::vm::VM::new(),
+                vm: self.vm_seed.borrow_mut().take().unwrap_or_default(),
                 env: self.base_env.clone(),
             }))
         }))
+    }
+
+    fn restore_vm(&self, vm: &mut VM) {
+        if let Some(ctx) = self.vm_ctx.get() {
+            *vm = std::mem::take(&mut ctx.borrow_mut().vm);
+        } else if let Some(seed) = self.vm_seed.borrow_mut().take() {
+            *vm = seed;
+        }
     }
 }
 
@@ -460,18 +470,52 @@ fn source_rows(source: &Source, root: &Val) -> Option<row_source::Rows<'static>>
 // ---------------------------------------------------------------------------
 
 /// Entry point for composed execution; returns `None` when any stage or sink cannot be lowered.
+#[allow(dead_code)]
 pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
-    let stage_builder = ComposedStageBuilder::new(base_env);
+    let mut vm = VM::new();
+    run_with_vm(pipeline, root, base_env, &mut vm)
+}
 
+/// Entry point for composed execution using caller-owned VM cache/state.
+pub(super) fn run_with_vm(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    let result = run_inner(pipeline, root, base_env, vm);
+    result
+}
+
+fn run_inner(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
+    let stage_builder = ComposedStageBuilder::new(base_env, vm);
+    let result = run_with_builder(pipeline, root, &eff_stages, &eff_kernels, &eff_sink, &stage_builder);
+    stage_builder.restore_vm(vm);
+    result
+}
+
+fn run_with_builder(
+    pipeline: &Pipeline,
+    root: &Val,
+    eff_stages: &[Stage],
+    eff_kernels: &[BodyKernel],
+    eff_sink: &Sink,
+    stage_builder: &ComposedStageBuilder<'_>,
+) -> Option<Result<Val, EvalError>> {
     let mut buf = source_rows(&pipeline.source, root)?;
 
-    let kernels = &eff_kernels;
-    let stages_ref = &eff_stages;
+    let kernels = eff_kernels;
+    let stages_ref = eff_stages;
 
     let strategies = compute_strategies_with_kernels(stages_ref, kernels, &eff_sink);
 
