@@ -371,14 +371,13 @@ where
 {
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
-    let source_demand = body_pull_demand(body);
 
     drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
-        source_demand,
+        plan.source_demand,
         |item| {
             collector.push_view_row(item, &plan.collect_kernel)?;
             Some(ViewRowAction::Emit)
