@@ -90,6 +90,21 @@ pub enum MembershipSinkOp {
 }
 
 impl PredicateSinkSpec {
+    /// Constructs a predicate terminal sink from the builtin method.
+    pub(crate) fn from_method(method: BuiltinMethod, predicate: Arc<Program>) -> Option<Self> {
+        Some(Self {
+            op: match method {
+                BuiltinMethod::Any => PredicateSinkOp::Any,
+                BuiltinMethod::All => PredicateSinkOp::All,
+                BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
+                BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
+                BuiltinMethod::FindOne => PredicateSinkOp::FindOne,
+                _ => return None,
+            },
+            predicate,
+        })
+    }
+
     /// Demand placed on the row stream by this terminal predicate sink.
     pub(crate) fn demand(&self) -> Demand {
         // Predicate sinks can short-circuit inside their accumulator, but the shared

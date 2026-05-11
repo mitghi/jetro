@@ -504,7 +504,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 
 use super::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-    PredicateSinkOp, PredicateSinkSpec, ReducerSpec,
+    PredicateSinkSpec, ReducerSpec,
 };
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
@@ -823,18 +823,10 @@ fn predicate_sink_for_method(
     let [arg] = args else {
         return None;
     };
-    let op = match method {
-        BuiltinMethod::Any => PredicateSinkOp::Any,
-        BuiltinMethod::All => PredicateSinkOp::All,
-        BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
-        BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
-        BuiltinMethod::FindOne => PredicateSinkOp::FindOne,
-        _ => return None,
-    };
-    Some(Sink::Predicate(PredicateSinkSpec {
-        op,
-        predicate: compile_subexpr(arg)?,
-    }))
+    Some(Sink::Predicate(PredicateSinkSpec::from_method(
+        method,
+        compile_subexpr(arg)?,
+    )?))
 }
 
 fn membership_sink_for_method(
