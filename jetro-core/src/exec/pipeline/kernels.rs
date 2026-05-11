@@ -2157,16 +2157,27 @@ pub(crate) fn eval_view_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<V
 where
     V: ValueView<'a>,
 {
-    let mut vm = crate::vm::VM::new();
-    eval_view_kernel_with_vm(kernel, item, &mut vm)
+    eval_view_kernel_inner(kernel, item, None)
 }
 
 /// Evaluates `kernel` on a borrowed view with caller-owned VM state for match kernels.
 #[inline]
+#[allow(dead_code)]
 pub(crate) fn eval_view_kernel_with_vm<'a, V>(
     kernel: &BodyKernel,
     item: &V,
     vm: &mut crate::vm::VM,
+) -> Option<ViewKernelValue<V>>
+where
+    V: ValueView<'a>,
+{
+    eval_view_kernel_inner(kernel, item, Some(vm))
+}
+
+fn eval_view_kernel_inner<'a, V>(
+    kernel: &BodyKernel,
+    item: &V,
+    mut vm: Option<&mut crate::vm::VM>,
 ) -> Option<ViewKernelValue<V>>
 where
     V: ValueView<'a>,
@@ -2185,7 +2196,7 @@ where
             for part in fstring.parts.iter() {
                 match part {
                     FStringKernelPart::Lit(value) => out.push_str(value),
-                    FStringKernelPart::Interp(kernel) => match eval_view_kernel_with_vm(kernel, item, vm)? {
+                    FStringKernelPart::Interp(kernel) => match eval_view_kernel_inner(kernel, item, vm.as_deref_mut())? {
                         ViewKernelValue::View(view) => {
                             append_json_view_to_string(&mut out, &view, view.scalar()).ok()?;
                         }
@@ -2200,7 +2211,7 @@ where
         BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
-                let value = match eval_view_kernel_with_vm(&entry.value, item, vm)? {
+                let value = match eval_view_kernel_inner(&entry.value, item, vm.as_deref_mut())? {
                     ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
                     ViewKernelValue::Owned(value) => value,
                 };
@@ -2227,7 +2238,7 @@ where
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
             .ok()
             .map(ViewKernelValue::Owned),
-        BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_with_vm(receiver, item, vm)? {
+        BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm.as_deref_mut())? {
             ViewKernelValue::View(view) => match (call.method, &call.args) {
                 (crate::builtins::BuiltinMethod::Has, crate::builtins::BuiltinArgs::Str(key)) => {
                     view_has(&view, key.as_ref())
@@ -2303,14 +2314,19 @@ where
                 .flatten()
                 .map(ViewKernelValue::Owned),
         },
-        BodyKernel::Compose { first, then } => match eval_view_kernel_with_vm(first, item, vm)? {
-            ViewKernelValue::View(view) => eval_view_kernel_with_vm(then, &view, vm),
-            ViewKernelValue::Owned(value) => eval_native_kernel_with_vm(then, &value, vm)
-                .ok()
-                .map(ViewKernelValue::Owned),
+        BodyKernel::Compose { first, then } => match eval_view_kernel_inner(first, item, vm.as_deref_mut())? {
+            ViewKernelValue::View(view) => eval_view_kernel_inner(then, &view, vm),
+            ViewKernelValue::Owned(value) => match vm {
+                Some(vm) => eval_native_kernel_with_vm(then, &value, vm)
+                    .ok()
+                    .map(ViewKernelValue::Owned),
+                None => eval_native_kernel(then, &value)
+                    .ok()
+                    .map(ViewKernelValue::Owned),
+            },
         },
         BodyKernel::CmpLit { lhs, op, lit } => {
-            let passes = match eval_view_kernel_with_vm(lhs, item, vm)? {
+            let passes = match eval_view_kernel_inner(lhs, item, vm.as_deref_mut())? {
                 ViewKernelValue::View(view) => crate::util::json_cmp_binop(
                     view.scalar(),
                     *op,
@@ -2328,13 +2344,13 @@ where
             if let Some(value) = eval_view_numeric_kernel(kernel, item) {
                 return Some(ViewKernelValue::Owned(numeric_kernel_value_to_val(value)));
             }
-            let lhs = view_kernel_value_to_owned(eval_view_kernel_with_vm(lhs, item, vm)?);
-            let rhs = view_kernel_value_to_owned(eval_view_kernel_with_vm(rhs, item, vm)?);
+            let lhs = view_kernel_value_to_owned(eval_view_kernel_inner(lhs, item, vm.as_deref_mut())?);
+            let rhs = view_kernel_value_to_owned(eval_view_kernel_inner(rhs, item, vm.as_deref_mut())?);
             eval_binary_op(lhs, *op, rhs)
                 .ok()
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel_with_vm(array, item, vm)? {
+        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel_inner(array, item, vm.as_deref_mut())? {
             ViewKernelValue::View(view) => Some(ViewKernelValue::View(eval_array_select_view(
                 view, *selector,
             ))),
@@ -2346,7 +2362,7 @@ where
             scrutinee,
             compiled,
             body_needs_current,
-        } => match eval_view_kernel_with_vm(scrutinee, item, vm)? {
+        } => match eval_view_kernel_inner(scrutinee, item, vm.as_deref_mut())? {
             ViewKernelValue::View(view) => {
                 let current = if *body_needs_current {
                     view.materialize()
@@ -2354,20 +2370,32 @@ where
                     Val::Null
                 };
                 let env = crate::data::context::Env::new(current);
-                crate::vm::exec_match_view(vm, compiled, view, &env)
-                    .ok()
-                    .map(ViewKernelValue::Owned)
+                match vm {
+                    Some(vm) => crate::vm::exec_match_view(vm, compiled, view, &env),
+                    None => {
+                        let mut local_vm = crate::vm::VM::new();
+                        crate::vm::exec_match_view(&mut local_vm, compiled, view, &env)
+                    }
+                }
+                .ok()
+                .map(ViewKernelValue::Owned)
             }
             ViewKernelValue::Owned(value) => {
                 let env = crate::data::context::Env::new(value.clone());
-                vm.exec_match(compiled, &value, &env)
-                    .ok()
-                    .map(ViewKernelValue::Owned)
+                match vm {
+                    Some(vm) => vm.exec_match(compiled, &value, &env),
+                    None => {
+                        let mut local_vm = crate::vm::VM::new();
+                        local_vm.exec_match(compiled, &value, &env)
+                    }
+                }
+                .ok()
+                .map(ViewKernelValue::Owned)
             }
         },
         BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
-                let passes = match eval_view_kernel_with_vm(predicate, item, vm)? {
+                let passes = match eval_view_kernel_inner(predicate, item, vm.as_deref_mut())? {
                     ViewKernelValue::View(view) => view.scalar().truthy(),
                     ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
                 };
@@ -2379,7 +2407,7 @@ where
         }
         BodyKernel::Or(predicates) => {
             for predicate in predicates.iter() {
-                let passes = match eval_view_kernel_with_vm(predicate, item, vm)? {
+                let passes = match eval_view_kernel_inner(predicate, item, vm.as_deref_mut())? {
                     ViewKernelValue::View(view) => view.scalar().truthy(),
                     ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
                 };
