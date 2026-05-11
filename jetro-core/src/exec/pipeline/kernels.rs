@@ -1499,6 +1499,22 @@ where
     scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum NumericKernelValue {
+    Int(i64),
+    Float(f64),
+}
+
+impl NumericKernelValue {
+    #[inline]
+    fn to_val(self) -> Val {
+        match self {
+            Self::Int(value) => Val::Int(value),
+            Self::Float(value) => Val::Float(value),
+        }
+    }
+}
+
 fn eval_binary_op(lhs: Val, op: crate::parse::ast::BinOp, rhs: Val) -> Result<Val, EvalError> {
     use crate::parse::ast::BinOp;
     match op {
@@ -1581,10 +1597,10 @@ where
 
     iter.try_for_each(|child| {
         match map {
-            Some(map) => match eval_view_kernel(map, &child)? {
-                ViewKernelValue::View(view) => {
-                    fold_json_view_scalar(
-                        view.scalar(),
+            Some(map) => {
+                if let Some(value) = eval_view_numeric_kernel(map, &child) {
+                    fold_numeric_kernel_value(
+                        value,
                         &mut acc_i,
                         &mut acc_f,
                         &mut floated,
@@ -1593,20 +1609,36 @@ where
                         &mut n_obs,
                         op,
                     );
+                    return Some(());
                 }
-                ViewKernelValue::Owned(value) => {
-                    super::num_fold(
-                        &mut acc_i,
-                        &mut acc_f,
-                        &mut floated,
-                        &mut min_f,
-                        &mut max_f,
-                        &mut n_obs,
-                        op,
-                        &value,
-                    );
+
+                match eval_view_kernel(map, &child)? {
+                    ViewKernelValue::View(view) => {
+                        fold_json_view_scalar(
+                            view.scalar(),
+                            &mut acc_i,
+                            &mut acc_f,
+                            &mut floated,
+                            &mut min_f,
+                            &mut max_f,
+                            &mut n_obs,
+                            op,
+                        );
+                    }
+                    ViewKernelValue::Owned(value) => {
+                        super::num_fold(
+                            &mut acc_i,
+                            &mut acc_f,
+                            &mut floated,
+                            &mut min_f,
+                            &mut max_f,
+                            &mut n_obs,
+                            op,
+                            &value,
+                        );
+                    }
                 }
-            },
+            }
             None => {
                 fold_json_view_scalar(
                     child.scalar(),
@@ -1626,6 +1658,155 @@ where
     Some(super::num_finalise(
         op, acc_i, acc_f, floated, min_f, max_f, n_obs,
     ))
+}
+
+fn eval_view_numeric_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<NumericKernelValue>
+where
+    V: ValueView<'a>,
+{
+    match kernel {
+        BodyKernel::Current => numeric_from_json_view(item.scalar()),
+        BodyKernel::FieldRead(key) => numeric_from_json_view(item.field(key).scalar()),
+        BodyKernel::FieldChain(keys) => {
+            numeric_from_json_view(walk_view_fields(item.clone(), keys.as_ref()).scalar())
+        }
+        BodyKernel::Const(Val::Int(value)) => Some(NumericKernelValue::Int(*value)),
+        BodyKernel::Const(Val::Float(value)) => Some(NumericKernelValue::Float(*value)),
+        BodyKernel::Binary { lhs, op, rhs } => {
+            let lhs = eval_view_numeric_kernel(lhs, item)?;
+            let rhs = eval_view_numeric_kernel(rhs, item)?;
+            eval_numeric_binary(lhs, *op, rhs)
+        }
+        BodyKernel::Compose { first, then } => match eval_view_kernel(first, item)? {
+            ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view),
+            ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
+        },
+        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel(array, item)? {
+            ViewKernelValue::View(view) => {
+                numeric_from_json_view(eval_array_select_view(view, *selector).scalar())
+            }
+            ViewKernelValue::Owned(value) => {
+                numeric_from_val(&eval_array_select_native(&value, *selector))
+            }
+        },
+        _ => None,
+    }
+}
+
+fn eval_native_numeric_kernel(kernel: &BodyKernel, item: &Val) -> Option<NumericKernelValue> {
+    match kernel {
+        BodyKernel::Current => numeric_from_val(item),
+        BodyKernel::FieldRead(key) => numeric_from_val(&item.get_field(key)),
+        BodyKernel::FieldChain(keys) => {
+            let mut cur = item.clone();
+            for key in keys.iter() {
+                cur = cur.get_field(key);
+            }
+            numeric_from_val(&cur)
+        }
+        BodyKernel::Const(Val::Int(value)) => Some(NumericKernelValue::Int(*value)),
+        BodyKernel::Const(Val::Float(value)) => Some(NumericKernelValue::Float(*value)),
+        BodyKernel::Binary { lhs, op, rhs } => {
+            let lhs = eval_native_numeric_kernel(lhs, item)?;
+            let rhs = eval_native_numeric_kernel(rhs, item)?;
+            eval_numeric_binary(lhs, *op, rhs)
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn numeric_from_json_view(scalar: JsonView<'_>) -> Option<NumericKernelValue> {
+    match scalar {
+        JsonView::Int(value) => Some(NumericKernelValue::Int(value)),
+        JsonView::UInt(value) if value <= i64::MAX as u64 => {
+            Some(NumericKernelValue::Int(value as i64))
+        }
+        JsonView::UInt(value) => Some(NumericKernelValue::Float(value as f64)),
+        JsonView::Float(value) => Some(NumericKernelValue::Float(value)),
+        _ => None,
+    }
+}
+
+#[inline]
+fn numeric_from_val(value: &Val) -> Option<NumericKernelValue> {
+    match value {
+        Val::Int(value) => Some(NumericKernelValue::Int(*value)),
+        Val::Float(value) => Some(NumericKernelValue::Float(*value)),
+        _ => None,
+    }
+}
+
+fn eval_numeric_binary(
+    lhs: NumericKernelValue,
+    op: crate::parse::ast::BinOp,
+    rhs: NumericKernelValue,
+) -> Option<NumericKernelValue> {
+    use crate::parse::ast::BinOp;
+    match (lhs, rhs, op) {
+        (NumericKernelValue::Int(a), NumericKernelValue::Int(b), BinOp::Add) => {
+            Some(NumericKernelValue::Int(a + b))
+        }
+        (NumericKernelValue::Int(a), NumericKernelValue::Int(b), BinOp::Sub) => {
+            Some(NumericKernelValue::Int(a - b))
+        }
+        (NumericKernelValue::Int(a), NumericKernelValue::Int(b), BinOp::Mul) => {
+            Some(NumericKernelValue::Int(a * b))
+        }
+        (NumericKernelValue::Int(a), NumericKernelValue::Int(b), BinOp::Mod) if b != 0 => {
+            Some(NumericKernelValue::Int(a % b))
+        }
+        (a, b, BinOp::Add) => Some(NumericKernelValue::Float(
+            numeric_to_f64(a) + numeric_to_f64(b),
+        )),
+        (a, b, BinOp::Sub) => Some(NumericKernelValue::Float(
+            numeric_to_f64(a) - numeric_to_f64(b),
+        )),
+        (a, b, BinOp::Mul) => Some(NumericKernelValue::Float(
+            numeric_to_f64(a) * numeric_to_f64(b),
+        )),
+        (a, b, BinOp::Div) => {
+            let denom = numeric_to_f64(b);
+            (denom != 0.0).then(|| NumericKernelValue::Float(numeric_to_f64(a) / denom))
+        }
+        (a, b, BinOp::Mod) => {
+            let denom = numeric_to_f64(b);
+            (denom != 0.0).then(|| NumericKernelValue::Float(numeric_to_f64(a) % denom))
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn numeric_to_f64(value: NumericKernelValue) -> f64 {
+    match value {
+        NumericKernelValue::Int(value) => value as f64,
+        NumericKernelValue::Float(value) => value,
+    }
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn fold_numeric_kernel_value(
+    value: NumericKernelValue,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: super::NumOp,
+) {
+    super::num_fold(
+        acc_i,
+        acc_f,
+        floated,
+        min_f,
+        max_f,
+        n_obs,
+        op,
+        &value.to_val(),
+    );
 }
 
 fn eval_nested_array_reducer_native_owned(
@@ -1883,6 +2064,9 @@ where
             Some(ViewKernelValue::Owned(Val::Bool(passes)))
         }
         BodyKernel::Binary { lhs, op, rhs } => {
+            if let Some(value) = eval_view_numeric_kernel(kernel, item) {
+                return Some(ViewKernelValue::Owned(value.to_val()));
+            }
             let lhs = view_kernel_value_to_owned(eval_view_kernel(lhs, item)?);
             let rhs = view_kernel_value_to_owned(eval_view_kernel(rhs, item)?);
             eval_binary_op(lhs, *op, rhs)
