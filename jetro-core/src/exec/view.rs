@@ -498,13 +498,19 @@ where
     }
     let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
-        pipeline::SourceAccessMode::Reverse { .. } => {
+        pipeline::SourceAccessMode::Reverse { outputs } => {
             let len = match source.scalar() {
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
             let items = (0..len).rev().map(|idx| source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, source_demand, observe);
+            return drive_view_iter(
+                items,
+                stages,
+                stage_kernels,
+                PullDemand::LastInput(outputs),
+                observe,
+            );
         }
         pipeline::SourceAccessMode::Indexed(idx) => {
             let len = match source.scalar() {
