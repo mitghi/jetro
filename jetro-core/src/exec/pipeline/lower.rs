@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinViewStage,
+    BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::data::value::Val;
@@ -157,6 +157,9 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     if trailing.is_empty() {
         return None;
     }
+    if !trailing_has_collection_operator(trailing) {
+        return None;
+    }
 
     let source = if field_end > 0 || !leading_fields.is_empty() {
         leading_fields.extend(steps[..field_end].iter().map(|s| match s {
@@ -177,6 +180,26 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     let mut plan = plan_with_exprs(stages, more_exprs, &kernels, sink);
     plan.source = source;
     Some(plan)
+}
+
+fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> bool {
+    use crate::parse::ast::Step;
+    trailing.iter().any(|step| {
+        let Step::Method(name, _) = step else {
+            return false;
+        };
+        matches!(
+            BuiltinMethod::from_name(name.as_str()).spec().category,
+            BuiltinCategory::StreamingOneToOne
+                | BuiltinCategory::StreamingFilter
+                | BuiltinCategory::StreamingExpand
+                | BuiltinCategory::Reducer
+                | BuiltinCategory::Positional
+                | BuiltinCategory::Barrier
+                | BuiltinCategory::Deep
+                | BuiltinCategory::Relational
+        )
+    })
 }
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.

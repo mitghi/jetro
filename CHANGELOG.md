@@ -20,6 +20,12 @@
   now shares constructors for positional, predicate, membership, arg-extreme,
   count, numeric, and keyed reducer sinks, reducing handwritten builtin
   classification drift.
+- **Nested pipeline plans are first-class execution units**. Nested collection
+  maps such as `items.map(...).sum()` now carry their source, stage
+  expressions, stage kernels, and sink kernels in the shared plan object.
+  Composed and legacy execution both reuse prepared nested-plan metadata across
+  rows, while scalar method-chain projections remain ordinary maps so existing
+  demand substitution and late projection still apply.
 
 ### Path-receiver scalar unwrap
 
