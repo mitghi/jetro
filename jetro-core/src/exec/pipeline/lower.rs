@@ -715,24 +715,12 @@ fn push_expr_stage(
             stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
             stage_exprs.push(arg_expr(arg));
         }
-        // Methods that route through the generic ExprBuiltin stage; `method` is preserved
-        // verbatim so the runtime executor dispatches on the right semantics.
-        BuiltinMethod::TakeWhile
-        | BuiltinMethod::DropWhile
-        | BuiltinMethod::IndicesWhere
-        | BuiltinMethod::FindIndex
-        | BuiltinMethod::MaxBy
-        | BuiltinMethod::MinBy
-        | BuiltinMethod::GroupBy
-        | BuiltinMethod::CountBy
-        | BuiltinMethod::IndexBy
-        | BuiltinMethod::TransformValues
-        | BuiltinMethod::TransformKeys
-        | BuiltinMethod::FilterValues
-        | BuiltinMethod::FilterKeys => {
+        // Remaining expression-argument lowerings route through the generic
+        // ExprBuiltin stage. The caller has already checked registry lowering
+        // metadata, so new supported builtins do not need another list here.
+        _ => {
             push_expr_builtin(method, arg, stages, stage_exprs)?;
         }
-        _ => return None,
     }
     Some(())
 }
