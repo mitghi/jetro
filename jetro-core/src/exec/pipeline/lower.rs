@@ -710,15 +710,9 @@ fn push_expr_builtin(
     Some(())
 }
 
-// Writes the terminal `Sink` for `method` into `*sink`; returns `None` for numeric reducers needing argument-based config.
+// Writes the no-arg terminal `Sink` for `method` into `*sink`.
 fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
-    let spec = method.spec();
-    match spec.sink?.accumulator {
-        BuiltinSinkAccumulator::SelectOne(_) => *sink = Sink::Terminal(method),
-        BuiltinSinkAccumulator::Count => *sink = Sink::Reducer(ReducerSpec::count()),
-        BuiltinSinkAccumulator::ApproxDistinct => *sink = Sink::ApproxCountDistinct,
-        BuiltinSinkAccumulator::Numeric => return None,
-    }
+    *sink = terminal_sink_for_method(method, &[])?;
     Some(())
 }
 
