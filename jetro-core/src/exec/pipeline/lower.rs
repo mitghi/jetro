@@ -17,8 +17,8 @@ use crate::parse::ast::Expr;
 use crate::{data::context::EvalError, data::value::Val};
 
 use super::{
-    expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
-    BodyKernel, Pipeline, PipelineBody, Plan, Sink, SortSpec, Source, Stage,
+    expr_label, plan_with_kernels, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
+    PipelineBody, Plan, Sink, SortSpec, Source, Stage,
 };
 
 impl Pipeline {
@@ -102,19 +102,7 @@ impl Pipeline {
             sink_kernels: Vec::new(),
         };
         rewrite(&mut p);
-        let kernels = Stage::body_kernels(&p.stages);
-        let plan_result = plan_with_exprs(
-            p.stages.clone(),
-            p.stage_exprs.clone(),
-            &kernels,
-            p.sink.clone(),
-        );
-        p.stages = plan_result.stages;
-        p.stage_exprs = plan_result.stage_exprs;
-        p.sink = plan_result.sink;
-        p.stage_kernels = Stage::body_kernels(&p.stages);
-        p.sink_kernels = p.sink.body_kernels();
-        Some(p)
+        Some(PipelineBody::planned(p.stages, p.stage_exprs, p.sink))
     }
 
     /// Returns `true` when `step` is a method call that can open a receiver-based pipeline without a field-chain prefix.

@@ -476,6 +476,26 @@ pub struct PipelineBody {
 }
 
 impl PipelineBody {
+    /// Builds a body from raw lowered parts, runs the stage planner, and refreshes
+    /// stage/sink kernel metadata.
+    pub(crate) fn planned(
+        stages: Vec<Stage>,
+        stage_exprs: Vec<Option<Arc<Expr>>>,
+        sink: Sink,
+    ) -> Self {
+        let kernels = Stage::body_kernels(&stages);
+        let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
+        let stage_kernels = Stage::body_kernels(&plan_result.stages);
+        let sink_kernels = plan_result.sink.body_kernels();
+        Self {
+            stages: plan_result.stages,
+            stage_exprs: plan_result.stage_exprs,
+            sink: plan_result.sink,
+            stage_kernels,
+            sink_kernels,
+        }
+    }
+
     /// Attaches `source` to this body, producing a complete executable `Pipeline`.
     /// Computes the execution `Strategy` once here so `run_with_env` can dispatch
     /// directly without re-walking stages on every call.
