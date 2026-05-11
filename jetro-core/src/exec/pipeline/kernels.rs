@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinCall;
+use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
@@ -92,6 +92,16 @@ pub enum BodyKernel {
     FString(FStringKernel),
     /// Evaluates an object literal by evaluating each field-value kernel.
     Object(ObjectKernel),
+    /// Runs a nested array reducer such as `items.map(qty * price).sum()` without
+    /// materialising the outer row.
+    NestedArrayReducer {
+        /// Kernel that resolves the nested array from the current row.
+        source: Box<BodyKernel>,
+        /// Optional per-child projection applied before reducing.
+        map: Option<Box<BodyKernel>>,
+        /// Numeric reducer operation.
+        op: super::NumOp,
+    },
     /// Runs a nested collection pipeline against the current row.
     NestedPlan(Arc<super::Plan>),
 }
@@ -273,11 +283,55 @@ fn classify_fstring_expr(parts: &[crate::parse::ast::FStringPart]) -> BodyKernel
     })
 }
 
+fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<BodyKernel> {
+    let (last, prefix) = steps.split_last()?;
+    let Step::Method(name, args) = last else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let method = BuiltinMethod::from_name(name.as_str());
+    let op = super::NumOp::from_builtin_reducer(method.spec().numeric_reducer?);
+
+    let (source_steps, map) = match prefix.split_last() {
+        Some((Step::Method(map_name, map_args), source_steps))
+            if BuiltinMethod::from_name(map_name.as_str()) == BuiltinMethod::Map =>
+        {
+            let [crate::parse::ast::Arg::Pos(map_expr)] = map_args.as_slice() else {
+                return None;
+            };
+            let map = BodyKernel::classify_expr(map_expr);
+            if matches!(map, BodyKernel::Generic) {
+                return None;
+            }
+            (source_steps, Some(Box::new(map)))
+        }
+        _ => (prefix, None),
+    };
+
+    let source = if source_steps.is_empty() {
+        BodyKernel::classify_expr(base)
+    } else {
+        classify_chain_expr(base, source_steps)
+    };
+    if matches!(source, BodyKernel::Generic) {
+        return None;
+    }
+    Some(BodyKernel::NestedArrayReducer {
+        source: Box::new(source),
+        map,
+        op,
+    })
+}
+
 fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
-    let nested_arg = crate::parse::ast::Arg::Pos(Expr::Chain(
-        Box::new(base.clone()),
-        steps.to_vec(),
-    ));
+    if let Some(kernel) = try_classify_nested_array_reducer(base, steps) {
+        return kernel;
+    }
+
+    let nested_arg =
+        crate::parse::ast::Arg::Pos(Expr::Chain(Box::new(base.clone()), steps.to_vec()));
     let mut receiver = match base {
         Expr::Current => BodyKernel::Current,
         Expr::Ident(name) => BodyKernel::FieldRead(Arc::from(name.as_str())),
@@ -393,6 +447,13 @@ impl BodyKernel {
                     })
             }
             Self::Object(object) => object.field_demand(),
+            Self::NestedArrayReducer { source, map, .. } => {
+                let need = source.field_demand();
+                match map {
+                    Some(map) => need.merge(map.field_demand()),
+                    None => need,
+                }
+            }
             Self::ConstBool(_) | Self::Const(_) => FieldDemand::None,
         }
     }
@@ -432,6 +493,12 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .any(|entry| entry.value.mentions_any_field_like_ident(names)),
+            Self::NestedArrayReducer { source, map, .. } => {
+                source.mentions_any_field_like_ident(names)
+                    || map
+                        .as_ref()
+                        .is_some_and(|map| map.mentions_any_field_like_ident(names))
+            }
             Self::NestedPlan(_) => true,
             Self::Generic
             | Self::Current
@@ -460,6 +527,9 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .all(|entry| entry.value.is_view_native()),
+            Self::NestedArrayReducer { source, map, .. } => {
+                source.is_view_native() && map.as_ref().is_none_or(|map| map.is_view_native())
+            }
             Self::NestedPlan(_) => false,
             _ => true,
         }
@@ -1187,6 +1257,9 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::Object(object) => {
             eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
         }
+        BodyKernel::NestedArrayReducer { source, map, op } => {
+            eval_nested_array_reducer_native(source, map.as_deref(), *op, item)
+        }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
             let recv = eval_native_kernel(receiver, item)?;
@@ -1253,6 +1326,49 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::CurrentCmpLit(op, lit) => Ok(Val::Bool(eval_cmp_op(item, *op, lit))),
         BodyKernel::Generic => unreachable!("generic body kernels are handled by eval_kernel"),
     }
+}
+
+fn eval_nested_array_reducer_native(
+    source: &BodyKernel,
+    map: Option<&BodyKernel>,
+    op: super::NumOp,
+    item: &Val,
+) -> Result<Val, EvalError> {
+    let source = eval_native_kernel(source, item)?;
+    let Some(items) = source.as_vals() else {
+        return Ok(op.empty());
+    };
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+
+    for child in items.iter() {
+        let value;
+        let observed = match map {
+            Some(map) => {
+                value = eval_native_kernel(map, child)?;
+                &value
+            }
+            None => child,
+        };
+        super::num_fold(
+            &mut acc_i,
+            &mut acc_f,
+            &mut floated,
+            &mut min_f,
+            &mut max_f,
+            &mut n_obs,
+            op,
+            observed,
+        );
+    }
+
+    Ok(super::num_finalise(
+        op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+    ))
 }
 
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
@@ -1389,6 +1505,174 @@ where
         .unwrap_or_else(|| array.index(-1))
 }
 
+fn eval_nested_array_reducer_view<'a, V>(
+    source: &BodyKernel,
+    map: Option<&BodyKernel>,
+    op: super::NumOp,
+    item: &V,
+) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    let source = match eval_view_kernel(source, item)? {
+        ViewKernelValue::View(view) => view,
+        ViewKernelValue::Owned(value) => {
+            return eval_nested_array_reducer_native_owned(value, map, op)
+        }
+    };
+    let mut iter = source.array_iter()?;
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+
+    iter.try_for_each(|child| {
+        match map {
+            Some(map) => match eval_view_kernel(map, &child)? {
+                ViewKernelValue::View(view) => {
+                    fold_json_view_scalar(
+                        view.scalar(),
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                        op,
+                    );
+                }
+                ViewKernelValue::Owned(value) => {
+                    super::num_fold(
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                        op,
+                        &value,
+                    );
+                }
+            },
+            None => {
+                fold_json_view_scalar(
+                    child.scalar(),
+                    &mut acc_i,
+                    &mut acc_f,
+                    &mut floated,
+                    &mut min_f,
+                    &mut max_f,
+                    &mut n_obs,
+                    op,
+                );
+            }
+        }
+        Some(())
+    })?;
+
+    Some(super::num_finalise(
+        op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+    ))
+}
+
+fn eval_nested_array_reducer_native_owned(
+    source: Val,
+    map: Option<&BodyKernel>,
+    op: super::NumOp,
+) -> Option<Val> {
+    let Some(items) = source.as_vals() else {
+        return Some(op.empty());
+    };
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+    for child in items.iter() {
+        let value;
+        let observed = match map {
+            Some(map) => {
+                value = eval_native_kernel(map, child).ok()?;
+                &value
+            }
+            None => child,
+        };
+        super::num_fold(
+            &mut acc_i,
+            &mut acc_f,
+            &mut floated,
+            &mut min_f,
+            &mut max_f,
+            &mut n_obs,
+            op,
+            observed,
+        );
+    }
+    Some(super::num_finalise(
+        op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+    ))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn fold_json_view_scalar(
+    scalar: JsonView<'_>,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: super::NumOp,
+) {
+    match scalar {
+        JsonView::Int(value) => super::num_fold(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            &Val::Int(value),
+        ),
+        JsonView::UInt(value) if value <= i64::MAX as u64 => super::num_fold(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            &Val::Int(value as i64),
+        ),
+        JsonView::UInt(value) => super::num_fold(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            &Val::Float(value as f64),
+        ),
+        JsonView::Float(value) => super::num_fold(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            &Val::Float(value),
+        ),
+        _ => {}
+    }
+}
+
 /// Result of a view-native kernel evaluation: a borrowed sub-view or a newly-owned `Val`.
 pub(crate) enum ViewKernelValue<V> {
     /// The kernel produced a borrowed sub-view of the input without materialising.
@@ -1442,6 +1726,10 @@ where
                 pairs.push((Arc::clone(&entry.key), value));
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
+        }
+        BodyKernel::NestedArrayReducer { source, map, op } => {
+            eval_nested_array_reducer_view(source, map.as_deref(), *op, item)
+                .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
             .ok()
@@ -1871,8 +2159,7 @@ mod tests {
         let program = Compiler::compile(&expr, binding_only);
         let kernel = BodyKernel::classify(&program);
         let BodyKernel::Match {
-            body_needs_current,
-            ..
+            body_needs_current, ..
         } = kernel
         else {
             panic!("expected match kernel");
@@ -1886,8 +2173,7 @@ mod tests {
         let program = Compiler::compile(&expr, current_body);
         let kernel = BodyKernel::classify(&program);
         let BodyKernel::Match {
-            body_needs_current,
-            ..
+            body_needs_current, ..
         } = kernel
         else {
             panic!("expected match kernel");
@@ -1957,6 +2243,29 @@ mod tests {
         assert_eq!(out.get_field("item_count"), Val::Int(2));
         assert_eq!(out.get_field("total"), Val::Int(35));
         assert_eq!(out.get_field("label").as_str_ref(), Some("#42-ada"));
+    }
+
+    #[test]
+    fn nested_array_reducer_kernels_run_on_value_views() {
+        let expr = parse("items.map(qty * price).sum()").expect("parse nested reducer");
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(
+            matches!(kernel, BodyKernel::NestedArrayReducer { .. }),
+            "{kernel:#?}"
+        );
+        assert!(kernel.is_view_native());
+
+        let row: Val = (&serde_json::json!({
+            "items": [
+                {"qty": 2, "price": 10},
+                {"qty": 3, "price": 5}
+            ]
+        }))
+            .into();
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &ValView::new(&row))),
+            Some(Val::Int(35))
+        );
     }
 
     #[test]
