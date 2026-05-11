@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
+    BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+    BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::{data::context::EvalError, data::value::Val};
@@ -794,23 +795,14 @@ fn terminal_sink_for_method(
                 projection_expr,
             )?))
         }
-        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::First => match args {
+        BuiltinSinkAccumulator::SelectOne(position) => match args {
             [] => Some(Sink::Terminal(method)),
             [arg] => Some(Sink::SelectMany {
                 n: usize_arg_at_least(arg, 1)?,
-                from_end: false,
+                from_end: matches!(position, BuiltinSelectionPosition::Last),
             }),
             _ => None,
         },
-        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::Last => match args {
-            [] => Some(Sink::Terminal(method)),
-            [arg] => Some(Sink::SelectMany {
-                n: usize_arg_at_least(arg, 1)?,
-                from_end: true,
-            }),
-            _ => None,
-        },
-        BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
     }
 }
