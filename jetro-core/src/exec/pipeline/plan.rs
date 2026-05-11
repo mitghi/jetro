@@ -209,6 +209,7 @@ pub fn plan(stages: Vec<Stage>, sink: Sink) -> Plan {
 
 /// Optimises `stages` and `sink` using the provided pre-classified `kernels`, running symbolic
 /// normalisation, filter reordering, filter fusion, and merge-with passes.
+#[cfg(test)]
 pub fn plan_with_kernels(stages: Vec<Stage>, kernels: &[BodyKernel], sink: Sink) -> Plan {
     plan_with_exprs(stages, Vec::new(), kernels, sink)
 }

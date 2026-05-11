@@ -67,8 +67,10 @@ pub use plan::plan;
 #[cfg(test)]
 pub use plan::select_strategy;
 pub use plan::{
-    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_exec_path,
+    compute_strategies_with_kernels, plan_with_exprs, select_exec_path,
 };
+#[cfg(test)]
+pub use plan::plan_with_kernels;
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use sink_accumulator::SinkAccumulator;
 
@@ -1004,8 +1006,13 @@ mod tests {
             panic!("expected compiled nested map stage");
         };
         assert_eq!(plan.stages.len(), plan.stage_kernels.len());
+        assert_eq!(plan.stages.len(), plan.stage_exprs.len());
         assert!(matches!(plan.source, Source::FieldChain { .. }));
-        assert!(matches!(plan.stage_kernels[0], BodyKernel::Binary { .. }));
+        assert!(plan
+            .stage_kernels
+            .iter()
+            .chain(plan.sink_kernels.iter())
+            .any(|kernel| matches!(kernel, BodyKernel::Binary { .. })));
 
         let doc: Val = (&json!({
             "rows": [

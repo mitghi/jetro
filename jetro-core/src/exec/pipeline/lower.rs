@@ -18,7 +18,7 @@ use crate::parse::ast::Expr;
 use crate::data::value::Val;
 
 use super::{
-    expr_label, plan_with_kernels, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
+    expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
     PipelineBody, Plan, Sink, SortSpec, Source, Stage,
 };
 
@@ -170,11 +170,11 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
         Source::Receiver(Val::Null)
     };
     let mut stages: Vec<Stage> = Vec::new();
-    let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
+    let (mut more_stages, more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
     let kernels = Stage::body_kernels(&stages);
-    let mut plan = plan_with_kernels(stages, &kernels, sink);
+    let mut plan = plan_with_exprs(stages, more_exprs, &kernels, sink);
     plan.source = source;
     Some(plan)
 }
