@@ -95,27 +95,6 @@ impl From<EvalError> for Error {
     }
 }
 
-
-// Thread-local VM, constructed lazily on first `collect()` call.
-// Thread-local avoids a Mutex and lets compile/path caches accumulate.
-thread_local! {
-    static THREAD_VM: OnceCell<RefCell<VM>> = const { OnceCell::new() };
-}
-
-/// Borrow the thread-local `VM`, constructing it on first access.
-/// All `Jetro::collect` calls on the same thread share one `VM` so that
-/// compile and path-resolution caches accumulate across queries.
-fn with_vm<F, R>(f: F) -> R
-where
-    F: FnOnce(&RefCell<VM>) -> R,
-{
-    THREAD_VM.with(|cell| {
-        let inner = cell.get_or_init(|| RefCell::new(VM::new()));
-        f(inner)
-    })
-}
-
-
 /// Primary entry point. Holds a JSON document and evaluates expressions against
 /// it. Lazy fields (`root_val`, `tape`, `structural_index`, `objvec_cache`)
 /// are populated on first use so callers only pay for the representations a
