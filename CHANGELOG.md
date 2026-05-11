@@ -26,6 +26,12 @@
   Composed and legacy execution both reuse prepared nested-plan metadata across
   rows, while scalar method-chain projections remain ordinary maps so existing
   demand substitution and late projection still apply.
+- **Execution VM state is instance-owned**. `Jetro` now keeps its VM cache on
+  the document handle instead of using a crate-level thread-local, and planned
+  view/composed/tape-row execution paths reuse caller-provided VM state rather
+  than allocating private hot-path VMs. A scalar `len()` lowering regression was
+  also fixed so string length filters remain view-native scalar calls instead
+  of being misclassified as nested array counts.
 
 ### Path-receiver scalar unwrap
 
