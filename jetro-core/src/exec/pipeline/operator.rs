@@ -201,6 +201,20 @@ impl ReducerSpec {
         }
     }
 
+    /// Constructs a `Count` reducer gated by a predicate expression.
+    pub fn count_with_predicate(
+        predicate: Arc<Program>,
+        predicate_expr: Option<Arc<Expr>>,
+    ) -> Self {
+        Self {
+            op: ReducerOp::Count,
+            predicate: Some(predicate),
+            projection: None,
+            predicate_expr,
+            projection_expr: None,
+        }
+    }
+
     /// Constructs a numeric reducer from builtin metadata.
     pub fn numeric(
         method: BuiltinMethod,

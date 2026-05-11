@@ -533,7 +533,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 
 use super::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
+    PredicateSinkOp, PredicateSinkSpec, ReducerSpec,
 };
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
@@ -808,13 +808,9 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Some(Sink::Reducer(ReducerSpec::count())),
-            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Count,
-                predicate: Some(compile_subexpr(arg)?),
-                projection: None,
-                predicate_expr: arg_expr(arg),
-                projection_expr: None,
-            })),
+            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(
+                ReducerSpec::count_with_predicate(compile_subexpr(arg)?, arg_expr(arg)),
+            )),
             _ => None,
         },
         BuiltinSinkAccumulator::Numeric => {
