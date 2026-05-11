@@ -4,22 +4,18 @@
 //! representation onto the shared planning demand model.
 
 use crate::{
-    builtins::{
-        registry::{
-            builtin_cardinality, builtin_category, effective_pipeline_order_effect,
-            propagate_demand as propagate_builtin_demand,
-        },
-        BuiltinCardinality, BuiltinCategory, BuiltinPipelineOrderEffect,
-    },
+    builtins::registry::propagate_demand as propagate_builtin_demand,
     plan::{
         chain_ir::{ChainOp, MatchRole},
         demand::{Demand, DemandOperator, PullDemand},
     },
 };
+#[cfg(test)]
+use crate::builtins::BuiltinCardinality;
 
 /// Describes whether a pipeline slot carries a homogeneous stream, a single
 /// scalar result, or an unconstrained mix of values.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
     /// No constraint on the kind of value in this slot.
@@ -32,7 +28,7 @@ pub enum ValueKind {
 
 /// Static specification describing the kind of values a `ChainOp` consumes
 /// and produces, along with its cardinality and ordering guarantees.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpSpec {
     /// Kind of values the operator reads from its source.
@@ -52,8 +48,13 @@ impl ChainOp {
     }
 
     /// Derive the static `OpSpec` for this operator by consulting builtin registry metadata.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn spec(&self) -> OpSpec {
+        use crate::builtins::{
+            registry::{builtin_cardinality, builtin_category, effective_pipeline_order_effect},
+            BuiltinCardinality, BuiltinCategory, BuiltinPipelineOrderEffect,
+        };
+
         match self {
             ChainOp::Match { role } => {
                 let cardinality = match role {

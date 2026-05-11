@@ -7,13 +7,15 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinCategory, BuiltinDemandLaw, BuiltinMethod,
+        BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod,
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
         BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
+#[cfg(test)]
+use crate::builtins::BuiltinCategory;
 
 /// Compact, stable numeric identity for a builtin. One-to-one with
 /// `BuiltinMethod`; used by planner/analysis to avoid re-matching names.
@@ -303,12 +305,14 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
 
 /// Return the builtin category for planner classification.
 #[inline]
+#[cfg(test)]
 pub(crate) fn builtin_category(id: BuiltinId) -> Option<BuiltinCategory> {
     id.method().map(|m| m.spec().category)
 }
 
 /// Return the builtin cardinality for planner classification.
 #[inline]
+#[cfg(test)]
 pub(crate) fn builtin_cardinality(id: BuiltinId) -> Option<BuiltinCardinality> {
     id.method().map(|m| m.spec().cardinality)
 }
