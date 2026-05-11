@@ -2,6 +2,25 @@
 
 ## 0.5.6
 
+### Demand/tape architecture cleanup
+
+- **Demand metadata stays in planner/executor APIs**. Pipeline bodies now expose
+  propagated source and pull demand directly, and segment pull demand is shared
+  through the pipeline IR instead of reimplemented by view runners.
+- **View source access is capability-driven**. Indexed, reverse, and bounded
+  forward access selection now lives with `SourceCapabilities`, including safe
+  demotion when a view prefix can change cardinality.
+- **View fallback consumes propagated demand**. Generic view-prefix fallback now
+  carries bounded demand into the borrowed prefix before materializing suffix
+  rows, preserving lazy behavior for safe fallback boundaries.
+- **Access modes carry their own bounds**. Reverse and bounded-forward view
+  execution honor the selected `SourceAccessMode` output/input counts directly,
+  keeping the access plan self-contained.
+- **Terminal sink and stage construction cleanup**. Logical/pipeline lowering
+  now shares constructors for positional, predicate, membership, arg-extreme,
+  count, numeric, and keyed reducer sinks, reducing handwritten builtin
+  classification drift.
+
 ### Path-receiver scalar unwrap
 
 - **Scalar method on path no longer wraps**. `$.s.upper()` now returns
