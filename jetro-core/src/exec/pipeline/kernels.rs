@@ -104,6 +104,13 @@ pub enum BodyKernel {
         /// Numeric reducer operation.
         op: super::NumOp,
     },
+    /// Counts a nested array, optionally after a view-native per-child predicate.
+    NestedArrayCount {
+        /// Kernel that resolves the nested array from the current row.
+        source: Box<BodyKernel>,
+        /// Optional per-child predicate applied before counting.
+        predicate: Option<Box<BodyKernel>>,
+    },
     /// Runs a nested collection pipeline against the current row.
     NestedPlan(Arc<super::Plan>),
 }
@@ -294,7 +301,10 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
         return None;
     }
     let method = BuiltinMethod::from_name(name.as_str());
-    let op = super::NumOp::from_builtin_reducer(method.spec().numeric_reducer?);
+    let op = method
+        .spec()
+        .numeric_reducer
+        .map(super::NumOp::from_builtin_reducer);
 
     let (source_steps, map) = match prefix.split_last() {
         Some((Step::Method(map_name, map_args), source_steps))
@@ -335,12 +345,21 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
     if matches!(source, BodyKernel::Generic) {
         return None;
     }
-    Some(BodyKernel::NestedArrayReducer {
-        source: Box::new(source),
-        predicate,
-        map,
-        op,
-    })
+    match (method, op, map) {
+        (_, Some(op), map) => Some(BodyKernel::NestedArrayReducer {
+            source: Box::new(source),
+            predicate,
+            map,
+            op,
+        }),
+        (BuiltinMethod::Count | BuiltinMethod::Len, None, None) => {
+            Some(BodyKernel::NestedArrayCount {
+                source: Box::new(source),
+                predicate,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
@@ -502,6 +521,13 @@ impl BodyKernel {
                     None => need,
                 }
             }
+            Self::NestedArrayCount { source, predicate } => {
+                let need = source.field_demand();
+                match predicate {
+                    Some(predicate) => need.merge(predicate.field_demand()),
+                    None => need,
+                }
+            }
             Self::ConstBool(_) | Self::Const(_) => FieldDemand::None,
         }
     }
@@ -555,6 +581,12 @@ impl BodyKernel {
                         .as_ref()
                         .is_some_and(|map| map.mentions_any_field_like_ident(names))
             }
+            Self::NestedArrayCount { source, predicate } => {
+                source.mentions_any_field_like_ident(names)
+                    || predicate
+                        .as_ref()
+                        .is_some_and(|predicate| predicate.mentions_any_field_like_ident(names))
+            }
             Self::NestedPlan(_) => true,
             Self::Generic
             | Self::Current
@@ -594,6 +626,12 @@ impl BodyKernel {
                         .as_ref()
                         .is_none_or(|predicate| predicate.is_view_native())
                     && map.as_ref().is_none_or(|map| map.is_view_native())
+            }
+            Self::NestedArrayCount { source, predicate } => {
+                source.is_view_native()
+                    && predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate.is_view_native())
             }
             Self::NestedPlan(_) => false,
             _ => true,
@@ -1356,6 +1394,9 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
             *op,
             item,
         ),
+        BodyKernel::NestedArrayCount { source, predicate } => {
+            eval_nested_array_count_native(source, predicate.as_deref(), item)
+        }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
             let recv = eval_native_kernel(receiver, item)?;
@@ -1476,6 +1517,27 @@ fn eval_nested_array_reducer_native(
     Ok(super::num_finalise(
         op, acc_i, acc_f, floated, min_f, max_f, n_obs,
     ))
+}
+
+fn eval_nested_array_count_native(
+    source: &BodyKernel,
+    predicate: Option<&BodyKernel>,
+    item: &Val,
+) -> Result<Val, EvalError> {
+    let source = eval_native_kernel(source, item)?;
+    let Some(items) = source.as_vals() else {
+        return Ok(Val::Int(0));
+    };
+    let Some(predicate) = predicate else {
+        return Ok(Val::Int(items.len() as i64));
+    };
+    let mut count = 0i64;
+    for child in items.iter() {
+        if crate::util::is_truthy(&eval_native_kernel(predicate, child)?) {
+            count += 1;
+        }
+    }
+    Ok(Val::Int(count))
 }
 
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
@@ -1732,6 +1794,41 @@ where
     ))
 }
 
+fn eval_nested_array_count_view<'a, V>(
+    source: &BodyKernel,
+    predicate: Option<&BodyKernel>,
+    item: &V,
+) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    let source = match eval_view_kernel(source, item)? {
+        ViewKernelValue::View(view) => view,
+        ViewKernelValue::Owned(value) => {
+            return eval_nested_array_count_native_owned(value, predicate)
+        }
+    };
+    let Some(predicate) = predicate else {
+        return match source.scalar() {
+            JsonView::ArrayLen(len) => Some(Val::Int(len as i64)),
+            _ => Some(Val::Int(0)),
+        };
+    };
+    let mut count = 0i64;
+    let mut iter = source.array_iter()?;
+    iter.try_for_each(|child| {
+        let passes = match eval_view_kernel(predicate, &child)? {
+            ViewKernelValue::View(view) => view.scalar().truthy(),
+            ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+        };
+        if passes {
+            count += 1;
+        }
+        Some(())
+    })?;
+    Some(Val::Int(count))
+}
+
 fn eval_view_numeric_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<NumericKernelValue>
 where
     V: ValueView<'a>,
@@ -1924,6 +2021,25 @@ fn eval_nested_array_reducer_native_owned(
     ))
 }
 
+fn eval_nested_array_count_native_owned(
+    source: Val,
+    predicate: Option<&BodyKernel>,
+) -> Option<Val> {
+    let Some(items) = source.as_vals() else {
+        return Some(Val::Int(0));
+    };
+    let Some(predicate) = predicate else {
+        return Some(Val::Int(items.len() as i64));
+    };
+    let mut count = 0i64;
+    for child in items.iter() {
+        if crate::util::is_truthy(&eval_native_kernel(predicate, child).ok()?) {
+            count += 1;
+        }
+    }
+    Some(Val::Int(count))
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn fold_json_view_scalar(
@@ -2042,6 +2158,10 @@ where
             op,
         } => {
             eval_nested_array_reducer_view(source, predicate.as_deref(), map.as_deref(), *op, item)
+                .map(ViewKernelValue::Owned)
+        }
+        BodyKernel::NestedArrayCount { source, predicate } => {
+            eval_nested_array_count_view(source, predicate.as_deref(), item)
                 .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
@@ -2597,6 +2717,19 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &ValView::new(&row))),
             Some(Val::Int(28))
+        );
+
+        let count = BodyKernel::classify_expr(
+            &parse("items.filter(price > 6).count()").expect("parse nested count"),
+        );
+        assert!(
+            matches!(count, BodyKernel::NestedArrayCount { .. }),
+            "{count:#?}"
+        );
+        assert!(count.is_view_native());
+        assert_eq!(
+            owned_value(eval_view_kernel(&count, &ValView::new(&row))),
+            Some(Val::Int(2))
         );
     }
 
