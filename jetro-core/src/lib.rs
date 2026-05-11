@@ -145,6 +145,9 @@ pub struct Jetro {
     /// `ObjVecData` columnar representations; keyed by pointer to avoid re-promotion.
     pub(crate) objvec_cache:
         std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::data::value::ObjVecData>>>,
+
+    /// Per-document VM cache used by `Jetro::collect`; not shared across document handles.
+    vm: RefCell<VM>,
 }
 
 
@@ -388,6 +391,7 @@ impl Jetro {
             raw_bytes: None,
             tape: OnceCell::new(),
             structural_index: OnceCell::new(),
+            vm: RefCell::new(VM::new()),
         }
     }
 
@@ -405,6 +409,7 @@ impl Jetro {
             raw_bytes: None,
             tape: OnceCell::new(),
             structural_index: OnceCell::new(),
+            vm: RefCell::new(VM::new()),
         }
     }
 
@@ -452,6 +457,7 @@ impl Jetro {
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
                 structural_index: OnceCell::new(),
+                vm: RefCell::new(VM::new()),
             });
         }
         #[allow(unreachable_code)]
@@ -464,7 +470,22 @@ impl Jetro {
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
                 structural_index: OnceCell::new(),
+                vm: RefCell::new(VM::new()),
             })
+        }
+    }
+
+    /// Borrow this document's VM cache, falling back to a temporary VM on re-entrant use.
+    pub(crate) fn with_vm<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut VM) -> R,
+    {
+        match self.vm.try_borrow_mut() {
+            Ok(mut vm) => f(&mut vm),
+            Err(_) => {
+                let mut vm = VM::new();
+                f(&mut vm)
+            }
         }
     }
 
@@ -561,7 +582,7 @@ impl Jetro {
     }
 
     /// Evaluate a Jetro expression against this document and return the result
-    /// as a `serde_json::Value`. Uses the thread-local `VM` with compile and
+    /// as a `serde_json::Value`. Uses this document's VM with compile and
     /// path-resolution caches for repeated calls.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         exec::router::collect_json(self, expr.as_ref())

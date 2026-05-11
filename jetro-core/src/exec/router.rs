@@ -2,7 +2,7 @@
 //!
 //! Receives a `Jetro` document and a `QueryPlan` produced by `planner`,
 //! then dispatches to either `physical_eval` (for structured IR nodes) or the
-//! thread-local VM (for the `SourceVm` fallback when planning is bypassed).
+//! document/engine-owned VM (for the `SourceVm` fallback when planning is bypassed).
 //! The only job here is routing — no evaluation logic lives in this module.
 
 use serde_json::Value;
@@ -11,7 +11,7 @@ use crate::data::context::EvalError;
 use crate::exec::interpreted as physical_eval;
 use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::plan::physical as planner;
-use crate::{with_vm, Jetro, VM};
+use crate::{Jetro, VM};
 
 /// Plans `expr` against `j`'s input mode and then executes the resulting plan, returning JSON.
 ///
@@ -31,18 +31,11 @@ pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, Ev
     }
 }
 
-/// Executes `expr` via the thread-local VM, acquiring a fresh `VM` if the cell is already borrowed.
+/// Executes `expr` via the document-owned VM, acquiring a fresh `VM` if it is already borrowed.
 fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    with_vm(|cell| match cell.try_borrow_mut() {
-        Ok(mut vm) => {
-            let prog = vm.get_or_compile(expr)?;
-            vm.execute_val(&prog, j.root_val()?)
-        }
-        Err(_) => {
-            let mut vm = VM::new();
-            let prog = vm.get_or_compile(expr)?;
-            vm.execute_val(&prog, j.root_val()?)
-        }
+    j.with_vm(|vm| {
+        let prog = vm.get_or_compile(expr)?;
+        vm.execute_val(&prog, j.root_val()?)
     })
 }
 
