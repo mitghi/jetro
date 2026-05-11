@@ -68,7 +68,6 @@ impl SinkDemand {
 }
 
 /// Source payload demand split into scan-time and result-row lanes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadDemand {
     /// Fields/value needed while deciding which rows survive.
@@ -81,10 +80,8 @@ pub struct PayloadDemand {
 #[derive(Debug, Clone)]
 pub struct LateProjection {
     /// Number of leading stages that must run before the delayed projection is applied.
-    #[allow(dead_code)]
     pub prefix_len: usize,
     /// Composed projection kernel to apply to selected rows.
-    #[allow(dead_code)]
     pub kernel: BodyKernel,
 }
 
@@ -1200,7 +1197,6 @@ impl Pipeline {
 
     /// Computes precise payload demand at the source, split into fields needed while scanning
     /// and fields needed only for selected output rows.
-    #[allow(dead_code)]
     pub fn segment_payload_demand(
         stages: &[Stage],
         stage_kernels: &[BodyKernel],
@@ -1312,7 +1308,6 @@ fn compose_projection_kernel(first: BodyKernel, then: BodyKernel) -> BodyKernel 
     }
 }
 
-#[allow(dead_code)]
 fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
     match sink {
         Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => {
@@ -1359,7 +1354,6 @@ fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
     }
 }
 
-#[allow(dead_code)]
 fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLanes) -> DemandLanes {
     match stage {
         Stage::Filter(_, _) => {
@@ -1458,7 +1452,6 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
     }
 }
 
-#[allow(dead_code)]
 fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
     match demand {
         FieldDemand::None => FieldDemand::None,
@@ -1471,7 +1464,6 @@ fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
     }
 }
 
-#[allow(dead_code)]
 fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
     kernels
         .get(idx)
