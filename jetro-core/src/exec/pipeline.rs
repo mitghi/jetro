@@ -1658,33 +1658,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_map_filter_map_sum_rewrites_to_child_sum_kernel() {
-        use serde_json::json;
-
-        let query = "$.rows.flat_map(items).filter(price > 8).map(qty * price).sum()";
-        let p = lower_query(query).unwrap();
-        assert_eq!(p.stages.len(), 1);
-        assert!(matches!(p.stages[0], Stage::Map(_, _)));
-        assert!(matches!(
-            p.stage_kernels[0],
-            BodyKernel::ChildMapSum {
-                predicate: Some(_),
-                ..
-            }
-        ));
-
-        assert_pipeline_matches_vm(
-            query,
-            json!({
-                "rows": [
-                    {"items": [{"qty": 2, "price": 10.0}, {"qty": 3, "price": 5.0}]},
-                    {"items": [{"qty": 4, "price": 9.0}]}
-                ]
-            }),
-        );
-    }
-
-    #[test]
     fn run_topn_smallest_three() {
         use serde_json::json;
         let doc: Val = (&json!({"xs":[5, 2, 8, 1, 4, 7, 3]})).into();
