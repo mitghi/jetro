@@ -13,6 +13,7 @@ use crate::{
 };
 
 use super::row_source;
+use super::nested::PreparedPlan;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel, is_truthy,
@@ -77,9 +78,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .copied()
                 .unwrap_or(StageStrategy::Default);
             if let Stage::CompiledMap(plan) = stage {
+                let prepared = PreparedPlan::new(plan);
                 let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                 for v in buf.into_iter() {
-                    out.push(super::nested::run_plan(plan, v)?);
+                    out.push(prepared.run(v)?);
                 }
                 buf = out;
                 continue;
@@ -224,6 +226,14 @@ where
             .unwrap_or(&BodyKernel::Generic)
     });
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
+    let prepared_nested: Vec<Option<PreparedPlan>> = pipeline
+        .stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::CompiledMap(plan) => Some(PreparedPlan::new(plan)),
+            _ => None,
+        })
+        .collect();
 
     'outer: for mut item in iter {
         if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
@@ -241,8 +251,11 @@ where
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
-                Stage::CompiledMap(plan) => {
-                    item = super::nested::run_plan(plan, item)?;
+                Stage::CompiledMap(_) => {
+                    item = prepared_nested[stage_idx]
+                        .as_ref()
+                        .expect("compiled map stages have prepared nested plans")
+                        .run(item)?;
                 }
                 _ => match super::val_stage_flow::apply_adapter_streaming(
                     stage,
