@@ -92,6 +92,8 @@ pub enum BodyKernel {
     FString(FStringKernel),
     /// Evaluates an object literal by evaluating each field-value kernel.
     Object(ObjectKernel),
+    /// Runs a nested collection pipeline against the current row.
+    NestedPlan(Arc<super::Plan>),
 }
 
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
@@ -272,6 +274,10 @@ fn classify_fstring_expr(parts: &[crate::parse::ast::FStringPart]) -> BodyKernel
 }
 
 fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
+    let nested_arg = crate::parse::ast::Arg::Pos(Expr::Chain(
+        Box::new(base.clone()),
+        steps.to_vec(),
+    ));
     let mut receiver = match base {
         Expr::Current => BodyKernel::Current,
         Expr::Ident(name) => BodyKernel::FieldRead(Arc::from(name.as_str())),
@@ -298,13 +304,15 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                 };
             }
             Step::Method(name, args) => {
-                let Some(call) =
-                    BuiltinCall::from_literal_ast_args(name.as_str(), args)
-                else {
-                    return BodyKernel::Generic;
+                let Some(call) = BuiltinCall::from_literal_ast_args(name.as_str(), args) else {
+                    return super::lower::try_decode_map_body(&nested_arg)
+                        .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
+                        .unwrap_or(BodyKernel::Generic);
                 };
                 if !call.method.is_view_projection_method() {
-                    return BodyKernel::Generic;
+                    return super::lower::try_decode_map_body(&nested_arg)
+                        .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
+                        .unwrap_or(BodyKernel::Generic);
                 }
                 receiver = BodyKernel::BuiltinCall {
                     receiver: Box::new(receiver),
@@ -355,7 +363,9 @@ impl BodyKernel {
     #[allow(dead_code)]
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
-            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) => FieldDemand::Whole,
+            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) | Self::NestedPlan(_) => {
+                FieldDemand::Whole
+            }
             Self::FieldRead(key) | Self::FieldCmpLit(key, _, _) => {
                 FieldDemand::Fields(FieldSet::single(Arc::clone(key)))
             }
@@ -422,6 +432,7 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .any(|entry| entry.value.mentions_any_field_like_ident(names)),
+            Self::NestedPlan(_) => true,
             Self::Generic
             | Self::Current
             | Self::CurrentCmpLit(_, _)
@@ -445,6 +456,11 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
             }
+            Self::Object(object) => object
+                .entries
+                .iter()
+                .all(|entry| entry.value.is_view_native()),
+            Self::NestedPlan(_) => false,
             _ => true,
         }
     }
@@ -1171,6 +1187,7 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::Object(object) => {
             eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
         }
+        BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
             let recv = eval_native_kernel(receiver, item)?;
             call.try_apply(&recv)?
@@ -1426,6 +1443,9 @@ where
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
+        BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
+            .ok()
+            .map(ViewKernelValue::Owned),
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel(receiver, item)? {
             ViewKernelValue::View(view) => match (call.method, &call.args) {
                 (crate::builtins::BuiltinMethod::Has, crate::builtins::BuiltinArgs::Str(key)) => {
@@ -1919,7 +1939,7 @@ mod tests {
     #[test]
     fn ast_classifier_builds_deep_object_projection_kernel() {
         let expr = crate::parse::parser::parse(
-            "{id, city: user.addr.city, item_count: items.len(), label: f\"#{id}-{user.name}\"}",
+            "{id, city: user.addr.city, item_count: items.len(), total: items.map(qty * price).sum(), label: f\"#{id}-{user.name}\"}",
         )
         .unwrap();
         let kernel = BodyKernel::classify_expr(&expr);
@@ -1928,13 +1948,14 @@ mod tests {
         let row: Val = (&serde_json::json!({
             "id": 42,
             "user": {"name": "ada", "addr": {"city": "London"}},
-            "items": [{"sku": "a"}, {"sku": "b"}]
+            "items": [{"sku": "a", "qty": 2, "price": 10}, {"sku": "b", "qty": 3, "price": 5}]
         }))
             .into();
         let out = super::eval_native_kernel(&kernel, &row).unwrap();
         assert_eq!(out.get_field("id"), Val::Int(42));
         assert_eq!(out.get_field("city").as_str_ref(), Some("London"));
         assert_eq!(out.get_field("item_count"), Val::Int(2));
+        assert_eq!(out.get_field("total"), Val::Int(35));
         assert_eq!(out.get_field("label").as_str_ref(), Some("#42-ada"));
     }
 
