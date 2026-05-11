@@ -7,10 +7,13 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, Expr, Step};
-use crate::builtins::BuiltinMethod;
-use crate::ir::logical::LogicalPlan;
+use crate::builtins::{
+    registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId},
+    BuiltinMethod, BuiltinPipelineLowering,
+};
 use crate::exec::pipeline::{SortSpec, Source};
+use crate::ir::logical::LogicalPlan;
+use crate::parse::ast::{Arg, Expr, Step};
 
 /// Try to lower a pipeline-shaped `Expr` to a `LogicalPlan`.
 /// Returns `None` for expressions that are not pipeline-shaped.
@@ -56,24 +59,32 @@ fn extract_source_and_steps(expr: &Expr) -> Option<(Source, &[Step])> {
 }
 
 fn apply_steps(mut plan: LogicalPlan, steps: &[Step]) -> Option<LogicalPlan> {
-    for step in steps {
-        plan = apply_step(plan, step)?;
+    for (idx, step) in steps.iter().enumerate() {
+        plan = apply_step(plan, step, idx == steps.len() - 1)?;
     }
     Some(plan)
 }
 
-fn apply_step(plan: LogicalPlan, step: &Step) -> Option<LogicalPlan> {
+fn apply_step(plan: LogicalPlan, step: &Step, is_last: bool) -> Option<LogicalPlan> {
     match step {
-        Step::Method(name, args) => apply_method(plan, name.as_str(), args),
+        Step::Method(name, args) => apply_method(plan, name.as_str(), args, is_last),
         // Field, OptField, Index, etc. — cannot classify as pipeline stage
         _ => None,
     }
 }
 
-fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalPlan> {
-    // Look up the BuiltinMethod from the name
+fn apply_method(
+    input: LogicalPlan,
+    name: &str,
+    args: &[Arg],
+    is_last: bool,
+) -> Option<LogicalPlan> {
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
+        return None;
+    }
+    let id = BuiltinId::from_method(method);
+    if !pipeline_accepts_arity(id, args.len(), is_last) {
         return None;
     }
 
@@ -83,6 +94,26 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
             LogicalPlan::Filter {
                 input: Box::new(input),
                 predicate: pred.clone(),
+            }
+        }
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
+            if !matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            ) {
+                return None;
+            }
+            let pred = single_expr_arg(args)?;
+            let filtered = LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: pred.clone(),
+            };
+            if is_last {
+                LogicalPlan::First(Box::new(filtered))
+            } else {
+                filtered
             }
         }
         BuiltinMethod::Map => {
@@ -113,35 +144,38 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
                 n,
             }
         }
-        BuiltinMethod::First => {
-            // first() takes 0 args in pipeline position
-            if !args.is_empty() { return None; }
-            LogicalPlan::First(Box::new(input))
-        }
-        BuiltinMethod::Last => {
-            if !args.is_empty() { return None; }
-            LogicalPlan::Last(Box::new(input))
-        }
+        BuiltinMethod::First => LogicalPlan::First(Box::new(input)),
+        BuiltinMethod::Last => LogicalPlan::Last(Box::new(input)),
         BuiltinMethod::Sum => {
             // sum() with no args — sum with projection arg is handled by Pipeline::lower
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Sum(Box::new(input))
         }
         BuiltinMethod::Avg => {
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Avg(Box::new(input))
         }
         BuiltinMethod::Min => {
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Min(Box::new(input))
         }
         BuiltinMethod::Max => {
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Max(Box::new(input))
         }
         BuiltinMethod::Count => {
             // count() with no args; count(pred) falls through to Pipeline::lower
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Count(Box::new(input))
         }
         BuiltinMethod::Reverse => LogicalPlan::Reverse {
@@ -189,15 +223,15 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
                     // Rewrite bare Ident to @.field (body context). Single-
                     // param `Lambda` is unwrapped to its substituted body so
                     // `Compiler::compile` does not lower it to `PushNull`.
-                    let unwrapped =
-                        crate::compile::lambda_lower::unwrap_single_lambda(&key_expr);
+                    let unwrapped = crate::compile::lambda_lower::unwrap_single_lambda(&key_expr);
                     let rooted: Expr = match unwrapped {
                         Expr::Ident(name) => {
                             Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name)])
                         }
                         other => other,
                     };
-                    let key_prog = Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""));
+                    let key_prog =
+                        Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""));
                     LogicalPlan::Sort {
                         input: Box::new(input),
                         spec: SortSpec::keyed(key_prog, descending),
@@ -238,9 +272,7 @@ fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalP
                 key: key.clone(),
             }
         }
-        BuiltinMethod::ApproxCountDistinct => {
-            LogicalPlan::ApproxCountDistinct(Box::new(input))
-        }
+        BuiltinMethod::ApproxCountDistinct => LogicalPlan::ApproxCountDistinct(Box::new(input)),
         // Not a recognised pipeline operator — fall through to existing path
         _ => return None,
     };
@@ -261,3 +293,49 @@ fn single_usize_arg(args: &[Arg]) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::parser::parse;
+
+    fn lower(query: &str) -> LogicalPlan {
+        let expr = parse(query).expect("parse");
+        try_lower(&expr).expect("logical lower")
+    }
+
+    #[test]
+    fn terminal_find_uses_filter_first_shape() {
+        let plan = lower("$.xs.find(score > 5)");
+
+        let LogicalPlan::First(inner) = plan else {
+            panic!("expected terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn terminal_find_first_uses_filter_first_shape() {
+        let plan = lower("$.xs.find_first(score > 5)");
+
+        let LogicalPlan::First(inner) = plan else {
+            panic!("expected terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn non_terminal_find_stays_streaming_filter() {
+        let plan = lower("$.xs.find(score > 5).map(name)");
+
+        let LogicalPlan::Map { input, .. } = plan else {
+            panic!("expected map");
+        };
+        assert!(matches!(*input, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn terminal_only_sinks_do_not_lower_mid_chain() {
+        let expr = parse("$.xs.first().map(name)").expect("parse");
+        assert!(try_lower(&expr).is_none());
+    }
+}
