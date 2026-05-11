@@ -21,7 +21,18 @@ use crate::parse::ast::BinOp;
 use crate::{Jetro, VM};
 
 /// Entry point: constructs an `ExecCtx` and evaluates the plan DAG starting from `root_id`.
+#[cfg(test)]
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
+    j.with_vm(|vm| run_with_vm(j, plan, root_id, vm))
+}
+
+/// Entry point for callers that already own the execution VM.
+pub(crate) fn run_with_vm(
+    j: &Jetro,
+    plan: &QueryPlan,
+    root_id: NodeId,
+    vm: &mut VM,
+) -> Result<Val, EvalError> {
     let mut ctx = ExecCtx {
         j,
         plan,
@@ -29,7 +40,7 @@ pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, E
         root: None,
         env: None,
         locals: Vec::new(),
-        vm: VM::new(),
+        vm,
     };
     ctx.eval(root_id)
 }
@@ -50,7 +61,7 @@ where
 }
 
 /// Stateful execution context that drives tree-walking evaluation of a `QueryPlan`.
-struct ExecCtx<'a> {
+struct ExecCtx<'a, 'vm> {
     /// The document handle providing raw bytes, tape, structural index, and `Val` root.
     j: &'a Jetro,
     /// The plan DAG being evaluated.
@@ -63,11 +74,11 @@ struct ExecCtx<'a> {
     env: Option<Env>,
     /// Stack of let-bound variable values visible to `FastChildren` evaluation paths.
     locals: Vec<(Arc<str>, Val)>,
-    /// Private VM instance used for `Vm` and `Structural` fallback nodes.
-    vm: VM,
+    /// Caller-owned VM instance used for `Vm` and `Structural` fallback nodes.
+    vm: &'vm mut VM,
 }
 
-impl ExecCtx<'_> {
+impl ExecCtx<'_, '_> {
     /// Evaluates node `id`, returning an error if no backend in its preference list could run.
     fn eval(&mut self, id: NodeId) -> Result<Val, EvalError> {
         self.eval_fast(id).unwrap_or_else(|| {
@@ -306,7 +317,7 @@ impl ExecCtx<'_> {
                         Ok(e) => e,
                         Err(e) => return Some(Err(e)),
                     };
-                    let result = structural.run_with_vm(index, bytes, &mut self.vm, &env);
+                    let result = structural.run_with_vm(index, bytes, self.vm, &env);
                     self.env = Some(env);
                     Some(result)
                 } else {
@@ -953,7 +964,7 @@ impl ExecCtx<'_> {
     }
 }
 
-impl PipelineSourceResolver for ExecCtx<'_> {
+impl PipelineSourceResolver for ExecCtx<'_, '_> {
     /// Converts a `PipelinePlanSource` into a `ResolvedPipelineSource` for use by the interpreter.
     ///
     /// Field-chain sources are returned as `ValFieldChain`; expression sources are evaluated eagerly.

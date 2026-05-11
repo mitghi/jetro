@@ -25,18 +25,7 @@ pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
 ///
 /// Used by `JetroEngine::collect` when the plan was already retrieved from cache.
 pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, EvalError> {
-    match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
-        QueryRoot::SourceVm(source) => run_vm_json(j, source.as_ref()),
-    }
-}
-
-/// Executes `expr` via the document-owned VM, acquiring a fresh `VM` if it is already borrowed.
-fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    j.with_vm(|vm| {
-        let prog = vm.get_or_compile(expr)?;
-        vm.execute_val(&prog, j.root_val()?)
-    })
+    j.with_vm(|vm| collect_plan_json_with_vm(j, plan, vm))
 }
 
 /// Executes a pre-built plan using a caller-supplied `VM` instance owned by `JetroEngine`,
@@ -47,7 +36,7 @@ pub(crate) fn collect_plan_json_with_vm(
     vm: &mut VM,
 ) -> Result<Value, EvalError> {
     match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
+        QueryRoot::Node(root) => physical_eval::run_with_vm(j, plan, *root, vm).map(Value::from),
         QueryRoot::SourceVm(source) => {
             let prog = vm.get_or_compile(source.as_ref())?;
             vm.execute_val(&prog, j.root_val()?)
