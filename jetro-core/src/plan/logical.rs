@@ -229,16 +229,40 @@ fn apply_method(
         }
         BuiltinMethod::CountBy => {
             let key = single_expr_arg(args)?;
-            LogicalPlan::CountBy {
+            let keyed = LogicalPlan::CountBy {
                 input: Box::new(input),
                 key: key.clone(),
+            };
+            if is_last
+                && matches!(
+                    pipeline_lowering(id),
+                    Some(BuiltinPipelineLowering::TerminalExprArg {
+                        terminal: BuiltinMethod::First,
+                    })
+                )
+            {
+                LogicalPlan::First(Box::new(keyed))
+            } else {
+                keyed
             }
         }
         BuiltinMethod::IndexBy => {
             let key = single_expr_arg(args)?;
-            LogicalPlan::IndexBy {
+            let keyed = LogicalPlan::IndexBy {
                 input: Box::new(input),
                 key: key.clone(),
+            };
+            if is_last
+                && matches!(
+                    pipeline_lowering(id),
+                    Some(BuiltinPipelineLowering::TerminalExprArg {
+                        terminal: BuiltinMethod::First,
+                    })
+                )
+            {
+                LogicalPlan::First(Box::new(keyed))
+            } else {
+                keyed
             }
         }
         BuiltinMethod::ApproxCountDistinct => LogicalPlan::ApproxCountDistinct(Box::new(input)),
@@ -306,5 +330,20 @@ mod tests {
     fn terminal_only_sinks_do_not_lower_mid_chain() {
         let expr = parse("$.xs.first().map(name)").expect("parse");
         assert!(try_lower(&expr).is_none());
+    }
+
+    #[test]
+    fn terminal_keyed_reducers_use_registry_terminal_shape() {
+        let count_by = lower("$.xs.count_by(@.kind)");
+        let LogicalPlan::First(inner) = count_by else {
+            panic!("expected count_by terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::CountBy { .. }));
+
+        let index_by = lower("$.xs.index_by(@.id)");
+        let LogicalPlan::First(inner) = index_by else {
+            panic!("expected index_by terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::IndexBy { .. }));
     }
 }
