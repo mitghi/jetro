@@ -15,7 +15,7 @@ use crate::builtins::{
     BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
-use crate::{data::context::EvalError, data::value::Val};
+use crate::data::value::Val;
 
 use super::{
     expr_label, plan_with_kernels, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
@@ -177,24 +177,6 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     let mut plan = plan_with_kernels(stages, &kernels, sink);
     plan.source = source;
     Some(plan)
-}
-
-/// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
-pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
-    let source = match &plan.source {
-        Source::Receiver(_) => Source::Receiver(seed.clone()),
-        source => source.clone(),
-    };
-    let root = seed;
-    let synth = PipelineBody {
-        stages: plan.stages.clone(),
-        stage_exprs: plan.stage_exprs.clone(),
-        sink: plan.sink.clone(),
-        stage_kernels: plan.stage_kernels.clone(),
-        sink_kernels: plan.sink_kernels.clone(),
-    }
-    .with_source(source);
-    synth.run(&root)
 }
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.

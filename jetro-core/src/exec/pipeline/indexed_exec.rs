@@ -104,7 +104,7 @@ fn apply_indexed_stages(
                 env.restore_current(prev);
             }
             Stage::CompiledMap(plan) => {
-                cur = match super::lower::run_compiled_map(plan, cur) {
+                cur = match super::nested::run_plan(plan, cur) {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };

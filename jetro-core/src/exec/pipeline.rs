@@ -25,6 +25,7 @@ mod exec;
 mod indexed_exec;
 mod ir;
 mod kernels;
+mod nested;
 pub(crate) mod logical_lower;
 mod lower;
 pub(crate) mod materialized_exec;

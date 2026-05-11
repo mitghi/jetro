@@ -12,7 +12,6 @@ use crate::{
     data::value::Val,
 };
 
-use super::lower::run_compiled_map;
 use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
@@ -80,7 +79,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             if let Stage::CompiledMap(plan) = stage {
                 let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                 for v in buf.into_iter() {
-                    out.push(run_compiled_map(plan, v)?);
+                    out.push(super::nested::run_plan(plan, v)?);
                 }
                 buf = out;
                 continue;
@@ -243,7 +242,7 @@ where
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
                 Stage::CompiledMap(plan) => {
-                    item = run_compiled_map(plan, item)?;
+                    item = super::nested::run_plan(plan, item)?;
                 }
                 _ => match super::val_stage_flow::apply_adapter_streaming(
                     stage,
