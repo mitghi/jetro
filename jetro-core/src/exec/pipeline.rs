@@ -33,6 +33,7 @@ mod operator;
 mod plan;
 mod reducer;
 mod row_source;
+mod row_program;
 mod sink_accumulator;
 mod symbolic;
 mod val_stage_flow;
