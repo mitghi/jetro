@@ -138,8 +138,12 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
         Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
         _ => return None,
     };
-    if !matches!(base, Expr::Current) {
-        return None;
+
+    let mut leading_fields: Vec<Arc<str>> = Vec::new();
+    match base {
+        Expr::Current => {}
+        Expr::Ident(name) => leading_fields.push(Arc::from(name.as_str())),
+        _ => return None,
     }
 
     let mut field_end = 0;
@@ -154,49 +158,43 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
         return None;
     }
 
+    let source = if field_end > 0 || !leading_fields.is_empty() {
+        leading_fields.extend(steps[..field_end].iter().map(|s| match s {
+            Step::Field(k) => Arc::<str>::from(k.as_str()),
+            _ => unreachable!(),
+        }));
+        Source::FieldChain {
+            keys: leading_fields.into(),
+        }
+    } else {
+        Source::Receiver(Val::Null)
+    };
     let mut stages: Vec<Stage> = Vec::new();
-    if field_end > 0 {
-        let keys: Arc<[Arc<str>]> = steps[..field_end]
-            .iter()
-            .map(|s| match s {
-                Step::Field(k) => Arc::<str>::from(k.as_str()),
-                _ => unreachable!(),
-            })
-            .collect::<Vec<_>>()
-            .into();
-        let n_keys = keys.len();
-        let fcd = Arc::new(crate::vm::FieldChainData {
-            keys,
-            ics: (0..n_keys)
-                .map(|_| std::sync::atomic::AtomicU64::new(0))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        });
-        let ops = vec![
-            crate::vm::Opcode::PushCurrent,
-            crate::vm::Opcode::FieldChain(fcd),
-        ];
-        let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
-        stages.push(Stage::Map(prog, BuiltinViewStage::Map));
-    }
     let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
     let kernels = Stage::body_kernels(&stages);
-    Some(plan_with_kernels(stages, &kernels, sink))
+    let mut plan = plan_with_kernels(stages, &kernels, sink);
+    plan.source = source;
+    Some(plan)
 }
 
 /// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
 pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
+    let source = match &plan.source {
+        Source::Receiver(_) => Source::Receiver(seed.clone()),
+        source => source.clone(),
+    };
+    let root = seed;
     let synth = PipelineBody {
         stages: plan.stages.clone(),
-        stage_exprs: Vec::new(),
+        stage_exprs: plan.stage_exprs.clone(),
         sink: plan.sink.clone(),
-        stage_kernels: Vec::new(),
-        sink_kernels: Vec::new(),
+        stage_kernels: plan.stage_kernels.clone(),
+        sink_kernels: plan.sink_kernels.clone(),
     }
-    .with_source(Source::Receiver(Val::arr(vec![seed])));
-    synth.run(&Val::Null)
+    .with_source(source);
+    synth.run(&root)
 }
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.

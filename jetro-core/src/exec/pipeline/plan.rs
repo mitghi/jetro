@@ -239,8 +239,11 @@ pub fn plan_with_exprs(
     fold_merge_with_kernels(&mut stages, &mut e_buf, &mut k_buf);
 
     Plan {
+        source: super::Source::Receiver(crate::data::value::Val::Null),
         stages,
         stage_exprs: e_buf,
+        stage_kernels: k_buf,
+        sink_kernels: sink.body_kernels(),
         sink,
     }
 }
@@ -456,6 +459,12 @@ pub fn select_exec_path(stages: &[Stage], sink: &Sink) -> PhysicalExecPath {
     // Indexed: all stages support position access and sink is positional.
     if select_strategy(stages, sink) == Strategy::IndexedDispatch {
         return PhysicalExecPath::Indexed;
+    }
+
+    // Nested compiled plans are executed by the generic materialized path today. Other physical
+    // paths can support them once they can run a nested `Plan` as a first-class stage.
+    if stages.iter().any(|s| matches!(s, Stage::CompiledMap(_))) {
+        return PhysicalExecPath::Legacy;
     }
 
     // Columnar: at least one stage has a BuiltinColumnarStage variant, meaning an ObjVec /

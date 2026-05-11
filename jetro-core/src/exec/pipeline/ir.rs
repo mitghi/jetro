@@ -698,18 +698,14 @@ impl Stage {
     /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
     /// optimisation (requires Map shape and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
-        match self {
-            Stage::Map(_, _) => true,
-            Stage::CompiledMap(_) => true,
-            _ => false,
-        }
+        matches!(self, Stage::Map(_, _))
     }
 
     /// Returns `true` when this stage performs a per-element value transformation that the
     /// demand optimiser can track symbolically (substitute `@` in downstream predicates).
     /// Direct Stage-variant match — no executor enum lookup.
     pub(crate) fn is_symbolic_map_stage(&self) -> bool {
-        matches!(self, Stage::CompiledMap(_) | Stage::Map(_, _))
+        matches!(self, Stage::Map(_, _))
     }
 
     /// Returns `true` when this stage is a filter whose predicate can be substituted symbolically
@@ -1019,12 +1015,18 @@ pub enum PhysicalExecPath {
 /// wrapping into a `Pipeline`.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Source used when this plan is executed as a nested receiver pipeline.
+    pub source: super::Source,
     /// Optimised, fused, and reordered stages.
     pub stages: Vec<Stage>,
     /// Preserved AST expressions parallel to `stages` after symbolic optimisation.
     pub stage_exprs: Vec<Option<Arc<Expr>>>,
     /// The terminal sink after demand optimisation.
     pub sink: Sink,
+    /// Pre-classified stage body kernels aligned with `stages`.
+    pub stage_kernels: Vec<BodyKernel>,
+    /// Pre-classified sink body kernels aligned with the sink's embedded programs.
+    pub sink_kernels: Vec<BodyKernel>,
 }
 
 pub(super) fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
