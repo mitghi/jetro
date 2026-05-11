@@ -398,6 +398,23 @@ impl BodyKernel {
                 let rhs = Self::classify_expr(rhs);
                 if matches!(lhs, Self::Generic) || matches!(rhs, Self::Generic) {
                     Self::Generic
+                } else if matches!(op, crate::parse::ast::BinOp::And) {
+                    Self::And(vec![lhs, rhs].into())
+                } else if matches!(op, crate::parse::ast::BinOp::Or) {
+                    Self::Or(vec![lhs, rhs].into())
+                } else if is_comparison_op(*op) {
+                    match literal_kernel_value(&rhs) {
+                        Some(lit) => Self::CmpLit {
+                            lhs: Box::new(lhs),
+                            op: *op,
+                            lit,
+                        },
+                        None => Self::Binary {
+                            lhs: Box::new(lhs),
+                            op: *op,
+                            rhs: Box::new(rhs),
+                        },
+                    }
                 } else {
                     Self::Binary {
                         lhs: Box::new(lhs),
@@ -740,6 +757,28 @@ impl BodyKernel {
             return kernel;
         }
         Self::Generic
+    }
+}
+
+#[inline]
+fn is_comparison_op(op: crate::parse::ast::BinOp) -> bool {
+    matches!(
+        op,
+        crate::parse::ast::BinOp::Eq
+            | crate::parse::ast::BinOp::Neq
+            | crate::parse::ast::BinOp::Lt
+            | crate::parse::ast::BinOp::Lte
+            | crate::parse::ast::BinOp::Gt
+            | crate::parse::ast::BinOp::Gte
+            | crate::parse::ast::BinOp::Fuzzy
+    )
+}
+
+fn literal_kernel_value(kernel: &BodyKernel) -> Option<Val> {
+    match kernel {
+        BodyKernel::Const(value) => Some(value.clone()),
+        BodyKernel::ConstBool(value) => Some(Val::Bool(*value)),
+        _ => None,
     }
 }
 
@@ -1470,7 +1509,15 @@ fn eval_binary_op(lhs: Val, op: crate::parse::ast::BinOp, rhs: Val) -> Result<Va
             Ok(Val::Float(lhs.as_f64().unwrap_or(0.0) / b))
         }
         BinOp::Mod => crate::util::num_op(lhs, rhs, |a, b| a % b, |a, b| a % b),
-        _ => Err(EvalError("unsupported binary kernel operator".into())),
+        BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte | BinOp::Fuzzy => {
+            Ok(Val::Bool(eval_cmp_op(&lhs, op, &rhs)))
+        }
+        BinOp::And => Ok(Val::Bool(
+            crate::util::is_truthy(&lhs) && crate::util::is_truthy(&rhs),
+        )),
+        BinOp::Or => Ok(Val::Bool(
+            crate::util::is_truthy(&lhs) || crate::util::is_truthy(&rhs),
+        )),
     }
 }
 
