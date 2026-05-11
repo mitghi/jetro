@@ -363,7 +363,7 @@ where
     V: ValueView<'a>,
 {
     let plan = terminal_collect_plan(body)?;
-    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
+    let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
 
     drive_view_frontier(
         source,
@@ -372,7 +372,7 @@ where
         &body.stage_kernels,
         plan.source_demand,
         |item| {
-            collector.push_view_row(item, &plan.collect_kernel)?;
+            collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
     )?;
@@ -682,8 +682,8 @@ where
 struct TerminalCollectPlan {
     /// Stages that run entirely in the view domain before collection.
     prefix: Vec<pipeline::ViewStageCapability>,
-    /// The kernel used to extract the value of each row for the output array.
-    collect_kernel: pipeline::BodyKernel,
+    /// The row program used to extract the value of each row for the output array.
+    collect_program: pipeline::RowProgram,
     /// Demand constraint derived from the pipeline's suffix stages.
     source_demand: PullDemand,
 }
@@ -712,14 +712,14 @@ fn terminal_collect_plan_from(
     if let Some((prefix_len, collect_kernel)) = terminal_projection_run(body, start) {
         return Some(TerminalCollectPlan {
             prefix: terminal_collect_prefix_from(&suffix_stages[..prefix_len], body, start)?,
-            collect_kernel,
+            collect_program: pipeline::RowProgram::from_kernel(collect_kernel)?,
             source_demand,
         });
     }
 
     Some(TerminalCollectPlan {
         prefix: terminal_collect_prefix_from(suffix_stages, body, start)?,
-        collect_kernel: pipeline::BodyKernel::Current,
+        collect_program: pipeline::RowProgram::from_kernel(pipeline::BodyKernel::Current)?,
         source_demand,
     })
 }
@@ -947,14 +947,14 @@ fn run_sorted_rows_terminal_collect_suffix<'a, V>(
 where
     V: ValueView<'a>,
 {
-    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
+    let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
     drive_view_iter(
         rows,
         &plan.prefix,
         stage_kernels,
         plan.source_demand,
         |item| {
-            collector.push_view_row(item, &plan.collect_kernel)?;
+            collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
     )?;
@@ -2075,7 +2075,7 @@ mod tests {
 
         assert_eq!(plan.prefix.len(), 1);
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
-        assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+        assert!(matches!(plan.collect_program.kernel(), BodyKernel::Current));
     }
 
     #[test]
@@ -2105,7 +2105,7 @@ mod tests {
         assert_eq!(plan.prefix.len(), 2);
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
         assert!(matches!(plan.prefix[1], ViewStageCapability::Take(1)));
-        assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+        assert!(matches!(plan.collect_program.kernel(), BodyKernel::Current));
     }
 
     #[test]
@@ -2135,7 +2135,10 @@ mod tests {
         let plan = super::terminal_collect_plan(&body).unwrap();
 
         assert!(plan.prefix.is_empty());
-        assert!(matches!(plan.collect_kernel, BodyKernel::Compose { .. }));
+        assert!(matches!(
+            plan.collect_program.kernel(),
+            BodyKernel::Compose { .. }
+        ));
     }
 
     #[test]
@@ -2156,7 +2159,10 @@ mod tests {
         let plan = super::terminal_collect_plan(&body).unwrap();
 
         assert!(plan.prefix.is_empty());
-        assert!(matches!(plan.collect_kernel, BodyKernel::BuiltinCall { .. }));
+        assert!(matches!(
+            plan.collect_program.kernel(),
+            BodyKernel::BuiltinCall { .. }
+        ));
     }
 
     #[test]

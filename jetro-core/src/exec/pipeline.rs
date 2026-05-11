@@ -73,6 +73,7 @@ pub use plan::{
 #[cfg(test)]
 pub use plan::plan_with_kernels;
 pub(crate) use reducer::ReducerAccumulator;
+pub(crate) use row_program::RowProgram;
 pub(crate) use sink_accumulator::SinkAccumulator;
 
 /// Per-element control-flow signal returned by a pipeline stage.

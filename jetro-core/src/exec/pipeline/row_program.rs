@@ -19,7 +19,6 @@ pub(crate) struct RowProgram {
     kernel: BodyKernel,
 }
 
-#[allow(dead_code)]
 impl RowProgram {
     /// Builds a row program from a pre-classified body kernel.
     pub(crate) fn from_kernel(kernel: BodyKernel) -> Option<Self> {
@@ -27,6 +26,7 @@ impl RowProgram {
     }
 
     /// Classifies a VM program as a row program when it has a native kernel representation.
+    #[allow(dead_code)]
     pub(crate) fn classify(program: &Program) -> Option<Self> {
         Self::from_kernel(BodyKernel::classify(program))
     }
@@ -44,6 +44,7 @@ impl RowProgram {
     }
 
     /// Evaluates this row program against an owned/materialized row.
+    #[allow(dead_code)]
     pub(crate) fn eval_val(&self, row: &Val) -> Result<Val, EvalError> {
         eval_kernel(&self.kernel, row, |_| {
             Err(EvalError(
