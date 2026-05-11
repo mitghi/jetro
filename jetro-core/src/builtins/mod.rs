@@ -702,8 +702,10 @@ pub enum BuiltinDemandLaw {
     Count,
     /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
     NumericReducer,
-    /// A predicate/keyed aggregate; requires all inputs and predicate/key evaluation.
-    KeyedReducer,
+    /// Key-only aggregate such as `count_by`; requires all inputs and key evaluation.
+    KeyOnlyReducer,
+    /// Row-retaining keyed aggregate; requires all full input rows.
+    RowKeyedReducer,
     /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
     OrderBarrier,
     /// Reverses one-to-one output order, swapping first/last positional demand.

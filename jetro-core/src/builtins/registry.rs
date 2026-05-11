@@ -301,9 +301,14 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: ValueNeed::Numeric,
             order: false,
         },
-        BuiltinDemandLaw::KeyedReducer => Demand {
+        BuiltinDemandLaw::KeyOnlyReducer => Demand {
             pull: PullDemand::All,
             value: ValueNeed::Predicate,
+            order: false,
+        },
+        BuiltinDemandLaw::RowKeyedReducer => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Whole,
             order: false,
         },
         BuiltinDemandLaw::OrderBarrier => Demand {
@@ -671,7 +676,10 @@ mod tests {
         let take = BuiltinId::from_method(BuiltinMethod::Take);
         let count = BuiltinId::from_method(BuiltinMethod::Count);
         let unique = BuiltinId::from_method(BuiltinMethod::Unique);
+        let group_by = BuiltinId::from_method(BuiltinMethod::GroupBy);
         let count_by = BuiltinId::from_method(BuiltinMethod::CountBy);
+        let index_by = BuiltinId::from_method(BuiltinMethod::IndexBy);
+        let approx_distinct = BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct);
         let sort = BuiltinId::from_method(BuiltinMethod::Sort);
         let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
         let take_while = BuiltinId::from_method(BuiltinMethod::TakeWhile);
@@ -746,6 +754,13 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Predicate);
         assert!(!demand.order);
+
+        for id in [group_by, index_by, approx_distinct] {
+            let demand = propagate_demand(id, BuiltinDemandArg::None, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All);
+            assert_eq!(demand.value, ValueNeed::Whole);
+            assert!(!demand.order);
+        }
 
         let downstream = Demand {
             pull: PullDemand::FirstInput(5),
