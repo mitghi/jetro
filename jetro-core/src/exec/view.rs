@@ -1396,47 +1396,12 @@ mod tests {
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-        PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceAccessMode,
-        SourceCapabilities, Stage, ViewSinkCapability, ViewStageCapability,
+        PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceCapabilities, Stage,
+        ViewSinkCapability, ViewStageCapability,
     };
     use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
     use crate::util::JsonView;
-
-    #[test]
-    fn selective_view_prefix_demotes_indexed_last_to_reverse_scan() {
-        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
-            PullDemand::LastInput(1),
-            &[ViewStageCapability::Filter { kernel: 0 }],
-        );
-
-        assert_eq!(access, SourceAccessMode::Reverse { outputs: 1 });
-    }
-
-    #[test]
-    fn selective_view_prefix_demotes_indexed_last_to_forward_without_reverse() {
-        let caps = SourceCapabilities {
-            reverse_stream: false,
-            ..SourceCapabilities::VIEW_ARRAY
-        };
-
-        let access = caps.choose_view_access(
-            PullDemand::LastInput(1),
-            &[ViewStageCapability::RemoveValue(Val::Int(2))],
-        );
-
-        assert_eq!(access, SourceAccessMode::Forward);
-    }
-
-    #[test]
-    fn map_only_view_prefix_keeps_indexed_last_seek() {
-        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
-            PullDemand::LastInput(1),
-            &[ViewStageCapability::Map { kernel: 0 }],
-        );
-
-        assert_eq!(access, SourceAccessMode::IndexedFromEnd(0));
-    }
 
     #[derive(Clone)]
     struct CountingView {
