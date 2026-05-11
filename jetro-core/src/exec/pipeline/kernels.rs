@@ -97,6 +97,8 @@ pub enum BodyKernel {
     NestedArrayReducer {
         /// Kernel that resolves the nested array from the current row.
         source: Box<BodyKernel>,
+        /// Optional per-child predicate applied before reducing.
+        predicate: Option<Box<BodyKernel>>,
         /// Optional per-child projection applied before reducing.
         map: Option<Box<BodyKernel>>,
         /// Numeric reducer operation.
@@ -309,6 +311,21 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
         }
         _ => (prefix, None),
     };
+    let (source_steps, predicate) = match source_steps.split_last() {
+        Some((Step::Method(filter_name, filter_args), source_steps))
+            if BuiltinMethod::from_name(filter_name.as_str()) == BuiltinMethod::Filter =>
+        {
+            let [crate::parse::ast::Arg::Pos(filter_expr)] = filter_args.as_slice() else {
+                return None;
+            };
+            let predicate = BodyKernel::classify_expr(filter_expr);
+            if matches!(predicate, BodyKernel::Generic) {
+                return None;
+            }
+            (source_steps, Some(Box::new(predicate)))
+        }
+        _ => (source_steps, None),
+    };
 
     let source = if source_steps.is_empty() {
         BodyKernel::classify_expr(base)
@@ -320,6 +337,7 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
     }
     Some(BodyKernel::NestedArrayReducer {
         source: Box::new(source),
+        predicate,
         map,
         op,
     })
@@ -468,8 +486,17 @@ impl BodyKernel {
                     })
             }
             Self::Object(object) => object.field_demand(),
-            Self::NestedArrayReducer { source, map, .. } => {
+            Self::NestedArrayReducer {
+                source,
+                predicate,
+                map,
+                ..
+            } => {
                 let need = source.field_demand();
+                let need = match predicate {
+                    Some(predicate) => need.merge(predicate.field_demand()),
+                    None => need,
+                };
                 match map {
                     Some(map) => need.merge(map.field_demand()),
                     None => need,
@@ -514,8 +541,16 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .any(|entry| entry.value.mentions_any_field_like_ident(names)),
-            Self::NestedArrayReducer { source, map, .. } => {
+            Self::NestedArrayReducer {
+                source,
+                predicate,
+                map,
+                ..
+            } => {
                 source.mentions_any_field_like_ident(names)
+                    || predicate
+                        .as_ref()
+                        .is_some_and(|predicate| predicate.mentions_any_field_like_ident(names))
                     || map
                         .as_ref()
                         .is_some_and(|map| map.mentions_any_field_like_ident(names))
@@ -548,8 +583,17 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .all(|entry| entry.value.is_view_native()),
-            Self::NestedArrayReducer { source, map, .. } => {
-                source.is_view_native() && map.as_ref().is_none_or(|map| map.is_view_native())
+            Self::NestedArrayReducer {
+                source,
+                predicate,
+                map,
+                ..
+            } => {
+                source.is_view_native()
+                    && predicate
+                        .as_ref()
+                        .is_none_or(|predicate| predicate.is_view_native())
+                    && map.as_ref().is_none_or(|map| map.is_view_native())
             }
             Self::NestedPlan(_) => false,
             _ => true,
@@ -1300,9 +1344,18 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
         BodyKernel::Object(object) => {
             eval_object_kernel(object, |kernel| eval_native_kernel(kernel, item))
         }
-        BodyKernel::NestedArrayReducer { source, map, op } => {
-            eval_nested_array_reducer_native(source, map.as_deref(), *op, item)
-        }
+        BodyKernel::NestedArrayReducer {
+            source,
+            predicate,
+            map,
+            op,
+        } => eval_nested_array_reducer_native(
+            source,
+            predicate.as_deref(),
+            map.as_deref(),
+            *op,
+            item,
+        ),
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
             let recv = eval_native_kernel(receiver, item)?;
@@ -1378,6 +1431,7 @@ fn eval_native_kernel(kernel: &BodyKernel, item: &Val) -> Result<Val, EvalError>
 
 fn eval_nested_array_reducer_native(
     source: &BodyKernel,
+    predicate: Option<&BodyKernel>,
     map: Option<&BodyKernel>,
     op: super::NumOp,
     item: &Val,
@@ -1394,6 +1448,11 @@ fn eval_nested_array_reducer_native(
     let mut n_obs = 0usize;
 
     for child in items.iter() {
+        if let Some(predicate) = predicate {
+            if !crate::util::is_truthy(&eval_native_kernel(predicate, child)?) {
+                continue;
+            }
+        }
         let value;
         let observed = match map {
             Some(map) => {
@@ -1577,6 +1636,7 @@ where
 
 fn eval_nested_array_reducer_view<'a, V>(
     source: &BodyKernel,
+    predicate: Option<&BodyKernel>,
     map: Option<&BodyKernel>,
     op: super::NumOp,
     item: &V,
@@ -1587,7 +1647,7 @@ where
     let source = match eval_view_kernel(source, item)? {
         ViewKernelValue::View(view) => view,
         ViewKernelValue::Owned(value) => {
-            return eval_nested_array_reducer_native_owned(value, map, op)
+            return eval_nested_array_reducer_native_owned(value, predicate, map, op)
         }
     };
     let mut iter = source.array_iter()?;
@@ -1599,6 +1659,15 @@ where
     let mut n_obs = 0usize;
 
     iter.try_for_each(|child| {
+        if let Some(predicate) = predicate {
+            let passes = match eval_view_kernel(predicate, &child)? {
+                ViewKernelValue::View(view) => view.scalar().truthy(),
+                ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+            };
+            if !passes {
+                return Some(());
+            }
+        }
         match map {
             Some(map) => {
                 if let Some(value) = eval_view_numeric_kernel(map, &child) {
@@ -1812,6 +1881,7 @@ fn fold_numeric_kernel_value(
 
 fn eval_nested_array_reducer_native_owned(
     source: Val,
+    predicate: Option<&BodyKernel>,
     map: Option<&BodyKernel>,
     op: super::NumOp,
 ) -> Option<Val> {
@@ -1825,6 +1895,11 @@ fn eval_nested_array_reducer_native_owned(
     let mut max_f = f64::NEG_INFINITY;
     let mut n_obs = 0usize;
     for child in items.iter() {
+        if let Some(predicate) = predicate {
+            if !crate::util::is_truthy(&eval_native_kernel(predicate, child).ok()?) {
+                continue;
+            }
+        }
         let value;
         let observed = match map {
             Some(map) => {
@@ -1960,8 +2035,13 @@ where
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
-        BodyKernel::NestedArrayReducer { source, map, op } => {
-            eval_nested_array_reducer_view(source, map.as_deref(), *op, item)
+        BodyKernel::NestedArrayReducer {
+            source,
+            predicate,
+            map,
+            op,
+        } => {
+            eval_nested_array_reducer_view(source, predicate.as_deref(), map.as_deref(), *op, item)
                 .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
@@ -2497,7 +2577,8 @@ mod tests {
 
     #[test]
     fn nested_array_reducer_kernels_run_on_value_views() {
-        let expr = parse("items.map(qty * price).sum()").expect("parse nested reducer");
+        let expr =
+            parse("items.filter(price > 6).map(qty * price).sum()").expect("parse nested reducer");
         let kernel = BodyKernel::classify_expr(&expr);
         assert!(
             matches!(kernel, BodyKernel::NestedArrayReducer { .. }),
@@ -2508,13 +2589,14 @@ mod tests {
         let row: Val = (&serde_json::json!({
             "items": [
                 {"qty": 2, "price": 10},
-                {"qty": 3, "price": 5}
+                {"qty": 3, "price": 5},
+                {"qty": 1, "price": 8}
             ]
         }))
             .into();
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &ValView::new(&row))),
-            Some(Val::Int(35))
+            Some(Val::Int(28))
         );
     }
 
