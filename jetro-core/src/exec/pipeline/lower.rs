@@ -490,7 +490,7 @@ fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::P
 /// cannot represent as a single-key `SortSpec`. Bailing out forces the
 /// router to fall back to the VM path, where `exec_lambda_method` handles
 /// the comparator via `sort_comparator_apply`.
-pub(super) fn compile_sort_spec(
+pub(crate) fn compile_sort_spec(
     arg: &crate::parse::ast::Arg,
 ) -> Option<(SortSpec, Option<Arc<Expr>>)> {
     use crate::parse::ast::{Arg, Expr};
