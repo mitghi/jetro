@@ -11,8 +11,8 @@ use crate::parse::ast::Expr;
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::ir::logical::LogicalPlan;
 use crate::exec::pipeline::{
-    plan_with_exprs, BodyKernel, NumOp, Pipeline, PipelineBody, ReducerOp,
-    ReducerSpec, Sink, Source, Stage,
+    plan_with_exprs, BodyKernel, NumOp, Pipeline, PipelineBody, ReducerOp, ReducerSpec, Sink,
+    Source, Stage,
 };
 
 // ---------------------------------------------------------------------------
@@ -194,44 +194,16 @@ fn collect(
             Some((source, stages, exprs, Sink::Reducer(ReducerSpec::count())))
         }
         LogicalPlan::Sum(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Sum),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
+            collect_numeric_sink(*inner, BuiltinMethod::Sum)
         }
         LogicalPlan::Avg(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Avg),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
+            collect_numeric_sink(*inner, BuiltinMethod::Avg)
         }
         LogicalPlan::Min(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Min),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
+            collect_numeric_sink(*inner, BuiltinMethod::Min)
         }
         LogicalPlan::Max(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Max),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
+            collect_numeric_sink(*inner, BuiltinMethod::Max)
         }
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
@@ -241,6 +213,27 @@ fn collect(
         // ── VM fallback — cannot lower to a Pipeline ───────────────────────
         LogicalPlan::ScalarExpr(_) => None,
     }
+}
+
+fn collect_numeric_sink(
+    inner: LogicalPlan,
+    method: BuiltinMethod,
+) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+    let (source, stages, exprs, _) = collect(inner)?;
+    Some((
+        source,
+        stages,
+        exprs,
+        Sink::Reducer(ReducerSpec {
+            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(
+                method.spec().numeric_reducer?,
+            )),
+            predicate: None,
+            projection: None,
+            predicate_expr: None,
+            projection_expr: None,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
