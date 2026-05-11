@@ -10,40 +10,35 @@ use crate::{
 
 use super::{Pipeline, PipelineBody, Plan, Source};
 
-/// Prepared nested plan execution metadata. Field-chain nested plans are reusable across rows
-/// because only the root value changes; receiver plans need a fresh receiver source per row.
+/// Prepared nested plan execution metadata. The physical path and demand annotations are stable
+/// across rows; receiver-sourced plans only swap the receiver value before running.
 #[derive(Clone)]
 pub(super) struct PreparedPlan {
-    source: Source,
-    body: PipelineBody,
-    reusable: Option<Pipeline>,
+    pipeline: Pipeline,
+    receiver_source: bool,
 }
 
 impl PreparedPlan {
     pub(super) fn new(plan: &Plan) -> Self {
-        let source = plan.source.clone();
-        let body = body_from_plan(plan);
-        let reusable = match &source {
-            Source::Receiver(_) => None,
-            source => Some(body.clone().with_source(source.clone())),
+        let receiver_source = matches!(plan.source, Source::Receiver(_));
+        let source = if receiver_source {
+            Source::Receiver(Val::Null)
+        } else {
+            plan.source.clone()
         };
         Self {
-            source,
-            body,
-            reusable,
+            pipeline: body_from_plan(plan).with_source(source),
+            receiver_source,
         }
     }
 
     pub(super) fn run(&self, seed: Val) -> Result<Val, EvalError> {
-        if let Some(pipeline) = &self.reusable {
+        if self.receiver_source {
+            let mut pipeline = self.pipeline.clone();
+            pipeline.source = Source::Receiver(seed.clone());
             return pipeline.run(&seed);
         }
-
-        let source = match &self.source {
-            Source::Receiver(_) => Source::Receiver(seed.clone()),
-            source => source.clone(),
-        };
-        self.body.clone().with_source(source).run(&seed)
+        self.pipeline.run(&seed)
     }
 }
 

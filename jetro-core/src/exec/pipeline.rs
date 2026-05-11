@@ -1029,6 +1029,30 @@ mod tests {
     }
 
     #[test]
+    fn compiled_map_receiver_plan_runs_from_current_row() {
+        use serde_json::json;
+
+        let p = lower_query("$.groups.map(@.map(qty * price).sum())").unwrap();
+        let Stage::CompiledMap(plan) = &p.stages[0] else {
+            panic!("expected compiled nested map stage");
+        };
+        assert!(matches!(plan.source, Source::Receiver(_)));
+
+        let doc: Val = (&json!({
+            "groups": [
+                [{"qty": 2, "price": 10}, {"qty": 3, "price": 5}],
+                [{"qty": 1, "price": 7}]
+            ]
+        }))
+            .into();
+        let out = p.run(&doc).unwrap();
+        assert!(crate::util::vals_deep_eq(
+            &out,
+            &Val::arr(vec![Val::Int(35), Val::Int(7)])
+        ));
+    }
+
+    #[test]
     fn run_terminal_count_predicate() {
         use serde_json::json;
         let doc: Val = (&json!({"orders":[
