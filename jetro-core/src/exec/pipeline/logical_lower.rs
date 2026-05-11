@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::exec::pipeline::{
-    plan_with_exprs, BodyKernel, Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage,
+    plan_with_exprs, Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage,
 };
 use crate::ir::logical::LogicalPlan;
 use crate::parse::ast::Expr;
@@ -203,21 +203,10 @@ fn collect_numeric_sink(
 /// Classifies stages into `BodyKernel`s, runs `plan_with_exprs` for filter reordering/fusion,
 /// and fills in the kernel vectors required by `PipelineBody`.
 fn build_body(stages: Vec<Stage>, stage_exprs: Vec<Option<Arc<Expr>>>, sink: Sink) -> PipelineBody {
-    let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
-        stages
-            .iter()
-            .map(|s| {
-                s.body_program()
-                    .map(BodyKernel::classify)
-                    .unwrap_or(BodyKernel::Generic)
-            })
-            .collect()
-    };
-
-    let kernels = classify_kernels(&stages);
+    let kernels = Stage::body_kernels(&stages);
     let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
 
-    let stage_kernels = classify_kernels(&plan_result.stages);
+    let stage_kernels = Stage::body_kernels(&plan_result.stages);
     let sink_kernels = plan_result.sink.body_kernels();
 
     PipelineBody {

@@ -540,6 +540,18 @@ macro_rules! method_stage_descriptor {
 }
 
 impl Stage {
+    /// Classifies the stage body program, returning `Generic` for stages without a body.
+    pub(crate) fn body_kernel(&self) -> BodyKernel {
+        self.body_program()
+            .map(BodyKernel::classify)
+            .unwrap_or(BodyKernel::Generic)
+    }
+
+    /// Classifies all stage body programs in order.
+    pub(crate) fn body_kernels(stages: &[Stage]) -> Vec<BodyKernel> {
+        stages.iter().map(Self::body_kernel).collect()
+    }
+
     /// Returns `true` when this stage requires a composed-barrier materialisation pass before
     /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {

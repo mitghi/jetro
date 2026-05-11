@@ -102,17 +102,7 @@ impl Pipeline {
             sink_kernels: Vec::new(),
         };
         rewrite(&mut p);
-        let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
-            stages
-                .iter()
-                .map(|s| {
-                    s.body_program()
-                        .map(BodyKernel::classify)
-                        .unwrap_or(BodyKernel::Generic)
-                })
-                .collect()
-        };
-        let kernels = classify_kernels(&p.stages);
+        let kernels = Stage::body_kernels(&p.stages);
         let plan_result = plan_with_exprs(
             p.stages.clone(),
             p.stage_exprs.clone(),
@@ -122,7 +112,7 @@ impl Pipeline {
         p.stages = plan_result.stages;
         p.stage_exprs = plan_result.stage_exprs;
         p.sink = plan_result.sink;
-        p.stage_kernels = classify_kernels(&p.stages);
+        p.stage_kernels = Stage::body_kernels(&p.stages);
         p.sink_kernels = p.sink.body_kernels();
         Some(p)
     }
@@ -203,14 +193,7 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
-    let kernels: Vec<BodyKernel> = stages
-        .iter()
-        .map(|s| {
-            s.body_program()
-                .map(BodyKernel::classify)
-                .unwrap_or(BodyKernel::Generic)
-        })
-        .collect();
+    let kernels = Stage::body_kernels(&stages);
     Some(plan_with_kernels(stages, &kernels, sink))
 }
 
