@@ -1029,6 +1029,38 @@ mod tests {
     }
 
     #[test]
+    fn registry_drives_logical_shapes() {
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinLogicalShape::Filter)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Find)),
+            Some(BuiltinLogicalShape::FilterThenFirst)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinLogicalShape::Map)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Sort)),
+            Some(BuiltinLogicalShape::Sort)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::CountBy)),
+            Some(BuiltinLogicalShape::CountBy)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::IndexBy)),
+            Some(BuiltinLogicalShape::IndexBy)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::FromJson)),
+            None
+        );
+    }
+
+    #[test]
     fn registry_classifies_pipeline_arity_without_method_special_cases() {
         assert_eq!(
             pipeline_arity(BuiltinId::from_method(BuiltinMethod::Filter), false),
