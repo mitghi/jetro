@@ -435,6 +435,9 @@ impl BodyKernel {
         if let Some(kernel) = classify_structural_view_kernel(rest) {
             return kernel;
         }
+        if let Some(kernel) = classify_rpn_structural_kernel(rest) {
+            return kernel;
+        }
         if let Some(kernel) = classify_and_kernel(ops) {
             return kernel;
         }
@@ -464,6 +467,80 @@ fn flatten_and_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
     match kernel {
         BodyKernel::And(predicates) => out.extend(predicates.iter().cloned()),
         other => out.push(other),
+    }
+}
+
+fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
+    use crate::vm::Opcode;
+
+    let mut stack: Vec<BodyKernel> = Vec::new();
+    for op in ops {
+        match op {
+            Opcode::PushCurrent => stack.push(BodyKernel::Current),
+            Opcode::LoadIdent(key) => stack.push(BodyKernel::FieldRead(Arc::clone(key))),
+            Opcode::GetField(key) => {
+                let receiver = stack.pop().unwrap_or(BodyKernel::Current);
+                stack.push(compose_field_kernel(receiver, Arc::clone(key)));
+            }
+            Opcode::FieldChain(chain) => {
+                let receiver = stack.pop().unwrap_or(BodyKernel::Current);
+                stack.push(compose_field_chain_kernel(receiver, Arc::clone(&chain.keys)));
+            }
+            op if trivial_lit(op).is_some() => stack.push(BodyKernel::Const(trivial_lit(op)?)),
+            op if arithmetic_binop(op).is_some() => {
+                let rhs = stack.pop()?;
+                let lhs = stack.pop()?;
+                stack.push(BodyKernel::Binary {
+                    lhs: Box::new(lhs),
+                    op: arithmetic_binop(op)?,
+                    rhs: Box::new(rhs),
+                });
+            }
+            _ => return None,
+        }
+    }
+    match stack.as_slice() {
+        [kernel] => Some(kernel.clone()),
+        _ => None,
+    }
+}
+
+fn compose_field_kernel(receiver: BodyKernel, key: Arc<str>) -> BodyKernel {
+    match receiver {
+        BodyKernel::Current => BodyKernel::FieldRead(key),
+        BodyKernel::FieldRead(first) => BodyKernel::FieldChain(Arc::from([first, key])),
+        BodyKernel::FieldChain(keys) => {
+            let mut out = Vec::with_capacity(keys.len() + 1);
+            out.extend(keys.iter().cloned());
+            out.push(key);
+            BodyKernel::FieldChain(out.into())
+        }
+        receiver => BodyKernel::Compose {
+            first: Box::new(receiver),
+            then: Box::new(BodyKernel::FieldRead(key)),
+        },
+    }
+}
+
+fn compose_field_chain_kernel(receiver: BodyKernel, keys: Arc<[Arc<str>]>) -> BodyKernel {
+    match receiver {
+        BodyKernel::Current => BodyKernel::FieldChain(keys),
+        BodyKernel::FieldRead(first) => {
+            let mut out = Vec::with_capacity(keys.len() + 1);
+            out.push(first);
+            out.extend(keys.iter().cloned());
+            BodyKernel::FieldChain(out.into())
+        }
+        BodyKernel::FieldChain(prefix) => {
+            let mut out = Vec::with_capacity(prefix.len() + keys.len());
+            out.extend(prefix.iter().cloned());
+            out.extend(keys.iter().cloned());
+            BodyKernel::FieldChain(out.into())
+        }
+        receiver => BodyKernel::Compose {
+            first: Box::new(receiver),
+            then: Box::new(BodyKernel::FieldChain(keys)),
+        },
     }
 }
 
@@ -1141,6 +1218,30 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Float(37.5))
+        );
+    }
+
+    #[test]
+    fn rpn_arithmetic_kernels_compose_nested_expressions() {
+        let expr = parse("qty * price + fee").expect("parse nested arithmetic");
+        let program = Compiler::compile(&expr, "qty * price + fee");
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::Binary { .. }));
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [
+                (Arc::from("qty"), Val::Int(3)),
+                (Arc::from("price"), Val::Float(12.5)),
+                (Arc::from("fee"), Val::Float(2.25)),
+            ]
+            .into(),
+        );
+        let view = ValView::new(&value);
+
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &view)),
+            Some(Val::Float(39.75))
         );
     }
 
