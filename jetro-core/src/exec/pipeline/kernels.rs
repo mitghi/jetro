@@ -2550,6 +2550,36 @@ mod tests {
     }
 
     #[test]
+    fn string_len_method_chain_stays_scalar_builtin_kernel() {
+        let expr = parse("name.len() == 3").expect("parse string len predicate");
+        let program = Compiler::compile(&expr, "name.len() == 3");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(
+            matches!(
+                &kernel,
+                BodyKernel::CmpLit { lhs, .. }
+                    if matches!(
+                        lhs.as_ref(),
+                        BodyKernel::BuiltinCall { receiver, call }
+                            if call.method == BuiltinMethod::Len
+                                && matches!(
+                                    receiver.as_ref(),
+                                    BodyKernel::FieldRead(field) if field.as_ref() == "name"
+                                )
+                    )
+            ),
+            "{kernel:#?}"
+        );
+
+        let value = Val::obj([(Arc::from("name"), Val::Str(Arc::from("ada")))].into());
+        assert_eq!(
+            owned_bool(eval_view_kernel(&kernel, &ValView::new(&value))),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn rpn_arithmetic_kernels_compose_nested_expressions() {
         let expr = parse("qty * price + fee").expect("parse nested arithmetic");
         let program = Compiler::compile(&expr, "qty * price + fee");
