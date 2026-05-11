@@ -255,6 +255,10 @@ mod spec_tests {
             Some(BuiltinViewStage::Filter)
         );
         assert_eq!(
+            BuiltinMethod::Compact.spec().view_stage,
+            Some(BuiltinViewStage::Compact)
+        );
+        assert_eq!(
             BuiltinMethod::Map.spec().view_stage,
             Some(BuiltinViewStage::Map)
         );
@@ -306,6 +310,10 @@ mod spec_tests {
             BuiltinViewInputMode::ReadsView
         );
         assert_eq!(
+            BuiltinViewStage::Compact.input_mode(),
+            BuiltinViewInputMode::ReadsView
+        );
+        assert_eq!(
             BuiltinViewStage::Take.input_mode(),
             BuiltinViewInputMode::SkipsViewRead
         );
@@ -320,6 +328,10 @@ mod spec_tests {
         assert_eq!(
             BuiltinViewStage::Skip.output_mode(),
             BuiltinViewOutputMode::PreservesInputView
+        );
+        assert_eq!(
+            BuiltinViewStage::Compact.cardinality(),
+            BuiltinCardinality::Filtering
         );
     }
 

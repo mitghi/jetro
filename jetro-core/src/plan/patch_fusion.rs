@@ -1,8 +1,3 @@
-// Phase A types are analysis-only; Phase B's `fuse_writes` consumes them.
-// Some helpers remain available for Phase C/E/F so we keep the lint
-// allowance until those phases land.
-#![allow(dead_code)]
-
 //! Phase A of the write-fusion plan: a non-mutating effect-summary
 //! analyzer that walks an [`Expr`] tree and collects, per subtree, the
 //! set of logical document roots it reads and the ordered list of
@@ -17,7 +12,11 @@
 //! write so the scheduler can recognise it as targeting `$`.
 
 use crate::parse::ast::{
-    Arg, ArrayElem, BindTarget, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step,
+    Arg, ArrayElem, Expr, FStringPart, ObjField, PatchOp, PathStep, PipeStep, Step,
+};
+use crate::parse::write_terminal::{
+    build_patch_op as build_write_patch_op, is_pipeline_fusion_terminal,
+    steps_to_path as write_steps_to_path,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -759,12 +758,6 @@ fn match_arm_reads_update_focus(arm: &crate::parse::ast::MatchArm) -> bool {
         || expr_reads_update_focus(&arm.body)
 }
 
-// Suppress dead-code lints for the `BindTarget` import that exists
-// solely so future Phase B code can match on bind shapes without
-// re-importing. Keeping it here documents the dependency.
-#[allow(dead_code)]
-fn _bind_target_witness(_b: &BindTarget) {}
-
 // ---------------------------------------------------------------------------
 // Phase B: contiguous same-root write fusion (IR rewrite)
 // ---------------------------------------------------------------------------
@@ -814,30 +807,17 @@ fn _bind_target_witness(_b: &BindTarget) {}
 /// collapse into single multi-op [`Expr::Patch`] nodes. Pure: takes
 /// ownership and returns the new tree.
 ///
-/// Phase C wraps the result in a final `flush_all` so any pending
-/// batches accumulated by the recursion bottom out as `let _N = patch …
-/// in body`. In the current pass Phase B's local lifters return their
-/// fused output directly so `pending` is typically empty here, but the
-/// final flush is the safety net Phase E will lean on.
 pub(crate) fn fuse_writes(expr: Expr) -> Expr {
     let mut ctx = FuseCtx::default();
-    let body = fuse_recursive(expr, &mut ctx);
-    ctx.flush_all(body)
+    fuse_recursive(expr, &mut ctx)
 }
 
-/// Phase C: recurse into a child that lives behind a non-fuseable
-/// scope boundary (lambda body, comprehension iter / body / cond,
-/// if/else branch, try-default). The outer pending map is taken before
-/// recursion so the child sees an empty `pending`; whatever batches
-/// the child produces flush *inside* the child's returned expression
-/// before we restore the outer state. Net effect: a write inside a
-/// branch can never be merged with a write outside that branch.
+/// Recurse into a child that lives behind a non-fuseable scope boundary
+/// (lambda body, comprehension iter / body / cond, if/else branch,
+/// try-default). Local fusion still happens inside the child, but no
+/// write is merged across the boundary.
 fn fuse_subtree(child: Expr, ctx: &mut FuseCtx) -> Expr {
-    let saved = ctx.take_pending();
-    let inner = fuse_recursive(child, ctx);
-    let inner = ctx.flush_all(inner);
-    ctx.restore_pending(saved);
-    inner
+    fuse_recursive(child, ctx)
 }
 
 /// Maximum number of alias-chain hops [`FuseCtx::canonical_root`] will
@@ -848,27 +828,9 @@ fn fuse_subtree(child: Expr, ctx: &mut FuseCtx) -> Expr {
 /// tipped into a hang by malformed analyzer state.
 const MAX_ALIAS_CHAIN_DEPTH: usize = 16;
 
-/// One open batch of writes against a single canonical root, awaiting
-/// flush. Phase C tracks these per-root in [`FuseCtx::pending`] so a
-/// sequence of writes can collect into a single emitted `Patch` even
-/// when the surrounding shape isn't directly handled by the Phase B
-/// local lifters.
-#[derive(Debug, Clone)]
-struct PendingBatch {
-    /// The root expression to attach to the emitted [`Expr::Patch`].
-    /// We preserve the *original* root expression (not a canonicalised
-    /// `RootRef`) so the lowered Patch keeps user-visible semantics.
-    root_expr: Expr,
-    /// The synthesized binding name `__patch_fuse_N` that any reference
-    /// to the post-batch document will resolve to.
-    binding: String,
-    /// Ops collected against this batch in source order.
-    ops: Vec<PatchOp>,
-}
-
-/// Mutable state threaded through the rewrite. Phase C extends Phase B's
-/// alias table with a `pending` tracker (open batches per root) and a
-/// depth-capped multi-level alias resolver.
+/// Mutable state threaded through the rewrite. The alias table composes
+/// let-aliases with canonical root detection, and the depth-capped resolver
+/// prevents malformed alias state from hanging the optimizer.
 #[derive(Default)]
 struct FuseCtx {
     /// Mirrors [`EffectAnalyzer::aliases`] for the duration of the
@@ -878,14 +840,8 @@ struct FuseCtx {
     scope_stack: Vec<u32>,
     /// Scope id allocator.
     next_scope: u32,
-    /// Counter for synthetic `let` names introduced by P2 (object lift)
-    /// and Phase C's pending-batch flush.
+    /// Counter for synthetic `let` names introduced by object lift.
     next_synth: u32,
-    /// Phase C: open batches per canonical root, keyed in source order.
-    /// `IndexMap` (not `HashMap`) so flush order matches insertion order
-    /// — a deterministic emission shape is required by the soundness
-    /// invariants on read-after-write coherence.
-    pending: indexmap::IndexMap<RootRef, PendingBatch>,
 }
 
 impl FuseCtx {
@@ -968,79 +924,6 @@ impl FuseCtx {
         a
     }
 
-    /// Phase C: append `ops` to the pending batch keyed by `root`.
-    /// Creates a fresh [`PendingBatch`] (with a `__patch_fuse_N` binding
-    /// name) when this is the first batch against the root. Returns the
-    /// binding name; callers use it to construct an [`Expr::Ident`]
-    /// placeholder where the post-batch value would have appeared.
-    fn add_to_batch(&mut self, root: RootRef, root_expr: Expr, ops: Vec<PatchOp>) -> String {
-        if let Some(batch) = self.pending.get_mut(&root) {
-            batch.ops.extend(ops);
-            batch.binding.clone()
-        } else {
-            let binding = self.fresh_synth_name();
-            let batch = PendingBatch {
-                root_expr,
-                binding: binding.clone(),
-                ops,
-            };
-            self.pending.insert(root, batch);
-            binding
-        }
-    }
-
-    /// Phase C: flush every pending batch, wrapping `body` in a
-    /// `let __patch_fuse_N = Patch{...} in ...` chain. Insertion order
-    /// of `pending` determines the wrapping order; the outermost let
-    /// is the first batch added, matching source-order semantics.
-    fn flush_all(&mut self, body: Expr) -> Expr {
-        let mut wrapped = body;
-        // Drain in reverse so the first-inserted batch is the outermost
-        // let — preserves source order for nested reads.
-        let drained: Vec<(RootRef, PendingBatch)> = self.pending.drain(..).collect();
-        for (_root, batch) in drained.into_iter().rev() {
-            wrapped = Expr::Let {
-                name: batch.binding,
-                init: Box::new(Expr::Patch {
-                    root: Box::new(batch.root_expr),
-                    ops: batch.ops,
-                }),
-                body: Box::new(wrapped),
-            };
-        }
-        wrapped
-    }
-
-    /// Phase C: flush only the pending batch keyed by `root`. Used when
-    /// a read of `root` is encountered; we must materialise the writes
-    /// before the read evaluates.
-    fn flush_root(&mut self, root: &RootRef, body: Expr) -> Expr {
-        if let Some(batch) = self.pending.shift_remove(root) {
-            Expr::Let {
-                name: batch.binding,
-                init: Box::new(Expr::Patch {
-                    root: Box::new(batch.root_expr),
-                    ops: batch.ops,
-                }),
-                body: Box::new(body),
-            }
-        } else {
-            body
-        }
-    }
-
-    /// Phase C: snapshot/restore for scope boundaries. Returns the
-    /// pending map at the call site and replaces it with an empty one
-    /// so children can collect their own batches without disturbing
-    /// outer state.
-    fn take_pending(&mut self) -> indexmap::IndexMap<RootRef, PendingBatch> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// Phase C: restore a previously taken pending map.
-    fn restore_pending(&mut self, prev: indexmap::IndexMap<RootRef, PendingBatch>) {
-        self.pending = prev;
-    }
 }
 
 /// Walk the expression bottom-up, fusing where shapes match. Most
@@ -1194,27 +1077,24 @@ fn fuse_recursive(expr: Expr, ctx: &mut FuseCtx) -> Expr {
 
         Expr::Lambda { params, body } => with_lambda_scope(ctx, &params, |ctx| Expr::Lambda {
             params: params.clone(),
-            // Phase C: lambda body is a non-fuseable boundary — flush
-            // both outer pending and the body's own pending so writes
-            // never leak in either direction across the call edge.
+            // Lambda body is a non-fuseable boundary, so writes never
+            // merge in either direction across the call edge.
             body: Box::new(fuse_subtree(*body, ctx)),
         }),
 
         Expr::Let { name, init, body } => fuse_let(name, *init, *body, ctx),
 
         Expr::IfElse { cond, then_, else_ } => Expr::IfElse {
-            // Phase C: each branch is its own scope. A write that only
-            // appears in `then_` must not be batched with one in `else_`,
-            // since at most one branch runs. `fuse_subtree` flushes
-            // pending at each boundary so any optimisation lifted into
-            // a branch stays inside it.
+            // Each branch is its own scope. A write that only appears
+            // in `then_` must not be batched with one in `else_`, since
+            // at most one branch runs.
             cond: Box::new(fuse_subtree(*cond, ctx)),
             then_: Box::new(fuse_subtree(*then_, ctx)),
             else_: Box::new(fuse_subtree(*else_, ctx)),
         },
         Expr::Try { body, default } => Expr::Try {
-            // Phase C: a try-default boundary is non-fuseable; the body
-            // may abort and the default observes the pre-failure state.
+            // A try-default boundary is non-fuseable; the body may abort
+            // and the default observes the pre-failure state.
             body: Box::new(fuse_subtree(*body, ctx)),
             default: Box::new(fuse_subtree(*default, ctx)),
         },
@@ -1370,7 +1250,7 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         Step::Method(n, a) => (n.clone(), a.clone()),
         _ => return Err(Expr::Chain(Box::new(base), steps)),
     };
-    if !is_write_terminal(&name) {
+    if !is_pipeline_fusion_terminal(&name) {
         return Err(Expr::Chain(Box::new(base), steps));
     }
     // Base must be a recognised root form.
@@ -1379,7 +1259,7 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         return Err(Expr::Chain(Box::new(base), steps));
     }
     let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
-    let path = match steps_to_path(&prefix) {
+    let path = match write_steps_to_path(&prefix, false) {
         Some(p) => p,
         None => return Err(Expr::Chain(Box::new(base), steps)),
     };
@@ -1391,99 +1271,6 @@ fn lift_chain_write_pipe_stage(stage: Expr) -> Result<Expr, Expr> {
         root: Box::new(base),
         ops: vec![op],
     })
-}
-
-/// Mirrors `parser::is_terminal_write` — duplicated locally so we don't
-/// need to make that helper `pub(crate)` for one call site.
-fn is_write_terminal(name: &str) -> bool {
-    matches!(
-        name,
-        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge"
-    )
-}
-
-fn steps_to_path(steps: &[Step]) -> Option<Vec<PathStep>> {
-    let mut out = Vec::with_capacity(steps.len());
-    for s in steps {
-        match s {
-            Step::Field(f) | Step::OptField(f) => out.push(PathStep::Field(f.clone())),
-            Step::Index(i) => out.push(PathStep::Index(*i)),
-            Step::Descendant(f) => out.push(PathStep::Descendant(f.clone())),
-            Step::DynIndex(e) => out.push(PathStep::DynIndex((**e).clone())),
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
-/// Mirrors `parser::build_write_op`. We only need `set` / `modify` /
-/// `delete` / `unset` for pipe-stage lifting; `merge` and `deep_merge`
-/// already pass through the original parser path when the base is `$`,
-/// and the pipe form `| .merge(x)` is unusual enough that we leave it
-/// alone for now.
-fn build_write_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
-    match name {
-        "set" => {
-            let v = arg_expr_owned(args.first()?);
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        "modify" => {
-            let v = match arg_expr_owned(args.first()?) {
-                Expr::Lambda { params, body } => {
-                    if let Some(p) = params.into_iter().next() {
-                        Expr::Let {
-                            name: p,
-                            init: Box::new(Expr::Current),
-                            body,
-                        }
-                    } else {
-                        *body
-                    }
-                }
-                other => other,
-            };
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        "delete" => {
-            if !args.is_empty() {
-                return None;
-            }
-            Some(PatchOp {
-                path,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        "unset" => {
-            let key = match arg_expr_owned(args.first()?) {
-                Expr::Str(s) => s,
-                Expr::Ident(s) => s,
-                _ => return None,
-            };
-            let mut p = path;
-            p.push(PathStep::Field(key));
-            Some(PatchOp {
-                path: p,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn arg_expr_owned(a: &Arg) -> Expr {
-    match a {
-        Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
-    }
 }
 
 /// Fuse a pipeline. Walks left-to-right, merging adjacent same-root
@@ -1918,14 +1705,14 @@ fn try_lift_chain_write(expr: &Expr) -> Option<Expr> {
         Step::Method(n, a) => (n.clone(), a.clone()),
         _ => return None,
     };
-    if !is_write_terminal(&name) {
+    if !is_pipeline_fusion_terminal(&name) {
         return None;
     }
     if !matches!(base, Expr::Current | Expr::Ident(_) | Expr::Root) {
         return None;
     }
     let prefix: Vec<Step> = steps[..steps.len() - 1].to_vec();
-    let path = steps_to_path(&prefix)?;
+    let path = write_steps_to_path(&prefix, false)?;
     let op = build_write_patch_op(&name, &args, path)?;
     Some(Expr::Patch {
         root: Box::new(base.clone()),
@@ -2229,56 +2016,4 @@ mod tests {
         assert_eq!(r, RootRef::Root);
     }
 
-    #[test]
-    fn pending_batch_add_and_flush_emits_let_wrapper() {
-        // Phase C: adding ops to pending and flushing wraps the body
-        // in `let __patch_fuse_0 = patch <root> { … } in body`.
-        let mut ctx = FuseCtx::default();
-        let op = PatchOp {
-            path: vec![PathStep::Field("k".into())],
-            val: Expr::Int(1),
-            cond: None,
-        };
-        let _binding = ctx.add_to_batch(RootRef::Root, Expr::Root, vec![op]);
-        let body = Expr::Bool(true);
-        let wrapped = ctx.flush_all(body);
-        match wrapped {
-            Expr::Let { name, init, body } => {
-                assert!(name.starts_with("__patch_fuse_"));
-                assert!(matches!(*init, Expr::Patch { .. }));
-                assert!(matches!(*body, Expr::Bool(true)));
-            }
-            other => panic!("expected Let wrapper, got {:?}", other),
-        }
-        // Pending should be drained.
-        assert!(ctx.pending.is_empty());
-    }
-
-    #[test]
-    fn flush_root_only_drains_named_root() {
-        // Two pending batches against distinct roots; flush_root drains
-        // only the targeted one and leaves the other intact.
-        let mut ctx = FuseCtx::default();
-        let op_a = PatchOp {
-            path: vec![PathStep::Field("a".into())],
-            val: Expr::Int(1),
-            cond: None,
-        };
-        let op_b = PatchOp {
-            path: vec![PathStep::Field("b".into())],
-            val: Expr::Int(2),
-            cond: None,
-        };
-        ctx.add_to_batch(RootRef::Root, Expr::Root, vec![op_a]);
-        ctx.add_to_batch(
-            RootRef::Local(Arc::from("x")),
-            Expr::Ident("x".into()),
-            vec![op_b],
-        );
-        let body = ctx.flush_root(&RootRef::Root, Expr::Bool(true));
-        // Wrapper for Root should be emitted; Local("x") still pending.
-        assert!(matches!(body, Expr::Let { .. }));
-        assert_eq!(ctx.pending.len(), 1);
-        assert!(ctx.pending.contains_key(&RootRef::Local(Arc::from("x"))));
-    }
 }

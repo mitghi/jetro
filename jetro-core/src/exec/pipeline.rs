@@ -25,6 +25,7 @@ mod exec;
 mod indexed_exec;
 mod ir;
 mod kernels;
+mod nested;
 pub(crate) mod logical_lower;
 mod lower;
 pub(crate) mod materialized_exec;
@@ -32,6 +33,7 @@ mod operator;
 mod plan;
 mod reducer;
 mod row_source;
+mod row_program;
 mod sink_accumulator;
 mod symbolic;
 mod val_stage_flow;
@@ -43,9 +45,10 @@ pub(crate) use capability::{
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
-    num_finalise, num_fold, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
+    num_finalise, num_fold, num_fold_f64, num_fold_i64, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
     OrderedKeySorter,
 };
+pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 #[cfg(test)]
 pub use ir::Strategy;
 pub use ir::{
@@ -53,7 +56,9 @@ pub use ir::{
     StageStrategy,
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
-pub(crate) use kernels::{eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue};
+pub(crate) use kernels::{
+    eval_kernel_with_vm, eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue,
+};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
     PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
@@ -65,9 +70,12 @@ pub use plan::plan;
 #[cfg(test)]
 pub use plan::select_strategy;
 pub use plan::{
-    compute_strategies_with_kernels, plan_with_exprs, plan_with_kernels, select_exec_path,
+    compute_strategies_with_kernels, plan_with_exprs, select_exec_path,
 };
+#[cfg(test)]
+pub use plan::plan_with_kernels;
 pub(crate) use reducer::ReducerAccumulator;
+pub(crate) use row_program::RowProgram;
 pub(crate) use sink_accumulator::SinkAccumulator;
 
 /// Per-element control-flow signal returned by a pipeline stage.
@@ -88,13 +96,27 @@ pub(crate) enum StageFlow<T> {
 #[cfg(feature = "simd-json")]
 /// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning
 /// the first matching value or `None` if the shape is not tape-compatible.
+#[allow(dead_code)]
 pub(crate) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    materialized_exec::run_tape_field_chain(body, tape, keys, base_env)
+    let mut vm = crate::vm::VM::new();
+    materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
+}
+
+#[cfg(feature = "simd-json")]
+/// Executes tape row streaming with caller-owned VM state.
+pub(crate) fn run_tape_field_chain_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    keys: &[Arc<str>],
+    base_env: &Env,
+    vm: &mut crate::vm::VM,
+) -> Option<Result<Val, EvalError>> {
+    materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, vm)
 }
 
 /// Extension point allowing the host (e.g. `Jetro`) to upgrade a flat `Arc<Vec<Val>>` array
@@ -430,12 +452,19 @@ pub struct Pipeline {
     pub payload_demand: PayloadDemand,
 
     /// Tail projection that can be delayed until rows have been selected.
-    #[allow(dead_code)]
     pub late_projection: Option<LateProjection>,
 
     /// Static source traversal capabilities used to choose the access mode.
     #[allow(dead_code)]
     pub(crate) source_capabilities: SourceCapabilities,
+
+    /// Whether the source can satisfy split scan/result payload lanes without full row materialization.
+    #[allow(dead_code)]
+    pub(crate) source_payload_lanes_supported: bool,
+
+    /// Whether bounded demand can materialize only selected source rows.
+    #[allow(dead_code)]
+    pub(crate) source_selected_materialization_supported: bool,
 
     /// Access mode selected from source capabilities plus propagated pull demand.
     pub(crate) source_access: SourceAccessMode,
@@ -468,13 +497,33 @@ pub struct PipelineBody {
 }
 
 impl PipelineBody {
+    /// Builds a body from raw lowered parts, runs the stage planner, and refreshes
+    /// stage/sink kernel metadata.
+    pub(crate) fn planned(
+        stages: Vec<Stage>,
+        stage_exprs: Vec<Option<Arc<Expr>>>,
+        sink: Sink,
+    ) -> Self {
+        let kernels = classify_stage_kernels(&stages, &stage_exprs);
+        let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
+        let stage_kernels = classify_stage_kernels(&plan_result.stages, &plan_result.stage_exprs);
+        let sink_kernels = plan_result.sink.body_kernels();
+        Self {
+            stages: plan_result.stages,
+            stage_exprs: plan_result.stage_exprs,
+            sink: plan_result.sink,
+            stage_kernels,
+            sink_kernels,
+        }
+    }
+
     /// Attaches `source` to this body, producing a complete executable `Pipeline`.
     /// Computes the execution `Strategy` once here so `run_with_env` can dispatch
     /// directly without re-walking stages on every call.
     #[inline]
     pub fn with_source(self, source: Source) -> Pipeline {
         let exec_path = select_exec_path(&self.stages, &self.sink);
-        let source_demand = Pipeline::segment_source_demand(&self.stages, &self.sink);
+        let source_demand = self.source_demand();
         let payload_demand = Pipeline::segment_payload_demand(
             &self.stages,
             &self.stage_kernels,
@@ -484,6 +533,10 @@ impl PipelineBody {
         let late_projection = Pipeline::late_projection_for(&self.stages, &self.stage_kernels);
         let source_capabilities = source.capabilities();
         let source_access = source_capabilities.choose_access(source_demand.chain.pull);
+        let source_payload_lanes_supported = source_capabilities
+            .supports_payload_lanes(&payload_demand.scan_need, &payload_demand.result_need);
+        let source_selected_materialization_supported =
+            source_capabilities.supports_selected_materialization(source_demand.chain.pull);
         let fallback_boundary = Pipeline::fallback_boundary_for(&self.stages, exec_path);
         Pipeline {
             source,
@@ -492,6 +545,8 @@ impl PipelineBody {
             payload_demand,
             late_projection,
             source_capabilities,
+            source_payload_lanes_supported,
+            source_selected_materialization_supported,
             source_access,
             fallback_boundary,
             stages: self.stages,
@@ -501,6 +556,21 @@ impl PipelineBody {
             sink_kernels: self.sink_kernels,
         }
     }
+}
+
+fn classify_stage_kernels(stages: &[Stage], exprs: &[Option<Arc<Expr>>]) -> Vec<BodyKernel> {
+    stages
+        .iter()
+        .enumerate()
+        .map(|(idx, stage)| {
+            exprs
+                .get(idx)
+                .and_then(|expr| expr.as_ref())
+                .map(|expr| BodyKernel::classify_expr(expr))
+                .filter(|kernel| !matches!(kernel, BodyKernel::Generic))
+                .unwrap_or_else(|| stage.body_kernel())
+        })
+        .collect()
 }
 
 impl Pipeline {
@@ -960,6 +1030,62 @@ mod tests {
     }
 
     #[test]
+    fn compiled_map_plan_preserves_preclassified_kernels() {
+        use serde_json::json;
+
+        let p = lower_query("$.rows.map(items.map(qty * price).sum())").unwrap();
+        assert_eq!(p.exec_path, PhysicalExecPath::Composed);
+        let Stage::CompiledMap(plan) = &p.stages[0] else {
+            panic!("expected compiled nested map stage");
+        };
+        assert_eq!(plan.stages.len(), plan.stage_kernels.len());
+        assert_eq!(plan.stages.len(), plan.stage_exprs.len());
+        assert!(matches!(plan.source, Source::FieldChain { .. }));
+        assert!(plan
+            .stage_kernels
+            .iter()
+            .chain(plan.sink_kernels.iter())
+            .any(|kernel| matches!(kernel, BodyKernel::Binary { .. })));
+
+        let doc: Val = (&json!({
+            "rows": [
+                {"items": [{"qty": 2, "price": 10}, {"qty": 3, "price": 5}]},
+                {"items": [{"qty": 1, "price": 7}]}
+            ]
+        }))
+            .into();
+        let out = p.run(&doc).unwrap();
+        assert!(crate::util::vals_deep_eq(
+            &out,
+            &Val::arr(vec![Val::Int(35), Val::Int(7)])
+        ));
+    }
+
+    #[test]
+    fn compiled_map_receiver_plan_runs_from_current_row() {
+        use serde_json::json;
+
+        let p = lower_query("$.groups.map(@.map(qty * price).sum())").unwrap();
+        let Stage::CompiledMap(plan) = &p.stages[0] else {
+            panic!("expected compiled nested map stage");
+        };
+        assert!(matches!(plan.source, Source::Receiver(_)));
+
+        let doc: Val = (&json!({
+            "groups": [
+                [{"qty": 2, "price": 10}, {"qty": 3, "price": 5}],
+                [{"qty": 1, "price": 7}]
+            ]
+        }))
+            .into();
+        let out = p.run(&doc).unwrap();
+        assert!(crate::util::vals_deep_eq(
+            &out,
+            &Val::arr(vec![Val::Int(35), Val::Int(7)])
+        ));
+    }
+
+    #[test]
     fn run_terminal_count_predicate() {
         use serde_json::json;
         let doc: Val = (&json!({"orders":[
@@ -1076,6 +1202,55 @@ mod tests {
     }
 
     #[test]
+    fn keyed_reducer_pipelines_match_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": 1},
+                {"status": "shipped", "id": 2},
+                {"status": "pending", "id": 3}
+            ]
+        });
+        assert_pipeline_matches_vm("$.orders.group_by(status)", doc.clone());
+        assert_pipeline_matches_vm("$.orders.count_by(status)", doc.clone());
+        assert_pipeline_matches_vm("$.orders.index_by(id)", doc);
+    }
+
+    #[test]
+    fn keyed_reducer_materialized_fallback_matches_vm() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": "a"},
+                {"status": "shipped", "id": "b"},
+                {"status": "pending", "id": "c"}
+            ]
+        });
+        assert_pipeline_matches_vm("$.orders.count_by(status.upper())", doc.clone());
+        assert_pipeline_matches_vm("$.orders.index_by(id.upper())", doc);
+    }
+
+    #[test]
+    fn keyed_reducers_preserve_upstream_projection_rows() {
+        use serde_json::json;
+        let doc = json!({
+            "orders": [
+                {"status": "pending", "id": 1, "price": 10},
+                {"status": "shipped", "id": 2, "price": 20},
+                {"status": "pending", "id": 3, "price": 30}
+            ]
+        });
+        assert_pipeline_matches_vm(
+            "$.orders.map({status: status, label: id}).group_by(status)",
+            doc.clone(),
+        );
+        assert_pipeline_matches_vm(
+            "$.orders.map({id: id, label: status}).index_by(id)",
+            doc,
+        );
+    }
+
+    #[test]
     fn demand_optimizer_pulls_filter_through_map_for_count() {
         let p = lower_query("$.orders.map(total).filter(@ > 10).count()").unwrap();
         assert_eq!(p.stages.len(), 1);
@@ -1156,6 +1331,8 @@ mod tests {
 
     #[test]
     fn payload_demand_delays_map_for_last_selection() {
+        use serde_json::json;
+
         let p = lower_query("$.books.map(isbn).last()").unwrap();
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
@@ -1166,7 +1343,7 @@ mod tests {
         );
         assert!(matches!(
             p.source_access,
-            SourceAccessMode::Reverse { outputs: 1 }
+            SourceAccessMode::IndexedFromEnd(0)
         ));
         assert!(!p.source_capabilities.tape_view);
         assert!(matches!(
@@ -1177,6 +1354,124 @@ mod tests {
         assert!(
             matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
         );
+        assert_pipeline_matches_vm(
+            "$.books.map(isbn).last()",
+            json!({
+                "books": [
+                    {"isbn": "first"},
+                    {"isbn": "last"}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn payload_demand_delays_map_for_first_and_nth_selection() {
+        let first = lower_query("$.books.map(isbn).first()").unwrap();
+        let first_demand = first.payload_demand();
+        assert_eq!(demand_paths(&first_demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&first_demand.result_need), vec!["isbn"]);
+        assert_eq!(
+            first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+        assert!(matches!(first.source_access, SourceAccessMode::Indexed(0)));
+        assert!(matches!(
+            first.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+
+        let nth = lower_query("$.books.map(isbn).nth(2)").unwrap();
+        let nth_demand = nth.payload_demand();
+        assert_eq!(demand_paths(&nth_demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&nth_demand.result_need), vec!["isbn"]);
+        assert_eq!(
+            nth.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::NthInput(2)
+        );
+        assert!(matches!(nth.source_access, SourceAccessMode::Indexed(2)));
+        assert!(matches!(
+            nth.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn late_projection_positional_sinks_match_vm() {
+        use serde_json::json;
+
+        let doc = json!({
+            "books": [
+                {"isbn": "a"},
+                {"isbn": "b"},
+                {"isbn": "c"}
+            ]
+        });
+        for query in [
+            "$.books.map(isbn).first()",
+            "$.books.map(isbn).take(2)",
+            "$.books.map(isbn).nth(1)",
+        ] {
+            assert_pipeline_matches_vm(query, doc.clone());
+        }
+    }
+
+    #[test]
+    fn positional_sinks_choose_direct_source_access() {
+        assert!(matches!(
+            lower_query("$.books.map(isbn).first()")
+                .unwrap()
+                .source_access,
+            SourceAccessMode::Indexed(0)
+        ));
+        assert!(matches!(
+            lower_query("$.books.map(isbn).nth(2)").unwrap().source_access,
+            SourceAccessMode::Indexed(2)
+        ));
+        assert!(matches!(
+            lower_query("$.books.map(isbn).last()").unwrap().source_access,
+            SourceAccessMode::IndexedFromEnd(0)
+        ));
+    }
+
+    #[test]
+    fn compact_participates_in_filter_like_demand() {
+        use serde_json::json;
+        let p = lower_query("$.xs.compact().last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+
+        let root = Val::from(&json!({"xs": [null, 1, null, 2]}));
+        assert_eq!(p.run(&root).unwrap(), Val::Int(2));
+    }
+
+    #[test]
+    fn compact_first_scans_until_non_null_output() {
+        use serde_json::json;
+        let p = lower_query("$.xs.compact().first()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::UntilOutput(1)
+        );
+        assert!(matches!(p.source_access, SourceAccessMode::Forward));
+
+        let root = Val::from(&json!({"xs": [null, null, 3, 4]}));
+        assert_eq!(p.run(&root).unwrap(), Val::Int(3));
+    }
+
+    #[test]
+    fn remove_value_participates_in_filter_like_demand() {
+        use serde_json::json;
+        let p = lower_query("$.xs.remove(2).last()").unwrap();
+        assert_eq!(
+            p.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(1)
+        );
+
+        let root = Val::from(&json!({"xs": [1, 2, 3, 2]}));
+        assert_eq!(p.run(&root).unwrap(), Val::Int(3));
     }
 
     #[test]
@@ -1200,6 +1495,137 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_accepts_object_key_builtin_stages() {
+        let stages = vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::HasKey,
+            crate::builtins::BuiltinArgs::Str(Arc::from("isbn")),
+        ))];
+        let projection = Pipeline::late_projection_for(&stages, &[]).unwrap();
+        assert_eq!(projection.prefix_len, 0);
+        assert!(matches!(
+            &projection.kernel,
+            BodyKernel::BuiltinCall { call, .. } if call.method == BuiltinMethod::HasKey
+        ));
+    }
+
+    #[test]
+    fn literal_path_helpers_store_preparsed_paths() {
+        let p = lower_query(r#"$.books.map(@.get_path("user.name")).last()"#).unwrap();
+        assert!(matches!(
+            p.late_projection.as_ref().map(|projection| &projection.kernel),
+            Some(BodyKernel::BuiltinCall { call, .. })
+                if matches!(call.args, crate::builtins::BuiltinArgs::Path(_))
+        ));
+    }
+
+    #[test]
+    fn late_projection_composes_chained_maps() {
+        let query = "$.books.map(user).map(name).last()";
+        let p = lower_query(query).unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&demand.result_need), vec!["user.name"]);
+        assert!(p.source_capabilities.field_key_read);
+        assert!(p.source_capabilities.selected_row_materialization);
+        assert!(p.source_payload_lanes_supported);
+        assert!(p.source_selected_materialization_supported);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+        assert!(
+            matches!(
+                p.late_projection.as_ref().map(|projection| &projection.kernel),
+                Some(BodyKernel::FieldChain(keys)) if keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>() == ["user", "name"]
+            ),
+            "{:?}",
+            p.late_projection
+        );
+    }
+
+    #[test]
+    fn payload_demand_prefixes_scan_and_result_lanes_through_map() {
+        let p = lower_query("$.books.map(user).filter(@.active).map(name).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["user.active"]);
+        assert_eq!(demand_paths(&demand.result_need), vec!["name"]);
+        assert!(p.source_payload_lanes_supported);
+        assert!(p.source_selected_materialization_supported);
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn selected_materialization_planning_tracks_pull_demand() {
+        assert!(lower_query("$.books.map(isbn).first()")
+            .unwrap()
+            .source_selected_materialization_supported);
+        assert!(lower_query("$.books.filter(price > 20).map(isbn).take(2)")
+            .unwrap()
+            .source_selected_materialization_supported);
+        assert!(!lower_query("$.books.map(isbn)")
+            .unwrap()
+            .source_selected_materialization_supported);
+    }
+
+    #[test]
+    fn payload_demand_prefixes_object_projection_fields() {
+        let p = lower_query("$.books.map(@.user).map({name, city: address.city}).last()").unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(
+            demand_paths(&demand.result_need),
+            vec!["name", "address.city"]
+        );
+        assert!(p.source_payload_lanes_supported);
+    }
+
+    #[test]
+    fn late_projection_guard_respects_prefix_and_barriers() {
+        let p = lower_query("$.books.filter(price > 20).map(isbn).last()").unwrap();
+        assert!(p.can_apply_late_projection_from(0));
+        assert!(p.can_apply_late_projection_from(1));
+        assert!(!p.can_apply_late_projection_from(2));
+
+        let p = lower_query("$.books.unique().map(isbn).last()").unwrap();
+        assert!(matches!(
+            p.fallback_boundary,
+            FallbackBoundary::LegacyStage { index: 0 }
+        ));
+        assert!(!p.can_apply_late_projection_from(0));
+    }
+
+    #[test]
+    fn sink_late_projection_support_is_demand_aware() {
+        use crate::plan::demand::PullDemand;
+
+        assert!(Sink::Collect.supports_late_projection(PullDemand::FirstInput(2)));
+        assert!(!Sink::Collect.supports_late_projection(PullDemand::LastInput(2)));
+        assert!(Sink::Nth(3).supports_late_projection(PullDemand::NthInput(3)));
+        assert!(Sink::Terminal(BuiltinMethod::Last).supports_late_projection(PullDemand::LastInput(1)));
+        assert!(!Sink::Reducer(ReducerSpec::count()).supports_late_projection(PullDemand::All));
+    }
+
+    #[test]
+    fn object_lambda_stages_preserve_positional_demand() {
+        for query in [
+            "$.books.transform_values(@).last()",
+            "$.books.transform_keys(@).last()",
+            "$.books.filter_values(@ != null).last()",
+            "$.books.filter_keys(@ != \"debug\").last()",
+        ] {
+            let p = lower_query(query).unwrap();
+            assert_eq!(
+                p.source_demand().chain.pull,
+                crate::plan::demand::PullDemand::LastInput(1),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn payload_demand_tracks_sort_filter_project_lanes() {
         let p = lower_query("$.books.sort(-score).filter(price > 20).map(isbn).last()").unwrap();
         let demand = p.payload_demand();
@@ -1213,6 +1639,24 @@ mod tests {
         assert!(
             matches!(p.late_projection.as_ref().map(|projection| &projection.kernel), Some(BodyKernel::FieldRead(field)) if field.as_ref() == "isbn")
         );
+    }
+
+    #[test]
+    fn payload_demand_tracks_keyed_reducer_lanes() {
+        let count_by = lower_query("$.orders.count_by(status)").unwrap();
+        let demand = count_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["status"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
+
+        let group_by = lower_query("$.orders.group_by(status)").unwrap();
+        let demand = group_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["*"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
+
+        let index_by = lower_query("$.orders.index_by(id)").unwrap();
+        let demand = index_by.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), vec!["*"]);
+        assert_eq!(demand_paths(&demand.result_need), Vec::<String>::new());
     }
 
     #[test]
@@ -1353,6 +1797,50 @@ mod tests {
     }
 
     #[test]
+    fn descending_sort_take_map_projects_only_after_topk_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort_by(-score).take(2).map(isbn)";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortTopK(2)));
+
+        assert_pipeline_matches_vm_query(
+            query,
+            "$.rows.sort(-score).first(2).map(isbn)",
+            json!({
+                "rows": [
+                    {"isbn": "low", "score": 10},
+                    {"isbn": "top", "score": 30},
+                    {"isbn": "mid", "score": 20}
+                ]
+            }),
+        );
+    }
+
+    #[test]
+    fn ascending_sort_last_map_projects_only_after_bottomk_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(score).map(isbn).last(2)";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortBottomK(2)));
+
+        assert_pipeline_matches_vm_query(
+            query,
+            "$.rows.sort(score).map(isbn).last(2)",
+            json!({
+                "rows": [
+                    {"isbn": "low", "score": 10},
+                    {"isbn": "top", "score": 30},
+                    {"isbn": "mid", "score": 20}
+                ]
+            }),
+        );
+    }
+
+    #[test]
     fn sort_take_while_take_uses_prefix_demand_without_key_correlation() {
         let p = lower_query("$.rows.sort_by(-price).take_while(price > 10).take(2)").unwrap();
         let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
@@ -1415,6 +1903,29 @@ mod tests {
     }
 
     #[test]
+    fn sort_filter_map_last_many_uses_lazy_until_output_and_matches_vm() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).filter(price > 20).map(isbn).last(2)";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortUntilOutput(2)));
+
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "rows": [
+                    {"isbn": "top-fails", "score": 100, "price": 10},
+                    {"isbn": "high-pass", "score": 90, "price": 30},
+                    {"isbn": "mid-fails", "score": 80, "price": 5},
+                    {"isbn": "low-pass", "score": 70, "price": 40},
+                    {"isbn": "tail-pass", "score": 60, "price": 50}
+                ]
+            }),
+        );
+    }
+
+    #[test]
     fn sort_drop_while_filter_map_last_preserves_prefix_boundary() {
         use serde_json::json;
 
@@ -1438,6 +1949,33 @@ mod tests {
                     {"isbn": "answer", "name": "tail_test", "score": 70, "price": 50}
                 ]
             }),
+        );
+    }
+
+    #[test]
+    fn prefix_while_terminal_sinks_keep_safe_source_demand() {
+        let take_first = lower_query("$.rows.take_while(price > 20).first()").unwrap();
+        assert_eq!(
+            take_first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(1)
+        );
+
+        let take_last = lower_query("$.rows.take_while(price > 20).last()").unwrap();
+        assert_eq!(
+            take_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let drop_first = lower_query("$.rows.drop_while(price < 20).first()").unwrap();
+        assert_eq!(
+            drop_first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+
+        let drop_last = lower_query("$.rows.drop_while(price < 20).last()").unwrap();
+        assert_eq!(
+            drop_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
         );
     }
 
@@ -1481,6 +2019,28 @@ mod tests {
                 ]
             }),
         );
+    }
+
+    #[test]
+    fn sort_scalar_element_last_can_use_bounded_bottomk() {
+        use serde_json::json;
+
+        let query = "$.rows.sort(-score).has_key(\"isbn\").last()";
+        let p = lower_query(query).unwrap();
+        let strategies = compute_strategies_with_kernels(&p.stages, &p.stage_kernels, &p.sink);
+        assert!(matches!(strategies[0], StageStrategy::SortBottomK(1)));
+
+        let out: serde_json::Value = p
+            .run(&Val::from(&json!({
+                "rows": [
+                    {"isbn": "top", "score": 100},
+                    {"score": 70},
+                    {"isbn": "mid", "score": 90}
+                ]
+            })))
+            .unwrap()
+            .into();
+        assert_eq!(out, json!(false));
     }
 
     #[test]
@@ -1689,6 +2249,14 @@ mod tests {
         );
         let take_json: serde_json::Value = take.run(&doc).unwrap().into();
         assert_eq!(take_json, json!([40, 30]));
+
+        let take_zero = lower_query("$.xs.reverse().take(0)").unwrap();
+        assert_eq!(
+            take_zero.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::LastInput(0)
+        );
+        let take_zero_json: serde_json::Value = take_zero.run(&doc).unwrap().into();
+        assert_eq!(take_zero_json, json!([]));
     }
 
     #[test]
@@ -1768,6 +2336,17 @@ mod tests {
 
         let last = lower_query("$.xs.map(@ + 1).last(2)").unwrap();
         assert_eq!(last.exec_path, PhysicalExecPath::Indexed);
+
+        let first_one = lower_query("$.xs.map(@ + 1).first(1)").unwrap();
+        assert_eq!(first_one.exec_path, PhysicalExecPath::Indexed);
+        assert!(matches!(first_one.source_access, SourceAccessMode::Indexed(0)));
+
+        let last_one = lower_query("$.xs.map(@ + 1).last(1)").unwrap();
+        assert_eq!(last_one.exec_path, PhysicalExecPath::Indexed);
+        assert!(matches!(
+            last_one.source_access,
+            SourceAccessMode::IndexedFromEnd(0)
+        ));
     }
 
     #[test]
@@ -1797,6 +2376,86 @@ mod tests {
             last.source_demand().chain.pull,
             crate::plan::demand::PullDemand::LastInput(3)
         );
+    }
+
+    #[test]
+    fn positional_terminal_sinks_respect_prefix_slices() {
+        use serde_json::json;
+        let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
+
+        let take_last = lower_query("$.xs.take(2).last()").unwrap();
+        assert_eq!(
+            take_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(2)
+        );
+        let out: serde_json::Value = take_last.run(&root).unwrap().into();
+        assert_eq!(out, json!(2));
+
+        let skip_last = lower_query("$.xs.skip(2).last()").unwrap();
+        assert_eq!(
+            skip_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::All
+        );
+        let out: serde_json::Value = skip_last.run(&root).unwrap().into();
+        assert_eq!(out, json!(4));
+    }
+
+    #[test]
+    fn positional_terminal_sinks_respect_zero_width_slices() {
+        use serde_json::json;
+        let root = Val::from(&json!({"xs": [1, 2, 3, 4]}));
+
+        let take_first = lower_query("$.xs.take(0).first()").unwrap();
+        assert_eq!(
+            take_first.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(0)
+        );
+        let out: serde_json::Value = take_first.run(&root).unwrap().into();
+        assert_eq!(out, json!(null));
+
+        let take_last = lower_query("$.xs.take(0).last()").unwrap();
+        assert_eq!(
+            take_last.source_demand().chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(0)
+        );
+        let out: serde_json::Value = take_last.run(&root).unwrap().into();
+        assert_eq!(out, json!(null));
+    }
+
+    #[test]
+    fn select_many_sink_demand_is_directional() {
+        let first = Sink::SelectMany {
+            n: 4,
+            from_end: false,
+        }
+        .demand();
+        assert_eq!(
+            first.chain.pull,
+            crate::plan::demand::PullDemand::FirstInput(4)
+        );
+
+        let last = Sink::SelectMany {
+            n: 2,
+            from_end: true,
+        }
+        .demand();
+        assert_eq!(
+            last.chain.pull,
+            crate::plan::demand::PullDemand::LastInput(2)
+        );
+        assert!(last.chain.order);
+    }
+
+    #[test]
+    fn nth_sink_demand_is_indexed_and_order_free() {
+        let demand = Sink::Nth(3).demand();
+        assert_eq!(
+            demand.chain.pull,
+            crate::plan::demand::PullDemand::NthInput(3)
+        );
+        assert_eq!(demand.chain.value, crate::plan::demand::ValueNeed::Whole);
+        assert!(!demand.chain.order);
+        assert_eq!(demand.positional, Some(Position::First));
     }
 
     #[test]
@@ -1939,6 +2598,24 @@ mod tests {
     }
 
     #[test]
+    fn scalar_and_path_element_stages_preserve_positional_demand() {
+        for query in [
+            "$.rows.has_key(\"isbn\").last()",
+            "$.rows.has_path(\"isbn\").last()",
+            "$.rows.get_path(\"isbn\").last()",
+            "$.rows.upper().last()",
+            "$.rows.byte_len().last()",
+        ] {
+            let p = lower_query(query).unwrap();
+            assert_eq!(
+                p.source_demand().chain.pull,
+                crate::plan::demand::PullDemand::LastInput(1),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn chunk_and_window_bounded_demand_match_vm() {
         use serde_json::json;
         let doc: Val = (&json!({"xs": [1, 2, 3, 4, 5, 6, 7, 8]})).into();
@@ -2005,6 +2682,11 @@ mod tests {
             crate::plan::demand::PullDemand::All
         );
         assert_eq!(
+            any.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
+        assert!(any.source_demand().has_scalar_short_circuit());
+        assert_eq!(
             any.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
         );
@@ -2015,6 +2697,15 @@ mod tests {
             all.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
         );
+        assert_eq!(
+            all.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilFailure
+        );
+        assert!(all.source_demand().has_scalar_short_circuit());
+        assert_eq!(
+            all.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
 
         let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
         assert!(
@@ -2024,11 +2715,25 @@ mod tests {
             find_index.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
         );
+        assert_eq!(
+            find_index.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
+        assert!(find_index.source_demand().has_scalar_short_circuit());
+        assert_eq!(
+            find_index.source_demand().chain.value,
+            crate::plan::demand::ValueNeed::Predicate
+        );
 
         let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
         assert!(
             matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::IndicesWhere)
         );
+        assert_eq!(
+            indices_where.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::None
+        );
+        assert!(!indices_where.source_demand().has_scalar_short_circuit());
         assert_eq!(
             indices_where.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Predicate
@@ -2110,16 +2815,30 @@ mod tests {
             includes.source_demand().chain.value,
             crate::plan::demand::ValueNeed::Whole
         );
+        assert_eq!(
+            includes.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
 
         let index = lower_query("$.xs.index(\"urgent\")").unwrap();
         assert!(
             matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index)
         );
+        assert_eq!(
+            index.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::UntilMatch
+        );
+        assert!(index.source_demand().has_scalar_short_circuit());
 
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
             matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
         );
+        assert_eq!(
+            indices.source_demand().sink_result,
+            crate::plan::demand::SinkResultDemand::None
+        );
+        assert!(!indices.source_demand().has_scalar_short_circuit());
 
         let dynamic = lower_query("$.xs.includes($.needle)").unwrap();
         assert!(matches!(dynamic.sink, Sink::Membership(ref spec)

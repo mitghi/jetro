@@ -1,19 +1,21 @@
-//! Demand propagation adapters for parser-facing chain operators.
+//! Demand propagation adapters for planner-facing chain operators.
 //!
-//! `parse::chain_ir` owns only the syntax-adjacent operator description.
-//! This module maps that representation onto the shared planning demand model.
+//! `plan::chain_ir` owns only the operator description. This module maps that
+//! representation onto the shared planning demand model.
 
 use crate::{
-    builtins::{
-        registry::propagate_demand as propagate_builtin_demand, BuiltinCardinality, BuiltinCategory,
+    builtins::registry::propagate_demand as propagate_builtin_demand,
+    plan::{
+        chain_ir::{ChainOp, MatchRole},
+        demand::{Demand, DemandOperator, PullDemand},
     },
-    parse::chain_ir::{ChainOp, MatchRole},
-    plan::demand::{Demand, DemandOperator, PullDemand},
 };
+#[cfg(test)]
+use crate::builtins::BuiltinCardinality;
 
 /// Describes whether a pipeline slot carries a homogeneous stream, a single
 /// scalar result, or an unconstrained mix of values.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
     /// No constraint on the kind of value in this slot.
@@ -26,7 +28,7 @@ pub enum ValueKind {
 
 /// Static specification describing the kind of values a `ChainOp` consumes
 /// and produces, along with its cardinality and ordering guarantees.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpSpec {
     /// Kind of values the operator reads from its source.
@@ -46,8 +48,13 @@ impl ChainOp {
     }
 
     /// Derive the static `OpSpec` for this operator by consulting builtin registry metadata.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn spec(&self) -> OpSpec {
+        use crate::builtins::{
+            registry::{builtin_cardinality, builtin_category, effective_pipeline_order_effect},
+            BuiltinCardinality, BuiltinCategory, BuiltinPipelineOrderEffect,
+        };
+
         match self {
             ChainOp::Match { role } => {
                 let cardinality = match role {
@@ -63,7 +70,7 @@ impl ChainOp {
                 }
             }
             ChainOp::Builtin { id, .. } => {
-                let Some(method) = id.method() else {
+                let Some(category) = builtin_category(*id) else {
                     return OpSpec {
                         input: ValueKind::Any,
                         output: ValueKind::Any,
@@ -71,8 +78,9 @@ impl ChainOp {
                         preserves_order: true,
                     };
                 };
-                let spec = method.spec();
-                let input = match spec.category {
+                let cardinality =
+                    builtin_cardinality(*id).unwrap_or(BuiltinCardinality::OneToOne);
+                let input = match category {
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
                     | BuiltinCategory::StreamingExpand
@@ -82,7 +90,7 @@ impl ChainOp {
                     | BuiltinCategory::Relational => ValueKind::Stream,
                     _ => ValueKind::Any,
                 };
-                let output = match spec.category {
+                let output = match category {
                     BuiltinCategory::Reducer | BuiltinCategory::Positional => ValueKind::Scalar,
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
@@ -92,9 +100,11 @@ impl ChainOp {
                 OpSpec {
                     input,
                     output,
-                    cardinality: spec.cardinality,
-                    preserves_order: spec.view_native
-                        || !matches!(spec.cardinality, BuiltinCardinality::Barrier),
+                    cardinality,
+                    preserves_order: !matches!(
+                        effective_pipeline_order_effect(*id, true),
+                        BuiltinPipelineOrderEffect::Blocks
+                    ),
                 }
             }
         }
@@ -175,6 +185,24 @@ mod tests {
     fn match_multi_classifies_as_flat_map() {
         let spec = ChainOp::match_role(MatchRole::Multi).spec();
         assert_eq!(spec.cardinality, BuiltinCardinality::Expanding);
+    }
+
+    #[test]
+    fn builtin_specs_come_from_registry_metadata() {
+        let filter = op(BuiltinMethod::Filter).spec();
+        assert_eq!(filter.input, ValueKind::Stream);
+        assert_eq!(filter.output, ValueKind::Stream);
+        assert_eq!(filter.cardinality, BuiltinCardinality::Filtering);
+        assert!(filter.preserves_order);
+
+        let count = op(BuiltinMethod::Count).spec();
+        assert_eq!(count.input, ValueKind::Stream);
+        assert_eq!(count.output, ValueKind::Scalar);
+        assert_eq!(count.cardinality, BuiltinCardinality::Reducing);
+
+        let sort = op(BuiltinMethod::Sort).spec();
+        assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
+        assert!(!sort.preserves_order);
     }
 
     #[test]
@@ -285,6 +313,38 @@ mod tests {
     }
 
     #[test]
+    fn scalar_has_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::Has), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn scalar_has_key_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::HasKey), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn scalar_has_path_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::HasPath), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn scalar_missing_preserves_positional_demand() {
+        let ops = [op(BuiltinMethod::Missing), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
     fn filter_nth_falls_back_to_all_input() {
         let ops = [op(BuiltinMethod::Filter), op_usize(BuiltinMethod::Nth, 2)];
         let demand = source_demand(&ops, Demand::RESULT);
@@ -368,6 +428,46 @@ mod tests {
         let ops = [op_usize(BuiltinMethod::Window, 4), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
+    }
+
+    #[test]
+    fn expanding_builtins_are_full_input_barriers_for_positional_sinks() {
+        for method in [
+            BuiltinMethod::Flatten,
+            BuiltinMethod::Explode,
+            BuiltinMethod::Split,
+            BuiltinMethod::Lines,
+            BuiltinMethod::Words,
+            BuiltinMethod::Chars,
+            BuiltinMethod::CharsOf,
+            BuiltinMethod::Bytes,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn barrier_builtins_request_full_ordered_input() {
+        for method in [
+            BuiltinMethod::Append,
+            BuiltinMethod::Prepend,
+            BuiltinMethod::Diff,
+            BuiltinMethod::Intersect,
+            BuiltinMethod::Union,
+            BuiltinMethod::Join,
+            BuiltinMethod::Zip,
+            BuiltinMethod::ZipLongest,
+            BuiltinMethod::Fold,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
     }
 
     #[test]

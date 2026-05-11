@@ -9,7 +9,7 @@ use crate::builtins::{
     BuiltinViewOutputMode, BuiltinViewStage,
 };
 use crate::data::value::Val;
-use crate::plan::demand::PullDemand;
+use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
 
 use super::{MembershipSinkOp, MembershipSinkTarget, PipelineBody, PredicateSinkOp, Stage};
@@ -25,6 +25,12 @@ pub(crate) struct SourceCapabilities {
     pub indexed_array_child: bool,
     /// Source rows can remain in the borrowed tape/view domain.
     pub tape_view: bool,
+    /// Source can read object fields by key without materialising the whole object row.
+    pub field_key_read: bool,
+    /// Source can skip unneeded nested subtrees while scanning.
+    pub subtree_skip: bool,
+    /// Source can materialise only rows selected by the sink/predicate path.
+    pub selected_row_materialization: bool,
     /// Source can fall back to materialising owned values.
     pub materialized_fallback: bool,
 }
@@ -36,6 +42,9 @@ impl SourceCapabilities {
         reverse_stream: true,
         indexed_array_child: true,
         tape_view: true,
+        field_key_read: true,
+        subtree_skip: true,
+        selected_row_materialization: true,
         materialized_fallback: true,
     };
 
@@ -45,6 +54,9 @@ impl SourceCapabilities {
         reverse_stream: true,
         indexed_array_child: true,
         tape_view: false,
+        field_key_read: true,
+        subtree_skip: false,
+        selected_row_materialization: true,
         materialized_fallback: true,
     };
 
@@ -52,6 +64,10 @@ impl SourceCapabilities {
     pub(crate) fn choose_access(self, demand: PullDemand) -> SourceAccessMode {
         match demand {
             PullDemand::NthInput(idx) if self.indexed_array_child => SourceAccessMode::Indexed(idx),
+            PullDemand::LastInput(1) if self.indexed_array_child => {
+                SourceAccessMode::IndexedFromEnd(0)
+            }
+            PullDemand::FirstInput(1) if self.indexed_array_child => SourceAccessMode::Indexed(0),
             PullDemand::LastInput(n) if self.reverse_stream => {
                 SourceAccessMode::Reverse { outputs: n }
             }
@@ -59,6 +75,71 @@ impl SourceCapabilities {
             _ if self.forward_stream => SourceAccessMode::Forward,
             _ => SourceAccessMode::MaterializedFallback,
         }
+    }
+
+    /// Chooses source access for a view prefix, demoting direct seeks when the
+    /// prefix can change cardinality and physical positions no longer match
+    /// semantic output positions.
+    pub(crate) fn choose_view_access(
+        self,
+        demand: PullDemand,
+        stages: &[ViewStageCapability],
+    ) -> SourceAccessMode {
+        let access = self.choose_access(demand);
+        if matches!(access, SourceAccessMode::IndexedFromEnd(_))
+            && !ViewStageCapability::all_preserve_cardinality(stages)
+        {
+            if self.reverse_stream {
+                return SourceAccessMode::Reverse { outputs: 1 };
+            }
+            if self.forward_stream {
+                return SourceAccessMode::Forward;
+            }
+        }
+        if matches!(access, SourceAccessMode::Indexed(_))
+            && !ViewStageCapability::all_preserve_cardinality(stages)
+        {
+            if self.forward_stream {
+                return SourceAccessMode::Forward;
+            }
+        }
+        access
+    }
+
+    /// Returns true when this source can satisfy split payload lanes without
+    /// materialising every row as a full owned value.
+    pub(crate) fn supports_payload_lanes(
+        self,
+        scan_need: &FieldDemand,
+        result_need: &FieldDemand,
+    ) -> bool {
+        payload_lane_supported(scan_need, self.field_key_read, self.subtree_skip)
+            && payload_lane_supported(
+                result_need,
+                self.field_key_read,
+                self.selected_row_materialization,
+            )
+    }
+
+    /// Returns true when this source can defer owned materialization to only
+    /// rows selected by bounded or positional demand.
+    pub(crate) fn supports_selected_materialization(self, demand: PullDemand) -> bool {
+        self.selected_row_materialization
+            && matches!(
+                demand,
+                PullDemand::FirstInput(_)
+                    | PullDemand::LastInput(_)
+                    | PullDemand::NthInput(_)
+                    | PullDemand::UntilOutput(_)
+            )
+    }
+}
+
+fn payload_lane_supported(need: &FieldDemand, field_key_read: bool, whole_value_ok: bool) -> bool {
+    match need {
+        FieldDemand::None => true,
+        FieldDemand::Fields(_) => field_key_read,
+        FieldDemand::Whole => whole_value_ok,
     }
 }
 
@@ -76,8 +157,223 @@ pub(crate) enum SourceAccessMode {
     },
     /// Seek directly to this array child.
     Indexed(usize),
+    /// Seek directly to this array child counted from the end.
+    IndexedFromEnd(usize),
     /// Conservative materialised fallback.
     MaterializedFallback,
+}
+
+#[cfg(test)]
+mod source_capability_tests {
+    use super::{SourceAccessMode, SourceCapabilities, ViewStageCapability};
+    use crate::data::value::Val;
+    use crate::plan::demand::{FieldDemand, FieldSet, PullDemand};
+    use std::sync::Arc;
+
+    #[test]
+    fn indexed_sources_choose_direct_positional_access() {
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::NthInput(3)),
+            SourceAccessMode::Indexed(3)
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(2)),
+            SourceAccessMode::Reverse { outputs: 2 }
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(4)),
+            SourceAccessMode::ForwardBounded(4)
+        );
+        assert_eq!(
+            SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::FirstInput(1)),
+            SourceAccessMode::Indexed(0)
+        );
+    }
+
+    #[test]
+    fn view_array_sources_advertise_tape_backed_access() {
+        let caps = SourceCapabilities::VIEW_ARRAY;
+        assert!(caps.tape_view);
+        assert!(caps.forward_stream);
+        assert!(caps.reverse_stream);
+        assert!(caps.indexed_array_child);
+        assert!(caps.materialized_fallback);
+        assert!(caps.field_key_read);
+        assert!(caps.subtree_skip);
+        assert!(caps.selected_row_materialization);
+        assert_eq!(
+            caps.choose_access(PullDemand::NthInput(2)),
+            SourceAccessMode::Indexed(2)
+        );
+        assert_eq!(
+            caps.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
+    }
+
+    #[test]
+    fn selective_view_prefix_demotes_indexed_last_to_reverse_scan() {
+        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
+            PullDemand::LastInput(1),
+            &[ViewStageCapability::Filter { kernel: 0 }],
+        );
+
+        assert_eq!(access, SourceAccessMode::Reverse { outputs: 1 });
+    }
+
+    #[test]
+    fn selective_view_prefix_demotes_indexed_last_to_forward_without_reverse() {
+        let caps = SourceCapabilities {
+            reverse_stream: false,
+            ..SourceCapabilities::VIEW_ARRAY
+        };
+
+        let access = caps.choose_view_access(
+            PullDemand::LastInput(1),
+            &[ViewStageCapability::RemoveValue(Val::Int(2))],
+        );
+
+        assert_eq!(access, SourceAccessMode::Forward);
+    }
+
+    #[test]
+    fn cardinality_preserving_view_prefix_keeps_indexed_last_seek() {
+        let access = SourceCapabilities::VIEW_ARRAY.choose_view_access(
+            PullDemand::LastInput(1),
+            &[ViewStageCapability::Map { kernel: 0 }],
+        );
+
+        assert_eq!(access, SourceAccessMode::IndexedFromEnd(0));
+    }
+
+    #[test]
+    fn non_seekable_sources_fall_back_to_forward_streaming() {
+        let forward_only = SourceCapabilities {
+            forward_stream: true,
+            reverse_stream: false,
+            indexed_array_child: false,
+            tape_view: false,
+            field_key_read: false,
+            subtree_skip: false,
+            selected_row_materialization: false,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            forward_only.choose_access(PullDemand::NthInput(3)),
+            SourceAccessMode::Forward
+        );
+        assert_eq!(
+            forward_only.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::Forward
+        );
+        assert_eq!(
+            forward_only.choose_access(PullDemand::FirstInput(2)),
+            SourceAccessMode::ForwardBounded(2)
+        );
+    }
+
+    #[test]
+    fn indexed_without_reverse_still_scans_forward_for_last_demand() {
+        let indexed_forward = SourceCapabilities {
+            forward_stream: true,
+            reverse_stream: false,
+            indexed_array_child: true,
+            tape_view: false,
+            field_key_read: true,
+            subtree_skip: false,
+            selected_row_materialization: true,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            indexed_forward.choose_access(PullDemand::NthInput(5)),
+            SourceAccessMode::Indexed(5)
+        );
+        assert_eq!(
+            indexed_forward.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
+    }
+
+    #[test]
+    fn indexed_only_sources_seek_single_positional_demands_and_materialize_ranges() {
+        let indexed_only = SourceCapabilities {
+            forward_stream: false,
+            reverse_stream: false,
+            indexed_array_child: true,
+            tape_view: true,
+            field_key_read: true,
+            subtree_skip: true,
+            selected_row_materialization: true,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::NthInput(7)),
+            SourceAccessMode::Indexed(7)
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::FirstInput(1)),
+            SourceAccessMode::Indexed(0)
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::FirstInput(2)),
+            SourceAccessMode::MaterializedFallback
+        );
+        assert_eq!(
+            indexed_only.choose_access(PullDemand::LastInput(1)),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
+    }
+
+    #[test]
+    fn non_streaming_sources_request_materialized_fallback() {
+        let fallback_only = SourceCapabilities {
+            forward_stream: false,
+            reverse_stream: false,
+            indexed_array_child: false,
+            tape_view: false,
+            field_key_read: false,
+            subtree_skip: false,
+            selected_row_materialization: false,
+            materialized_fallback: true,
+        };
+
+        assert_eq!(
+            fallback_only.choose_access(PullDemand::All),
+            SourceAccessMode::MaterializedFallback
+        );
+    }
+
+    #[test]
+    fn payload_lanes_require_matching_source_capabilities() {
+        let fields = FieldDemand::Fields(FieldSet::single(Arc::from("price")));
+        assert!(SourceCapabilities::VIEW_ARRAY.supports_payload_lanes(&fields, &fields));
+        assert!(SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_payload_lanes(&fields, &FieldDemand::Whole));
+        assert!(!SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_payload_lanes(&FieldDemand::Whole, &fields));
+    }
+
+    #[test]
+    fn selected_materialization_requires_bounded_demand() {
+        assert!(SourceCapabilities::VIEW_ARRAY
+            .supports_selected_materialization(PullDemand::LastInput(1)));
+        assert!(SourceCapabilities::MATERIALIZED_ARRAY
+            .supports_selected_materialization(PullDemand::UntilOutput(3)));
+        assert!(!SourceCapabilities::VIEW_ARRAY.supports_selected_materialization(PullDemand::All));
+
+        let no_selected = SourceCapabilities {
+            selected_row_materialization: false,
+            ..SourceCapabilities::MATERIALIZED_ARRAY
+        };
+        assert!(!no_selected.supports_selected_materialization(PullDemand::FirstInput(1)));
+    }
 }
 
 /// Describes whether a view-pipeline stage reads the input `ValueView` or only acts on position.
@@ -138,13 +434,17 @@ pub(crate) struct ViewPrefixCapabilities {
 }
 
 /// Per-stage capability for the view execution path; each variant carries a kernel index into `stage_kernels`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) enum ViewStageCapability {
     /// Filter stage: evaluates the view-native predicate at `kernel`, keeping matching views.
     Filter {
         /// Index into `stage_kernels` for the predicate kernel.
         kernel: usize,
     },
+    /// Compact stage: keeps non-null views.
+    Compact,
+    /// Remove stage: drops views equal to a literal target.
+    RemoveValue(Val),
     /// Map stage: evaluates the view-native projection at `kernel`, yielding a sub-view.
     Map {
         /// Index into `stage_kernels` for the projection kernel.
@@ -195,6 +495,7 @@ impl ViewStageCapability {
             BuiltinViewStage::Filter if kernel_is_view_native => Some(Self::Filter {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::Compact => Some(Self::Compact),
             BuiltinViewStage::Map if kernel_is_view_native => Some(Self::Map {
                 kernel: kernel_index,
             }),
@@ -214,9 +515,11 @@ impl ViewStageCapability {
     }
 
     /// Returns the `BuiltinViewStage` tag that corresponds to this capability variant.
-    pub(crate) fn view_stage(self) -> BuiltinViewStage {
+    pub(crate) fn view_stage(&self) -> BuiltinViewStage {
         match self {
             Self::Filter { .. } => BuiltinViewStage::Filter,
+            Self::Compact => BuiltinViewStage::Compact,
+            Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
@@ -229,21 +532,31 @@ impl ViewStageCapability {
     }
 
     /// Returns whether this stage reads the input view or only acts on position.
-    pub(crate) fn input_mode(self) -> ViewInputMode {
+    pub(crate) fn input_mode(&self) -> ViewInputMode {
         view_input_mode(self.view_stage().input_mode())
     }
 
     /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
-    pub(crate) fn output_mode(self) -> ViewOutputMode {
+    pub(crate) fn output_mode(&self) -> ViewOutputMode {
         view_output_mode(self.view_stage().output_mode())
     }
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
-    pub(crate) fn materialization(self) -> ViewMaterialization {
+    pub(crate) fn materialization(&self) -> ViewMaterialization {
         if matches!(self, Self::KeyedReduce { .. }) {
             return ViewMaterialization::StageFinalValue;
         }
         ViewMaterialization::Never
+    }
+
+    /// Returns true when this view stage emits exactly one row for every input row.
+    pub(crate) fn preserves_cardinality(&self) -> bool {
+        matches!(self, Self::Map { .. })
+    }
+
+    /// Returns true when every stage in a prefix preserves input/output cardinality.
+    pub(crate) fn all_preserve_cardinality(stages: &[Self]) -> bool {
+        stages.iter().all(Self::preserves_cardinality)
     }
 }
 
@@ -469,11 +782,23 @@ mod tests {
         assert_eq!(flat_map.input_mode(), ViewInputMode::ReadsView);
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert_eq!(flat_map.materialization(), ViewMaterialization::Never);
+        assert!(!flat_map.preserves_cardinality());
+
+        let remove = ViewStageCapability::RemoveValue(Val::Int(2));
+        assert_eq!(remove.input_mode(), ViewInputMode::ReadsView);
+        assert_eq!(remove.output_mode(), ViewOutputMode::PreservesInputView);
+        assert_eq!(remove.materialization(), ViewMaterialization::Never);
+        assert!(!remove.preserves_cardinality());
 
         let take = ViewStageCapability::Take(2);
         assert_eq!(take.input_mode(), ViewInputMode::SkipsViewRead);
         assert_eq!(take.output_mode(), ViewOutputMode::PreservesInputView);
         assert_eq!(take.materialization(), ViewMaterialization::Never);
+        assert!(!take.preserves_cardinality());
+
+        assert!(map.preserves_cardinality());
+        assert!(!filter.preserves_cardinality());
+        assert!(!ViewStageCapability::Compact.preserves_cardinality());
     }
 
     #[test]
@@ -503,12 +828,26 @@ mod tests {
         }
         .view_capability(8, None)
         .unwrap();
+        let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Compact,
+            crate::builtins::BuiltinArgs::None,
+        ))
+        .view_capability(9, None)
+        .unwrap();
+        let remove = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Remove,
+            crate::builtins::BuiltinArgs::Val(Val::Int(2)),
+        ))
+        .view_capability(10, None)
+        .unwrap();
 
         assert!(matches!(filter, ViewStageCapability::Filter { kernel: 4 }));
         assert_eq!(map.output_mode(), ViewOutputMode::BorrowedSubview);
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
+        assert!(matches!(compact, ViewStageCapability::Compact));
+        assert!(matches!(remove, ViewStageCapability::RemoveValue(Val::Int(2))));
         let cancel = crate::builtins::BuiltinMethod::Reverse
             .spec()
             .cancellation
@@ -785,6 +1124,38 @@ mod tests {
         let prefix = view_prefix_capabilities(&body).unwrap();
         assert_eq!(prefix.consumed_stages, 2);
         assert_eq!(prefix.stages.len(), 2);
+    }
+
+    #[test]
+    fn view_prefix_keeps_remove_value_before_materializing_stage() {
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    BuiltinViewStage::Map,
+                ),
+                Stage::Builtin(crate::exec::pipeline::PipelineBuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Remove,
+                    args: crate::builtins::BuiltinArgs::Val(Val::Int(2)),
+                }),
+                Stage::Builtin(crate::exec::pipeline::PipelineBuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Upper,
+                    args: crate::builtins::BuiltinArgs::None,
+                }),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("id"))],
+            sink_kernels: Vec::new(),
+        };
+
+        let prefix = view_prefix_capabilities(&body).unwrap();
+        assert_eq!(prefix.consumed_stages, 2);
+        assert!(matches!(prefix.stages[0], ViewStageCapability::Map { kernel: 0 }));
+        assert!(matches!(
+            prefix.stages[1],
+            ViewStageCapability::RemoveValue(Val::Int(2))
+        ));
     }
 }
 

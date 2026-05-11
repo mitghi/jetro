@@ -11,14 +11,15 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
 use crate::builtins::{
-    BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator, BuiltinViewStage,
+    BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
-use crate::{data::context::EvalError, data::value::Val};
+use crate::data::value::Val;
 
 use super::{
-    expr_label, plan_with_exprs, plan_with_kernels, sink_name, source_name, trace_enabled,
-    BodyKernel, Pipeline, PipelineBody, Plan, Sink, SortSpec, Source, Stage,
+    expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
+    PipelineBody, Plan, Sink, SortSpec, Source, Stage,
 };
 
 impl Pipeline {
@@ -102,29 +103,7 @@ impl Pipeline {
             sink_kernels: Vec::new(),
         };
         rewrite(&mut p);
-        let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
-            stages
-                .iter()
-                .map(|s| {
-                    s.body_program()
-                        .map(BodyKernel::classify)
-                        .unwrap_or(BodyKernel::Generic)
-                })
-                .collect()
-        };
-        let kernels = classify_kernels(&p.stages);
-        let plan_result = plan_with_exprs(
-            p.stages.clone(),
-            p.stage_exprs.clone(),
-            &kernels,
-            p.sink.clone(),
-        );
-        p.stages = plan_result.stages;
-        p.stage_exprs = plan_result.stage_exprs;
-        p.sink = plan_result.sink;
-        p.stage_kernels = classify_kernels(&p.stages);
-        p.sink_kernels = sink_kernels(&p.sink);
-        Some(p)
+        Some(PipelineBody::planned(p.stages, p.stage_exprs, p.sink))
     }
 
     /// Returns `true` when `step` is a method call that can open a receiver-based pipeline without a field-chain prefix.
@@ -159,8 +138,12 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
         Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
         _ => return None,
     };
-    if !matches!(base, Expr::Current) {
-        return None;
+
+    let mut leading_fields: Vec<Arc<str>> = Vec::new();
+    match base {
+        Expr::Current => {}
+        Expr::Ident(name) => leading_fields.push(Arc::from(name.as_str())),
+        _ => return None,
     }
 
     let mut field_end = 0;
@@ -174,57 +157,49 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     if trailing.is_empty() {
         return None;
     }
-
-    let mut stages: Vec<Stage> = Vec::new();
-    if field_end > 0 {
-        let keys: Arc<[Arc<str>]> = steps[..field_end]
-            .iter()
-            .map(|s| match s {
-                Step::Field(k) => Arc::<str>::from(k.as_str()),
-                _ => unreachable!(),
-            })
-            .collect::<Vec<_>>()
-            .into();
-        let n_keys = keys.len();
-        let fcd = Arc::new(crate::vm::FieldChainData {
-            keys,
-            ics: (0..n_keys)
-                .map(|_| std::sync::atomic::AtomicU64::new(0))
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        });
-        let ops = vec![
-            crate::vm::Opcode::PushCurrent,
-            crate::vm::Opcode::FieldChain(fcd),
-        ];
-        let prog = Arc::new(crate::vm::Program::new(ops, "<compiled-map-prefix>"));
-        stages.push(Stage::Map(prog, BuiltinViewStage::Map));
+    if !trailing_has_collection_operator(trailing) {
+        return None;
     }
-    let (mut more_stages, _more_exprs, sink) = decode_method_chain(trailing)?;
+
+    let source = if field_end > 0 || !leading_fields.is_empty() {
+        leading_fields.extend(steps[..field_end].iter().map(|s| match s {
+            Step::Field(k) => Arc::<str>::from(k.as_str()),
+            _ => unreachable!(),
+        }));
+        Source::FieldChain {
+            keys: leading_fields.into(),
+        }
+    } else {
+        Source::Receiver(Val::Null)
+    };
+    let mut stages: Vec<Stage> = Vec::new();
+    let (mut more_stages, more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
 
-    let kernels: Vec<BodyKernel> = stages
-        .iter()
-        .map(|s| {
-            s.body_program()
-                .map(BodyKernel::classify)
-                .unwrap_or(BodyKernel::Generic)
-        })
-        .collect();
-    Some(plan_with_kernels(stages, &kernels, sink))
+    let kernels = Stage::body_kernels(&stages);
+    let mut plan = plan_with_exprs(stages, more_exprs, &kernels, sink);
+    plan.source = source;
+    Some(plan)
 }
 
-/// Wraps `seed` in a single-element receiver pipeline backed by `plan` and runs it.
-pub(super) fn run_compiled_map(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
-    let synth = PipelineBody {
-        stages: plan.stages.clone(),
-        stage_exprs: Vec::new(),
-        sink: plan.sink.clone(),
-        stage_kernels: Vec::new(),
-        sink_kernels: Vec::new(),
-    }
-    .with_source(Source::Receiver(Val::arr(vec![seed])));
-    synth.run(&Val::Null)
+fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> bool {
+    use crate::parse::ast::Step;
+    trailing.iter().any(|step| {
+        let Step::Method(name, _) = step else {
+            return false;
+        };
+        matches!(
+            BuiltinMethod::from_name(name.as_str()).spec().category,
+            BuiltinCategory::StreamingOneToOne
+                | BuiltinCategory::StreamingFilter
+                | BuiltinCategory::StreamingExpand
+                | BuiltinCategory::Reducer
+                | BuiltinCategory::Positional
+                | BuiltinCategory::Barrier
+                | BuiltinCategory::Deep
+                | BuiltinCategory::Relational
+        )
+    })
 }
 
 // Classifies each trailing method step as a stage or sink; `None` on any unrecognised step.
@@ -247,7 +222,10 @@ fn decode_method_chain(
                     continue;
                 }
                 let method = BuiltinMethod::from_name(name.as_str());
-                if matches!(method, BuiltinMethod::Compact | BuiltinMethod::Remove) {
+                if matches!(
+                    method.spec().view_stage,
+                    Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
+                ) {
                     if let Some(call) =
                         crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args)
                     {
@@ -471,6 +449,13 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
     )))
 }
 
+/// Compiles a pipeline stage body expression using the same current-row
+/// binding rules as method-chain lowering.
+pub(crate) fn compile_pipeline_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
+    compile_subexpr(&crate::parse::ast::Arg::Pos(expr.clone()))
+        .expect("positional pipeline expression must compile")
+}
+
 fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
     use crate::parse::ast::Arg;
     let expr = match arg {
@@ -487,7 +472,7 @@ fn compile_raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::P
 /// cannot represent as a single-key `SortSpec`. Bailing out forces the
 /// router to fall back to the VM path, where `exec_lambda_method` handles
 /// the comparator via `sort_comparator_apply`.
-pub(super) fn compile_sort_spec(
+pub(crate) fn compile_sort_spec(
     arg: &crate::parse::ast::Arg,
 ) -> Option<(SortSpec, Option<Arc<Expr>>)> {
     use crate::parse::ast::{Arg, Expr};
@@ -522,8 +507,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // ---------------------------------------------------------------------------
 
 use super::{
-    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, NumOp,
-    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerSpec,
 };
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
@@ -705,24 +689,12 @@ fn push_expr_stage(
             stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
             stage_exprs.push(arg_expr(arg));
         }
-        // Methods that route through the generic ExprBuiltin stage; `method` is preserved
-        // verbatim so the runtime executor dispatches on the right semantics.
-        BuiltinMethod::TakeWhile
-        | BuiltinMethod::DropWhile
-        | BuiltinMethod::IndicesWhere
-        | BuiltinMethod::FindIndex
-        | BuiltinMethod::MaxBy
-        | BuiltinMethod::MinBy
-        | BuiltinMethod::GroupBy
-        | BuiltinMethod::CountBy
-        | BuiltinMethod::IndexBy
-        | BuiltinMethod::TransformValues
-        | BuiltinMethod::TransformKeys
-        | BuiltinMethod::FilterValues
-        | BuiltinMethod::FilterKeys => {
+        // Remaining expression-argument lowerings route through the generic
+        // ExprBuiltin stage. The caller has already checked registry lowering
+        // metadata, so new supported builtins do not need another list here.
+        _ => {
             push_expr_builtin(method, arg, stages, stage_exprs)?;
         }
-        _ => return None,
     }
     Some(())
 }
@@ -741,15 +713,9 @@ fn push_expr_builtin(
     Some(())
 }
 
-// Writes the terminal `Sink` for `method` into `*sink`; returns `None` for numeric reducers needing argument-based config.
+// Writes the no-arg terminal `Sink` for `method` into `*sink`.
 fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
-    let spec = method.spec();
-    match spec.sink?.accumulator {
-        BuiltinSinkAccumulator::SelectOne(_) => *sink = Sink::Terminal(method),
-        BuiltinSinkAccumulator::Count => *sink = Sink::Reducer(ReducerSpec::count()),
-        BuiltinSinkAccumulator::ApproxDistinct => *sink = Sink::ApproxCountDistinct,
-        BuiltinSinkAccumulator::Numeric => return None,
-    }
+    *sink = terminal_sink_for_method(method, &[])?;
     Some(())
 }
 
@@ -810,47 +776,36 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Some(Sink::Reducer(ReducerSpec::count())),
-            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Count,
-                predicate: Some(compile_subexpr(arg)?),
-                projection: None,
-                predicate_expr: arg_expr(arg),
-                projection_expr: None,
-            })),
+            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(
+                ReducerSpec::count_with_predicate(compile_subexpr(arg)?, arg_expr(arg)),
+            )),
             _ => None,
         },
-        BuiltinSinkAccumulator::Numeric => Some(Sink::Reducer(ReducerSpec {
-            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(spec.numeric_reducer?)),
-            predicate: None,
-            projection: match args {
+        BuiltinSinkAccumulator::Numeric => {
+            let projection = match args {
                 [] => None,
                 [arg] => Some(compile_subexpr(arg)?),
                 _ => return None,
-            },
-            predicate_expr: None,
-            projection_expr: match args {
+            };
+            let projection_expr = match args {
                 [] => None,
                 [arg] => arg_expr(arg),
                 _ => return None,
-            },
-        })),
-        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::First => match args {
+            };
+            Some(Sink::Reducer(ReducerSpec::numeric(
+                method,
+                projection,
+                projection_expr,
+            )?))
+        }
+        BuiltinSinkAccumulator::SelectOne(position) => match args {
             [] => Some(Sink::Terminal(method)),
             [arg] => Some(Sink::SelectMany {
                 n: usize_arg_at_least(arg, 1)?,
-                from_end: false,
+                from_end: matches!(position, BuiltinSelectionPosition::Last),
             }),
             _ => None,
         },
-        BuiltinSinkAccumulator::SelectOne(_) if method == BuiltinMethod::Last => match args {
-            [] => Some(Sink::Terminal(method)),
-            [arg] => Some(Sink::SelectMany {
-                n: usize_arg_at_least(arg, 1)?,
-                from_end: true,
-            }),
-            _ => None,
-        },
-        BuiltinSinkAccumulator::SelectOne(_) if args.is_empty() => Some(Sink::Terminal(method)),
         _ => None,
     }
 }
@@ -862,18 +817,10 @@ fn predicate_sink_for_method(
     let [arg] = args else {
         return None;
     };
-    let op = match method {
-        BuiltinMethod::Any => PredicateSinkOp::Any,
-        BuiltinMethod::All => PredicateSinkOp::All,
-        BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
-        BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
-        BuiltinMethod::FindOne => PredicateSinkOp::FindOne,
-        _ => return None,
-    };
-    Some(Sink::Predicate(PredicateSinkSpec {
-        op,
-        predicate: compile_subexpr(arg)?,
-    }))
+    Some(Sink::Predicate(PredicateSinkSpec::from_method(
+        method,
+        compile_subexpr(arg)?,
+    )?))
 }
 
 fn membership_sink_for_method(
@@ -883,19 +830,12 @@ fn membership_sink_for_method(
     let [arg] = args else {
         return None;
     };
-    let op = match method {
-        BuiltinMethod::Includes => MembershipSinkOp::Includes,
-        BuiltinMethod::Index => MembershipSinkOp::Index,
-        BuiltinMethod::IndicesOf => MembershipSinkOp::IndicesOf,
-        _ => return None,
-    };
-    Some(Sink::Membership(MembershipSinkSpec {
-        op,
-        target: literal_arg_value(arg)
+    Some(Sink::Membership(MembershipSinkSpec::from_method(
+        method,
+        literal_arg_value(arg)
             .map(MembershipSinkTarget::Literal)
             .or_else(|| Some(MembershipSinkTarget::Program(compile_raw_arg_expr(arg)?)))?,
-        method,
-    }))
+    )?))
 }
 
 fn arg_extreme_sink_for_method(
@@ -905,35 +845,8 @@ fn arg_extreme_sink_for_method(
     let [arg] = args else {
         return None;
     };
-    let want_max = match method {
-        BuiltinMethod::MaxBy => true,
-        BuiltinMethod::MinBy => false,
-        _ => return None,
-    };
-    Some(Sink::ArgExtreme(ArgExtremeSinkSpec {
-        want_max,
-        key: compile_subexpr(arg)?,
-    }))
-}
-
-fn sink_kernels(sink: &Sink) -> Vec<BodyKernel> {
-    match sink {
-        Sink::Reducer(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Predicate(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Membership(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::ArgExtreme(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        _ => Vec::new(),
-    }
+    Some(Sink::ArgExtreme(ArgExtremeSinkSpec::from_method(
+        method,
+        compile_subexpr(arg)?,
+    )?))
 }

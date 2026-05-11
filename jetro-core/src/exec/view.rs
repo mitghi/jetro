@@ -14,6 +14,7 @@ use crate::data::view::{scalar_view_to_owned_val, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
+use crate::vm::VM;
 
 mod key;
 mod reducer_stage;
@@ -39,11 +40,28 @@ where
 /// `terminal_collect`, `full`, `reducing_stage_prefix`, `sort_prefix`, then a
 /// generic `prefix_then_materialized_suffix` fallback. Returns `None` when no
 /// path can handle the pipeline shape, allowing the caller to fall back to `Val`-based execution.
+#[allow(dead_code)]
 pub(crate) fn run_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let mut vm = VM::new();
+    run_with_env_and_vm(source, body, cache, base_env, &mut vm)
+}
+
+/// Top-level view-pipeline runner using caller-owned VM state for fallback suffixes
+/// and VM-backed sink targets.
+pub(crate) fn run_with_env_and_vm<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -54,20 +72,20 @@ where
     if let Some(result) = run_terminal_select_projection(source.clone(), body) {
         return Some(result);
     }
-    if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env)) {
+    if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
         return Some(result);
     }
     if let Some(result) =
-        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
+        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env, vm)
     {
         return Some(result);
     }
     if let Some(result) =
-        run_sort_prefix_then_materialized_suffix(source.clone(), body, cache, base_env)
+        run_sort_prefix_then_materialized_suffix(source.clone(), body, cache, base_env, vm)
     {
         return Some(result);
     }
-    run_prefix_then_materialized_suffix(source, body, cache, base_env)
+    run_prefix_then_materialized_suffix(source, body, cache, base_env, vm)
 }
 
 /// Runs the complete pipeline entirely in the view domain when all stages and
@@ -78,22 +96,22 @@ fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Va
 where
     V: ValueView<'a>,
 {
-    run_full_with_env(source, body, None)
+    let mut vm = VM::new();
+    run_full_with_env(source, body, None, &mut vm)
 }
 
 fn run_full_with_env<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
     base_env: Option<&Env>,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = body.pull_demand();
     let sink = match (source_demand, capabilities.sink) {
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
             pipeline::ViewSinkCapability::Nth { index: 0 }
@@ -108,7 +126,7 @@ where
         },
         (_, sink) => sink,
     };
-    let sink = match resolve_view_sink(sink, base_env) {
+    let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
@@ -116,6 +134,7 @@ where
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
@@ -128,6 +147,7 @@ where
 fn resolve_view_sink(
     sink: pipeline::ViewSinkCapability,
     base_env: Option<&Env>,
+    vm: &mut VM,
 ) -> Option<Result<pipeline::ViewSinkCapability, EvalError>> {
     match sink {
         pipeline::ViewSinkCapability::Membership {
@@ -135,7 +155,6 @@ fn resolve_view_sink(
             target: pipeline::ViewMembershipTarget::Program(program),
         } => {
             let env = base_env?;
-            let mut vm = crate::vm::VM::new();
             Some(vm.exec_in_env(&program, env).map(|target| {
                 pipeline::ViewSinkCapability::Membership {
                     op,
@@ -179,7 +198,7 @@ where
             }
             let sink_done = sink_acc.observe_builtin_lazy(
                 *accumulator,
-                || item.materialize(),
+                || scalar_view_to_owned_val(item.scalar()).unwrap_or_else(|| item.materialize()),
                 || {
                     let kernel = (*project_kernel)?;
                     let kernel = sink_kernels.get(kernel)?;
@@ -262,6 +281,13 @@ fn view_membership_matches<'a, V>(item: &V, target: &Val) -> bool
 where
     V: ValueView<'a>,
 {
+    view_matches_value(item, target)
+}
+
+fn view_matches_value<'a, V>(item: &V, target: &Val) -> bool
+where
+    V: ValueView<'a>,
+{
     let target_view = JsonView::from_val(target);
     if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
         return crate::util::json_vals_eq(item.scalar(), target_view);
@@ -307,6 +333,7 @@ fn run_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -322,10 +349,12 @@ where
     }
 
     let mut boundary_rows = Vec::new();
-    let source_demand = PullDemand::All;
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix.consumed_stages], &body.sink);
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix.stages,
         &body.stage_kernels,
         source_demand,
@@ -341,6 +370,7 @@ where
         boundary_rows,
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -355,18 +385,16 @@ where
     V: ValueView<'a>,
 {
     let plan = terminal_collect_plan(body)?;
-    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
-        source_demand,
+        plan.source_demand,
         |item| {
-            collector.push_view_row(item, &plan.collect_kernel)?;
+            collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
     )?;
@@ -374,8 +402,8 @@ where
     Some(Ok(collector.finish()))
 }
 
-/// Optimised path for `map(...).first()` / `map(...).last()` style suffixes
-/// where the trailing projection can run only on the selected view row.
+/// Optimised path for `map(...).first()` / `map(...).last()` / `map(...).nth(i)`
+/// style suffixes where the trailing projection can run only on the selected view row.
 fn run_terminal_select_projection<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -384,34 +412,68 @@ where
     V: ValueView<'a>,
 {
     let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
-    let sink_spec = body.sink.builtin_sink_spec()?;
-    let crate::builtins::BuiltinSinkAccumulator::SelectOne(position) = sink_spec.accumulator else {
-        return None;
+    let position = match &body.sink {
+        pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
+        _ => {
+            let sink_spec = body.sink.builtin_sink_spec()?;
+            match sink_spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::First,
+                ) => TerminalSelectPosition::First,
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                ) => TerminalSelectPosition::Last,
+                _ => return None,
+            }
+        }
     };
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
     let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[..prefix_len], &body.sink)
-            .chain
-            .pull;
+        pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix_len], &body.sink);
     let mut selected = Val::Null;
     let mut seen = false;
+    let mut nth_seen = 0usize;
+    let nth_target = match body.sink {
+        pipeline::Sink::Nth(_)
+            if matches!(source_demand, PullDemand::NthInput(_))
+                && pipeline::ViewStageCapability::all_preserve_cardinality(&prefix) =>
+        {
+            Some(0)
+        }
+        pipeline::Sink::Nth(index) => Some(index),
+        _ => None,
+    };
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix,
         &body.stage_kernels,
         source_demand,
         |item| {
+            if let Some(target) = nth_target {
+                if nth_seen < target {
+                    nth_seen += 1;
+                    return Some(ViewRowAction::Emit);
+                }
+            }
             selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
             seen = true;
             Some(match position {
-                crate::builtins::BuiltinSelectionPosition::First => ViewRowAction::Stop,
-                crate::builtins::BuiltinSelectionPosition::Last => ViewRowAction::Emit,
+                TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
+                TerminalSelectPosition::Last => ViewRowAction::Emit,
             })
         },
     )?;
 
     Some(Ok(if seen { selected } else { Val::Null }))
+}
+
+#[derive(Clone, Copy)]
+enum TerminalSelectPosition {
+    First,
+    Last,
+    Nth,
 }
 
 /// Action returned by a sink observer after processing one view row.
@@ -437,6 +499,7 @@ enum ViewDriveFlow {
 /// Returns `None` when `source` cannot be iterated as an array.
 fn drive_view_frontier<'a, V, F>(
     source: V,
+    source_capabilities: pipeline::SourceCapabilities,
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
@@ -446,15 +509,24 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
-    let access = pipeline::SourceCapabilities::VIEW_ARRAY.choose_access(source_demand);
+    if source_demand.is_zero() {
+        return Some(());
+    }
+    let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
-        pipeline::SourceAccessMode::Reverse { .. } => {
+        pipeline::SourceAccessMode::Reverse { outputs } => {
             let len = match source.scalar() {
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
             let items = (0..len).rev().map(|idx| source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, source_demand, observe);
+            return drive_view_iter(
+                items,
+                stages,
+                stage_kernels,
+                PullDemand::LastInput(outputs),
+                observe,
+            );
         }
         pipeline::SourceAccessMode::Indexed(idx) => {
             let len = match source.scalar() {
@@ -467,12 +539,35 @@ where
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
         }
-        pipeline::SourceAccessMode::Forward
-        | pipeline::SourceAccessMode::ForwardBounded(_)
-        | pipeline::SourceAccessMode::MaterializedFallback => {}
+        pipeline::SourceAccessMode::IndexedFromEnd(offset) => {
+            let len = match source.scalar() {
+                JsonView::ArrayLen(len) => len,
+                _ => return None,
+            };
+            let Some(idx) = index_from_end(len, offset) else {
+                return Some(());
+            };
+            let items = std::iter::once(source.index(idx as i64));
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
+        }
+        pipeline::SourceAccessMode::ForwardBounded(inputs) => {
+            let items = source.array_iter()?;
+            return drive_view_iter(
+                items,
+                stages,
+                stage_kernels,
+                PullDemand::FirstInput(inputs),
+                observe,
+            );
+        }
+        pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
     }
     let items = source.array_iter()?;
     drive_view_iter(items, stages, stage_kernels, source_demand, observe)
+}
+
+fn index_from_end(len: usize, offset: usize) -> Option<usize> {
+    len.checked_sub(offset.checked_add(1)?)
 }
 
 /// Drives an arbitrary `items` iterator through the view-stage frontier, calling
@@ -542,7 +637,7 @@ where
     V: ValueView<'a>,
     F: FnMut(&V) -> Option<ViewRowAction>,
 {
-    let Some(stage) = stages.get(stage_idx).copied() else {
+    let Some(stage) = stages.get(stage_idx).cloned() else {
         return match observe(&item)? {
             ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
             ViewRowAction::Emit => {
@@ -609,8 +704,8 @@ where
 struct TerminalCollectPlan {
     /// Stages that run entirely in the view domain before collection.
     prefix: Vec<pipeline::ViewStageCapability>,
-    /// The kernel used to extract the value of each row for the output array.
-    collect_kernel: pipeline::BodyKernel,
+    /// The row program used to extract the value of each row for the output array.
+    collect_program: pipeline::RowProgram,
     /// Demand constraint derived from the pipeline's suffix stages.
     source_demand: PullDemand,
 }
@@ -635,20 +730,18 @@ fn terminal_collect_plan_from(
     }
 
     let suffix_stages = body.stages.get(start..)?;
-    let source_demand = pipeline::Pipeline::segment_source_demand(suffix_stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = pipeline::Pipeline::segment_pull_demand(suffix_stages, &body.sink);
     if let Some((prefix_len, collect_kernel)) = terminal_projection_run(body, start) {
         return Some(TerminalCollectPlan {
             prefix: terminal_collect_prefix_from(&suffix_stages[..prefix_len], body, start)?,
-            collect_kernel,
+            collect_program: pipeline::RowProgram::from_kernel(collect_kernel)?,
             source_demand,
         });
     }
 
     Some(TerminalCollectPlan {
         prefix: terminal_collect_prefix_from(suffix_stages, body, start)?,
-        collect_kernel: pipeline::BodyKernel::Current,
+        collect_program: pipeline::RowProgram::from_kernel(pipeline::BodyKernel::Current)?,
         source_demand,
     })
 }
@@ -700,7 +793,7 @@ fn terminal_projection_stage_kernel(
     }
 
     match stage {
-        pipeline::Stage::Builtin(call) if call.spec().view_scalar => {
+        pipeline::Stage::Builtin(call) if call.method.is_view_projection_method() => {
             Some(pipeline::BodyKernel::BuiltinCall {
                 receiver: Box::new(pipeline::BodyKernel::Current),
                 call: call.clone(),
@@ -757,6 +850,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -765,12 +859,11 @@ where
     if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
         return None;
     }
-    let source_demand = pipeline::Pipeline::segment_source_demand(&body.stages, &body.sink)
-        .chain
-        .pull;
+    let source_demand = body.pull_demand();
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         source_demand,
@@ -786,6 +879,7 @@ where
         plan.reducer.finish(),
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -798,6 +892,7 @@ fn run_sort_prefix_then_materialized_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -810,7 +905,7 @@ where
         .copied()
         .unwrap_or(pipeline::StageStrategy::Default);
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
-        return run_sort_prefix_then_view_suffix(source, body, &plan, base_env);
+        return run_sort_prefix_then_view_suffix(source, body, &plan, base_env, vm);
     }
     let collect_suffix = terminal_collect_plan_from(body, plan.sort_stage + 1);
     if collect_suffix.is_none()
@@ -823,11 +918,12 @@ where
         pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            let key = view_sort_key(item, plan.key_program.as_ref())?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -841,6 +937,19 @@ where
             &body.stage_kernels,
         );
     }
+    if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
+        winners.as_slice(),
+        body,
+        plan.sort_stage + 1,
+        false,
+    ) {
+        return Some(out);
+    }
+    if let Some(out) =
+        run_sorted_rows_view_suffix(winners.as_slice(), body, plan.sort_stage + 1, base_env, vm)
+    {
+        return Some(out);
+    }
     let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
 
     Some(run_materialized_suffix(
@@ -849,6 +958,7 @@ where
         boundary_rows,
         cache,
         base_env,
+        vm,
     ))
 }
 
@@ -863,19 +973,136 @@ fn run_sorted_rows_terminal_collect_suffix<'a, V>(
 where
     V: ValueView<'a>,
 {
-    let mut collector = pipeline::TerminalCollector::new(&plan.collect_kernel);
+    let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
     drive_view_iter(
         rows,
         &plan.prefix,
         stage_kernels,
         plan.source_demand,
         |item| {
-            collector.push_view_row(item, &plan.collect_kernel)?;
+            collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
     )?;
 
     Some(Ok(collector.finish()))
+}
+
+/// Applies a trailing view-native projection only to the selected sorted row
+/// for bounded-sort suffixes such as `.sort_by(k).map(f).last()`.
+fn run_sorted_rows_terminal_select_projection_suffix<'a, V>(
+    rows: &[V],
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+    source_reversed: bool,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let (relative_prefix_len, project_kernel) = terminal_projection_run(body, suffix_start)?;
+    let prefix_end = suffix_start + relative_prefix_len;
+    let prefix =
+        terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
+    let source_demand = pipeline::Pipeline::segment_pull_demand(
+        &body.stages[suffix_start..prefix_end],
+        &body.sink,
+    );
+    if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
+        let mut selected = Vec::new();
+        drive_view_iter(
+            rows.iter().cloned(),
+            &prefix,
+            &body.stage_kernels,
+            source_demand,
+            |item| {
+                selected.push(eval_owned_scalar_or_value_kernel(item, &project_kernel)?);
+                Some(ViewRowAction::Emit)
+            },
+        )?;
+        if from_end && source_reversed {
+            selected.reverse();
+        }
+        return Some(Ok(Val::Arr(Arc::new(selected))));
+    }
+    let mut nth_target = None;
+    let position = match &body.sink {
+        pipeline::Sink::Nth(index) => {
+            nth_target = Some(*index);
+            TerminalSelectPosition::Nth
+        }
+        _ => {
+            let sink_spec = body.sink.builtin_sink_spec()?;
+            match sink_spec.accumulator {
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::First,
+                ) => TerminalSelectPosition::First,
+                crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                ) => TerminalSelectPosition::Last,
+                _ => return None,
+            }
+        }
+    };
+    let mut selected = Val::Null;
+    let mut seen = false;
+    let mut selected_index = 0usize;
+
+    drive_view_iter(
+        rows.iter().cloned(),
+        &prefix,
+        &body.stage_kernels,
+        source_demand,
+        |item| {
+            if let Some(target) = nth_target {
+                if selected_index < target {
+                    selected_index += 1;
+                    return Some(ViewRowAction::Skip);
+                }
+            }
+            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            seen = true;
+            Some(match position {
+                TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
+                TerminalSelectPosition::Last => ViewRowAction::Emit,
+            })
+        },
+    )?;
+
+    Some(Ok(if seen { selected } else { Val::Null }))
+}
+
+/// Feeds pre-sorted view rows through a fully view-native suffix and sink,
+/// avoiding the materialized boundary for bounded sort winners.
+fn run_sorted_rows_view_suffix<'a, V>(
+    rows: &[V],
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: ValueView<'a>,
+{
+    let suffix = view_suffix_capabilities(body, suffix_start)?;
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
+
+    drive_view_iter(
+        rows.iter().cloned(),
+        &suffix.stages,
+        &body.stage_kernels,
+        source_demand,
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
+    )?;
+
+    Some(sink_acc.finish_result(false))
 }
 
 /// Handles `SortUntilOutput` strategy: sorts rows with an `OrderedKeySorter`
@@ -886,34 +1113,36 @@ fn run_sort_prefix_then_view_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     plan: &SortBarrierPlan,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
-    let sink = match resolve_view_sink(suffix.sink, Some(base_env)) {
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[plan.sort_stage + 1..], &body.sink);
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    let source_demand =
-        pipeline::Pipeline::segment_source_demand(&body.stages[plan.sort_stage + 1..], &body.sink)
-            .chain
-            .pull;
     let ordered_descending = if matches!(source_demand, PullDemand::LastInput(_)) {
         !plan.descending
     } else {
         plan.descending
     };
+    let source_reversed = ordered_descending != plan.descending;
     let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
     drive_view_frontier(
         source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_kernel, &body.stage_kernels)?;
+            let key = view_sort_key(item, plan.key_program.as_ref())?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -921,8 +1150,18 @@ where
 
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
+    let ordered: Vec<_> = sorter.finish().collect();
+    if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
+        ordered.as_slice(),
+        body,
+        plan.sort_stage + 1,
+        source_reversed,
+    ) {
+        return Some(out);
+    }
+
     drive_view_iter(
-        sorter.finish(),
+        ordered,
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
@@ -932,6 +1171,23 @@ where
     Some(sink_acc.finish_result(false))
 }
 
+fn view_suffix_sink_for_demand(
+    sink: pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+) -> pipeline::ViewSinkCapability {
+    match (source_demand, sink) {
+        (
+            PullDemand::LastInput(_),
+            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
+        ) => pipeline::ViewSinkCapability::SelectMany {
+            n,
+            from_end,
+            source_reversed: true,
+        },
+        (_, sink) => sink,
+    }
+}
+
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
 /// prefix, the index of the sort stage, and the key extraction configuration.
 struct SortBarrierPlan {
@@ -939,8 +1195,8 @@ struct SortBarrierPlan {
     prefix: Vec<pipeline::ViewStageCapability>,
     /// Index of the `Sort` stage within `body.stages`.
     sort_stage: usize,
-    /// Stage-kernel index for the sort key, or `None` for a natural (identity) sort.
-    key_kernel: Option<usize>,
+    /// Row program for the sort key, or `None` for a natural (identity) sort.
+    key_program: Option<pipeline::RowProgram>,
     /// Whether the sort order is descending.
     descending: bool,
 }
@@ -979,20 +1235,18 @@ fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
     for (idx, stage) in body.stages.iter().enumerate() {
         match stage {
             pipeline::Stage::Sort(spec) => {
-                let key_kernel = if spec.key.is_some() {
-                    Some(
-                        body.stage_kernels
-                            .get(idx)?
-                            .is_view_native()
-                            .then_some(idx)?,
-                    )
+                let key_program = if spec.key.is_some() {
+                    let kernel = body.stage_kernels.get(idx)?;
+                    kernel
+                        .is_view_native()
+                        .then(|| pipeline::RowProgram::from_kernel(kernel.clone()))?
                 } else {
                     None
                 };
                 return Some(SortBarrierPlan {
                     prefix,
                     sort_stage: idx,
-                    key_kernel,
+                    key_program,
                     descending: spec.descending,
                 });
             }
@@ -1019,11 +1273,12 @@ fn run_materialized_suffix(
     boundary_rows: Vec<Val>,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Result<Val, EvalError> {
     let suffix = suffix_body(body, consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
     let root = Val::Null;
-    suffix.run_with_env(&root, base_env, cache)
+    suffix.run_with_env_and_vm(&root, base_env, cache, vm)
 }
 
 /// Runs the suffix of `body` against a single `boundary_value` (e.g. the
@@ -1035,6 +1290,7 @@ fn run_materialized_value_suffix(
     boundary_value: Val,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Result<Val, EvalError> {
     if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
         return Ok(boundary_value);
@@ -1042,7 +1298,7 @@ fn run_materialized_value_suffix(
     let suffix =
         suffix_body(body, consumed_stages).with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
-    suffix.run_with_env(&root, base_env, cache)
+    suffix.run_with_env_and_vm(&root, base_env, cache, vm)
 }
 
 /// Applies a single view stage to `item`, returning the control flow decision
@@ -1151,18 +1407,19 @@ where
     }
 }
 
-/// Extracts a sort key `Val` from `item`, optionally applying `stage_kernels[kernel_idx]`
-/// as a projection. Falls back to `item.materialize()` when no kernel is specified.
-fn view_sort_key<'a, V>(
-    item: &V,
-    kernel_idx: Option<usize>,
-    stage_kernels: &[pipeline::BodyKernel],
-) -> Option<Val>
+/// Extracts a sort key `Val` from `item`, optionally applying a row program.
+/// Falls back to `item.materialize()` when no key program is specified.
+fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    match kernel_idx {
-        Some(idx) => eval_owned_scalar_or_value_kernel(item, stage_kernels.get(idx)?),
+    match key {
+        Some(program) => match program.eval_view(item)? {
+            pipeline::ViewKernelValue::View(view) => {
+                scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+            }
+            pipeline::ViewKernelValue::Owned(value) => Some(value),
+        },
         None => Some(item.materialize()),
     }
 }
@@ -1181,8 +1438,10 @@ mod tests {
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-        PipelineBody, Sink, Stage, ViewStageCapability,
+        PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceCapabilities, Stage,
+        ViewSinkCapability, ViewStageCapability,
     };
+    use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
     use crate::util::JsonView;
 
@@ -1191,6 +1450,7 @@ mod tests {
         rows: Arc<[i64]>,
         idx: Option<usize>,
         scalar_reads: Rc<Cell<usize>>,
+        array_iter_reads: Rc<Cell<usize>>,
         materialize_reads: Rc<Cell<usize>>,
     }
 
@@ -1200,6 +1460,7 @@ mod tests {
                 rows: rows.iter().copied().collect::<Vec<_>>().into(),
                 idx: None,
                 scalar_reads: Rc::new(Cell::new(0)),
+                array_iter_reads: Rc::new(Cell::new(0)),
                 materialize_reads: Rc::new(Cell::new(0)),
             }
         }
@@ -1210,6 +1471,10 @@ mod tests {
 
         fn materialize_reads(&self) -> usize {
             self.materialize_reads.get()
+        }
+
+        fn array_iter_reads(&self) -> usize {
+            self.array_iter_reads.get()
         }
     }
 
@@ -1230,6 +1495,7 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx: None,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
@@ -1264,21 +1530,26 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
 
         fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads
+                .set(self.array_iter_reads.get() + 1);
             if self.idx.is_some() {
                 return None;
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
+            let array_iter_reads = Rc::clone(&self.array_iter_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
             Some(Box::new((0..rows.len()).map(move |idx| Self {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
+                array_iter_reads: Rc::clone(&array_iter_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
             })))
         }
@@ -1290,6 +1561,31 @@ mod tests {
                 .map(Val::Int)
                 .unwrap_or(Val::Null)
         }
+    }
+
+    #[test]
+    fn view_frontier_zero_demand_skips_source_access() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let observed = Rc::new(Cell::new(0usize));
+        let observed_in_closure = Rc::clone(&observed);
+
+        let result = super::drive_view_frontier(
+            source.clone(),
+            SourceCapabilities::VIEW_ARRAY,
+            &[],
+            &[],
+            PullDemand::FirstInput(0),
+            move |_| {
+                observed_in_closure.set(observed_in_closure.get() + 1);
+                Some(super::ViewRowAction::Emit)
+            },
+        );
+
+        assert!(result.is_some());
+        assert_eq!(observed.get(), 0);
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
@@ -1320,6 +1616,92 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
         assert_eq!(source.scalar_reads(), 2);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_predicate_sink_result_is_decided() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_all_sink_fails() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::All,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(false));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_membership_sink_result_is_decided() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_full_runner_stops_when_index_sink_matches() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(2));
+        assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
@@ -1375,7 +1757,8 @@ mod tests {
             .unwrap();
         let first_json: serde_json::Value = first.into();
         assert_eq!(first_json, serde_json::json!(1));
-        assert_eq!(first_source.materialize_reads(), 1);
+        assert_eq!(first_source.materialize_reads(), 0);
+        assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
@@ -1387,8 +1770,9 @@ mod tests {
             .unwrap();
         let last_json: serde_json::Value = last.into();
         assert_eq!(last_json, serde_json::json!(4));
-        assert_eq!(last_source.materialize_reads(), 1);
-        assert_eq!(last_source.scalar_reads(), 1);
+        assert_eq!(last_source.materialize_reads(), 0);
+        assert_eq!(last_source.scalar_reads(), 2);
+        assert_eq!(last_source.array_iter_reads(), 0);
 
         let nth_source = CountingView::root(&[1, 2, 3, 4]);
         let nth_body = PipelineBody {
@@ -1405,6 +1789,59 @@ mod tests {
         assert_eq!(nth_json, serde_json::json!(3));
         assert_eq!(nth_source.materialize_reads(), 1);
         assert_eq!(nth_source.scalar_reads(), 1);
+        assert_eq!(nth_source.array_iter_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_zero_demand_does_not_touch_source() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let mut observed = 0usize;
+
+        super::drive_view_frontier(
+            source.clone(),
+            crate::exec::pipeline::SourceCapabilities::VIEW_ARRAY,
+            &[],
+            &[],
+            crate::plan::demand::PullDemand::LastInput(0),
+            |_| {
+                observed += 1;
+                Some(super::ViewRowAction::Emit)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed, 0);
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_ignores_overflowing_from_end_offset() {
+        assert_eq!(super::index_from_end(4, 0), Some(3));
+        assert_eq!(super::index_from_end(4, 3), Some(0));
+        assert_eq!(super::index_from_end(4, 4), None);
+        assert_eq!(super::index_from_end(4, usize::MAX), None);
+    }
+
+    #[test]
+    fn view_suffix_sink_marks_reversed_select_many_for_last_input() {
+        let sink = ViewSinkCapability::SelectMany {
+            n: 2,
+            from_end: true,
+            source_reversed: false,
+        };
+
+        let adjusted = super::view_suffix_sink_for_demand(sink, PullDemand::LastInput(2));
+
+        assert!(matches!(
+            adjusted,
+            ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: true
+            }
+        ));
     }
 
     #[test]
@@ -1426,7 +1863,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first, Val::Int(1));
-        assert_eq!(first_source.scalar_reads(), 1);
+        assert_eq!(first_source.scalar_reads(), 2);
+        assert_eq!(first_source.array_iter_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
@@ -1438,6 +1876,7 @@ mod tests {
             .unwrap();
         assert_eq!(last, Val::Int(4));
         assert_eq!(last_source.scalar_reads(), 2);
+        assert_eq!(last_source.array_iter_reads(), 0);
 
         let take_source = CountingView::root(&[1, 2, 3, 4]);
         let take_body = PipelineBody {
@@ -1459,6 +1898,24 @@ mod tests {
         let take_json: serde_json::Value = take.into();
         assert_eq!(take_json, serde_json::json!([1, 2, 3]));
         assert_eq!(take_source.scalar_reads(), 3);
+
+        let nth_source = CountingView::root(&[1, 2, 3, 4]);
+        let nth_body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(2),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+        let nth = super::run_terminal_select_projection(nth_source.clone(), &nth_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(nth, Val::Int(3));
+        assert_eq!(nth_source.scalar_reads(), 2);
+        assert_eq!(nth_source.array_iter_reads(), 0);
     }
 
     #[test]
@@ -1539,10 +1996,15 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let includes =
-            super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env))
-                .unwrap()
-                .unwrap();
+        let mut vm = crate::vm::VM::new();
+        let includes = super::run_full_with_env(
+            includes_source.clone(),
+            &includes_body,
+            Some(&env),
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(includes, Val::Bool(true));
         assert_eq!(includes_source.materialize_reads(), 0);
         assert_eq!(includes_source.scalar_reads(), 3);
@@ -1557,9 +2019,10 @@ mod tests {
             ..includes_body
         };
 
-        let index = super::run_full_with_env(index_source.clone(), &index_body, Some(&env))
-            .unwrap()
-            .unwrap();
+        let index =
+            super::run_full_with_env(index_source.clone(), &index_body, Some(&env), &mut vm)
+                .unwrap()
+                .unwrap();
         assert_eq!(index, Val::Int(2));
         assert_eq!(index_source.materialize_reads(), 0);
         assert_eq!(index_source.scalar_reads(), 3);
@@ -1574,9 +2037,10 @@ mod tests {
             ..index_body
         };
 
-        let indices = super::run_full_with_env(indices_source.clone(), &indices_body, Some(&env))
-            .unwrap()
-            .unwrap();
+        let indices =
+            super::run_full_with_env(indices_source.clone(), &indices_body, Some(&env), &mut vm)
+                .unwrap()
+                .unwrap();
         let indices_json: serde_json::Value = indices.into();
         assert_eq!(indices_json, serde_json::json!([0, 2]));
         assert_eq!(indices_source.materialize_reads(), 0);
@@ -1647,7 +2111,7 @@ mod tests {
 
         assert_eq!(plan.prefix.len(), 1);
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
-        assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+        assert!(matches!(plan.collect_program.kernel(), BodyKernel::Current));
     }
 
     #[test]
@@ -1677,7 +2141,7 @@ mod tests {
         assert_eq!(plan.prefix.len(), 2);
         assert!(matches!(plan.prefix[0], ViewStageCapability::Filter { .. }));
         assert!(matches!(plan.prefix[1], ViewStageCapability::Take(1)));
-        assert!(matches!(plan.collect_kernel, BodyKernel::Current));
+        assert!(matches!(plan.collect_program.kernel(), BodyKernel::Current));
     }
 
     #[test]
@@ -1707,7 +2171,34 @@ mod tests {
         let plan = super::terminal_collect_plan(&body).unwrap();
 
         assert!(plan.prefix.is_empty());
-        assert!(matches!(plan.collect_kernel, BodyKernel::Compose { .. }));
+        assert!(matches!(
+            plan.collect_program.kernel(),
+            BodyKernel::Compose { .. }
+        ));
+    }
+
+    #[test]
+    fn terminal_collect_plan_composes_trailing_object_key_builtins() {
+        let call = crate::builtins::BuiltinCall {
+            method: crate::builtins::BuiltinMethod::HasKey,
+            args: crate::builtins::BuiltinArgs::Str(Arc::from("isbn")),
+        };
+        assert!(call.method.is_view_object_key_method());
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(call)],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let plan = super::terminal_collect_plan(&body).unwrap();
+
+        assert!(plan.prefix.is_empty());
+        assert!(matches!(
+            plan.collect_program.kernel(),
+            BodyKernel::BuiltinCall { .. }
+        ));
     }
 
     #[test]
@@ -1816,11 +2307,13 @@ mod tests {
         };
 
         let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
         let out = super::run_reducing_stage_prefix_then_materialized_suffix(
             source.clone(),
             &body,
             None,
             &env,
+            &mut vm,
         )
         .unwrap()
         .unwrap();
@@ -1846,11 +2339,13 @@ mod tests {
         };
 
         let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
         let out = super::run_reducing_stage_prefix_then_materialized_suffix(
             source.clone(),
             &body,
             None,
             &env,
+            &mut vm,
         )
         .unwrap()
         .unwrap();

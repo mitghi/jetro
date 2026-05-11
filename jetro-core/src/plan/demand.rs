@@ -4,8 +4,6 @@
 //! input and value payload they need, and stage/operator adapters translate
 //! that demand backward toward the source.
 
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 /// Describes how much of each element's content a pipeline stage actually
@@ -13,6 +11,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
     /// The stage only needs to know the element exists; payload can be skipped.
+    #[allow(dead_code)]
     None,
     /// The stage only counts matching elements; payload can be skipped unless predicates need it.
     CountOnly,
@@ -72,8 +71,17 @@ impl FieldPath {
     }
 
     /// Borrow the key chain.
+    #[cfg(test)]
     pub fn keys(&self) -> &[Arc<str>] {
         &self.keys
+    }
+
+    /// Return this path with `prefix` inserted before its first key.
+    pub fn prefixed(&self, prefix: &[Arc<str>]) -> Self {
+        let mut keys = Vec::with_capacity(prefix.len() + self.keys.len());
+        keys.extend(prefix.iter().cloned());
+        keys.extend(self.keys.iter().cloned());
+        Self { keys: keys.into() }
     }
 }
 
@@ -119,14 +127,20 @@ impl FieldSet {
     }
 
     /// Borrow all paths in deterministic order.
+    #[cfg(test)]
     pub fn paths(&self) -> &[FieldPath] {
         &self.paths
     }
 
-    /// Returns `true` if the set contains no paths.
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
+    /// Return all paths with `prefix` inserted before each path.
+    pub fn prefixed(&self, prefix: &[Arc<str>]) -> Self {
+        let mut out = Self::new();
+        for path in self.paths.iter() {
+            out.insert(path.prefixed(prefix));
+        }
+        out
     }
+
 }
 
 /// Precise value payload need for high-performance planning.
@@ -209,7 +223,36 @@ pub enum PullDemand {
     UntilOutput(usize),
 }
 
+/// Demand for scalar terminal sinks whose result can be decided before all rows
+/// are consumed. This is intentionally separate from `PullDemand::UntilOutput`,
+/// which counts rows emitted by the stage chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkResultDemand {
+    /// The sink result cannot be decided early by a single row event.
+    None,
+    /// Stop once a predicate or membership row matches.
+    UntilMatch,
+    /// Stop once a predicate row fails.
+    UntilFailure,
+}
+
+impl SinkResultDemand {
+    /// Returns true when the sink result may allow executor-level short-circuiting.
+    #[cfg(test)]
+    pub(crate) fn can_short_circuit(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
 impl PullDemand {
+    /// Returns true when this demand can be satisfied without reading any input rows.
+    pub(crate) fn is_zero(self) -> bool {
+        matches!(
+            self,
+            PullDemand::FirstInput(0) | PullDemand::LastInput(0) | PullDemand::UntilOutput(0)
+        )
+    }
+
     /// Return a `PullDemand` capped to at most `n` input elements,
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {
@@ -271,6 +314,83 @@ impl Demand {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{FieldDemand, FieldSet, PullDemand, SinkResultDemand};
+
+    fn paths(need: FieldDemand) -> Vec<String> {
+        match need {
+            FieldDemand::Fields(fields) => fields
+                .paths()
+                .iter()
+                .map(|path| {
+                    path.keys()
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect(),
+            FieldDemand::None => Vec::new(),
+            FieldDemand::Whole => vec!["*".to_string()],
+        }
+    }
+
+    #[test]
+    fn field_sets_prefix_nested_paths() {
+        let mut fields = FieldSet::chain(Arc::from([Arc::<str>::from("name")]));
+        fields.insert(super::FieldPath::chain(Arc::from([
+            Arc::<str>::from("address"),
+            Arc::<str>::from("city"),
+        ])));
+        let prefixed = fields.prefixed(&[Arc::from("user")]);
+        assert_eq!(
+            paths(FieldDemand::Fields(prefixed)),
+            vec!["user.name", "user.address.city"]
+        );
+    }
+
+    #[test]
+    fn pull_demand_caps_inputs_without_crossing_prefix_bounds() {
+        assert_eq!(PullDemand::All.cap_inputs(3), PullDemand::FirstInput(3));
+        assert_eq!(
+            PullDemand::UntilOutput(2).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(
+            PullDemand::LastInput(2).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(
+            PullDemand::FirstInput(5).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(PullDemand::NthInput(2).cap_inputs(3), PullDemand::NthInput(2));
+        assert_eq!(
+            PullDemand::NthInput(3).cap_inputs(3),
+            PullDemand::FirstInput(3)
+        );
+    }
+
+    #[test]
+    fn pull_demand_zero_only_matches_no_read_variants() {
+        assert!(PullDemand::FirstInput(0).is_zero());
+        assert!(PullDemand::LastInput(0).is_zero());
+        assert!(PullDemand::UntilOutput(0).is_zero());
+        assert!(!PullDemand::NthInput(0).is_zero());
+        assert!(!PullDemand::All.is_zero());
+    }
+
+    #[test]
+    fn sink_result_demand_is_separate_from_row_output_demand() {
+        assert!(SinkResultDemand::UntilMatch.can_short_circuit());
+        assert!(SinkResultDemand::UntilFailure.can_short_circuit());
+        assert!(!SinkResultDemand::None.can_short_circuit());
+    }
+}
+
 /// Adapter trait implemented by whichever operator representation a planner
 /// uses for demand propagation.
 pub trait DemandOperator {
@@ -282,6 +402,7 @@ pub trait DemandOperator {
 /// A single annotated step produced by `propagate_demands`, recording an
 /// operator alongside the demand it receives and the demand it places upstream.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub struct DemandStep<Op> {
     /// The operator at this position in the chain.
     pub op: Op,
@@ -293,6 +414,7 @@ pub struct DemandStep<Op> {
 
 /// Walk `ops` in reverse and compute each operator's upstream demand given
 /// `final_demand` at the sink, returning annotated `DemandStep`s in forward order.
+#[cfg(test)]
 pub fn propagate_demands<Op>(ops: &[Op], final_demand: Demand) -> Vec<DemandStep<Op>>
 where
     Op: DemandOperator + Clone,
@@ -314,6 +436,7 @@ where
 
 /// Fold demand propagation over `ops` from sink to source and return only
 /// the final upstream demand without allocating intermediate `DemandStep`s.
+#[cfg(test)]
 pub fn source_demand<Op>(ops: &[Op], final_demand: Demand) -> Demand
 where
     Op: DemandOperator,

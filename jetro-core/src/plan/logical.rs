@@ -7,10 +7,13 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, Expr, Step};
-use crate::builtins::BuiltinMethod;
-use crate::ir::logical::LogicalPlan;
+use crate::builtins::{
+    registry::{logical_shape, pipeline_accepts_arity, BuiltinId, BuiltinLogicalShape},
+    BuiltinMethod,
+};
 use crate::exec::pipeline::{SortSpec, Source};
+use crate::ir::logical::LogicalPlan;
+use crate::parse::ast::{Arg, Expr, Step};
 
 /// Try to lower a pipeline-shaped `Expr` to a `LogicalPlan`.
 /// Returns `None` for expressions that are not pipeline-shaped.
@@ -56,193 +59,203 @@ fn extract_source_and_steps(expr: &Expr) -> Option<(Source, &[Step])> {
 }
 
 fn apply_steps(mut plan: LogicalPlan, steps: &[Step]) -> Option<LogicalPlan> {
-    for step in steps {
-        plan = apply_step(plan, step)?;
+    for (idx, step) in steps.iter().enumerate() {
+        plan = apply_step(plan, step, idx == steps.len() - 1)?;
     }
     Some(plan)
 }
 
-fn apply_step(plan: LogicalPlan, step: &Step) -> Option<LogicalPlan> {
+fn apply_step(plan: LogicalPlan, step: &Step, is_last: bool) -> Option<LogicalPlan> {
     match step {
-        Step::Method(name, args) => apply_method(plan, name.as_str(), args),
+        Step::Method(name, args) => apply_method(plan, name.as_str(), args, is_last),
         // Field, OptField, Index, etc. — cannot classify as pipeline stage
         _ => None,
     }
 }
 
-fn apply_method(input: LogicalPlan, name: &str, args: &[Arg]) -> Option<LogicalPlan> {
-    // Look up the BuiltinMethod from the name
+fn apply_method(
+    input: LogicalPlan,
+    name: &str,
+    args: &[Arg],
+    is_last: bool,
+) -> Option<LogicalPlan> {
     let method = BuiltinMethod::from_name(name);
     if method == BuiltinMethod::Unknown {
         return None;
     }
+    let id = BuiltinId::from_method(method);
+    if !pipeline_accepts_arity(id, args.len(), is_last) {
+        return None;
+    }
 
-    let plan = match method {
-        BuiltinMethod::Filter | BuiltinMethod::FindAll => {
+    let plan = match logical_shape(id)? {
+        BuiltinLogicalShape::Filter => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::Filter {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::Map => {
+        BuiltinLogicalShape::FilterThenFirst => {
+            let pred = single_expr_arg(args)?;
+            let filtered = LogicalPlan::Filter {
+                input: Box::new(input),
+                predicate: pred.clone(),
+            };
+            if is_last {
+                LogicalPlan::First(Box::new(filtered))
+            } else {
+                filtered
+            }
+        }
+        BuiltinLogicalShape::Map => {
             let proj = single_expr_arg(args)?;
             LogicalPlan::Map {
                 input: Box::new(input),
                 projection: proj.clone(),
             }
         }
-        BuiltinMethod::FlatMap => {
+        BuiltinLogicalShape::FlatMap => {
             let exp = single_expr_arg(args)?;
             LogicalPlan::FlatMap {
                 input: Box::new(input),
                 expansion: exp.clone(),
             }
         }
-        BuiltinMethod::Take => {
+        BuiltinLogicalShape::Take => {
             let n = single_usize_arg(args)?;
             LogicalPlan::Take {
                 input: Box::new(input),
                 n,
             }
         }
-        BuiltinMethod::Skip => {
+        BuiltinLogicalShape::Skip => {
             let n = single_usize_arg(args)?;
             LogicalPlan::Skip {
                 input: Box::new(input),
                 n,
             }
         }
-        BuiltinMethod::First => {
-            // first() takes 0 args in pipeline position
-            if !args.is_empty() { return None; }
+        BuiltinLogicalShape::First => {
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::First(Box::new(input))
         }
-        BuiltinMethod::Last => {
-            if !args.is_empty() { return None; }
+        BuiltinLogicalShape::Last => {
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Last(Box::new(input))
         }
-        BuiltinMethod::Sum => {
+        BuiltinLogicalShape::Sum => {
             // sum() with no args — sum with projection arg is handled by Pipeline::lower
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Sum(Box::new(input))
         }
-        BuiltinMethod::Avg => {
-            if !args.is_empty() { return None; }
+        BuiltinLogicalShape::Avg => {
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Avg(Box::new(input))
         }
-        BuiltinMethod::Min => {
-            if !args.is_empty() { return None; }
+        BuiltinLogicalShape::Min => {
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Min(Box::new(input))
         }
-        BuiltinMethod::Max => {
-            if !args.is_empty() { return None; }
+        BuiltinLogicalShape::Max => {
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Max(Box::new(input))
         }
-        BuiltinMethod::Count => {
+        BuiltinLogicalShape::Count => {
             // count() with no args; count(pred) falls through to Pipeline::lower
-            if !args.is_empty() { return None; }
+            if !args.is_empty() {
+                return None;
+            }
             LogicalPlan::Count(Box::new(input))
         }
-        BuiltinMethod::Reverse => LogicalPlan::Reverse {
+        BuiltinLogicalShape::Reverse => LogicalPlan::Reverse {
             input: Box::new(input),
         },
-        BuiltinMethod::TakeWhile => {
+        BuiltinLogicalShape::TakeWhile => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::TakeWhile {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::DropWhile => {
+        BuiltinLogicalShape::DropWhile => {
             let pred = single_expr_arg(args)?;
             LogicalPlan::DropWhile {
                 input: Box::new(input),
                 predicate: pred.clone(),
             }
         }
-        BuiltinMethod::Sort => {
-            match args.len() {
-                0 => LogicalPlan::Sort {
+        BuiltinLogicalShape::Sort => match args.len() {
+            0 => LogicalPlan::Sort {
+                input: Box::new(input),
+                spec: SortSpec::identity(),
+            },
+            1 => {
+                let (spec, _) = crate::exec::pipeline::compile_sort_spec(&args[0])?;
+                LogicalPlan::Sort {
                     input: Box::new(input),
-                    spec: SortSpec::identity(),
-                },
-                1 => {
-                    // Compile the key arg into a SortSpec.
-                    // UnaryNeg wrapping means descending order.
-                    let arg_expr = match &args[0] {
-                        Arg::Pos(e) => e,
-                        _ => return None,
-                    };
-                    // 2-arg comparator lambdas (`.sort((a, b) => …)`) cannot
-                    // be represented as a single-key SortSpec. Bail out so
-                    // the router falls back to the VM path, where
-                    // `exec_lambda_method` dispatches to
-                    // `sort_comparator_apply`.
-                    if matches!(arg_expr, Expr::Lambda { params, .. } if params.len() >= 2) {
-                        return None;
-                    }
-                    let (key_expr, descending) = match arg_expr {
-                        Expr::UnaryNeg(inner) => (inner.as_ref().clone(), true),
-                        other => (other.clone(), false),
-                    };
-                    // Rewrite bare Ident to @.field (body context). Single-
-                    // param `Lambda` is unwrapped to its substituted body so
-                    // `Compiler::compile` does not lower it to `PushNull`.
-                    let unwrapped =
-                        crate::compile::lambda_lower::unwrap_single_lambda(&key_expr);
-                    let rooted: Expr = match unwrapped {
-                        Expr::Ident(name) => {
-                            Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name)])
-                        }
-                        other => other,
-                    };
-                    let key_prog = Arc::new(crate::compile::compiler::Compiler::compile(&rooted, ""));
-                    LogicalPlan::Sort {
-                        input: Box::new(input),
-                        spec: SortSpec::keyed(key_prog, descending),
-                    }
+                    spec,
                 }
-                _ => return None,
             }
-        }
-        BuiltinMethod::Unique => LogicalPlan::Unique {
+            _ => return None,
+        },
+        BuiltinLogicalShape::Unique => LogicalPlan::Unique {
             input: Box::new(input),
             key: None,
         },
-        BuiltinMethod::UniqueBy => {
+        BuiltinLogicalShape::UniqueBy => {
             let key = single_expr_arg(args)?;
             LogicalPlan::Unique {
                 input: Box::new(input),
                 key: Some(key.clone()),
             }
         }
-        BuiltinMethod::GroupBy => {
+        BuiltinLogicalShape::GroupBy => {
             let key = single_expr_arg(args)?;
             LogicalPlan::GroupBy {
                 input: Box::new(input),
                 key: key.clone(),
             }
         }
-        BuiltinMethod::CountBy => {
+        BuiltinLogicalShape::CountBy => {
             let key = single_expr_arg(args)?;
-            LogicalPlan::CountBy {
+            let keyed = LogicalPlan::CountBy {
                 input: Box::new(input),
                 key: key.clone(),
+            };
+            if is_last {
+                LogicalPlan::First(Box::new(keyed))
+            } else {
+                keyed
             }
         }
-        BuiltinMethod::IndexBy => {
+        BuiltinLogicalShape::IndexBy => {
             let key = single_expr_arg(args)?;
-            LogicalPlan::IndexBy {
+            let keyed = LogicalPlan::IndexBy {
                 input: Box::new(input),
                 key: key.clone(),
+            };
+            if is_last {
+                LogicalPlan::First(Box::new(keyed))
+            } else {
+                keyed
             }
         }
-        BuiltinMethod::ApproxCountDistinct => {
+        BuiltinLogicalShape::ApproxCountDistinct => {
             LogicalPlan::ApproxCountDistinct(Box::new(input))
         }
-        // Not a recognised pipeline operator — fall through to existing path
-        _ => return None,
     };
     Some(plan)
 }
@@ -261,3 +274,73 @@ fn single_usize_arg(args: &[Arg]) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::parser::parse;
+
+    fn lower(query: &str) -> LogicalPlan {
+        let expr = parse(query).expect("parse");
+        try_lower(&expr).expect("logical lower")
+    }
+
+    #[test]
+    fn terminal_find_uses_filter_first_shape() {
+        let plan = lower("$.xs.find(score > 5)");
+
+        let LogicalPlan::First(inner) = plan else {
+            panic!("expected terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn terminal_find_first_uses_filter_first_shape() {
+        let plan = lower("$.xs.find_first(score > 5)");
+
+        let LogicalPlan::First(inner) = plan else {
+            panic!("expected terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn non_terminal_find_stays_streaming_filter() {
+        let plan = lower("$.xs.find(score > 5).map(name)");
+
+        let LogicalPlan::Map { input, .. } = plan else {
+            panic!("expected map");
+        };
+        assert!(matches!(*input, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn terminal_only_sinks_do_not_lower_mid_chain() {
+        let expr = parse("$.xs.first().map(name)").expect("parse");
+        assert!(try_lower(&expr).is_none());
+    }
+
+    #[test]
+    fn select_many_first_last_fall_back_to_pipeline_lowerer() {
+        let first = parse("$.xs.first(2)").expect("parse");
+        assert!(try_lower(&first).is_none());
+
+        let last = parse("$.xs.last(2)").expect("parse");
+        assert!(try_lower(&last).is_none());
+    }
+
+    #[test]
+    fn terminal_keyed_reducers_use_registry_terminal_shape() {
+        let count_by = lower("$.xs.count_by(@.kind)");
+        let LogicalPlan::First(inner) = count_by else {
+            panic!("expected count_by terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::CountBy { .. }));
+
+        let index_by = lower("$.xs.index_by(@.id)");
+        let LogicalPlan::First(inner) = index_by else {
+            panic!("expected index_by terminal First");
+        };
+        assert!(matches!(*inner, LogicalPlan::IndexBy { .. }));
+    }
+}

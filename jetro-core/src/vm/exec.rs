@@ -2002,6 +2002,53 @@ impl VM {
                 })?;
                 Ok(Val::arr(out))
             }
+            BuiltinMethod::Fold => {
+                // `fold(init, fn)` — left-fold returning the final acc only.
+                // `fold(fn)` — first-element seed (Iterator::reduce).
+                let (init_val, lam_idx, lam_arg_idx) = match call.orig_args.len() {
+                    1 => (None, 0usize, 0usize),
+                    2 => {
+                        let init = match call.orig_args.first() {
+                            Some(arg) => {
+                                crate::data::runtime::eval_compiled_arg(self, call, arg, env)?
+                            }
+                            None => Val::Null,
+                        };
+                        (Some(init), 1usize, 1usize)
+                    }
+                    _ => return call_builtin_method_compiled(self, recv, call, env),
+                };
+                let lam_body = call
+                    .sub_progs
+                    .get(lam_idx)
+                    .ok_or_else(|| EvalError("fold: requires lambda".into()))?;
+                let (p1, p2) = match call.orig_args.get(lam_arg_idx) {
+                    Some(Arg::Pos(Expr::Lambda { params, .. })) if params.len() >= 2 => {
+                        (params[0].as_str(), params[1].as_str())
+                    }
+                    _ => return call_builtin_method_compiled(self, recv, call, env),
+                };
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError("fold: expected array".into()))?;
+                let mut iter = items.into_iter();
+                let mut running = match init_val {
+                    Some(v) => v,
+                    None => match iter.next() {
+                        Some(v) => v,
+                        None => return Ok(Val::Null),
+                    },
+                };
+                for item in iter {
+                    let f1 = scratch.push_lam(Some(p1), running.clone());
+                    let f2 = scratch.push_lam(Some(p2), item);
+                    let r = self.exec(lam_body, &scratch)?;
+                    scratch.pop_lam(f2);
+                    scratch.pop_lam(f1);
+                    running = r;
+                }
+                return Ok(running);
+            }
             BuiltinMethod::Accumulate => {
                 // Two callable shapes:
                 //   - `xs.accumulate((a, x) => ...)` — single-arg form: the

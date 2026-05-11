@@ -539,3 +539,171 @@ fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
     }
     raw
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, sync::Arc};
+
+    use crate::builtins::BuiltinMethod;
+    use crate::exec::pipeline::{MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
+    use crate::vm::Program;
+
+    use super::*;
+
+    fn empty_program() -> Arc<Program> {
+        Arc::new(Program::new(Vec::new(), "<sink-accumulator-test>"))
+    }
+
+    fn predicate_sink(op: PredicateSinkOp) -> Sink {
+        Sink::Predicate(PredicateSinkSpec {
+            op,
+            predicate: empty_program(),
+        })
+    }
+
+    fn membership_sink(op: MembershipSinkOp) -> Sink {
+        Sink::Membership(MembershipSinkSpec {
+            op,
+            target: MembershipSinkTarget::Literal(Val::Int(7)),
+            method: BuiltinMethod::Includes,
+        })
+    }
+
+    #[test]
+    fn predicate_short_circuit_sinks_do_not_materialize_rows() {
+        let any_sink = predicate_sink(PredicateSinkOp::Any);
+        let mut any = SinkAccumulator::new(&any_sink);
+        let materialized = Cell::new(0);
+        let decided = any
+            .observe_predicate_lazy(PredicateSinkOp::Any, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(1)
+            })
+            .unwrap();
+
+        assert!(decided);
+        assert_eq!(materialized.get(), 0);
+        assert_eq!(any.finish(false), Val::Bool(true));
+
+        let all_sink = predicate_sink(PredicateSinkOp::All);
+        let mut all = SinkAccumulator::new(&all_sink);
+        let materialized = Cell::new(0);
+        let decided = all
+            .observe_predicate_lazy(PredicateSinkOp::All, false, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(1)
+            })
+            .unwrap();
+
+        assert!(decided);
+        assert_eq!(materialized.get(), 0);
+        assert_eq!(all.finish(false), Val::Bool(false));
+    }
+
+    #[test]
+    fn find_one_materializes_only_matching_row_once() {
+        let sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut acc = SinkAccumulator::new(&sink);
+        let materialized = Cell::new(0);
+
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(0)
+            })
+            .unwrap());
+        assert_eq!(materialized.get(), 0);
+
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(42)
+            })
+            .unwrap());
+        assert_eq!(materialized.get(), 1);
+
+        let err = acc
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+                materialized.set(materialized.get() + 1);
+                Val::Int(99)
+            })
+            .unwrap_err();
+        assert!(err.0.contains("got multiple"));
+        assert_eq!(materialized.get(), 1);
+    }
+
+    #[test]
+    fn find_one_finish_result_requires_exactly_one_match() {
+        let empty_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut empty = SinkAccumulator::new(&empty_sink);
+        empty
+            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || Val::Int(0))
+            .unwrap();
+        let err = empty.finish_result(false).unwrap_err();
+        assert!(err.0.contains("got 0"));
+
+        let one_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let mut one = SinkAccumulator::new(&one_sink);
+        one.observe_predicate_lazy(PredicateSinkOp::FindOne, true, || Val::Int(9))
+            .unwrap();
+        assert_eq!(one.finish_result(false).unwrap(), Val::Int(9));
+    }
+
+    #[test]
+    fn membership_short_circuit_sinks_stop_on_first_match() {
+        let includes_sink = membership_sink(MembershipSinkOp::Includes);
+        let mut includes = SinkAccumulator::new(&includes_sink);
+        assert!(!includes.observe_membership_match(MembershipSinkOp::Includes, false));
+        assert!(includes.observe_membership_match(MembershipSinkOp::Includes, true));
+        assert_eq!(includes.finish(false), Val::Bool(true));
+
+        let index_sink = membership_sink(MembershipSinkOp::Index);
+        let mut index = SinkAccumulator::new(&index_sink);
+        assert!(!index.observe_membership_match(MembershipSinkOp::Index, false));
+        assert!(!index.observe_membership_match(MembershipSinkOp::Index, false));
+        assert!(index.observe_membership_match(MembershipSinkOp::Index, true));
+        assert_eq!(index.finish(false), Val::Int(2));
+    }
+
+    #[test]
+    fn scalar_short_circuit_decisions_match_sink_result_demand() {
+        use crate::plan::demand::SinkResultDemand;
+
+        for op in [PredicateSinkOp::Any, PredicateSinkOp::FindIndex] {
+            let sink = predicate_sink(op);
+            assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
+            let mut acc = SinkAccumulator::new(&sink);
+            assert!(!acc.observe_predicate_lazy(op, false, || Val::Null).unwrap());
+            assert!(acc.observe_predicate_lazy(op, true, || Val::Null).unwrap());
+        }
+
+        let sink = predicate_sink(PredicateSinkOp::All);
+        assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilFailure);
+        let mut acc = SinkAccumulator::new(&sink);
+        assert!(!acc
+            .observe_predicate_lazy(PredicateSinkOp::All, true, || Val::Null)
+            .unwrap());
+        assert!(acc
+            .observe_predicate_lazy(PredicateSinkOp::All, false, || Val::Null)
+            .unwrap());
+
+        for op in [MembershipSinkOp::Includes, MembershipSinkOp::Index] {
+            let sink = membership_sink(op);
+            assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
+            let mut acc = SinkAccumulator::new(&sink);
+            assert!(!acc.observe_membership_match(op, false));
+            assert!(acc.observe_membership_match(op, true));
+        }
+    }
+
+    #[test]
+    fn membership_indices_sink_retains_all_matches_without_stopping() {
+        let sink = membership_sink(MembershipSinkOp::IndicesOf);
+        let mut acc = SinkAccumulator::new(&sink);
+
+        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, true));
+        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, false));
+        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, true));
+        assert_eq!(acc.finish(false), Val::int_vec(vec![0, 2]));
+    }
+}

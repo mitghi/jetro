@@ -10,14 +10,15 @@ use std::sync::Arc;
 use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
+    vm::VM,
 };
 
-use super::lower::run_compiled_map;
 use super::row_source;
+use super::nested::PreparedPlan;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
-    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel, is_truthy,
-    BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
+    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
+    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
     TerminalMapCollector,
 };
 
@@ -25,8 +26,12 @@ use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
 use crate::plan::demand::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
-pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val, EvalError> {
-    let mut vm = crate::vm::VM::new();
+pub(super) fn run(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Result<Val, EvalError> {
     let mut loop_env = base_env.clone();
 
     let recv = row_source::resolve(&pipeline.source, root);
@@ -37,7 +42,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
-        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
         _ => None,
     };
     if let Sink::Membership(spec) = &pipeline.sink {
@@ -55,7 +60,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         .iter()
         .any(Stage::requires_legacy_materialization);
     if !needs_barrier {
-        return run_streaming_rows(pipeline, base_env, row_source::source_iter(&recv));
+        return run_streaming_rows_with_vm(pipeline, base_env, row_source::source_iter(&recv), vm);
     }
 
     let pre_iter: LegacyPreIter = {
@@ -78,9 +83,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 .copied()
                 .unwrap_or(StageStrategy::Default);
             if let Stage::CompiledMap(plan) = stage {
+                let prepared = PreparedPlan::new(plan);
                 let mut out: Vec<Val> = Vec::with_capacity(buf.len());
                 for v in buf.into_iter() {
-                    out.push(run_compiled_map(plan, v)?);
+                    out.push(prepared.run(v)?);
                 }
                 buf = out;
                 continue;
@@ -89,7 +95,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
             if let Some(applied) = apply_adapter_materialized(
                 stage,
                 &mut buf,
-                &mut vm,
+                vm,
                 &mut loop_env,
                 kernel,
                 strategy,
@@ -110,7 +116,7 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
 
         let sink_done = match &pipeline.sink {
             Sink::Predicate(_) => {
-                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
@@ -118,10 +124,10 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
                 membership_target.as_ref().expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
-                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Reducer(_) => {
-                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
                     ReducerItemFlow::Skipped => continue 'outer,
                 }
@@ -137,22 +143,40 @@ pub(super) fn run(pipeline: &Pipeline, root: &Val, base_env: &Env) -> Result<Val
         }
     }
 
-    // group_by wraps its output in a single-element array; unwrap it so the caller sees the map
+    // Keyed reducers wrap their output in a single-element array; unwrap it so
+    // terminal collection returns the reducer object.
     let unwrap_single_collect_obj = pipeline
         .stages
         .last()
         .and_then(Stage::descriptor)
-        .is_some_and(|desc| desc.method == Some(BuiltinMethod::GroupBy));
+        .is_some_and(|desc| {
+            desc.method
+                .is_some_and(|method| method.spec().keyed_reducer.is_some())
+        });
     sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
 /// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
 #[cfg(feature = "simd-json")]
+#[allow(dead_code)]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
     tape: &crate::data::tape::TapeData,
     keys: &[Arc<str>],
     base_env: &Env,
+) -> Option<Result<Val, EvalError>> {
+    let mut vm = VM::new();
+    run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
+}
+
+/// Streams a pipeline directly from a `simd-json` tape using caller-owned VM state.
+#[cfg(feature = "simd-json")]
+pub(super) fn run_tape_field_chain_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    keys: &[Arc<str>],
+    base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>> {
     if body
         .stages
@@ -169,30 +193,56 @@ pub(super) fn run_tape_field_chain(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    Some(run_streaming_rows(
+    Some(run_streaming_rows_with_vm(
         &pipeline,
         base_env,
         source.iter_materialized(),
+        vm,
     ))
 }
 
+#[cfg(test)]
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
 where
     I: IntoIterator<Item = Val>,
 {
-    let mut vm = crate::vm::VM::new();
+    let mut vm = VM::new();
+    run_streaming_rows_with_vm(pipeline, base_env, iter, &mut vm)
+}
+
+fn run_streaming_rows_with_vm<I>(
+    pipeline: &Pipeline,
+    base_env: &Env,
+    iter: I,
+    vm: &mut VM,
+) -> Result<Val, EvalError>
+where
+    I: IntoIterator<Item = Val>,
+{
     let mut loop_env = base_env.clone();
     let source_demand = pipeline.source_demand().chain.pull;
+    let late_projection = pipeline
+        .can_apply_late_projection_from(0)
+        .then(|| pipeline.late_projection.as_ref())
+        .flatten()
+        .filter(|_| pipeline.sink.supports_late_projection(source_demand));
+    let stage_limit = late_projection
+        .map(|projection| projection.prefix_len)
+        .unwrap_or(pipeline.stages.len());
     let mut pulled_inputs: usize = 0;
     let mut emitted_outputs: usize = 0;
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
-        Sink::Membership(spec) => Some(eval_membership_target(spec, &mut vm, &loop_env)?),
+        Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
         _ => None,
     };
-    let terminal_map_idx = if matches!(pipeline.sink, Sink::Collect)
+    if source_demand.is_zero() {
+        return sink_acc.finish_result(false);
+    }
+    let terminal_map_idx = if late_projection.is_none()
+        && matches!(pipeline.sink, Sink::Collect)
         && pipeline
             .stages
             .last()
@@ -209,6 +259,14 @@ where
             .unwrap_or(&BodyKernel::Generic)
     });
     let mut terminal_map_collect = terminal_map_kernel.map(TerminalMapCollector::new);
+    let prepared_nested: Vec<Option<PreparedPlan>> = pipeline
+        .stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::CompiledMap(plan) => Some(PreparedPlan::new(plan)),
+            _ => None,
+        })
+        .collect();
 
     'outer: for mut item in iter {
         if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
@@ -220,20 +278,23 @@ where
         }
         pulled_inputs += 1;
 
-        for (stage_idx, stage) in pipeline.stages.iter().enumerate() {
+        for (stage_idx, stage) in pipeline.stages[..stage_limit].iter().enumerate() {
             let kernel = pipeline
                 .stage_kernels
                 .get(stage_idx)
                 .unwrap_or(&BodyKernel::Generic);
             match stage {
-                Stage::CompiledMap(plan) => {
-                    item = run_compiled_map(plan, item)?;
+                Stage::CompiledMap(_) => {
+                    item = prepared_nested[stage_idx]
+                        .as_ref()
+                        .expect("compiled map stages have prepared nested plans")
+                        .run(item)?;
                 }
                 _ => match super::val_stage_flow::apply_adapter_streaming(
                     stage,
                     stage_idx,
                     item,
-                    &mut vm,
+                    vm,
                     &mut loop_env,
                     kernel,
                     &mut stage_taken,
@@ -258,12 +319,19 @@ where
 
         if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
         {
+            if let Some(projection) = late_projection {
+                return eval_late_projection(&projection.kernel, &item, vm);
+            }
             return Ok(item);
+        }
+
+        if let Some(projection) = late_projection {
+            item = eval_late_projection(&projection.kernel, &item, vm)?;
         }
 
         let sink_done = match &pipeline.sink {
             Sink::Predicate(_) => {
-                observe_predicate_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_predicate_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
@@ -271,10 +339,10 @@ where
                 membership_target.as_ref().expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
-                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)?
+                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
             }
             Sink::Reducer(_) => {
-                match observe_reducer_item(pipeline, item, &mut sink_acc, &mut vm, &mut loop_env)? {
+                match observe_reducer_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)? {
                     ReducerItemFlow::Observed => false,
                     ReducerItemFlow::Skipped => continue 'outer,
                 }
@@ -294,6 +362,18 @@ where
         return Ok(collector.finish());
     }
     sink_acc.finish_result(false)
+}
+
+fn eval_late_projection(
+    projection: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+) -> Result<Val, EvalError> {
+    eval_kernel_with_vm(projection, item, vm, |_, _| {
+        Err(EvalError(
+            "late projection requires a native body kernel".to_string(),
+        ))
+    })
 }
 
 // barrier stages always produce a Vec<Val>, so only the Owned variant is needed here
@@ -399,7 +479,7 @@ fn apply_adapter_materialized(
                 Some(prog) => {
                     let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
                     for v in buf.iter() {
-                        let key = match eval_kernel(kernel, v, |item| {
+                        let key = match eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                             apply_item_in_env(vm, loop_env, item, prog)
                         }) {
                             Ok(key) => key,
@@ -490,7 +570,7 @@ fn observe_reducer_item(
             .sink_kernels
             .get(kernel_idx)
             .unwrap_or(&BodyKernel::Generic);
-        let keep = eval_kernel(kernel, &item, |item| {
+        let keep = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
             apply_item_in_env(vm, loop_env, item, predicate)
         })?;
         if !crate::util::is_truthy(&keep) {
@@ -504,7 +584,7 @@ fn observe_reducer_item(
             .sink_kernels
             .get(project_kernel_idx)
             .unwrap_or(&BodyKernel::Generic);
-        let reducer_item = eval_kernel(kernel, &item, |item| {
+        let reducer_item = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
             apply_item_in_env(vm, loop_env, item, project)
         })?;
         sink_acc.push_projected_numeric(&reducer_item);
@@ -561,7 +641,7 @@ fn observe_predicate_sink_item(
         .sink_kernels
         .get(kernel_idx)
         .unwrap_or(&BodyKernel::Generic);
-    let predicate = eval_kernel(kernel, &item, |item| {
+    let predicate = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
         apply_item_in_env(vm, loop_env, item, &spec.predicate)
     })?;
     sink_acc.observe_predicate_item(spec.op, crate::util::is_truthy(&predicate), item)
@@ -583,7 +663,7 @@ fn observe_arg_extreme_sink_item(
         .sink_kernels
         .get(kernel_idx)
         .unwrap_or(&BodyKernel::Generic);
-    let key = eval_kernel(kernel, &item, |item| {
+    let key = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
         apply_item_in_env(vm, loop_env, item, &spec.key)
     })?;
     sink_acc.observe_arg_extreme(spec.want_max, item, key);
@@ -612,7 +692,7 @@ pub(crate) fn apply_lambda_obj(
                 ..
             } => {
                 let k_val = Val::Str(k.clone());
-                let new_k = eval_kernel(kernel, &k_val, |item| {
+                let new_k = eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 let new_k_arc = match new_k {
@@ -625,7 +705,7 @@ pub(crate) fn apply_lambda_obj(
                 method: BuiltinMethod::TransformValues,
                 ..
             } => {
-                let new_v = eval_kernel(kernel, v, |item| {
+                let new_v = eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 out.insert(k.clone(), new_v);
@@ -635,7 +715,7 @@ pub(crate) fn apply_lambda_obj(
                 ..
             } => {
                 let k_val = Val::Str(k.clone());
-                if is_truthy(&eval_kernel(kernel, &k_val, |item| {
+                if is_truthy(&eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
                     out.insert(k.clone(), v.clone());
@@ -645,7 +725,7 @@ pub(crate) fn apply_lambda_obj(
                 method: BuiltinMethod::FilterValues,
                 ..
             } => {
-                if is_truthy(&eval_kernel(kernel, v, |item| {
+                if is_truthy(&eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
                     out.insert(k.clone(), v.clone());
@@ -655,4 +735,139 @@ pub(crate) fn apply_lambda_obj(
         }
     }
     Ok(Val::obj(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use crate::data::context::Env;
+    use crate::data::value::Val;
+    use crate::parse::ast::BinOp;
+
+    use super::super::{
+        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody,
+        PredicateSinkOp, PredicateSinkSpec, Sink, Source,
+    };
+
+    struct CountingRows {
+        next: i64,
+        end: i64,
+        reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingRows {
+        fn new(end: i64, reads: Rc<Cell<usize>>) -> Self {
+            Self {
+                next: 1,
+                end,
+                reads,
+            }
+        }
+    }
+
+    impl Iterator for CountingRows {
+        type Item = Val;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.next > self.end {
+                return None;
+            }
+            self.reads.set(self.reads.get() + 1);
+            let value = self.next;
+            self.next += 1;
+            Some(Val::Int(value))
+        }
+    }
+
+    fn empty_pipeline(sink: Sink, sink_kernels: Vec<BodyKernel>) -> super::Pipeline {
+        PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink,
+            stage_kernels: Vec::new(),
+            sink_kernels,
+        }
+        .with_source(Source::Receiver(Val::Null))
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_any_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_all_sink_fails() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::All,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }),
+            vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(false));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_includes_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Includes,
+            }),
+            Vec::new(),
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn materialized_streaming_stops_when_index_sink_matches() {
+        let reads = Rc::new(Cell::new(0));
+        let pipeline = empty_pipeline(
+            Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::Int(3)),
+                method: crate::builtins::BuiltinMethod::Index,
+            }),
+            Vec::new(),
+        );
+        let env = Env::new(Val::Null);
+
+        let out = super::run_streaming_rows(&pipeline, &env, CountingRows::new(8, reads.clone()))
+            .unwrap();
+
+        assert_eq!(out, Val::Int(2));
+        assert_eq!(reads.get(), 3);
+    }
 }

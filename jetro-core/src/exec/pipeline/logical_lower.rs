@@ -7,13 +7,10 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Expr, Step};
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
+use crate::exec::pipeline::{Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage};
 use crate::ir::logical::LogicalPlan;
-use crate::exec::pipeline::{
-    plan_with_exprs, BodyKernel, NumOp, Pipeline, PipelineBody, ReducerOp,
-    ReducerSpec, Sink, Source, Stage,
-};
+use crate::parse::ast::Expr;
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -25,7 +22,7 @@ use crate::exec::pipeline::{
 /// linear pipeline (e.g. `ScalarExpr`).
 pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
     let (source, stages, stage_exprs, sink) = collect(plan)?;
-    let body = build_body(stages, stage_exprs, sink);
+    let body = PipelineBody::planned(stages, stage_exprs, sink);
     Some(body.with_source(source))
 }
 
@@ -36,9 +33,7 @@ pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
 /// Walks `plan` top-down, collecting the source, an ordered list of stages (with parallel
 /// expression slots), and the terminal sink.  Returns `None` for plan shapes that cannot be
 /// lowered to a linear pipeline.
-fn collect(
-    plan: LogicalPlan,
-) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     match plan {
         // ── Leaf: the row source ───────────────────────────────────────────
         LogicalPlan::Source(source) => Some((source, vec![], vec![], Sink::Collect)),
@@ -69,25 +64,11 @@ fn collect(
         }
 
         LogicalPlan::TakeWhile { input, predicate } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&predicate);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::TakeWhile,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(predicate)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::TakeWhile, predicate)
         }
 
         LogicalPlan::DropWhile { input, predicate } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&predicate);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::DropWhile,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(predicate)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::DropWhile, predicate)
         }
 
         // ── Positional ─────────────────────────────────────────────────────
@@ -148,36 +129,15 @@ fn collect(
 
         // ── Keyed reducers ─────────────────────────────────────────────────
         LogicalPlan::GroupBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::GroupBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::GroupBy, key)
         }
 
         LogicalPlan::CountBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::CountBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::CountBy, key)
         }
 
         LogicalPlan::IndexBy { input, key } => {
-            let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let prog = compile_expr_body(&key);
-            stages.push(Stage::ExprBuiltin {
-                method: BuiltinMethod::IndexBy,
-                body: prog,
-            });
-            exprs.push(Some(Arc::new(key)));
-            Some((source, stages, exprs, sink))
+            collect_expr_builtin_stage(*input, BuiltinMethod::IndexBy, key)
         }
 
         // ── Terminal sinks — strip the default Collect, install the real one ──
@@ -193,46 +153,10 @@ fn collect(
             let (source, stages, exprs, _) = collect(*inner)?;
             Some((source, stages, exprs, Sink::Reducer(ReducerSpec::count())))
         }
-        LogicalPlan::Sum(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Sum),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
-        }
-        LogicalPlan::Avg(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Avg),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
-        }
-        LogicalPlan::Min(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Min),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
-        }
-        LogicalPlan::Max(inner) => {
-            let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec {
-                op: ReducerOp::Numeric(NumOp::Max),
-                predicate: None,
-                projection: None,
-                predicate_expr: None,
-                projection_expr: None,
-            })))
-        }
+        LogicalPlan::Sum(inner) => collect_numeric_sink(*inner, BuiltinMethod::Sum),
+        LogicalPlan::Avg(inner) => collect_numeric_sink(*inner, BuiltinMethod::Avg),
+        LogicalPlan::Min(inner) => collect_numeric_sink(*inner, BuiltinMethod::Min),
+        LogicalPlan::Max(inner) => collect_numeric_sink(*inner, BuiltinMethod::Max),
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
             Some((source, stages, exprs, Sink::ApproxCountDistinct))
@@ -243,83 +167,39 @@ fn collect(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Body assembly
-// ---------------------------------------------------------------------------
+fn collect_expr_builtin_stage(
+    input: LogicalPlan,
+    method: BuiltinMethod,
+    body_expr: Expr,
+) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+    let (source, mut stages, mut exprs, sink) = collect(input)?;
+    stages.push(Stage::ExprBuiltin {
+        method,
+        body: compile_expr_body(&body_expr),
+    });
+    exprs.push(Some(Arc::new(body_expr)));
+    Some((source, stages, exprs, sink))
+}
 
-/// Classifies stages into `BodyKernel`s, runs `plan_with_exprs` for filter reordering/fusion,
-/// and fills in the kernel vectors required by `PipelineBody`.
-fn build_body(
-    stages: Vec<Stage>,
-    stage_exprs: Vec<Option<Arc<Expr>>>,
-    sink: Sink,
-) -> PipelineBody {
-    let classify_kernels = |stages: &[Stage]| -> Vec<BodyKernel> {
-        stages
-            .iter()
-            .map(|s| {
-                s.body_program()
-                    .map(BodyKernel::classify)
-                    .unwrap_or(BodyKernel::Generic)
-            })
-            .collect()
-    };
-
-    let kernels = classify_kernels(&stages);
-    let plan_result = plan_with_exprs(stages, stage_exprs, &kernels, sink);
-
-    let stage_kernels = classify_kernels(&plan_result.stages);
-    let sink_kernels = match &plan_result.sink {
-        Sink::Reducer(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Predicate(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::Membership(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        Sink::ArgExtreme(spec) => spec
-            .sink_programs()
-            .map(|p| BodyKernel::classify(p))
-            .collect(),
-        _ => Vec::new(),
-    };
-
-    PipelineBody {
-        stages: plan_result.stages,
-        stage_exprs: plan_result.stage_exprs,
-        sink: plan_result.sink,
-        stage_kernels,
-        sink_kernels,
-    }
+fn collect_numeric_sink(
+    inner: LogicalPlan,
+    method: BuiltinMethod,
+) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+    let (source, stages, exprs, _) = collect(inner)?;
+    Some((
+        source,
+        stages,
+        exprs,
+        Sink::Reducer(ReducerSpec::numeric(method, None, None)?),
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Expression compilation
 // ---------------------------------------------------------------------------
 
-/// Compiles `expr` to a `Program`, rewriting a bare `Ident` to `@.<ident>` so that
-/// identifiers in stage body position resolve against the current row, not the document root.
-///
-/// This replicates the `Ident→@.field` rewrite that `compile_subexpr` performs in `lower.rs`,
-/// without requiring access to the `pub(super)` helper there.
+/// Compiles `expr` with the same current-row binding rules as direct pipeline
+/// method-chain lowering.
 fn compile_expr_body(expr: &Expr) -> Arc<crate::vm::Program> {
-    // Route single-param `Expr::Lambda` through `compile_lambda_arg` so
-    // the body is substituted and — when nested-lambda references to the
-    // param remain — wrapped in `BindLamCurrent` for correct outer-row
-    // binding under pipeline stages that advance via `swap_current`.
-    if matches!(expr, Expr::Lambda { params, .. } if params.len() == 1) {
-        return crate::compile::lambda_lower::compile_lambda_arg(expr, "");
-    }
-    let lowered: Expr = match expr {
-        Expr::Ident(name) => {
-            Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())])
-        }
-        other => other.clone(),
-    };
-    Arc::new(crate::compile::compiler::Compiler::compile(&lowered, ""))
+    crate::exec::pipeline::compile_pipeline_expr_body(expr)
 }

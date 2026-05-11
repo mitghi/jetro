@@ -6,7 +6,7 @@
 //! This module consolidates the composed-execution helpers: barrier-stage handling,
 //! segment chain building, sink dispatch, and the per-stage builder.
 
-use std::borrow::Borrow;
+use std::borrow::{Borrow, Cow};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -18,7 +18,7 @@ use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
 use crate::exec::composed as cmp;
 use crate::plan::demand::PullDemand;
-use crate::vm::Program;
+use crate::vm::{Program, VM};
 
 use super::ir::program_match_only;
 use super::{
@@ -36,20 +36,25 @@ pub(super) struct ComposedStageBuilder<'a> {
     base_env: &'a Env,
     // lazily allocated; shared by all generic program-based stages so it is created at most once
     vm_ctx: OnceCell<Rc<RefCell<cmp::VmCtx>>>,
+    vm_seed: RefCell<Option<VM>>,
 }
 
 impl<'a> ComposedStageBuilder<'a> {
     /// Creates a builder that borrows `base_env` for the duration of pipeline compilation.
-    pub(super) fn new(base_env: &'a Env) -> Self {
+    pub(super) fn new(base_env: &'a Env, vm: &mut VM) -> Self {
         Self {
             base_env,
             vm_ctx: OnceCell::new(),
+            vm_seed: RefCell::new(Some(std::mem::take(vm))),
         }
     }
 
     /// Builds a specialised `composed::Stage` for `(stage, kernel)`; returns `None` for barrier stages.
     pub(super) fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
         Some(match (stage, kernel) {
+            (Stage::CompiledMap(plan), _) => Box::new(NestedPlanStage {
+                plan: super::nested::PreparedPlan::new(plan),
+            }),
             (Stage::Filter(_, _), BodyKernel::FieldCmpLit(field, op, lit))
                 if matches!(op, crate::parse::ast::BinOp::Eq) =>
             {
@@ -90,10 +95,16 @@ impl<'a> ComposedStageBuilder<'a> {
             ) => Box::new(cmp::Skip {
                 remaining: Cell::new(*value),
             }),
-            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Compact => {
+            (Stage::Builtin(call), _)
+                if call.method.spec().view_stage
+                    == Some(crate::builtins::BuiltinViewStage::Compact) =>
+            {
                 Box::new(cmp::CompactFilterStage)
             }
-            (Stage::Builtin(call), _) if call.method == crate::builtins::BuiltinMethod::Remove => {
+            (Stage::Builtin(call), _)
+                if call.method.spec().view_stage
+                    == Some(crate::builtins::BuiltinViewStage::RemoveValue) =>
+            {
                 match &call.args {
                     crate::builtins::BuiltinArgs::Val(target) => {
                         Box::new(cmp::RemoveValueFilterStage::new(target.clone()))
@@ -187,10 +198,31 @@ impl<'a> ComposedStageBuilder<'a> {
     fn vm_ctx(&self) -> Rc<RefCell<cmp::VmCtx>> {
         Rc::clone(self.vm_ctx.get_or_init(|| {
             Rc::new(RefCell::new(cmp::VmCtx {
-                vm: crate::vm::VM::new(),
+                vm: self.vm_seed.borrow_mut().take().unwrap_or_default(),
                 env: self.base_env.clone(),
             }))
         }))
+    }
+
+    fn restore_vm(&self, vm: &mut VM) {
+        if let Some(ctx) = self.vm_ctx.get() {
+            *vm = std::mem::take(&mut ctx.borrow_mut().vm);
+        } else if let Some(seed) = self.vm_seed.borrow_mut().take() {
+            *vm = seed;
+        }
+    }
+}
+
+struct NestedPlanStage {
+    plan: super::nested::PreparedPlan,
+}
+
+impl cmp::Stage for NestedPlanStage {
+    fn apply<'a>(&self, x: &'a Val) -> cmp::StageOutput<'a> {
+        match self.plan.run(x.clone()) {
+            Ok(value) => cmp::StageOutput::Pass(Cow::Owned(value)),
+            Err(_) => cmp::StageOutput::Filtered,
+        }
     }
 }
 
@@ -283,15 +315,25 @@ fn run_barrier(
             let key = key_from_kernel(kernel)?;
             cmp::barrier_unique_by(buf, &key)
         }
-        Stage::ExprBuiltin {
-            method: crate::builtins::BuiltinMethod::GroupBy,
-            ..
-        } => {
-            if !matches!(sink, Sink::Collect) || !is_terminal {
-                return None;
-            }
+        Stage::ExprBuiltin { method, .. }
+            if matches!(
+                method,
+                crate::builtins::BuiltinMethod::GroupBy
+                    | crate::builtins::BuiltinMethod::CountBy
+                    | crate::builtins::BuiltinMethod::IndexBy
+            ) =>
+        {
             let key = key_from_kernel(kernel)?;
-            return Some(BarrierOutput::Done(cmp::barrier_group_by(buf, &key)));
+            let value = match method {
+                crate::builtins::BuiltinMethod::GroupBy => cmp::barrier_group_by(buf, &key),
+                crate::builtins::BuiltinMethod::CountBy => cmp::barrier_count_by(buf, &key),
+                crate::builtins::BuiltinMethod::IndexBy => cmp::barrier_index_by(buf, &key),
+                _ => unreachable!("keyed reducer match guard"),
+            };
+            if matches!(sink, Sink::Collect) && is_terminal {
+                return Some(BarrierOutput::Done(value));
+            }
+            return Some(BarrierOutput::Rows(vec![value]));
         }
         _ => return None,
     };
@@ -428,18 +470,52 @@ fn source_rows(source: &Source, root: &Val) -> Option<row_source::Rows<'static>>
 // ---------------------------------------------------------------------------
 
 /// Entry point for composed execution; returns `None` when any stage or sink cannot be lowered.
+#[allow(dead_code)]
 pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,
     base_env: &Env,
 ) -> Option<Result<Val, EvalError>> {
-    let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
-    let stage_builder = ComposedStageBuilder::new(base_env);
+    let mut vm = VM::new();
+    run_with_vm(pipeline, root, base_env, &mut vm)
+}
 
+/// Entry point for composed execution using caller-owned VM cache/state.
+pub(super) fn run_with_vm(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    let result = run_inner(pipeline, root, base_env, vm);
+    result
+}
+
+fn run_inner(
+    pipeline: &Pipeline,
+    root: &Val,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
+    let stage_builder = ComposedStageBuilder::new(base_env, vm);
+    let result = run_with_builder(pipeline, root, &eff_stages, &eff_kernels, &eff_sink, &stage_builder);
+    stage_builder.restore_vm(vm);
+    result
+}
+
+fn run_with_builder(
+    pipeline: &Pipeline,
+    root: &Val,
+    eff_stages: &[Stage],
+    eff_kernels: &[BodyKernel],
+    eff_sink: &Sink,
+    stage_builder: &ComposedStageBuilder<'_>,
+) -> Option<Result<Val, EvalError>> {
     let mut buf = source_rows(&pipeline.source, root)?;
 
-    let kernels = &eff_kernels;
-    let stages_ref = &eff_stages;
+    let kernels = eff_kernels;
+    let stages_ref = eff_stages;
 
     let strategies = compute_strategies_with_kernels(stages_ref, kernels, &eff_sink);
 
@@ -529,13 +605,7 @@ fn run_late_projection_sink(
     rows: &[Val],
 ) -> Option<Result<Val, EvalError>> {
     let projection = pipeline.late_projection.as_ref()?;
-    if projection.prefix_len < start || projection.prefix_len >= stages.len() {
-        return None;
-    }
-    if stages[projection.prefix_len..]
-        .iter()
-        .any(Stage::is_composed_barrier)
-    {
+    if !pipeline.can_apply_late_projection_from(start) {
         return None;
     }
 
@@ -555,10 +625,11 @@ fn run_late_projection_sink(
 }
 
 fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink> {
+    if !sink.supports_late_projection(demand) {
+        return None;
+    }
     match sink {
-        Sink::Collect if !matches!(demand, PullDemand::LastInput(_)) => {
-            Some(ProjectingSink::Collect(Vec::new()))
-        }
+        Sink::Collect => Some(ProjectingSink::Collect(Vec::new())),
         Sink::Terminal(crate::builtins::BuiltinMethod::First) => Some(ProjectingSink::First(None)),
         Sink::Terminal(crate::builtins::BuiltinMethod::Last) => Some(ProjectingSink::Last(None)),
         Sink::Nth(idx) => {
@@ -831,12 +902,7 @@ fn run_lazy_ordered_suffix(
     };
     let suffix_start = sort_idx + 1;
     if let Some(projection) = pipeline.late_projection.as_ref() {
-        if projection.prefix_len >= suffix_start
-            && projection.prefix_len < stages.len()
-            && !stages[projection.prefix_len..]
-                .iter()
-                .any(Stage::is_composed_barrier)
-        {
+        if pipeline.can_apply_late_projection_from(suffix_start) {
             if let Some(projecting_sink) = projecting_sink_for(sink, final_demand) {
                 if let Some(prefix) = build_chain(
                     stages,

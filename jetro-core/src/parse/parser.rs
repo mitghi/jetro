@@ -12,6 +12,9 @@ use pest_derive::Parser;
 use std::fmt;
 
 use super::ast::*;
+use super::write_terminal::{
+    build_patch_op, is_chain_write_terminal, steps_to_path as write_steps_to_path,
+};
 
 /// Pest-derived parser for the v2 grammar. The grammar file is embedded at
 /// compile time via the `#[grammar]` attribute and is not loaded at runtime.
@@ -745,15 +748,12 @@ fn classify_chain_write(base: &Expr, steps: &[Step]) -> Option<Expr> {
         Step::Method(n, a) => (n.as_str(), a),
         _ => return None,
     };
-    if !is_terminal_write(name) {
+    if !is_chain_write_terminal(name) {
         return None;
     }
 
     let prefix = &steps[..steps.len() - 1];
-    let path = match steps_to_path(prefix) {
-        Ok(p) => p,
-        Err(_) => return None, // complex step in path — fall back to method call
-    };
+    let path = write_steps_to_path(prefix, true)?;
 
     if name == "update" {
         let ops = build_update_ops(args)?;
@@ -764,142 +764,12 @@ fn classify_chain_write(base: &Expr, steps: &[Step]) -> Option<Expr> {
         });
     }
 
-    let op = build_write_terminal_op(name, args)?;
+    let op = build_patch_op(name, args, Vec::new())?;
     Some(Expr::UpdateBatch {
         root: Box::new(Expr::Root),
         selector: path,
         ops: vec![op],
     })
-}
-
-/// Return `true` when `name` is one of the chain-write terminal method names
-/// that `classify_chain_write` should rewrite to `Expr::Patch`.
-fn is_terminal_write(name: &str) -> bool {
-    // `.replace` is intentionally absent — it is the two-arg string builtin.
-    matches!(
-        name,
-        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge" | "update"
-    )
-}
-
-/// Convert a slice of `Step` values (the path prefix before the write
-/// terminal) into `PathStep` values, returning an error when an unsupported
-/// step type is encountered.
-fn steps_to_path(steps: &[Step]) -> Result<Vec<PathStep>, String> {
-    let mut out = Vec::with_capacity(steps.len());
-    for s in steps {
-        match s {
-            Step::Field(f) => out.push(PathStep::Field(f.clone())),
-            Step::Index(i) => out.push(PathStep::Index(*i)),
-            Step::OptField(f) => out.push(PathStep::Field(f.clone())),
-            Step::Descendant(f) => out.push(PathStep::Descendant(f.clone())),
-            Step::DynIndex(e) => {
-                // Dynamic index expressions are supported in patch paths for
-                // computed keys, e.g. `$.items[$i].set(v)`.
-                out.push(PathStep::DynIndex((**e).clone()));
-            }
-            Step::Wildcard => out.push(PathStep::Wildcard),
-            Step::InlineFilter(e) => out.push(PathStep::WildcardFilter(e.clone())),
-            _ => return Err("chain-write: unsupported step in path".into()),
-        }
-    }
-    Ok(out)
-}
-
-/// Build the `PatchOp` for a terminal write method, encoding the write
-/// semantics: `set` → value write, `modify` → lambda rewrite, `delete` →
-/// `DeleteMark`, `unset` → child `DeleteMark`, `merge`/`deep_merge` →
-/// method call on current.
-fn build_write_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
-    match name {
-        "set" => {
-            let v = arg_expr(args.first()?).clone();
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        // `.modify(|x| expr)` desugars the lambda into a `let` binding so
-        // the current value is accessible as the named parameter inside `expr`.
-        "modify" => {
-            let v = match arg_expr(args.first()?).clone() {
-                Expr::Lambda { params, body } => {
-                    if let Some(p) = params.into_iter().next() {
-                        Expr::Let {
-                            name: p,
-                            init: Box::new(Expr::Current),
-                            body,
-                        }
-                    } else {
-                        *body
-                    }
-                }
-                other => other,
-            };
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        "delete" => {
-            if !args.is_empty() {
-                return None;
-            }
-            Some(PatchOp {
-                path,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        // `.merge(obj)` and `.deep_merge(obj)` wrap the arg in a method call
-        // on the current value so the patch engine can apply the merge in place.
-        "merge" | "deep_merge" | "deepMerge" => {
-            let arg = arg_expr(args.first()?).clone();
-            let method = if name == "merge" {
-                "merge".to_string()
-            } else {
-                "deep_merge".to_string()
-            };
-            let v = Expr::Chain(
-                Box::new(Expr::Current),
-                vec![Step::Method(method, vec![Arg::Pos(arg)])],
-            );
-            Some(PatchOp {
-                path,
-                val: v,
-                cond: None,
-            })
-        }
-        // `.unset(key)` appends the key as a `PathStep::Field` and marks it
-        // for deletion, equivalent to `patch $ { path.key: DELETE }`.
-        "unset" => {
-            let key = match arg_expr(args.first()?) {
-                Expr::Str(s) => s.clone(),
-                Expr::Ident(s) => s.clone(),
-                _ => return None,
-            };
-            let mut p = path;
-            p.push(PathStep::Field(key));
-            Some(PatchOp {
-                path: p,
-                val: Expr::DeleteMark,
-                cond: None,
-            })
-        }
-        _ => None,
-    }
-}
-
-fn build_write_terminal_op(name: &str, args: &[Arg]) -> Option<PatchOp> {
-    match name {
-        "set" | "modify" | "delete" | "merge" | "deep_merge" | "deepMerge" => {
-            build_write_op(name, args, Vec::new())
-        }
-        "unset" => build_write_op(name, args, Vec::new()),
-        _ => None,
-    }
 }
 
 fn build_update_ops(args: &[Arg]) -> Option<Vec<PatchOp>> {

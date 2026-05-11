@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::data::value::{ObjVecData, Val};
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
 
-use super::{BodyKernel, CollectLayout, ObjectKernel, ViewKernelValue};
+use super::{BodyKernel, CollectLayout, ObjectKernel, RowProgram, ViewKernelValue};
 
 /// Output collector for the terminal stage of a pipeline.
 pub(crate) enum TerminalCollector<'a> {
@@ -45,13 +45,17 @@ impl<'a> TerminalCollector<'a> {
         }
     }
 
-    /// Evaluates `item` via `kernel` on the zero-copy view path; returns `None` on failure.
-    pub(crate) fn push_view_row<'v, V>(&mut self, item: &V, kernel: &BodyKernel) -> Option<()>
+    /// Evaluates `item` via a generic row program on the zero-copy view path.
+    pub(crate) fn push_view_program<'v, V>(
+        &mut self,
+        item: &V,
+        program: &RowProgram,
+    ) -> Option<()>
     where
         V: ValueView<'v>,
     {
         match self {
-            Self::Values(values) => values.push(eval_view_value(item, kernel)?),
+            Self::Values(values) => values.push(eval_view_program_value(item, program)?),
             Self::UniformObject(collector) => collector.push_view_row(item)?,
         }
         Some(())
@@ -142,6 +146,18 @@ where
     V: ValueView<'a>,
 {
     match super::eval_view_kernel(kernel, item)? {
+        ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
+        ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+fn eval_view_program_value<'a, V>(item: &V, program: &RowProgram) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match program.eval_view(item)? {
         ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }

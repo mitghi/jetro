@@ -78,8 +78,8 @@ impl Builtin for Filter {
     ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
             })
         })?;
         Ok(if keep {
@@ -96,8 +96,8 @@ impl Builtin for Filter {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::filter_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -145,6 +145,7 @@ impl Builtin for Compact {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_stage(BuiltinViewStage::Compact)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
@@ -163,6 +164,7 @@ impl Builtin for Remove {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_stage(BuiltinViewStage::RemoveValue)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
@@ -214,8 +216,8 @@ impl Builtin for Map {
             return Ok(crate::exec::pipeline::StageFlow::TerminalCollected);
         }
         let mapped = super::map_one(&item, |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
             })
         })?;
         Ok(crate::exec::pipeline::StageFlow::Continue(mapped))
@@ -229,8 +231,8 @@ impl Builtin for Map {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::map_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -265,8 +267,8 @@ impl Builtin for FlatMap {
         let prog = body?;
         let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
-            let inner = match crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            let inner = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             }) {
                 Ok(inner) => inner,
                 Err(err) => return Some(Err(err)),
@@ -640,7 +642,7 @@ impl Builtin for ApproxCountDistinct {
             .view_native()
             .approx_distinct_sink()
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .demand_law(BuiltinDemandLaw::RowKeyedReducer)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -878,7 +880,9 @@ impl Builtin for Pairwise {
 
 #[inline]
 fn expand_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding).cost(10.0)
+    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
 }
 
 /// `flatten` — concatenates nested arrays.
@@ -919,6 +923,7 @@ impl Builtin for Split {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
             .cost(10.0)
+            .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Expanding,
@@ -941,6 +946,7 @@ impl Builtin for Split {
 fn expand_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
         .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
         .element()
 }
 
@@ -1075,7 +1081,9 @@ impl Builtin for Collect {
 
 #[inline]
 fn barrier_default_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(20.0)
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
+        .cost(20.0)
+        .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `sort` — full-barrier comparison sort, optional key.
@@ -1278,6 +1286,17 @@ impl Builtin for Accumulate {
     fn spec() -> BuiltinSpec { barrier_default_spec() }
 }
 
+/// `fold(init, fn)` / `fold(fn)` — like `accumulate(...).last()` but
+/// emits a single value instead of the running-trace array. Equivalent
+/// to `Iterator::fold` (with init) or `Iterator::reduce` (without).
+pub(crate) struct Fold;
+impl Builtin for Fold {
+    const METHOD: BuiltinMethod = BuiltinMethod::Fold;
+    const NAME: &'static str = "fold";
+    const ALIASES: &'static [&'static str] = &["reduce"];
+    fn spec() -> BuiltinSpec { barrier_default_spec() }
+}
+
 // ── Keyed reducers ───────────────────────────────────────────────────────────
 
 /// `group_by(key)` — keyed reducer collecting elements per key.
@@ -1291,7 +1310,7 @@ impl Builtin for GroupBy {
             .keyed_reducer(BuiltinKeyedReducer::Group)
             .columnar_stage(BuiltinColumnarStage::GroupBy)
             .cost(20.0)
-            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .demand_law(BuiltinDemandLaw::RowKeyedReducer)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
@@ -1332,7 +1351,8 @@ impl Builtin for CountBy {
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Count)
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .demand_law(BuiltinDemandLaw::KeyOnlyReducer)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
                 true,
@@ -1376,7 +1396,8 @@ impl Builtin for IndexBy {
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Index)
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::KeyedReducer)
+            .demand_law(BuiltinDemandLaw::RowKeyedReducer)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
                 true,
@@ -1538,7 +1559,9 @@ impl Builtin for Reverse {
 
 #[inline]
 fn barrier_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier).cost(10.0)
+    BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `append(arr)` — concatenates barrier.
@@ -1901,6 +1924,7 @@ fn object_lambda_spec() -> BuiltinSpec {
             1.0,
             1.0,
         ))
+        .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
@@ -2051,6 +2075,8 @@ impl Builtin for FilterValues {
 fn path_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne)
         .indexed()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 
@@ -2064,6 +2090,7 @@ impl Builtin for GetPath {
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::get_path_apply(recv, p) }
+            super::BuiltinArgs::Path(path) => Some(super::get_path_impl(recv, path)),
             _ => None,
         }
     }
@@ -2094,6 +2121,7 @@ impl Builtin for HasPath {
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Str(p) => { super::has_path_apply(recv, p) }
+            super::BuiltinArgs::Path(path) => Some(crate::data::value::Val::Bool(!super::get_path_impl(recv, path).is_null())),
             _ => None,
         }
     }
@@ -2445,6 +2473,8 @@ fn scalar_native_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
         .indexed()
         .view_native()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 
@@ -2454,6 +2484,8 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
         .indexed()
         .view_native()
         .view_scalar()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
 
@@ -2771,7 +2803,11 @@ pub(crate) struct Missing;
 impl Builtin for Missing {
     const METHOD: BuiltinMethod = BuiltinMethod::Missing;
     const NAME: &'static str = "missing";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::Missing) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::Missing)
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+    }
     #[inline]
     fn apply_args(
         recv: &crate::data::value::Val,
@@ -2998,6 +3034,8 @@ impl Builtin for Has {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(
@@ -3021,7 +3059,13 @@ impl Builtin for HasKey {
     const METHOD: BuiltinMethod = BuiltinMethod::HasKey;
     const NAME: &'static str = "has_key";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec().view_scalar()
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .view_scalar()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
     }
     #[inline]
     fn apply_args(
@@ -3029,7 +3073,7 @@ impl Builtin for HasKey {
         args: &super::BuiltinArgs,
     ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => Some(super::has_apply(recv, p).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Str(p) => Some(super::has_key_apply(recv, p)),
             _ => None,
         }
     }

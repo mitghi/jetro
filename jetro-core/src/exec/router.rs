@@ -2,7 +2,7 @@
 //!
 //! Receives a `Jetro` document and a `QueryPlan` produced by `planner`,
 //! then dispatches to either `physical_eval` (for structured IR nodes) or the
-//! thread-local VM (for the `SourceVm` fallback when planning is bypassed).
+//! document/engine-owned VM (for the `SourceVm` fallback when planning is bypassed).
 //! The only job here is routing — no evaluation logic lives in this module.
 
 use serde_json::Value;
@@ -11,7 +11,7 @@ use crate::data::context::EvalError;
 use crate::exec::interpreted as physical_eval;
 use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::plan::physical as planner;
-use crate::{with_vm, Jetro, VM};
+use crate::{Jetro, VM};
 
 /// Plans `expr` against `j`'s input mode and then executes the resulting plan, returning JSON.
 ///
@@ -25,25 +25,7 @@ pub(crate) fn collect_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
 ///
 /// Used by `JetroEngine::collect` when the plan was already retrieved from cache.
 pub(crate) fn collect_plan_json(j: &Jetro, plan: &QueryPlan) -> Result<Value, EvalError> {
-    match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
-        QueryRoot::SourceVm(source) => run_vm_json(j, source.as_ref()),
-    }
-}
-
-/// Executes `expr` via the thread-local VM, acquiring a fresh `VM` if the cell is already borrowed.
-fn run_vm_json(j: &Jetro, expr: &str) -> Result<Value, EvalError> {
-    with_vm(|cell| match cell.try_borrow_mut() {
-        Ok(mut vm) => {
-            let prog = vm.get_or_compile(expr)?;
-            vm.execute_val(&prog, j.root_val()?)
-        }
-        Err(_) => {
-            let mut vm = VM::new();
-            let prog = vm.get_or_compile(expr)?;
-            vm.execute_val(&prog, j.root_val()?)
-        }
-    })
+    j.with_vm(|vm| collect_plan_json_with_vm(j, plan, vm))
 }
 
 /// Executes a pre-built plan using a caller-supplied `VM` instance owned by `JetroEngine`,
@@ -54,7 +36,7 @@ pub(crate) fn collect_plan_json_with_vm(
     vm: &mut VM,
 ) -> Result<Value, EvalError> {
     match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run(j, plan, *root).map(Value::from),
+        QueryRoot::Node(root) => physical_eval::run_with_vm(j, plan, *root, vm).map(Value::from),
         QueryRoot::SourceVm(source) => {
             let prog = vm.get_or_compile(source.as_ref())?;
             vm.execute_val(&prog, j.root_val()?)
@@ -765,9 +747,121 @@ mod tests {
         let picked = j
             .collect(r#"$.books.map(@.pick("title", "score")).last()"#)
             .unwrap();
+        let omitted = j
+            .collect(r#"$.books.map(@.omit("debug")).last()"#)
+            .unwrap();
 
         assert_eq!(keys, json!(["title", "score", "debug"]));
         assert_eq!(picked, json!({"title": "b", "score": 902}));
+        assert_eq!(omitted, json!({"title": "b", "score": 902}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_object_values_entries_use_tape_native_helpers() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"a","score":1},{"title":"b","score":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let values = j.collect(r#"$.books.map(@.values()).last()"#).unwrap();
+        let entries = j.collect(r#"$.books.map(@.entries()).last()"#).unwrap();
+
+        assert_eq!(values, json!(["b", 2]));
+        assert_eq!(entries, json!([["title", "b"], ["score", 2]]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_object_key_predicates_use_tape_native_helpers() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"low","score":1},{"title":"b","isbn":"x"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let has = j.collect(r#"$.books.map(@.has("isbn")).last()"#).unwrap();
+        let has_key = j
+            .collect(r#"$.books.map(@.has_key("isbn")).last()"#)
+            .unwrap();
+        let missing = j
+            .collect(r#"$.books.map(@.missing("score")).last()"#)
+            .unwrap();
+
+        assert_eq!(has, json!(true));
+        assert_eq!(has_key, json!(true));
+        assert_eq!(missing, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_has_preserves_array_and_string_membership_without_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"tags":["sf"],"title":"Dune"},{"tags":["sf","hugo"],"title":"Foundation"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let tag = j
+            .collect(r#"$.books.map(@.tags.has("hugo")).last()"#)
+            .unwrap();
+        let title = j
+            .collect(r#"$.books.map(@.title.has("dation")).last()"#)
+            .unwrap();
+
+        assert_eq!(tag, json!(true));
+        assert_eq!(title, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_missing_treats_null_as_missing_without_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"isbn":"x"},{"isbn":null}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map(@.missing("isbn")).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_path_helpers_use_tape_native_navigation() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"user":{"name":"ada"}},{"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let name = j
+            .collect(r#"$.books.map(@.get_path("user.name")).last()"#)
+            .unwrap();
+        let found = j
+            .collect(r#"$.books.map(@.has_path("user.name")).last()"#)
+            .unwrap();
+        let missing = j
+            .collect(r#"$.books.map(@.has_path("user.missing")).last()"#)
+            .unwrap();
+
+        assert_eq!(name, json!("bob"));
+        assert_eq!(found, json!(true));
+        assert_eq!(missing, json!(false));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
@@ -867,6 +961,118 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_remove_last_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.map(id).remove(2).last()"#).unwrap();
+
+        assert_eq!(out, json!(3));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_remove_last_ignores_removed_physical_tail() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":3},{"id":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.map(id).remove(2).last()"#).unwrap();
+
+        assert_eq!(out, json!(3));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_remove_take_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":4}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.map(id).remove(2).take(2)"#).unwrap();
+
+        assert_eq!(out, json!([1, 3]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_compact_take_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[null,{"id":1},null,{"id":2},{"id":3}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.compact().take(2).map(id)"#).unwrap();
+
+        assert_eq!(out, json!([1, 2]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_compact_last_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[null,{"id":1},null,{"id":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.compact().map(id).last()"#).unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_compact_last_ignores_physical_null_tail() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":[{"id":1},{"id":2},null],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.compact().map(id).last()"#).unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_map_first_reads_head_without_materializing_result_row() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.people.map(name).first()"#).unwrap();
+
+        assert_eq!(out, json!("al"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_map_last_reads_tail_and_materializes_one_result() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
@@ -875,6 +1081,60 @@ mod tests {
         j.reset_tape_materialized_subtrees();
 
         let out = j.collect(r#"$.people.map(name).last()"#).unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_chained_map_last_composes_late_projection() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"user":{"name":"al"}},{"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.map(@.user).map(@.name).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_chained_map_take_composes_bounded_projection() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"user":{"name":"al"}},{"user":{"name":"bob"}},{"user":{"name":"cy"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.map(@.user).map(@.name).take(2)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["al", "bob"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn tape_view_chained_map_nth_uses_indexed_projection() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"user":{"name":"al"}},{"user":{"name":"bob"}},{"user":{"name":"cy"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.map(@.user).map(@.name).nth(1)"#)
+            .unwrap();
 
         assert_eq!(out, json!("bob"));
         assert!(!j.root_val_is_materialized());
@@ -901,6 +1161,24 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn tape_view_filter_last_ignores_failing_physical_tail() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"bob","score":2},{"name":"cy","score":903}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.people.filter(score < 900).map(name).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("bob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn tape_view_map_nth_reads_indexed_row() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"al","score":1},{"name":"ada","score":901},{"name":"bob","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
@@ -912,7 +1190,7 @@ mod tests {
 
         assert_eq!(out, json!("ada"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -930,7 +1208,7 @@ mod tests {
 
         assert_eq!(out, json!("bob"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]
@@ -1362,6 +1640,114 @@ mod tests {
 
     #[cfg(feature = "simd-json")]
     #[test]
+    fn view_sort_topk_keeps_object_key_suffix_as_tape_views() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"score":10},{"isbn":"top","score":30},{"isbn":"mid","score":20}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).take(2).has_key("isbn")"#)
+            .unwrap();
+
+        assert_eq!(out, json!([true, true]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_keeps_object_key_terminal_projection_as_tape_view() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"score":20},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).has_key("isbn").last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_keeps_scalar_terminal_projection_as_tape_view() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"name":"top","score":30},{"name":"mid","score":20},{"name":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).map(name).upper().last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("LOW"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_many_keeps_projection_as_tape_views() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"mid","score":20},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).map(isbn).last(2)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["mid", "low"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_head_many_keeps_projection_as_tape_views() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"mid","score":20},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).map(isbn).first(2)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["top", "mid"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_nth_keeps_projection_as_tape_view() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"mid","score":20},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).map(isbn).nth(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!("mid"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
     fn view_prefix_streams_into_sort_topk_without_materializing_prefix_rows() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"low","score":10},{"name":"top","score":30},{"name":"mid","score":20},{"name":"skip","score":5}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
@@ -1411,7 +1797,197 @@ mod tests {
 
         assert_eq!(out, json!("answer"));
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 1);
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_filter_map_nth_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"skip","score":100,"price":10},{"isbn":"first","score":90,"price":30},{"isbn":"second","score":80,"price":40},{"isbn":"tail","score":70,"price":50}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).filter(price > 20).map(isbn).nth(1)"#)
+            .unwrap();
+
+        assert_eq!(out, json!("second"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_filter_map_last_many_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"skip","score":100,"price":10},{"isbn":"first","score":90,"price":30},{"isbn":"second","score":80,"price":40},{"isbn":"tail","score":70,"price":50}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).filter(price > 20).map(isbn).last(2)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["second", "tail"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_string_predicate_map_last_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"name":"prod","score":100},{"name":"skip_test","score":90},{"name":"answer","score":80}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).filter(name.ends_with("er")).map(name).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("answer"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_numeric_predicate_map_last_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":100,"delta":-1.2},{"isbn":"mid","score":90,"delta":-2.4},{"isbn":"answer","score":80,"delta":2.6}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.sort_by(-score).filter(delta.abs() > 2.0).map(isbn).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("answer"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_membership_dynamic_target_stops_without_row_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.includes($.needle)"#).unwrap();
+
+        assert_eq!(out, json!(true));
+        assert!(j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_index_dynamic_target_stops_without_row_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.index($.needle)"#).unwrap();
+
+        assert_eq!(out, json!(2));
+        assert!(j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_indices_dynamic_target_scans_without_row_materialization() {
+        let j = Jetro::from_bytes(
+            br#"{"xs":["needle","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.xs.indices_of($.needle)"#).unwrap();
+
+        assert_eq!(out, json!([0, 2]));
+        assert!(j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_pick_omit_helpers_only_materialize_outputs() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30,"debug":1},{"isbn":"low","score":10,"debug":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let picked = j
+            .collect(r#"$.data.sort_by(-score).map(@.pick("isbn")).last()"#)
+            .unwrap();
+        let omitted = j
+            .collect(r#"$.data.sort_by(-score).map(@.omit("debug")).last()"#)
+            .unwrap();
+
+        assert_eq!(picked, json!({"isbn": "low"}));
+        assert_eq!(omitted, json!({"isbn": "low", "score": 10}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_object_collection_helpers_stay_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"top","score":30},{"isbn":"low","score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let keys = j
+            .collect(r#"$.data.sort_by(-score).map(@.keys()).last()"#)
+            .unwrap();
+        let values = j
+            .collect(r#"$.data.sort_by(-score).map(@.values()).last()"#)
+            .unwrap();
+        let entries = j
+            .collect(r#"$.data.sort_by(-score).map(@.entries()).last()"#)
+            .unwrap();
+
+        assert_eq!(keys, json!(["isbn", "score"]));
+        assert_eq!(values, json!(["low", 10]));
+        assert_eq!(entries, json!([["isbn", "low"], ["score", 10]]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn view_sort_tail_path_helpers_stay_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"user":{"name":"top"},"score":30},{"user":{"name":"low"},"score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let name = j
+            .collect(r#"$.data.sort_by(-score).map(@.get_path("user.name")).last()"#)
+            .unwrap();
+        let found = j
+            .collect(r#"$.data.sort_by(-score).map(@.has_path("user.name")).last()"#)
+            .unwrap();
+
+        assert_eq!(name, json!("low"));
+        assert_eq!(found, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
     }
 
     #[cfg(feature = "simd-json")]

@@ -415,6 +415,7 @@ pub struct CompiledMatch {
     /// future analysers consume this flag; the runtime always produces
     /// the same non-exhaustive error if every arm misses, regardless of
     /// the flag value.
+    #[allow(dead_code)]
     pub is_exhaustive: bool,
     /// Shape summary describing what the structural backend can serve
     /// from a bitmap index without touching the document body. `None`

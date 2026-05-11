@@ -68,14 +68,19 @@ pub(super) fn apply_adapter_streaming<'a>(
     // ElementBuiltin: element-wise scalar apply via Stage variant match.
     // All other variants pass through (barriers handled by materialised path).
     match stage {
-        Stage::Builtin(call) if call.method == crate::builtins::BuiltinMethod::Compact => {
+        Stage::Builtin(call)
+            if call.method.spec().view_stage == Some(crate::builtins::BuiltinViewStage::Compact) =>
+        {
             if matches!(item, Val::Null) {
                 Ok(StageFlow::SkipRow)
             } else {
                 Ok(StageFlow::Continue(item))
             }
         }
-        Stage::Builtin(call) if call.method == crate::builtins::BuiltinMethod::Remove => {
+        Stage::Builtin(call)
+            if call.method.spec().view_stage
+                == Some(crate::builtins::BuiltinViewStage::RemoveValue) =>
+        {
             match &call.args {
                 crate::builtins::BuiltinArgs::Val(target)
                     if crate::util::vals_eq(&item, target) =>

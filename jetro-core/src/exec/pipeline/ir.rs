@@ -9,17 +9,19 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    participates_in_demand, pipeline_materialization, pipeline_order_effect, pipeline_shape,
-    BuiltinId,
+    effective_pipeline_order_effect, participates_in_demand, pipeline_composed_barrier,
+    pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
+    sink_demand as builtin_sink_demand, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinMethod, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-    BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineOrderEffect,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
-use crate::parse::chain_ir::ChainOp;
-use crate::plan::demand::{Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, ValueNeed};
+use crate::plan::chain_ir::{ChainOp, MatchRole};
+use crate::plan::demand::{
+    Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, SinkResultDemand, ValueNeed,
+};
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
@@ -42,6 +44,8 @@ pub enum Position {
 pub struct SinkDemand {
     /// Element-level pull/value/order requirements propagated to the source chain.
     pub chain: ChainDemand,
+    /// Scalar sink-result decision demand, separate from row-output pull demand.
+    pub sink_result: SinkResultDemand,
     /// Set when the sink selects exactly one element by position (first/last).
     pub positional: Option<Position>,
 }
@@ -51,12 +55,19 @@ impl SinkDemand {
     /// demand can be computed.
     pub const RESULT: SinkDemand = SinkDemand {
         chain: ChainDemand::RESULT,
+        sink_result: SinkResultDemand::None,
         positional: None,
     };
+
+    /// Returns true when the terminal scalar result can stop the executor loop
+    /// before row-output pull demand is satisfied.
+    #[cfg(test)]
+    pub(crate) fn has_scalar_short_circuit(self) -> bool {
+        self.sink_result.can_short_circuit()
+    }
 }
 
 /// Source payload demand split into scan-time and result-row lanes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadDemand {
     /// Fields/value needed while deciding which rows survive.
@@ -69,10 +80,8 @@ pub struct PayloadDemand {
 #[derive(Debug, Clone)]
 pub struct LateProjection {
     /// Number of leading stages that must run before the delayed projection is applied.
-    #[allow(dead_code)]
     pub prefix_len: usize,
     /// Composed projection kernel to apply to selected rows.
-    #[allow(dead_code)]
     pub kernel: BodyKernel,
 }
 
@@ -110,54 +119,35 @@ impl Sink {
                     value: ValueNeed::Whole,
                     order: false,
                 },
+                sink_result: SinkResultDemand::None,
                 positional: Some(Position::First),
             };
         }
-        if let Sink::SelectMany { n, from_end } = self {
+        if matches!(self, Sink::SelectMany { .. }) {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: if *from_end {
-                        PullDemand::LastInput(*n)
-                    } else {
-                        PullDemand::FirstInput(*n)
-                    },
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
+                chain: self.select_many_demand().expect("checked SelectMany"),
+                sink_result: SinkResultDemand::None,
                 positional: None,
             };
         }
-        if matches!(self, Sink::Predicate(_)) {
-            let value = match self {
-                Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne => ValueNeed::Whole,
-                _ => ValueNeed::Predicate,
-            };
+        if let Sink::Predicate(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value,
-                    order: false,
-                },
+                chain: spec.demand(),
+                sink_result: spec.sink_result_demand(),
                 positional: None,
             };
         }
-        if matches!(self, Sink::Membership(_)) {
+        if let Sink::Membership(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Whole,
-                    order: false,
-                },
+                chain: spec.demand(),
+                sink_result: spec.sink_result_demand(),
                 positional: None,
             };
         }
-        if matches!(self, Sink::ArgExtreme(_)) {
+        if let Sink::ArgExtreme(spec) = self {
             return SinkDemand {
-                chain: ChainDemand {
-                    pull: PullDemand::All,
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
+                chain: spec.demand(),
+                sink_result: SinkResultDemand::None,
                 positional: None,
             };
         }
@@ -165,6 +155,18 @@ impl Sink {
             return sink_demand_from_builtin(spec);
         }
         SinkDemand::RESULT
+    }
+
+    /// Returns true when this sink can apply a delayed projection only to the
+    /// rows it actually emits or retains.
+    pub(crate) fn supports_late_projection(&self, demand: PullDemand) -> bool {
+        match self {
+            Sink::Collect => !matches!(demand, PullDemand::LastInput(_)),
+            Sink::Terminal(BuiltinMethod::First | BuiltinMethod::Last)
+            | Sink::Nth(_)
+            | Sink::SelectMany { .. } => true,
+            _ => false,
+        }
     }
 
     /// Returns `true` when every sub-program in the sink (predicate, projection) satisfies
@@ -184,6 +186,29 @@ impl Sink {
             Sink::Predicate(spec) => program_ok(&spec.predicate),
             Sink::ArgExtreme(spec) => program_ok(&spec.key),
             Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
+        }
+    }
+
+    /// Classifies embedded sink programs into body kernels for payload planning and view routing.
+    pub(crate) fn body_kernels(&self) -> Vec<BodyKernel> {
+        match self {
+            Sink::Reducer(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::Predicate(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::Membership(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            Sink::ArgExtreme(spec) => spec
+                .sink_programs()
+                .map(|p| BodyKernel::classify(p))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -270,6 +295,21 @@ impl Sink {
             Sink::Collect => None,
         }
     }
+
+    fn select_many_demand(&self) -> Option<ChainDemand> {
+        let Sink::SelectMany { n, from_end } = self else {
+            return None;
+        };
+        Some(ChainDemand {
+            pull: if *from_end {
+                PullDemand::LastInput(*n)
+            } else {
+                PullDemand::FirstInput(*n)
+            },
+            value: ValueNeed::Whole,
+            order: true,
+        })
+    }
 }
 
 fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<usize> {
@@ -277,44 +317,13 @@ fn view_native_sink_kernel(sink_kernels: &[BodyKernel], idx: usize) -> Option<us
 }
 
 fn sink_demand_from_builtin(spec: BuiltinSinkSpec) -> SinkDemand {
-    match spec.demand {
-        BuiltinSinkDemand::First { value } => SinkDemand {
-            chain: ChainDemand::first(sink_value_need(value)),
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
+    SinkDemand {
+        chain: builtin_sink_demand(spec),
+        sink_result: SinkResultDemand::None,
+        positional: match spec.accumulator {
+            BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
+            _ => None,
         },
-        BuiltinSinkDemand::Last { value } => SinkDemand {
-            chain: ChainDemand {
-                pull: PullDemand::LastInput(1),
-                value: sink_value_need(value),
-                order: true,
-            },
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
-        },
-        BuiltinSinkDemand::All { value, order } => SinkDemand {
-            chain: ChainDemand {
-                pull: PullDemand::All,
-                value: sink_value_need(value),
-                order,
-            },
-            positional: match spec.accumulator {
-                BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
-                _ => None,
-            },
-        },
-    }
-}
-
-fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
-    match value {
-        BuiltinSinkValueNeed::None => ValueNeed::CountOnly,
-        BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
-        BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
     }
 }
 
@@ -478,30 +487,16 @@ impl<'a> StageDescriptor<'a> {
         self.method.and_then(|method| method.spec().columnar_stage)
     }
 
-    /// Returns whether the stage is streaming, legacy-materialised, or a composed barrier.
-    #[inline]
-    pub(crate) fn pipeline_materialization(self) -> BuiltinPipelineMaterialization {
-        self.method
-            .map(|method| pipeline_materialization(BuiltinId::from_method(method)))
-            .unwrap_or(BuiltinPipelineMaterialization::Streaming)
-    }
-
     /// Returns how this stage affects the sort order of its input stream.
     #[inline]
     pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
         let Some(method) = self.method else {
             return BuiltinPipelineOrderEffect::Blocks;
         };
-        let spec = method.spec();
-        if let Some(effect) = pipeline_order_effect(BuiltinId::from_method(method)) {
-            return effect;
-        }
-        if self.allow_one_to_one_order_fallback
-            && spec.cardinality == crate::builtins::BuiltinCardinality::OneToOne
-        {
-            return BuiltinPipelineOrderEffect::Preserves;
-        }
-        BuiltinPipelineOrderEffect::Blocks
+        effective_pipeline_order_effect(
+            BuiltinId::from_method(method),
+            self.allow_one_to_one_order_fallback,
+        )
     }
 
     /// Returns `true` when the stage can run using only a materialised receiver, delegating
@@ -542,28 +537,45 @@ macro_rules! method_stage_descriptor {
 }
 
 impl Stage {
+    /// Classifies the stage body program, returning `Generic` for stages without a body.
+    pub(crate) fn body_kernel(&self) -> BodyKernel {
+        self.body_program()
+            .map(BodyKernel::classify)
+            .unwrap_or(BodyKernel::Generic)
+    }
+
+    /// Classifies all stage body programs in order.
+    pub(crate) fn body_kernels(stages: &[Stage]) -> Vec<BodyKernel> {
+        stages.iter().map(Self::body_kernel).collect()
+    }
+
     /// Returns `true` when this stage requires a composed-barrier materialisation pass before
     /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {
-        self.pipeline_materialization() == BuiltinPipelineMaterialization::ComposedBarrier
+        self.descriptor()
+            .and_then(|desc| desc.method)
+            .is_some_and(|method| pipeline_composed_barrier(BuiltinId::from_method(method)))
     }
 
     /// Returns `true` when the stage cannot participate in the streaming pull loop and must be
     /// executed via the legacy materialisation path.
     pub(crate) fn requires_legacy_materialization(&self) -> bool {
-        !matches!(
-            self.pipeline_materialization(),
-            BuiltinPipelineMaterialization::Streaming
-        )
+        matches!(self, Stage::SortedDedup(_))
+            || (!matches!(self, Stage::CompiledMap(_))
+                && self
+                    .descriptor()
+                    .and_then(|desc| desc.method)
+                    .is_some_and(|method| !pipeline_streams(BuiltinId::from_method(method))))
     }
 
     /// Returns `true` when the stage cannot use a composed/view barrier and must fall back to the
     /// legacy full-materialisation executor.
     pub(crate) fn requires_legacy_fallback(&self) -> bool {
-        matches!(
-            self.pipeline_materialization(),
-            BuiltinPipelineMaterialization::LegacyMaterialized
-        )
+        matches!(self, Stage::SortedDedup(_))
+            || self
+                .descriptor()
+                .and_then(|desc| desc.method)
+                .is_some_and(|method| pipeline_legacy_materialized(BuiltinId::from_method(method)))
     }
 
     /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,
@@ -575,6 +587,17 @@ impl Stage {
     ) -> Option<ViewStageCapability> {
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
+        if stage == BuiltinViewStage::RemoveValue {
+            return match self {
+                Stage::Builtin(call) => match &call.args {
+                    crate::builtins::BuiltinArgs::Val(target) => {
+                        Some(ViewStageCapability::RemoveValue(target.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
         if stage == BuiltinViewStage::Distinct {
             return match desc.body {
                 Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {
@@ -656,18 +679,6 @@ impl Stage {
         }
     }
 
-    // Hard-coded overrides for CompiledMap (streaming) and SortedDedup (legacy).
-    fn pipeline_materialization(&self) -> BuiltinPipelineMaterialization {
-        match self {
-            Stage::CompiledMap(_) => BuiltinPipelineMaterialization::Streaming,
-            Stage::SortedDedup(_) => BuiltinPipelineMaterialization::LegacyMaterialized,
-            _ => self
-                .descriptor()
-                .map(StageDescriptor::pipeline_materialization)
-                .unwrap_or(BuiltinPipelineMaterialization::Streaming),
-        }
-    }
-
     /// Returns `true` when this stage can execute using only the materialised receiver, with
     /// `program_ok` used to validate the stage's body program if present.
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
@@ -687,18 +698,14 @@ impl Stage {
     /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
     /// optimisation (requires Map shape and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
-        match self {
-            Stage::Map(_, _) => true,
-            Stage::CompiledMap(_) => true,
-            _ => false,
-        }
+        matches!(self, Stage::Map(_, _))
     }
 
     /// Returns `true` when this stage performs a per-element value transformation that the
     /// demand optimiser can track symbolically (substitute `@` in downstream predicates).
     /// Direct Stage-variant match — no executor enum lookup.
     pub(crate) fn is_symbolic_map_stage(&self) -> bool {
-        matches!(self, Stage::CompiledMap(_) | Stage::Map(_, _))
+        matches!(self, Stage::Map(_, _))
     }
 
     /// Returns `true` when this stage is a filter whose predicate can be substituted symbolically
@@ -784,12 +791,12 @@ impl Stage {
             // reason about them with the role-specific propagation rules
             // (`Predicate` widens upstream demand to scan-until-output;
             // `Transform` is 1:1).
-            Stage::Filter(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
-                crate::parse::chain_ir::MatchRole::Predicate,
-            )),
-            Stage::Map(prog, _) if program_is_match_only(prog) => Some(ChainOp::match_role(
-                crate::parse::chain_ir::MatchRole::Transform,
-            )),
+            Stage::Filter(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(MatchRole::Predicate))
+            }
+            Stage::Map(prog, _) if program_is_match_only(prog) => {
+                Some(ChainOp::match_role(MatchRole::Transform))
+            }
             _ => self.chain_demand_op(),
         }
     }
@@ -819,7 +826,11 @@ impl Stage {
         } else {
             None
         };
-        SinkDemand { chain, positional }
+        SinkDemand {
+            chain,
+            sink_result: demand.sink_result,
+            positional,
+        }
     }
 
     pub(crate) fn ordered_prefix_effect(
@@ -1004,12 +1015,18 @@ pub enum PhysicalExecPath {
 /// wrapping into a `Pipeline`.
 #[derive(Debug, Clone)]
 pub struct Plan {
+    /// Source used when this plan is executed as a nested receiver pipeline.
+    pub source: super::Source,
     /// Optimised, fused, and reordered stages.
     pub stages: Vec<Stage>,
     /// Preserved AST expressions parallel to `stages` after symbolic optimisation.
     pub stage_exprs: Vec<Option<Arc<Expr>>>,
     /// The terminal sink after demand optimisation.
     pub sink: Sink,
+    /// Pre-classified stage body kernels aligned with `stages`.
+    pub stage_kernels: Vec<BodyKernel>,
+    /// Pre-classified sink body kernels aligned with the sink's embedded programs.
+    pub sink_kernels: Vec<BodyKernel>,
 }
 
 pub(super) fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
@@ -1162,6 +1179,17 @@ impl PipelineBody {
                 .sink
                 .can_run_with_receiver_only(program_is_current_only)
     }
+
+    /// Returns the source demand for this body after propagating the sink demand
+    /// through all planned stages.
+    pub(crate) fn source_demand(&self) -> SinkDemand {
+        Pipeline::segment_source_demand(&self.stages, &self.sink)
+    }
+
+    /// Returns only the pull lane of this body's source demand.
+    pub(crate) fn pull_demand(&self) -> PullDemand {
+        Pipeline::segment_pull_demand(&self.stages, &self.sink)
+    }
 }
 
 impl Pipeline {
@@ -1174,6 +1202,11 @@ impl Pipeline {
             .fold(sink.demand(), |demand, stage| stage.upstream_demand(demand))
     }
 
+    /// Returns only the pull lane of `segment_source_demand`.
+    pub fn segment_pull_demand(stages: &[Stage], sink: &Sink) -> PullDemand {
+        Self::segment_source_demand(stages, sink).chain.pull
+    }
+
     /// Returns the `SinkDemand` that the pipeline's source must satisfy after propagating the
     /// sink demand through all stages.
     pub fn source_demand(&self) -> SinkDemand {
@@ -1182,7 +1215,6 @@ impl Pipeline {
 
     /// Computes precise payload demand at the source, split into fields needed while scanning
     /// and fields needed only for selected output rows.
-    #[allow(dead_code)]
     pub fn segment_payload_demand(
         stages: &[Stage],
         stage_kernels: &[BodyKernel],
@@ -1231,6 +1263,22 @@ impl Pipeline {
         })
     }
 
+    /// Returns true when the stored late projection can be applied after a
+    /// prefix that starts at `start` without crossing a composed barrier.
+    pub(crate) fn can_apply_late_projection_from(&self, start: usize) -> bool {
+        let Some(projection) = self.late_projection.as_ref() else {
+            return false;
+        };
+        projection.prefix_len >= start
+            && projection.prefix_len < self.stages.len()
+            && !self.stages[start..projection.prefix_len]
+                .iter()
+                .any(Stage::requires_legacy_fallback)
+            && !self.stages[projection.prefix_len..]
+                .iter()
+                .any(Stage::is_composed_barrier)
+    }
+
     /// Computes the first explicit materialization/fallback boundary for this physical path.
     pub fn fallback_boundary_for(
         stages: &[Stage],
@@ -1256,7 +1304,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
         }
         Stage::Builtin(call)
             if call.spec().pure
-                && call.spec().view_scalar
+                && call.method.is_view_projection_method()
                 && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
         {
             Some(BodyKernel::BuiltinCall {
@@ -1278,7 +1326,6 @@ fn compose_projection_kernel(first: BodyKernel, then: BodyKernel) -> BodyKernel 
     }
 }
 
-#[allow(dead_code)]
 fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
     match sink {
         Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => {
@@ -1325,7 +1372,6 @@ fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
     }
 }
 
-#[allow(dead_code)]
 fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLanes) -> DemandLanes {
     match stage {
         Stage::Filter(_, _) => {
@@ -1380,6 +1426,22 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             scan_need: map_lane_payload(&downstream.scan_need, kernel),
             result_need: map_lane_payload(&downstream.result_need, kernel),
         },
+        Stage::ExprBuiltin { method, .. }
+            if matches!(method.spec().demand_law, BuiltinDemandLaw::KeyOnlyReducer) =>
+        {
+            DemandLanes {
+                scan_need: kernel.field_demand(),
+                result_need: FieldDemand::None,
+            }
+        }
+        Stage::ExprBuiltin { method, .. }
+            if matches!(method.spec().demand_law, BuiltinDemandLaw::RowKeyedReducer) =>
+        {
+            DemandLanes {
+                scan_need: FieldDemand::Whole,
+                result_need: FieldDemand::None,
+            }
+        }
         Stage::Builtin(call)
             if call.method.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
         {
@@ -1408,16 +1470,18 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
     }
 }
 
-#[allow(dead_code)]
 fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
-    if demand.is_none() {
-        FieldDemand::None
-    } else {
-        kernel.field_demand()
+    match demand {
+        FieldDemand::None => FieldDemand::None,
+        FieldDemand::Fields(fields) => match kernel {
+            BodyKernel::FieldRead(key) => FieldDemand::Fields(fields.prefixed(&[Arc::clone(key)])),
+            BodyKernel::FieldChain(keys) => FieldDemand::Fields(fields.prefixed(keys)),
+            _ => kernel.field_demand(),
+        },
+        FieldDemand::Whole => kernel.field_demand(),
     }
 }
 
-#[allow(dead_code)]
 fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
     kernels
         .get(idx)

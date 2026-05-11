@@ -7,12 +7,15 @@
 
 use crate::{
     builtins::{
-        BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinSinkAccumulator,
-        BuiltinStructural,
+        BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod,
+        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinPipelineShape, BuiltinSinkAccumulator,
+        BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
+#[cfg(test)]
+use crate::builtins::BuiltinCategory;
 
 /// Compact, stable numeric identity for a builtin. One-to-one with
 /// `BuiltinMethod`; used by planner/analysis to avoid re-matching names.
@@ -48,6 +51,116 @@ impl BuiltinPipelineArity {
             Self::Exact(n) => arity == n,
             Self::Range { min, max } => (min..=max).contains(&arity),
         }
+    }
+}
+
+/// Logical planner shape for pipeline-position builtins.
+///
+/// This keeps method classification in the builtin registry while allowing
+/// `plan::logical` to own construction of `LogicalPlan` nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinLogicalShape {
+    /// `filter(expr)`-style streaming predicate.
+    Filter,
+    /// `filter(expr)` followed by `first()` when terminal.
+    FilterThenFirst,
+    /// `map(expr)` one-to-one projection.
+    Map,
+    /// `flat_map(expr)` expansion.
+    FlatMap,
+    /// `take(n)` positional prefix.
+    Take,
+    /// `skip(n)` positional offset.
+    Skip,
+    /// Nullary terminal first.
+    First,
+    /// Nullary terminal last.
+    Last,
+    /// Nullary numeric reducer.
+    Sum,
+    /// Nullary numeric reducer.
+    Avg,
+    /// Nullary numeric reducer.
+    Min,
+    /// Nullary numeric reducer.
+    Max,
+    /// Nullary count reducer.
+    Count,
+    /// Nullary reverse barrier.
+    Reverse,
+    /// Prefix predicate barrier.
+    TakeWhile,
+    /// Prefix predicate barrier.
+    DropWhile,
+    /// Sort with optional key.
+    Sort,
+    /// Nullary unique.
+    Unique,
+    /// `unique_by(expr)`.
+    UniqueBy,
+    /// `group_by(expr)`.
+    GroupBy,
+    /// `count_by(expr)` followed by first when terminal.
+    CountBy,
+    /// `index_by(expr)` followed by first when terminal.
+    IndexBy,
+    /// Nullary approximate distinct reducer.
+    ApproxCountDistinct,
+}
+
+/// Return the logical planner shape for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
+    let method = id.method()?;
+    match method {
+        BuiltinMethod::Filter | BuiltinMethod::FindAll => Some(BuiltinLogicalShape::Filter),
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::FilterThenFirst)
+        }
+        BuiltinMethod::Map => Some(BuiltinLogicalShape::Map),
+        BuiltinMethod::FlatMap => Some(BuiltinLogicalShape::FlatMap),
+        BuiltinMethod::Take => Some(BuiltinLogicalShape::Take),
+        BuiltinMethod::Skip => Some(BuiltinLogicalShape::Skip),
+        BuiltinMethod::First => Some(BuiltinLogicalShape::First),
+        BuiltinMethod::Last => Some(BuiltinLogicalShape::Last),
+        BuiltinMethod::Sum => Some(BuiltinLogicalShape::Sum),
+        BuiltinMethod::Avg => Some(BuiltinLogicalShape::Avg),
+        BuiltinMethod::Min => Some(BuiltinLogicalShape::Min),
+        BuiltinMethod::Max => Some(BuiltinLogicalShape::Max),
+        BuiltinMethod::Count => Some(BuiltinLogicalShape::Count),
+        BuiltinMethod::Reverse => Some(BuiltinLogicalShape::Reverse),
+        BuiltinMethod::TakeWhile => Some(BuiltinLogicalShape::TakeWhile),
+        BuiltinMethod::DropWhile => Some(BuiltinLogicalShape::DropWhile),
+        BuiltinMethod::Sort => Some(BuiltinLogicalShape::Sort),
+        BuiltinMethod::Unique => Some(BuiltinLogicalShape::Unique),
+        BuiltinMethod::UniqueBy => Some(BuiltinLogicalShape::UniqueBy),
+        BuiltinMethod::GroupBy => Some(BuiltinLogicalShape::GroupBy),
+        BuiltinMethod::CountBy => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::CountBy)
+        }
+        BuiltinMethod::IndexBy => {
+            matches!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalExprArg {
+                    terminal: BuiltinMethod::First,
+                })
+            )
+            .then_some(BuiltinLogicalShape::IndexBy)
+        }
+        BuiltinMethod::ApproxCountDistinct => Some(BuiltinLogicalShape::ApproxCountDistinct),
+        _ => None,
     }
 }
 
@@ -188,9 +301,14 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: ValueNeed::Numeric,
             order: false,
         },
-        BuiltinDemandLaw::KeyedReducer => Demand {
+        BuiltinDemandLaw::KeyOnlyReducer => Demand {
             pull: PullDemand::All,
             value: ValueNeed::Predicate,
+            order: false,
+        },
+        BuiltinDemandLaw::RowKeyedReducer => Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Whole,
             order: false,
         },
         BuiltinDemandLaw::OrderBarrier => Demand {
@@ -211,11 +329,50 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
     }
 }
 
+/// Convert builtin terminal-sink metadata into the shared planner demand model.
+#[inline]
+pub(crate) fn sink_demand(spec: BuiltinSinkSpec) -> Demand {
+    match spec.demand {
+        BuiltinSinkDemand::First { value } => Demand::first(sink_value_need(value)),
+        BuiltinSinkDemand::Last { value } => Demand {
+            pull: PullDemand::LastInput(1),
+            value: sink_value_need(value),
+            order: true,
+        },
+        BuiltinSinkDemand::All { value, order } => Demand {
+            pull: PullDemand::All,
+            value: sink_value_need(value),
+            order,
+        },
+    }
+}
+
+#[inline]
+fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
+    match value {
+        BuiltinSinkValueNeed::None => ValueNeed::CountOnly,
+        BuiltinSinkValueNeed::Whole => ValueNeed::Whole,
+        BuiltinSinkValueNeed::Numeric => ValueNeed::Numeric,
+    }
+}
+
 /// Return `true` if builtin `id` has a non-trivial demand law that can
 /// restrict the amount of input the planner must pull from its source.
 #[inline]
 pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
-    demand_law(id) != BuiltinDemandLaw::Identity
+    demand_law(id) != BuiltinDemandLaw::Identity || demand_is_conservative_barrier(id)
+}
+
+/// Return true when builtin `id` cannot safely preserve downstream pull
+/// precision and must be treated as a full-input demand boundary.
+#[inline]
+pub(crate) fn demand_is_conservative_barrier(id: BuiltinId) -> bool {
+    matches!(
+        demand_law(id),
+        BuiltinDemandLaw::FlatMapLike
+            | BuiltinDemandLaw::DropWhile
+            | BuiltinDemandLaw::OrderBarrier
+    ) || matches!(id.method(), Some(BuiltinMethod::Unknown) | None)
 }
 
 /// Return the materialization policy for builtin `id`; defaults to `Streaming`
@@ -227,6 +384,33 @@ pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterial
         .unwrap_or(BuiltinPipelineMaterialization::Streaming)
 }
 
+/// Return true when builtin `id` streams row-by-row without buffering.
+#[inline]
+pub(crate) fn pipeline_streams(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::Streaming
+    )
+}
+
+/// Return true when builtin `id` buffers through the composed barrier path.
+#[inline]
+pub(crate) fn pipeline_composed_barrier(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::ComposedBarrier
+    )
+}
+
+/// Return true when builtin `id` requires the legacy materialized executor.
+#[inline]
+pub(crate) fn pipeline_legacy_materialized(id: BuiltinId) -> bool {
+    matches!(
+        pipeline_materialization(id),
+        BuiltinPipelineMaterialization::LegacyMaterialized
+    )
+}
+
 /// Return the cardinality/cost shape annotation for builtin `id`, used by
 /// the pipeline cost estimator during plan selection.
 #[inline]
@@ -234,11 +418,47 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     id.method().map(|m| m.spec().pipeline_shape).flatten()
 }
 
+/// Return the builtin category for planner classification.
+#[inline]
+#[cfg(test)]
+pub(crate) fn builtin_category(id: BuiltinId) -> Option<BuiltinCategory> {
+    id.method().map(|m| m.spec().category)
+}
+
+/// Return the builtin cardinality for planner classification.
+#[inline]
+#[cfg(test)]
+pub(crate) fn builtin_cardinality(id: BuiltinId) -> Option<BuiltinCardinality> {
+    id.method().map(|m| m.spec().cardinality)
+}
+
 /// Return how builtin `id` affects element ordering in the pipeline, or
 /// `None` if the builtin has no registered ordering behaviour.
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
     id.method().map(|m| m.spec().order_effect).flatten()
+}
+
+/// Return the effective pipeline order behaviour for builtin `id`. Explicit
+/// registry metadata wins; optionally, pure one-to-one builtins may be treated
+/// as order-preserving by callers that allow this conservative fallback.
+#[inline]
+pub(crate) fn effective_pipeline_order_effect(
+    id: BuiltinId,
+    allow_one_to_one_fallback: bool,
+) -> BuiltinPipelineOrderEffect {
+    let Some(method) = id.method() else {
+        return BuiltinPipelineOrderEffect::Blocks;
+    };
+    let spec = method.spec();
+    if let Some(effect) = pipeline_order_effect(id) {
+        return effect;
+    }
+    if allow_one_to_one_fallback && spec.cardinality == BuiltinCardinality::OneToOne {
+        BuiltinPipelineOrderEffect::Preserves
+    } else {
+        BuiltinPipelineOrderEffect::Blocks
+    }
 }
 
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
@@ -451,12 +671,18 @@ mod tests {
     #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
+        let map = BuiltinId::from_method(BuiltinMethod::Map);
+        let remove = BuiltinId::from_method(BuiltinMethod::Remove);
         let take = BuiltinId::from_method(BuiltinMethod::Take);
         let count = BuiltinId::from_method(BuiltinMethod::Count);
         let unique = BuiltinId::from_method(BuiltinMethod::Unique);
+        let group_by = BuiltinId::from_method(BuiltinMethod::GroupBy);
         let count_by = BuiltinId::from_method(BuiltinMethod::CountBy);
+        let index_by = BuiltinId::from_method(BuiltinMethod::IndexBy);
+        let approx_distinct = BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct);
         let sort = BuiltinId::from_method(BuiltinMethod::Sort);
         let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
+        let take_while = BuiltinId::from_method(BuiltinMethod::TakeWhile);
         let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
         let slice = BuiltinId::from_method(BuiltinMethod::Slice);
         let chunk = BuiltinId::from_method(BuiltinMethod::Chunk);
@@ -468,6 +694,46 @@ mod tests {
         let demand = propagate_demand(filter, BuiltinDemandArg::None, demand);
         assert_eq!(demand.pull, PullDemand::UntilOutput(3));
         assert_eq!(demand.value, ValueNeed::Whole);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(2),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(4),
+            value: ValueNeed::Predicate,
+            order: false,
+        };
+        let demand = propagate_demand(map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::NthInput(4));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::CountOnly,
+            order: true,
+        };
+        let demand = propagate_demand(map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
 
         let demand = propagate_demand(count, BuiltinDemandArg::None, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
@@ -488,6 +754,13 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Predicate);
         assert!(!demand.order);
+
+        for id in [group_by, index_by, approx_distinct] {
+            let demand = propagate_demand(id, BuiltinDemandArg::None, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All);
+            assert_eq!(demand.value, ValueNeed::Whole);
+            assert!(!demand.order);
+        }
 
         let downstream = Demand {
             pull: PullDemand::FirstInput(5),
@@ -531,6 +804,26 @@ mod tests {
 
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let demand = propagate_demand(take_while, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::NthInput(2),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(take_while, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(!demand.order);
+
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
             value: ValueNeed::Predicate,
             order: true,
         };
@@ -559,6 +852,84 @@ mod tests {
     }
 
     #[test]
+    fn registry_converts_sink_demands() {
+        let first = sink_demand(BuiltinMethod::First.spec().sink.unwrap());
+        assert_eq!(first.pull, PullDemand::FirstInput(1));
+        assert_eq!(first.value, ValueNeed::Whole);
+
+        let last = sink_demand(BuiltinMethod::Last.spec().sink.unwrap());
+        assert_eq!(last.pull, PullDemand::LastInput(1));
+        assert_eq!(last.value, ValueNeed::Whole);
+
+        let count = sink_demand(BuiltinMethod::Count.spec().sink.unwrap());
+        assert_eq!(count.pull, PullDemand::All);
+        assert_eq!(count.value, ValueNeed::CountOnly);
+        assert!(!count.order);
+    }
+
+    #[test]
+    fn registry_marks_one_to_one_element_demands() {
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+
+        for method in [
+            BuiltinMethod::TransformKeys,
+            BuiltinMethod::TransformValues,
+            BuiltinMethod::FilterKeys,
+            BuiltinMethod::FilterValues,
+            BuiltinMethod::Has,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::Missing,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::HasPath,
+            BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
+            BuiltinMethod::Keys,
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
+        ] {
+            let demand = propagate_demand(
+                BuiltinId::from_method(method),
+                BuiltinDemandArg::None,
+                downstream,
+            );
+            assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_marks_conservative_demand_barriers() {
+        for method in [
+            BuiltinMethod::FlatMap,
+            BuiltinMethod::DropWhile,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Unknown,
+        ] {
+            assert!(
+                demand_is_conservative_barrier(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Map,
+            BuiltinMethod::Filter,
+            BuiltinMethod::Take,
+            BuiltinMethod::Last,
+        ] {
+            assert!(
+                !demand_is_conservative_barrier(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_drives_pipeline_execution_policy() {
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Sort)),
@@ -568,6 +939,17 @@ mod tests {
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Reverse)),
             BuiltinPipelineMaterialization::ComposedBarrier
         );
+        for method in [
+            BuiltinMethod::GroupBy,
+            BuiltinMethod::CountBy,
+            BuiltinMethod::IndexBy,
+        ] {
+            assert_eq!(
+                pipeline_materialization(BuiltinId::from_method(method)),
+                BuiltinPipelineMaterialization::ComposedBarrier,
+                "{method:?}"
+            );
+        }
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Split)),
             BuiltinPipelineMaterialization::LegacyMaterialized
@@ -576,6 +958,13 @@ mod tests {
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
             BuiltinPipelineMaterialization::Streaming
         );
+        assert!(pipeline_streams(BuiltinId::from_method(BuiltinMethod::TakeWhile)));
+        assert!(pipeline_composed_barrier(BuiltinId::from_method(
+            BuiltinMethod::Sort
+        )));
+        assert!(pipeline_legacy_materialized(BuiltinId::from_method(
+            BuiltinMethod::Split
+        )));
         assert_eq!(
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
                 .unwrap()
@@ -595,6 +984,18 @@ mod tests {
         assert_eq!(
             pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace)),
             Some(BuiltinPipelineOrderEffect::Preserves)
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Replace), false),
+            BuiltinPipelineOrderEffect::Preserves
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::HasKey), true),
+            BuiltinPipelineOrderEffect::Preserves
+        );
+        assert_eq!(
+            effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Count), true),
+            BuiltinPipelineOrderEffect::Blocks
         );
     }
 
@@ -639,6 +1040,38 @@ mod tests {
         assert_eq!(
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Count)),
             Some(BuiltinPipelineLowering::TerminalSink)
+        );
+    }
+
+    #[test]
+    fn registry_drives_logical_shapes() {
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinLogicalShape::Filter)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Find)),
+            Some(BuiltinLogicalShape::FilterThenFirst)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinLogicalShape::Map)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::Sort)),
+            Some(BuiltinLogicalShape::Sort)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::CountBy)),
+            Some(BuiltinLogicalShape::CountBy)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::IndexBy)),
+            Some(BuiltinLogicalShape::IndexBy)
+        );
+        assert_eq!(
+            logical_shape(BuiltinId::from_method(BuiltinMethod::FromJson)),
+            None
         );
     }
 
@@ -737,7 +1170,7 @@ mod tests {
             BuiltinMethod::ParseInt,
             // `Has` was previously element-wise but the streaming pipeline
             // wrapped its boolean result into `[true]`. Spec is now whole-
-            // input scalar (not element-wise) — no wrap, no element-wise
+            // input scalar (not element-wise) - no wrap, no element-wise
             // vectorisation. Same for `Keys` / `Values` / `Entries`.
             BuiltinMethod::HasKey,
             BuiltinMethod::Lines,
@@ -747,6 +1180,7 @@ mod tests {
         }
 
         for method in [
+            BuiltinMethod::Has,
             BuiltinMethod::Len,
             BuiltinMethod::FromJson,
             BuiltinMethod::Sort,

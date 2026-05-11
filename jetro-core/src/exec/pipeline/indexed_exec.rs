@@ -6,6 +6,7 @@ use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
     plan::demand::PullDemand,
+    vm::VM,
 };
 
 use super::{row_source, Pipeline, Position, SourceAccessMode, Stage};
@@ -15,17 +16,21 @@ pub(super) fn run(
     pipeline: &Pipeline,
     root: &Val,
     base_env: &Env,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>> {
     let recv = row_source::resolve(&pipeline.source, root);
     let len = row_source::row_count(&recv)?;
 
     let demand = pipeline.source_demand();
     if let super::Sink::SelectMany { n, from_end } = pipeline.sink {
-        return run_select_many(pipeline, base_env, &recv, len, n, from_end);
+        return run_select_many(pipeline, base_env, vm, &recv, len, n, from_end);
     }
 
     let idx = match pipeline.source_access {
         SourceAccessMode::Indexed(idx) => idx,
+        SourceAccessMode::IndexedFromEnd(offset) => {
+            len.checked_sub(offset.checked_add(1)?)?
+        }
         SourceAccessMode::ForwardBounded(_) => 0,
         SourceAccessMode::Reverse { .. } => len.checked_sub(1)?,
         SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => {
@@ -45,12 +50,13 @@ pub(super) fn run(
     }
 
     let elem = row_source::row_at(&recv, idx)?;
-    apply_indexed_stages(pipeline, base_env, elem)
+    apply_indexed_stages(pipeline, base_env, vm, elem)
 }
 
 fn run_select_many(
     pipeline: &Pipeline,
     base_env: &Env,
+    vm: &mut VM,
     recv: &Val,
     len: usize,
     n: usize,
@@ -65,7 +71,7 @@ fn run_select_many(
     let mut out = Vec::with_capacity(end.saturating_sub(start));
     for idx in start..end {
         if let Some(elem) = row_source::row_at(recv, idx) {
-            match apply_indexed_stages(pipeline, base_env, elem)? {
+            match apply_indexed_stages(pipeline, base_env, vm, elem)? {
                 Ok(value) => out.push(value),
                 Err(err) => return Some(Err(err)),
             }
@@ -82,9 +88,9 @@ fn run_select_many(
 fn apply_indexed_stages(
     pipeline: &Pipeline,
     base_env: &Env,
+    vm: &mut VM,
     elem: Val,
 ) -> Option<Result<Val, EvalError>> {
-    let mut vm = crate::vm::VM::new();
     let mut env = base_env.clone();
     let mut cur = elem;
     for stage in &pipeline.stages {
@@ -101,7 +107,7 @@ fn apply_indexed_stages(
                 env.restore_current(prev);
             }
             Stage::CompiledMap(plan) => {
-                cur = match super::lower::run_compiled_map(plan, cur) {
+                cur = match super::nested::run_plan(plan, cur) {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };

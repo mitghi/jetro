@@ -3,7 +3,6 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::common::{books, vm_query};
     use serde_json::json;
 
     #[test]
@@ -30,13 +29,11 @@ mod tests {
 
     #[test]
     fn simd_scan_via_vm_path() {
-        
-        
         use crate::Jetro;
         let raw = br#"{"a":{"x":1},"b":[{"x":2},{"x":3}]}"#.to_vec();
         let j_b = Jetro::from_bytes(raw.clone()).unwrap();
         let j_t = Jetro::new(serde_json::from_slice(&raw).unwrap());
-        
+
         assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
         assert_eq!(j_b.collect("$..x").unwrap(), j_t.collect("$..x").unwrap());
     }

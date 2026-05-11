@@ -159,6 +159,9 @@ pub enum BuiltinMethod {
     ApproxCountDistinct,
     /// Produces a running accumulation using the lambda.
     Accumulate,
+    /// Folds the array to a single value with `fn(acc, row) -> acc`. Equivalent
+    /// to `accumulate(init, fn).last()` but avoids the intermediate array.
+    Fold,
     /// Splits an array into two arrays: elements that pass and those that fail the predicate.
     Partition,
     /// Zips two arrays element-wise into `[[a0, b0], ...]`.
@@ -415,7 +418,7 @@ macro_rules! for_each_builtin {
             DeepLike, DeepMerge, DeepShape, Defaults, DelPath, DelPaths, Diff, DiffWindow,
             DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
             FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
-            FlatMap, Flatten, FlattenKeys, Floor, FromBase64, FromJson, FromPairs, GetPath,
+            FlatMap, Flatten, FlattenKeys, Floor, Fold, FromBase64, FromJson, FromPairs, GetPath,
             GroupBy, GroupShape, Has, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
             Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
             IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
@@ -462,6 +465,7 @@ impl BuiltinMethod {
                 | Self::TakeWhile
                 | Self::DropWhile
                 | Self::Accumulate
+                | Self::Fold
                 | Self::Partition
                 | Self::TransformKeys
                 | Self::TransformValues
@@ -482,6 +486,8 @@ pub enum BuiltinArgs {
     None,
     /// A single string argument (field name, separator, pattern, etc.).
     Str(Arc<str>),
+    /// A pre-parsed dot/bracket path used by hot path helpers.
+    Path(Arc<[PathSeg]>),
     /// Two string arguments (needle + replacement, pattern + replacement).
     StrPair { first: Arc<str>, second: Arc<str> },
     /// A list of string arguments (field list for `pick`, `omit`, etc.).
@@ -696,8 +702,10 @@ pub enum BuiltinDemandLaw {
     Count,
     /// A numeric aggregate (sum/min/max/avg); requires all inputs with numeric-only payload.
     NumericReducer,
-    /// A predicate/keyed aggregate; requires all inputs and predicate/key evaluation.
-    KeyedReducer,
+    /// Key-only aggregate such as `count_by`; requires all inputs and key evaluation.
+    KeyOnlyReducer,
+    /// Row-retaining keyed aggregate; requires all full input rows.
+    RowKeyedReducer,
     /// A full-input ordering barrier; downstream limits can choose strategy, but source scan remains all input.
     OrderBarrier,
     /// Reverses one-to-one output order, swapping first/last positional demand.
@@ -722,6 +730,10 @@ pub enum BuiltinStructural {
 pub enum BuiltinViewStage {
     /// Predicate-driven row filter stage.
     Filter,
+    /// Null-removal filter stage.
+    Compact,
+    /// Literal equality removal filter stage.
+    RemoveValue,
     /// Per-row projection stage.
     Map,
     /// Per-row expansion stage (one-to-many).
@@ -927,6 +939,8 @@ impl BuiltinViewStage {
     pub fn input_mode(self) -> BuiltinViewInputMode {
         match self {
             Self::Filter
+            | Self::Compact
+            | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -945,6 +959,8 @@ impl BuiltinViewStage {
             Self::FlatMap => BuiltinViewOutputMode::BorrowedSubviews,
             Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
+            | Self::Compact
+            | Self::RemoveValue
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -957,7 +973,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
-            Self::Filter => BuiltinCardinality::Filtering,
+            Self::Filter | Self::Compact | Self::RemoveValue => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap => BuiltinCardinality::Expanding,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
@@ -978,6 +994,8 @@ impl BuiltinViewStage {
     pub fn cost(self) -> f64 {
         match self {
             Self::Filter
+            | Self::Compact
+            | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
             | Self::TakeWhile
@@ -992,7 +1010,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
-            Self::Filter | Self::TakeWhile | Self::DropWhile => 0.5,
+            Self::Filter | Self::Compact | Self::RemoveValue | Self::TakeWhile | Self::DropWhile => 0.5,
             Self::Distinct => 1.0,
             Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,
@@ -1354,6 +1372,7 @@ impl BuiltinSpec {
     /// pipeline-streaming lowering remains the canonical path for
     /// `$.path.method()`, even when category/cardinality would otherwise be
     /// eligible for direct dispatch.
+    #[allow(dead_code)]
     fn never_unwrap(mut self) -> Self {
         self.never_unwrap = true;
         self
@@ -1404,6 +1423,23 @@ impl BuiltinMethod {
             || self.is_string_arg_view_scalar()
             || self.is_string_no_arg_view_scalar()
             || self.is_numeric_no_arg_view_scalar()
+    }
+
+    /// Returns true for object/path membership helpers that can execute on a
+    /// borrowed `JsonView` without materialising the receiver object.
+    #[inline]
+    pub(crate) fn is_view_object_key_method(self) -> bool {
+        matches!(
+            self,
+            Self::Has | Self::HasKey | Self::Missing | Self::GetPath | Self::HasPath
+        )
+    }
+
+    /// Returns true when this builtin can be composed into a view-native
+    /// projection kernel without materialising the receiver row.
+    #[inline]
+    pub(crate) fn is_view_projection_method(self) -> bool {
+        self.spec().view_scalar || self.is_view_object_key_method()
     }
 
     /// Returns the full capability descriptor for this builtin.
@@ -1635,14 +1671,21 @@ impl BuiltinCall {
             (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
                 apply_or_recv!(implode_apply(recv, field))
             }
-            (BuiltinMethod::Has | BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => {
+            (BuiltinMethod::Has, BuiltinArgs::Str(k)) => {
                 apply_or_recv!(has_apply(recv, k))
             }
+            (BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => return Some(has_key_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
             }
+            (BuiltinMethod::GetPath, BuiltinArgs::Path(path)) => {
+                return Some(get_path_impl(recv, path))
+            }
             (BuiltinMethod::HasPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(has_path_apply(recv, p))
+            }
+            (BuiltinMethod::HasPath, BuiltinArgs::Path(path)) => {
+                return Some(Val::Bool(!get_path_impl(recv, path).is_null()))
             }
             (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(del_path_apply(recv, p))
@@ -1889,9 +1932,11 @@ impl BuiltinCall {
                 }
                 Self::new(method, BuiltinArgs::StrVec(keys))
             }
-            BuiltinMethod::GetPath
-            | BuiltinMethod::HasPath
-            | BuiltinMethod::Has
+            BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
+                let path = args.str(0)?;
+                Self::new(method, BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()))
+            }
+            BuiltinMethod::Has
             | BuiltinMethod::HasKey
             | BuiltinMethod::Join
             | BuiltinMethod::Explode
@@ -2804,9 +2849,13 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
         }
-        BuiltinMethod::GetPath
-        | BuiltinMethod::HasPath
-        | BuiltinMethod::Has
+        BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
+            BuiltinCall::new(
+                method,
+                BuiltinArgs::Path(parse_path_segs(str_arg!(0)?.as_ref()).into()),
+            )
+        }
+        BuiltinMethod::Has
         | BuiltinMethod::HasKey
         | BuiltinMethod::Missing
         | BuiltinMethod::Explode

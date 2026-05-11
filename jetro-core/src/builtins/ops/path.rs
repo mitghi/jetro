@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use std::sync::Arc;
 
 /// A single resolved segment of a dot/bracket path string.
+#[derive(Debug, Clone)]
 pub(crate) enum PathSeg {
     /// A named object field (`.foo`).
     Field(String),
@@ -81,6 +82,26 @@ pub(crate) fn get_path_impl(val: &Val, segs: &[PathSeg]) -> Val {
         PathSeg::Index(i) => val.get_index(*i),
     };
     get_path_impl(&next, &segs[1..])
+}
+
+#[inline]
+fn get_path_from_obj(m: &IndexMap<Arc<str>, Val>, segs: &[PathSeg]) -> Val {
+    let Some((first, rest)) = segs.split_first() else {
+        return Val::Null;
+    };
+    match first {
+        PathSeg::Field(key) => m
+            .get(key.as_str())
+            .map(|value| {
+                if rest.is_empty() {
+                    value.clone()
+                } else {
+                    get_path_impl(value, rest)
+                }
+            })
+            .unwrap_or(Val::Null),
+        PathSeg::Index(_) => Val::Null,
+    }
 }
 
 /// Returns a copy of `val` with the node at `segs` replaced by `new_val`; creates missing intermediate objects.
@@ -264,6 +285,20 @@ pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
+/// Returns `Val::Bool(true)` when the receiver is an object containing `key`.
+///
+/// Unlike `has`, this is deliberately object-only: arrays use `has` for
+/// membership and strings use `has`/`contains` for substring checks.
+#[inline]
+pub fn has_key_apply(recv: &Val, key: &str) -> Val {
+    let found = match recv {
+        Val::Obj(m) => m.contains_key(key),
+        Val::ObjSmall(pairs) => pairs.iter().any(|(k, _)| k.as_ref() == key),
+        _ => false,
+    };
+    Val::Bool(found)
+}
+
 /// Keeps only the listed `keys` from an object (or each object in an array), dropping all others.
 #[inline]
 pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
@@ -310,7 +345,6 @@ pub fn pick_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
 pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
     fn pick_obj(m: &IndexMap<Arc<str>, Val>, specs: &[PickSpec]) -> Val {
         let mut out = IndexMap::with_capacity(specs.len());
-        let wrapped = Val::Obj(Arc::new(m.clone()));
         for spec in specs {
             match &spec.source {
                 PickSource::Field(src) => {
@@ -319,7 +353,7 @@ pub(crate) fn pick_specs_apply(recv: &Val, specs: &[PickSpec]) -> Option<Val> {
                     }
                 }
                 PickSource::Path(segs) => {
-                    let v = get_path_impl(&wrapped, segs);
+                    let v = get_path_from_obj(m, segs);
                     if !v.is_null() {
                         out.insert(spec.out_key.clone(), v);
                     }

@@ -1,6 +1,55 @@
 # Changelog
 
-## 0.5.6
+## 0.5.7
+
+### Release focus
+
+- **Demand/tape execution is now metadata-driven end to end**. This release
+  moves more query behavior out of handwritten shape fusions and into shared
+  builtin metadata, planner demand propagation, source capabilities, and common
+  executor paths. New builtin execution facts cover logical shape, lowering,
+  sink/reducer behavior, view support, order/cardinality effects,
+  materialization policy, and demand behavior.
+- **Cold-path performance is restored and guarded**. The release benchmark
+  suite is back near native Rust for the showcase workloads after fixing a
+  view-kernel VM allocation regression. The current `bench_cold` profile keeps
+  most cases around 1.0x-1.4x native, with the README showcase around 1.17x in
+  the latest validation run.
+- **Documentation and benchmark coverage expanded**. The README/showcase was
+  refreshed, `bench_cold` covers more representative chains, and a Go benchmark
+  harness was added for cross-runtime comparison. The release also includes the
+  updated logo asset.
+
+### Demand/tape architecture cleanup
+
+- **Demand metadata stays in planner/executor APIs**. Pipeline bodies now expose
+  propagated source and pull demand directly, and segment pull demand is shared
+  through the pipeline IR instead of reimplemented by view runners.
+- **View source access is capability-driven**. Indexed, reverse, and bounded
+  forward access selection now lives with `SourceCapabilities`, including safe
+  demotion when a view prefix can change cardinality.
+- **View fallback consumes propagated demand**. Generic view-prefix fallback now
+  carries bounded demand into the borrowed prefix before materializing suffix
+  rows, preserving lazy behavior for safe fallback boundaries.
+- **Access modes carry their own bounds**. Reverse and bounded-forward view
+  execution honor the selected `SourceAccessMode` output/input counts directly,
+  keeping the access plan self-contained.
+- **Terminal sink and stage construction cleanup**. Logical/pipeline lowering
+  now shares constructors for positional, predicate, membership, arg-extreme,
+  count, numeric, and keyed reducer sinks, reducing handwritten builtin
+  classification drift.
+- **Nested pipeline plans are first-class execution units**. Nested collection
+  maps such as `items.map(...).sum()` now carry their source, stage
+  expressions, stage kernels, and sink kernels in the shared plan object.
+  Composed and legacy execution both reuse prepared nested-plan metadata across
+  rows, while scalar method-chain projections remain ordinary maps so existing
+  demand substitution and late projection still apply.
+- **Execution VM state is instance-owned**. `Jetro` now keeps its VM cache on
+  the document handle instead of using a crate-level thread-local, and planned
+  view/composed/tape-row execution paths reuse caller-provided VM state rather
+  than allocating private hot-path VMs. A scalar `len()` lowering regression was
+  also fixed so string length filters remain view-native scalar calls instead
+  of being misclassified as nested array counts.
 
 ### Path-receiver scalar unwrap
 
@@ -18,6 +67,21 @@
   decides eligibility (Scalar or Object category, OneToOne cardinality,
   not opted out). Used by both `try_lower_pipeline` and the top-level
   fast-path lowering in `plan_query_with_context`.
+
+### New builtin: `fold` / `reduce`
+
+- **`fold(init, fn)` and `fold(fn)`**. Left fold returning a single
+  value — same loop as `accumulate` but emits only the final acc, no
+  intermediate trace. The 1-arg form seeds the accumulator from the
+  first element (Iterator::reduce); empty array with no init returns
+  `null`. `reduce` is registered as an alias.
+
+  ```jetro
+  $.xs.fold(0, (a, b) => a + b)            # → final sum
+  $.orders.fold(0, (acc, o) => acc + o.total)
+  $.orders.fold({total: 0, n: 0}, (a, o) =>
+    {total: a.total + o.total, n: a.n + 1})
+  ```
 
 ### `rec` family
 

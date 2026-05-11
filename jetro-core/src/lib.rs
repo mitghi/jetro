@@ -95,27 +95,6 @@ impl From<EvalError> for Error {
     }
 }
 
-
-// Thread-local VM, constructed lazily on first `collect()` call.
-// Thread-local avoids a Mutex and lets compile/path caches accumulate.
-thread_local! {
-    static THREAD_VM: OnceCell<RefCell<VM>> = const { OnceCell::new() };
-}
-
-/// Borrow the thread-local `VM`, constructing it on first access.
-/// All `Jetro::collect` calls on the same thread share one `VM` so that
-/// compile and path-resolution caches accumulate across queries.
-fn with_vm<F, R>(f: F) -> R
-where
-    F: FnOnce(&RefCell<VM>) -> R,
-{
-    THREAD_VM.with(|cell| {
-        let inner = cell.get_or_init(|| RefCell::new(VM::new()));
-        f(inner)
-    })
-}
-
-
 /// Primary entry point. Holds a JSON document and evaluates expressions against
 /// it. Lazy fields (`root_val`, `tape`, `structural_index`, `objvec_cache`)
 /// are populated on first use so callers only pay for the representations a
@@ -145,6 +124,9 @@ pub struct Jetro {
     /// `ObjVecData` columnar representations; keyed by pointer to avoid re-promotion.
     pub(crate) objvec_cache:
         std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::data::value::ObjVecData>>>,
+
+    /// Per-document VM cache used by `Jetro::collect`; not shared across document handles.
+    vm: RefCell<VM>,
 }
 
 
@@ -388,6 +370,7 @@ impl Jetro {
             raw_bytes: None,
             tape: OnceCell::new(),
             structural_index: OnceCell::new(),
+            vm: RefCell::new(VM::new()),
         }
     }
 
@@ -405,6 +388,7 @@ impl Jetro {
             raw_bytes: None,
             tape: OnceCell::new(),
             structural_index: OnceCell::new(),
+            vm: RefCell::new(VM::new()),
         }
     }
 
@@ -452,6 +436,7 @@ impl Jetro {
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
                 structural_index: OnceCell::new(),
+                vm: RefCell::new(VM::new()),
             });
         }
         #[allow(unreachable_code)]
@@ -464,7 +449,22 @@ impl Jetro {
                 raw_bytes: Some(Arc::from(bytes.into_boxed_slice())),
                 tape: OnceCell::new(),
                 structural_index: OnceCell::new(),
+                vm: RefCell::new(VM::new()),
             })
+        }
+    }
+
+    /// Borrow this document's VM cache, falling back to a temporary VM on re-entrant use.
+    pub(crate) fn with_vm<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut VM) -> R,
+    {
+        match self.vm.try_borrow_mut() {
+            Ok(mut vm) => f(&mut vm),
+            Err(_) => {
+                let mut vm = VM::new();
+                f(&mut vm)
+            }
         }
     }
 
@@ -561,7 +561,7 @@ impl Jetro {
     }
 
     /// Evaluate a Jetro expression against this document and return the result
-    /// as a `serde_json::Value`. Uses the thread-local `VM` with compile and
+    /// as a `serde_json::Value`. Uses this document's VM with compile and
     /// path-resolution caches for repeated calls.
     pub fn collect<S: AsRef<str>>(&self, expr: S) -> std::result::Result<Value, EvalError> {
         exec::router::collect_json(self, expr.as_ref())
