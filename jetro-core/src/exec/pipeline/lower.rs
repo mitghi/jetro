@@ -311,6 +311,10 @@ fn rewrite(p: &mut PipelineBody) {
 fn rewrite_step(p: &mut PipelineBody) -> bool {
     use crate::vm::Opcode;
 
+    if rewrite_flat_map_numeric_sum_tail(p) {
+        return true;
+    }
+
     let mut const_false_at: Option<usize> = None;
     for (i, s) in p.stages.iter().enumerate() {
         if let Stage::Filter(prog, _) = s {
@@ -398,6 +402,99 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
     }
 
     false
+}
+
+fn rewrite_flat_map_numeric_sum_tail(p: &mut PipelineBody) -> bool {
+    let Sink::Reducer(spec) = &p.sink else {
+        return false;
+    };
+    if !matches!(
+        spec.op,
+        super::ReducerOp::Numeric(super::NumOp::Sum)
+    ) || spec.predicate.is_some()
+        || spec.projection.is_some()
+    {
+        return false;
+    }
+
+    let len = p.stages.len();
+    if len >= 3 {
+        if let (Stage::FlatMap(array, _), Stage::Filter(predicate, _), Stage::Map(map, _)) =
+            (&p.stages[len - 3], &p.stages[len - 2], &p.stages[len - 1])
+        {
+            let program = child_array_sum_program(
+                array,
+                Some(predicate),
+                map,
+                "<flat-map-filter-map-sum-fused>",
+            );
+            p.stages.truncate(len - 3);
+            p.stage_exprs.truncate(len - 3);
+            p.stages.push(Stage::Map(program, BuiltinViewStage::Map));
+            p.stage_exprs.push(None);
+            return true;
+        }
+    }
+
+    if len >= 2 {
+        if let (Stage::FlatMap(array, _), Stage::Map(map, _)) =
+            (&p.stages[len - 2], &p.stages[len - 1])
+        {
+            let program = child_array_sum_program(array, None, map, "<flat-map-map-sum-fused>");
+            p.stages.truncate(len - 2);
+            p.stage_exprs.truncate(len - 2);
+            p.stages.push(Stage::Map(program, BuiltinViewStage::Map));
+            p.stage_exprs.push(None);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn child_array_sum_program(
+    array: &Arc<crate::vm::Program>,
+    predicate: Option<&Arc<crate::vm::Program>>,
+    map: &Arc<crate::vm::Program>,
+    source: &'static str,
+) -> Arc<crate::vm::Program> {
+    let mut ops = array.ops.as_ref().to_vec();
+    if let Some(predicate) = predicate {
+        ops.push(crate::vm::Opcode::CallMethod(compiled_unary_call(
+            BuiltinMethod::Filter,
+            "filter",
+            predicate,
+        )));
+    }
+    ops.push(crate::vm::Opcode::CallMethod(compiled_unary_call(
+        BuiltinMethod::Map,
+        "map",
+        map,
+    )));
+    ops.push(crate::vm::Opcode::CallMethod(Arc::new(crate::vm::CompiledCall {
+        method: BuiltinMethod::Sum,
+        name: Arc::from("sum"),
+        sub_progs: Vec::new().into(),
+        sub_kernels: Vec::new().into(),
+        orig_args: Vec::new().into(),
+        demand_max_keep: None,
+    })));
+    Arc::new(crate::vm::Program::new(ops, source))
+}
+
+fn compiled_unary_call(
+    method: BuiltinMethod,
+    name: &'static str,
+    program: &Arc<crate::vm::Program>,
+) -> Arc<crate::vm::CompiledCall> {
+    Arc::new(crate::vm::CompiledCall {
+        method,
+        name: Arc::from(name),
+        sub_progs: vec![Arc::clone(program)].into(),
+        sub_kernels: vec![BodyKernel::classify(program)].into(),
+        orig_args: Vec::new().into(),
+        demand_max_keep: None,
+    })
 }
 
 fn is_take_stage(stage: &Stage) -> bool {
