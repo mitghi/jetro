@@ -253,7 +253,7 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let mut writer = super::ndjson::ndjson_writer(writer);
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let count = drive_rev(engine, path, query, options, |value| {
         super::ndjson::write_val_line(&mut writer, &value)?;
         Ok(super::ndjson::NdjsonControl::Continue)
@@ -299,7 +299,7 @@ where
         return Ok(0);
     }
 
-    let mut writer = super::ndjson::ndjson_writer(writer);
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
     let count = drive_rev(engine, path, query, options, |value| {
         super::ndjson::write_val_line(&mut writer, &value)?;
@@ -433,7 +433,7 @@ where
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
-    let mut writer = super::ndjson::ndjson_writer(writer);
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
