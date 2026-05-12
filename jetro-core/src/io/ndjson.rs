@@ -131,7 +131,11 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
                 });
             }
 
-            return Ok(Some((self.line_no, std::mem::take(buf))));
+            let capacity = buf.capacity();
+            return Ok(Some((
+                self.line_no,
+                std::mem::replace(buf, Vec::with_capacity(capacity)),
+            )));
         }
     }
 
@@ -444,5 +448,26 @@ mod tests {
 
         assert!(!document.root_val_is_materialized());
         assert!(!document.tape_is_built());
+    }
+
+    #[test]
+    fn owned_row_read_preserves_reusable_buffer_capacity() {
+        let input = std::io::Cursor::new(b"{\"n\":1}\n{\"n\":2}\n");
+        let mut driver = super::NdjsonPerRowDriver::new(input);
+        let mut buf = Vec::with_capacity(128);
+
+        let first = driver
+            .read_next_owned(&mut buf)
+            .expect("row read succeeds")
+            .expect("first row exists");
+        assert_eq!(first.1, br#"{"n":1}"#);
+        assert_eq!(buf.capacity(), 128);
+
+        let second = driver
+            .read_next_owned(&mut buf)
+            .expect("row read succeeds")
+            .expect("second row exists");
+        assert_eq!(second.1, br#"{"n":2}"#);
+        assert_eq!(buf.capacity(), 128);
     }
 }
