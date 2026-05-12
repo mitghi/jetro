@@ -368,7 +368,7 @@ where
     F: FnMut(crate::data::value::Val) -> Result<super::ndjson::NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
-    let executor = super::ndjson::NdjsonRowExecutor::new(engine, query);
+    let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, query);
     let mut count = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
@@ -399,7 +399,7 @@ where
     }
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
-    let executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
+    let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
     let mut emitted = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {

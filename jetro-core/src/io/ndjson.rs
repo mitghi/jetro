@@ -2,12 +2,13 @@ use super::{NdjsonSource, RowError};
 use crate::data::value::{Val, ValRef};
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
-use crate::{Jetro, JetroEngine, JetroEngineError};
+use crate::{Jetro, JetroEngine, JetroEngineError, VM};
 use memchr::memchr;
 use serde_json::Value;
 use std::fs::File;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::Path;
+use std::sync::MutexGuard;
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
@@ -901,12 +902,13 @@ where
     F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let executor = NdjsonRowExecutor::new(engine, query);
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let out = executor.eval_owned_row(line_no, row)?;
+        let document = parse_row(engine, line_no, row)?;
+        let out = collect_row_val(engine, &document, &plan, line_no)?;
         count += 1;
         if matches!(emit(Value::from(out))?, NdjsonControl::Stop) {
             break;
@@ -928,7 +930,7 @@ where
     F: FnMut(Val) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let executor = NdjsonRowExecutor::new(engine, query);
+    let mut executor = NdjsonRowExecutor::new(engine, query);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
 
@@ -959,7 +961,7 @@ where
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let executor = NdjsonRowExecutor::new(engine, predicate);
+    let mut executor = NdjsonRowExecutor::new(engine, predicate);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
 
@@ -985,6 +987,7 @@ where
 pub(super) struct NdjsonRowExecutor<'a> {
     engine: &'a JetroEngine,
     plan: crate::ir::physical::QueryPlan,
+    vm: MutexGuard<'a, VM>,
 }
 
 impl<'a> NdjsonRowExecutor<'a> {
@@ -992,11 +995,12 @@ impl<'a> NdjsonRowExecutor<'a> {
         Self {
             engine,
             plan: engine.cached_plan(query, PlanningContext::bytes()),
+            vm: engine.lock_vm(),
         }
     }
 
     pub(super) fn eval_owned_row(
-        &self,
+        &mut self,
         line_no: u64,
         row: Vec<u8>,
     ) -> Result<Val, JetroEngineError> {
@@ -1013,11 +1017,12 @@ impl<'a> NdjsonRowExecutor<'a> {
     }
 
     pub(super) fn eval_document(
-        &self,
+        &mut self,
         line_no: u64,
         document: &Jetro,
     ) -> Result<Val, JetroEngineError> {
-        collect_row_val(self.engine, document, &self.plan, line_no)
+        crate::exec::router::collect_plan_val_with_vm(document, &self.plan, &mut self.vm)
+            .map_err(|err| row_eval_error(line_no, err))
     }
 
     pub(super) fn engine(&self) -> &'a JetroEngine {

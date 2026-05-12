@@ -338,6 +338,10 @@ impl JetroEngine {
         exec::router::collect_plan_val_with_vm(document, plan, &mut vm)
     }
 
+    pub(crate) fn lock_vm(&self) -> std::sync::MutexGuard<'_, VM> {
+        self.vm.lock().expect("vm cache poisoned")
+    }
+
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
     /// Routes through [`JetroEngine::parse_value`] so the document's object keys are
     /// interned into this engine's key cache.
