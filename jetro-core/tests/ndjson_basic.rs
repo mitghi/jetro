@@ -267,6 +267,30 @@ fn source_helpers_dispatch_reader_and_file_inputs() {
 }
 
 #[test]
+fn source_helpers_dispatch_stream_inputs() {
+    let engine = JetroEngine::new();
+    let reader = NdjsonSource::reader(Cursor::new(br#"{"score":2}
+{"score":3}
+"#));
+
+    let out = engine
+        .collect_ndjson_stream_source(reader, "$.map(score).sum()")
+        .expect("source stream query should run");
+
+    let path = temp_path("jetro-ndjson-source-stream-file");
+    std::fs::write(&path, b"{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_stream_source(NdjsonSource::file(path.clone()), "$.map(name)", &mut written)
+        .expect("source stream query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, json!(5));
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(written).unwrap(), "[\"Ada\",\"Bob\"]\n");
+}
+
+#[test]
 fn reverse_file_helpers_evaluate_rows_from_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-api");
