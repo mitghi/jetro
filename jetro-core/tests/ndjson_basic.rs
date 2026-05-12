@@ -1,3 +1,4 @@
+use jetro_core::io::NdjsonOptions;
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
@@ -67,4 +68,41 @@ not-json
         }
         other => panic!("expected row error, got {other:?}"),
     }
+}
+
+#[test]
+fn options_enforce_max_line_length_after_newline_trim() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada"}
+"#;
+
+    let err = engine
+        .collect_ndjson_with_options(
+            Cursor::new(input),
+            "name",
+            NdjsonOptions::default().with_max_line_len(4),
+        )
+        .expect_err("long row should fail");
+
+    match err {
+        JetroEngineError::Ndjson(row) => {
+            assert!(
+                row.to_string().contains("line 1") && row.to_string().contains("too large"),
+                "{row}"
+            );
+        }
+        other => panic!("expected row error, got {other:?}"),
+    }
+}
+
+#[test]
+fn crlf_and_trailing_newline_less_rows_are_supported() {
+    let engine = JetroEngine::new();
+    let input = b"{\"name\":\"Ada\"}\r\n{\"name\":\"Bob\"}";
+
+    let out = engine
+        .collect_ndjson(Cursor::new(input), "name")
+        .expect("ndjson query should run");
+
+    assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
 }

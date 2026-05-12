@@ -8,7 +8,10 @@ mod ndjson;
 use std::fmt;
 use std::path::PathBuf;
 
-pub use ndjson::{collect_ndjson, for_each_ndjson, run_ndjson, NdjsonPerRowDriver};
+pub use ndjson::{
+    collect_ndjson, collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_with_options,
+    run_ndjson, run_ndjson_with_options, NdjsonOptions, NdjsonPerRowDriver,
+};
 
 /// Source descriptor for future multi-source NDJSON APIs.
 pub enum NdjsonSource<R> {

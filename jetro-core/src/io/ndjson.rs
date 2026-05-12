@@ -6,6 +6,27 @@ use std::io::{BufRead, BufWriter, Write};
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 
+/// Configuration for per-row NDJSON execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NdjsonOptions {
+    pub max_line_len: usize,
+}
+
+impl Default for NdjsonOptions {
+    fn default() -> Self {
+        Self {
+            max_line_len: DEFAULT_MAX_LINE_LEN,
+        }
+    }
+}
+
+impl NdjsonOptions {
+    pub fn with_max_line_len(mut self, max_line_len: usize) -> Self {
+        self.max_line_len = max_line_len;
+        self
+    }
+}
+
 /// Forward-only per-row NDJSON reader.
 pub struct NdjsonPerRowDriver<R> {
     reader: R,
@@ -105,13 +126,27 @@ pub fn for_each_ndjson<R, F>(
     engine: &JetroEngine,
     reader: R,
     query: &str,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(Value),
+{
+    for_each_ndjson_with_options(engine, reader, query, NdjsonOptions::default(), f)
+}
+
+pub fn for_each_ndjson_with_options<R, F>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    options: NdjsonOptions,
     mut f: F,
 ) -> Result<usize, JetroEngineError>
 where
     R: BufRead,
     F: FnMut(Value),
 {
-    let mut driver = NdjsonPerRowDriver::new(reader);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;
@@ -134,8 +169,20 @@ pub fn collect_ndjson<R>(
 where
     R: BufRead,
 {
+    collect_ndjson_with_options(engine, reader, query, NdjsonOptions::default())
+}
+
+pub fn collect_ndjson_with_options<R>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    R: BufRead,
+{
     let mut values = Vec::new();
-    for_each_ndjson(engine, reader, query, |value| values.push(value))?;
+    for_each_ndjson_with_options(engine, reader, query, options, |value| values.push(value))?;
     Ok(values)
 }
 
@@ -149,8 +196,22 @@ where
     R: BufRead,
     W: Write,
 {
+    run_ndjson_with_options(engine, reader, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_with_options<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
     let mut writer = BufWriter::new(writer);
-    let mut driver = NdjsonPerRowDriver::new(reader);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;

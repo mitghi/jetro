@@ -328,6 +328,21 @@ impl JetroEngine {
         io::run_ndjson(self, reader, query, writer)
     }
 
+    /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
+    pub fn run_ndjson_with_options<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_with_options(self, reader, query, writer, options)
+    }
+
     /// Evaluate `query` independently for every non-empty NDJSON row and collect
     /// the per-row results.
     pub fn collect_ndjson<R>(
@@ -339,6 +354,19 @@ impl JetroEngine {
         R: std::io::BufRead,
     {
         io::collect_ndjson(self, reader, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_with_options<R>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_with_options(self, reader, query, options)
     }
 
     /// Evaluate `query` independently for every non-empty NDJSON row and call
@@ -354,6 +382,21 @@ impl JetroEngine {
         F: FnMut(Value),
     {
         io::for_each_ndjson(self, reader, query, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_with_options<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_with_options(self, reader, query, options, f)
     }
 
     /// Look up a compiled `QueryPlan` by expression string and planning context,
