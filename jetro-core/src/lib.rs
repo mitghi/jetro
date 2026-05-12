@@ -280,6 +280,16 @@ impl JetroEngine {
         Ok(document)
     }
 
+    /// Parse raw JSON bytes into a `Jetro` document without forcing the `Val`
+    /// tree. This keeps byte-backed callers eligible for tape/view execution;
+    /// object keys are interned only if execution later materialises the row.
+    pub(crate) fn parse_bytes_lazy(
+        &self,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<Jetro, JetroEngineError> {
+        Ok(Jetro::from_bytes(bytes)?)
+    }
+
     /// Evaluate a Jetro expression against an already-constructed `Jetro` document,
     /// using the engine's shared plan cache and `VM`.
     pub fn collect<S: AsRef<str>>(

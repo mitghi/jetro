@@ -335,7 +335,9 @@ where
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
-        let out = engine.collect_prepared(&document, &plan)?;
+        let out = engine
+            .collect_prepared(&document, &plan)
+            .map_err(|err| row_eval_error(line_no, err))?;
         emit(out)?;
         count += 1;
     }
@@ -345,7 +347,7 @@ where
 
 fn parse_row(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Jetro, JetroEngineError> {
     engine
-        .parse_bytes(row)
+        .parse_bytes_lazy(row)
         .map_err(|err| row_parse_error(line_no, err))
 }
 
@@ -358,6 +360,15 @@ fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
         }
         .into(),
         other => other,
+    }
+}
+
+fn row_eval_error(line_no: u64, err: crate::EvalError) -> JetroEngineError {
+    let message = err.0;
+    if message.starts_with("Invalid JSON:") {
+        RowError::InvalidJsonMessage { line_no, message }.into()
+    } else {
+        crate::EvalError(message).into()
     }
 }
 
@@ -384,4 +395,19 @@ fn non_ws_range(buf: &[u8]) -> (usize, usize) {
         .map(|idx| idx + 1)
         .unwrap_or(start);
     (start, end)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn parse_row_keeps_simd_document_lazy() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"name":"Ada","age":30}"#.to_vec();
+
+        let document = super::parse_row(&engine, 1, row).expect("row parses lazily");
+
+        assert!(!document.root_val_is_materialized());
+        assert!(!document.tape_is_built());
+    }
 }
