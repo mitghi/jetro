@@ -164,7 +164,9 @@ fn file_helpers_use_the_same_per_row_execution() {
             &path,
             "name",
             &mut written,
-            NdjsonOptions::default().with_initial_buffer_capacity(64),
+            NdjsonOptions::default()
+                .with_initial_buffer_capacity(64)
+                .with_reader_buffer_capacity(64),
         )
         .expect("file query should run");
 

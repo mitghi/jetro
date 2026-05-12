@@ -10,12 +10,14 @@ use std::path::Path;
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
+const DEFAULT_READER_BUFFER_CAPACITY: usize = 64 * 1024;
 
 /// Configuration for per-row NDJSON execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NdjsonOptions {
     pub max_line_len: usize,
     pub initial_buffer_capacity: usize,
+    pub reader_buffer_capacity: usize,
 }
 
 impl Default for NdjsonOptions {
@@ -23,6 +25,7 @@ impl Default for NdjsonOptions {
         Self {
             max_line_len: DEFAULT_MAX_LINE_LEN,
             initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
+            reader_buffer_capacity: DEFAULT_READER_BUFFER_CAPACITY,
         }
     }
 }
@@ -35,6 +38,11 @@ impl NdjsonOptions {
 
     pub fn with_initial_buffer_capacity(mut self, capacity: usize) -> Self {
         self.initial_buffer_capacity = capacity;
+        self
+    }
+
+    pub fn with_reader_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.reader_buffer_capacity = capacity;
         self
     }
 }
@@ -237,7 +245,13 @@ where
     P: AsRef<Path>,
 {
     let file = File::open(path)?;
-    collect_ndjson(engine, std::io::BufReader::new(file), query)
+    let options = NdjsonOptions::default();
+    collect_ndjson_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        query,
+        options,
+    )
 }
 
 pub fn collect_ndjson_file_with_options<P>(
@@ -250,7 +264,12 @@ where
     P: AsRef<Path>,
 {
     let file = File::open(path)?;
-    collect_ndjson_with_options(engine, std::io::BufReader::new(file), query, options)
+    collect_ndjson_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        query,
+        options,
+    )
 }
 
 pub fn run_ndjson<R, W>(
@@ -277,7 +296,14 @@ where
     W: Write,
 {
     let file = File::open(path)?;
-    run_ndjson(engine, std::io::BufReader::new(file), query, writer)
+    let options = NdjsonOptions::default();
+    run_ndjson_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        query,
+        writer,
+        options,
+    )
 }
 
 pub fn run_ndjson_file_with_options<P, W>(
@@ -294,7 +320,7 @@ where
     let file = File::open(path)?;
     run_ndjson_with_options(
         engine,
-        std::io::BufReader::new(file),
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
         query,
         writer,
         options,
