@@ -1,5 +1,5 @@
 use super::{NdjsonSource, RowError};
-use crate::data::value::{Val, ValRef};
+use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
 use crate::{Jetro, JetroEngine, JetroEngineError, VM};
@@ -1128,7 +1128,7 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         Val::ObjSmall(entries) => {
             write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
         }
-        _ => serde_json::to_writer(&mut *writer, &ValRef(value))?,
+        Val::ObjVec(data) => write_json_objvec(writer, data)?,
     }
     Ok(())
 }
@@ -1233,6 +1233,30 @@ where
         write_val_json(writer, value)?;
     }
     writer.write_all(b"}")?;
+    Ok(())
+}
+
+fn write_json_objvec<W: Write>(
+    writer: &mut W,
+    data: &crate::data::value::ObjVecData,
+) -> Result<(), JetroEngineError> {
+    writer.write_all(b"[")?;
+    for row in 0..data.nrows() {
+        if row > 0 {
+            writer.write_all(b",")?;
+        }
+        writer.write_all(b"{")?;
+        for slot in 0..data.stride() {
+            if slot > 0 {
+                writer.write_all(b",")?;
+            }
+            write_json_str(writer, data.keys[slot].as_ref())?;
+            writer.write_all(b":")?;
+            write_val_json(writer, data.cell(row, slot))?;
+        }
+        writer.write_all(b"}")?;
+    }
+    writer.write_all(b"]")?;
     Ok(())
 }
 
