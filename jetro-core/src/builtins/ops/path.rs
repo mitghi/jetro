@@ -285,6 +285,23 @@ pub fn has_apply(recv: &Val, key: &str) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
+/// Returns `Val::Bool(true)` when every literal needle is present in `recv`.
+///
+/// Receiver dispatch mirrors `has_apply`: arrays use element membership,
+/// strings use substring search, and objects use key lookup. Empty needle
+/// arrays are true by vacuous truth.
+#[inline]
+pub fn has_all_apply(recv: &Val, needles: &Val) -> Option<Val> {
+    let Val::Arr(items) = needles else {
+        return None;
+    };
+    let found = items.iter().all(|needle| {
+        let key = crate::util::val_to_key(needle);
+        matches!(has_apply(recv, &key), Some(Val::Bool(true)))
+    });
+    Some(Val::Bool(found))
+}
+
 /// Returns `Val::Bool(true)` when the receiver is an object containing `key`.
 ///
 /// Unlike `has`, this is deliberately object-only: arrays use `has` for

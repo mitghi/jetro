@@ -3069,6 +3069,30 @@ impl Builtin for Has {
     }
 }
 
+/// `has_all([a, b, ...])` — every literal needle is present in the receiver.
+pub(crate) struct HasAll;
+impl Builtin for HasAll {
+    const METHOD: BuiltinMethod = BuiltinMethod::HasAll;
+    const NAME: &'static str = "has_all";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(v) => super::has_all_apply(recv, v),
+            _ => None,
+        }
+    }
+}
+
 /// `has_key(key)` — object key existence test with a view/tape-native backend.
 pub(crate) struct HasKey;
 impl Builtin for HasKey {
