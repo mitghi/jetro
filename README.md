@@ -326,6 +326,7 @@ Full syntax reference: [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md)
 - **[Jetrocli](https://github.com/mitghi/jetrocli)**: For interactive use in Terminal.
 - **[Jetro Emacs Plugin](https://github.com/mitghi/jetromacs)** use Jetro in Emacs.
 - **[Jetro Python Binding](https://github.com/mitghi/jetro-py)**: Python Binding for Jetro.
+- **[Jetro Dart Binding](https://github.com/mitghi/jetro-dart)**: Dart/Flutter Binding for Jetro.
 
 ## Learn More
 
