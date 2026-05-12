@@ -1,5 +1,4 @@
 use super::RowError;
-use crate::data::value::ValRef;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
@@ -256,8 +255,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let count = drive_rev(engine, path, query, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        super::ndjson::write_val_line(&mut writer, &value)?;
         Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     writer.flush()?;
@@ -304,8 +302,7 @@ where
     let mut writer = BufWriter::new(writer);
     let mut emitted = 0usize;
     let count = drive_rev(engine, path, query, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        super::ndjson::write_val_line(&mut writer, &value)?;
         emitted += 1;
         Ok(if emitted >= limit {
             super::ndjson::NdjsonControl::Stop
@@ -352,8 +349,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let count = drive_rev_matches(engine, path, predicate, limit, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        super::ndjson::write_val_line(&mut writer, &value)?;
         Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     writer.flush()?;

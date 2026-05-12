@@ -582,8 +582,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        write_val_line(&mut writer, &value)?;
         Ok(NdjsonControl::Continue)
     })?;
     writer.flush()?;
@@ -630,8 +629,7 @@ where
     let mut writer = BufWriter::new(writer);
     let mut emitted = 0usize;
     let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        write_val_line(&mut writer, &value)?;
         emitted += 1;
         Ok(if emitted >= limit {
             NdjsonControl::Stop
@@ -797,8 +795,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let count = drive_ndjson_matches(engine, reader, predicate, limit, options, |value| {
-        serde_json::to_writer(&mut writer, &ValRef(&value))?;
-        writer.write_all(b"\n")?;
+        write_val_line(&mut writer, &value)?;
         Ok(NdjsonControl::Continue)
     })?;
     writer.flush()?;
@@ -1026,6 +1023,12 @@ impl<'a> NdjsonRowExecutor<'a> {
     pub(super) fn engine(&self) -> &'a JetroEngine {
         self.engine
     }
+}
+
+pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
+    serde_json::to_writer(&mut *writer, &ValRef(value))?;
+    writer.write_all(b"\n")?;
+    Ok(())
 }
 
 pub(super) fn collect_row_val(
