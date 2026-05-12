@@ -79,6 +79,84 @@ fn run_ndjson_matches_writes_matching_original_rows() {
 }
 
 #[test]
+fn file_match_helpers_stop_after_limit() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-match-file");
+    std::fs::write(
+        &path,
+        b"{\"name\":\"Ada\",\"active\":true}\n{\"name\":\"Bob\",\"active\":false}\n{\"name\":\"Cid\",\"active\":true}\nnot-json\n",
+    )
+    .unwrap();
+
+    let out = engine
+        .collect_ndjson_matches_file(&path, "active", 2)
+        .expect("file match query should stop before the invalid tail");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_matches_file_with_options(
+            &path,
+            "active",
+            1,
+            &mut written,
+            NdjsonOptions::default().with_reader_buffer_capacity(64),
+        )
+        .expect("file match writer should stop after one match");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        out,
+        vec![
+            json!({"name": "Ada", "active": true}),
+            json!({"name": "Cid", "active": true})
+        ]
+    );
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\"name\":\"Ada\",\"active\":true}\n"
+    );
+}
+
+#[test]
+fn source_match_helpers_dispatch_reader_and_file_inputs() {
+    let engine = JetroEngine::new();
+    let reader = NdjsonSource::reader(Cursor::new(
+        br#"{"name":"Ada","score":10}
+{"name":"Bob","score":5}
+{"name":"Cid","score":20}
+"#,
+    ));
+
+    let out = engine
+        .collect_ndjson_matches_source(reader, "score > 9", 1)
+        .expect("reader source match should run");
+
+    let path = temp_path("jetro-ndjson-match-source-file");
+    std::fs::write(
+        &path,
+        b"{\"name\":\"Ada\",\"score\":10}\n{\"name\":\"Bob\",\"score\":5}\n{\"name\":\"Cid\",\"score\":20}\n",
+    )
+    .unwrap();
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_matches_source(
+            NdjsonSource::file(path.clone()),
+            "score > 9",
+            2,
+            &mut written,
+        )
+        .expect("file source match should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, vec![json!({"name": "Ada", "score": 10})]);
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\"name\":\"Ada\",\"score\":10}\n{\"name\":\"Cid\",\"score\":20}\n"
+    );
+}
+
+#[test]
 fn for_each_ndjson_streams_results_to_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"price":10}
@@ -309,6 +387,59 @@ fn reverse_file_helpers_evaluate_rows_from_tail() {
     assert_eq!(out_with_options, out);
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(written).unwrap(), "\"Bob\"\n\"Ada\"\n");
+}
+
+#[test]
+fn reverse_match_helpers_stop_from_tail() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-match");
+    std::fs::write(
+        &path,
+        b"{\"name\":\"Ada\",\"active\":true}\n{\"name\":\"Bob\",\"active\":false}\n{\"name\":\"Cid\",\"active\":true}\n{\"name\":\"Dia\",\"active\":true}\nnot-json\n",
+    )
+    .unwrap();
+
+    let err = engine
+        .collect_ndjson_rev_matches(&path, "active", 2)
+        .expect_err("reverse match starts at the invalid tail");
+    match err {
+        JetroEngineError::Ndjson(row) => {
+            assert!(row.to_string().contains("line 1"), "{row}");
+        }
+        other => panic!("expected row error, got {other:?}"),
+    }
+
+    std::fs::write(
+        &path,
+        b"{\"name\":\"Ada\",\"active\":true}\n{\"name\":\"Bob\",\"active\":false}\n{\"name\":\"Cid\",\"active\":true}\n{\"name\":\"Dia\",\"active\":true}\n",
+    )
+    .unwrap();
+    let out = engine
+        .collect_ndjson_rev_matches_with_options(
+            &path,
+            "active",
+            2,
+            NdjsonOptions::default().with_reverse_chunk_size(7),
+        )
+        .expect("reverse match query should run");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_rev_matches(&path, "active", 1, &mut written)
+        .expect("reverse match writer should stop after one match");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        out,
+        vec![
+            json!({"name": "Dia", "active": true}),
+            json!({"name": "Cid", "active": true})
+        ]
+    );
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(written).unwrap(),
+        "{\"name\":\"Dia\",\"active\":true}\n"
+    );
 }
 
 #[test]

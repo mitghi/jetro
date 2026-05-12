@@ -1,6 +1,7 @@
 use super::RowError;
 use crate::data::value::ValRef;
 use crate::plan::physical::PlanningContext;
+use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
 use serde_json::Value;
@@ -152,6 +153,42 @@ where
     Ok(values)
 }
 
+pub fn collect_ndjson_rev_matches<P>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    collect_ndjson_rev_matches_with_options(
+        engine,
+        path,
+        predicate,
+        limit,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn collect_ndjson_rev_matches_with_options<P>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let mut values = Vec::with_capacity(limit);
+    drive_rev_matches(engine, path, predicate, limit, options, |value| {
+        values.push(Value::from(value));
+        Ok(super::ndjson::NdjsonControl::Continue)
+    })?;
+    Ok(values)
+}
+
 pub fn run_ndjson_rev<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -192,6 +229,49 @@ where
     Ok(count)
 }
 
+pub fn run_ndjson_rev_matches<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_matches_with_options(
+        engine,
+        path,
+        predicate,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_matches_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let mut writer = BufWriter::new(writer);
+    let count = drive_rev_matches(engine, path, predicate, limit, options, |value| {
+        serde_json::to_writer(&mut writer, &ValRef(&value))?;
+        writer.write_all(b"\n")?;
+        Ok(super::ndjson::NdjsonControl::Continue)
+    })?;
+    writer.flush()?;
+    Ok(count)
+}
+
 fn drive_rev<P, F>(
     engine: &JetroEngine,
     path: P,
@@ -219,6 +299,45 @@ where
     }
 
     Ok(count)
+}
+
+fn drive_rev_matches<P, F>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+    mut emit: F,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    F: FnMut(crate::data::value::Val) -> Result<super::ndjson::NdjsonControl, JetroEngineError>,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
+    let plan = engine.cached_plan(predicate, PlanningContext::bytes());
+    let mut emitted = 0usize;
+
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
+        let matched = super::ndjson::collect_row_val(engine, &document, &plan, reverse_row_no)?;
+        if !is_truthy(&matched) {
+            continue;
+        }
+
+        let root = document
+            .root_val_with(engine.keys())
+            .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+        emitted += 1;
+        if matches!(emit(root)?, super::ndjson::NdjsonControl::Stop) || emitted >= limit {
+            break;
+        }
+    }
+
+    Ok(emitted)
 }
 
 fn trim_line_ending(buf: &mut Vec<u8>) {

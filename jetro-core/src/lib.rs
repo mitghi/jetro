@@ -491,6 +491,99 @@ impl JetroEngine {
         io::run_ndjson_matches_with_options(self, reader, predicate, limit, writer, options)
     }
 
+    /// Open an NDJSON file, write matching original rows, and stop after `limit` matches.
+    pub fn run_ndjson_matches_file<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_file`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_file_with_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file_with_options(self, path, predicate, limit, writer, options)
+    }
+
+    /// Evaluate `predicate` against each row from an [`io::NdjsonSource`], write
+    /// matching original rows, and stop after `limit` matches.
+    pub fn run_ndjson_matches_source<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source(self, source, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_source`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_source_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source_with_options(self, source, predicate, limit, writer, options)
+    }
+
+    /// Read an NDJSON file from tail to head, write matching original rows, and
+    /// stop after `limit` matches.
+    pub fn run_ndjson_rev_matches<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_matches`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_matches_with_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches_with_options(self, path, predicate, limit, writer, options)
+    }
+
     /// Evaluate `query` independently for every non-empty NDJSON row and collect
     /// the per-row results.
     pub fn collect_ndjson<R>(
@@ -612,6 +705,83 @@ impl JetroEngine {
         R: std::io::BufRead,
     {
         io::collect_ndjson_matches_with_options(self, reader, predicate, limit, options)
+    }
+
+    /// Open an NDJSON file, collect matching original rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches_file<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_matches_file(self, path, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches_file`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_file_with_options<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_matches_file_with_options(self, path, predicate, limit, options)
+    }
+
+    /// Evaluate `predicate` against each row from an [`io::NdjsonSource`],
+    /// collect matching original rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches_source(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_matches_source(self, source, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches_source`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_source_with_options(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_matches_source_with_options(self, source, predicate, limit, options)
+    }
+
+    /// Read an NDJSON file from tail to head, collect matching original rows,
+    /// and stop after `limit` matches.
+    pub fn collect_ndjson_rev_matches<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_matches(self, path, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_rev_matches`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_rev_matches_with_options<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_matches_with_options(self, path, predicate, limit, options)
     }
 
     /// Evaluate `query` independently for every non-empty NDJSON row and call

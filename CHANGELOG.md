@@ -51,6 +51,12 @@
   one API while preserving the same options-aware per-row execution paths.
   Callback-based per-row iteration is also available through
   `for_each_ndjson_source`.
+- **Early-stop NDJSON matching**. Added `for_each_ndjson_until` plus
+  `collect_ndjson_matches*` and `run_ndjson_matches*` APIs for reader, file,
+  source-dispatch, and reverse-file inputs. Match helpers evaluate a predicate
+  per row, emit the original full row only for truthy matches, and stop as soon
+  as the requested match limit is reached, without exposing stream-as-array
+  semantics.
 
 ### Demand/tape architecture cleanup
 

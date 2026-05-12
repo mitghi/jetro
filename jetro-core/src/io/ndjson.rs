@@ -442,6 +442,78 @@ where
     Ok(values)
 }
 
+pub fn collect_ndjson_matches_file<P>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(path)?;
+    let options = NdjsonOptions::default();
+    collect_ndjson_matches_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        predicate,
+        limit,
+        options,
+    )
+}
+
+pub fn collect_ndjson_matches_file_with_options<P>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(path)?;
+    collect_ndjson_matches_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        predicate,
+        limit,
+        options,
+    )
+}
+
+pub fn collect_ndjson_matches_source(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+) -> Result<Vec<Value>, JetroEngineError> {
+    collect_ndjson_matches_source_with_options(
+        engine,
+        source,
+        predicate,
+        limit,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn collect_ndjson_matches_source_with_options(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+    options: NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError> {
+    match source {
+        NdjsonSource::File(path) => {
+            collect_ndjson_matches_file_with_options(engine, path, predicate, limit, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            collect_ndjson_matches_with_options(engine, reader, predicate, limit, options)
+        }
+    }
+}
+
 pub fn run_ndjson<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -561,7 +633,14 @@ where
     R: BufRead,
     W: Write,
 {
-    run_ndjson_matches_with_options(engine, reader, predicate, limit, writer, NdjsonOptions::default())
+    run_ndjson_matches_with_options(
+        engine,
+        reader,
+        predicate,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
 }
 
 pub fn run_ndjson_matches_with_options<R, W>(
@@ -584,6 +663,93 @@ where
     })?;
     writer.flush()?;
     Ok(count)
+}
+
+pub fn run_ndjson_matches_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    let options = NdjsonOptions::default();
+    run_ndjson_matches_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        predicate,
+        limit,
+        writer,
+        options,
+    )
+}
+
+pub fn run_ndjson_matches_file_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    run_ndjson_matches_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        predicate,
+        limit,
+        writer,
+        options,
+    )
+}
+
+pub fn run_ndjson_matches_source<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_matches_source_with_options(
+        engine,
+        source,
+        predicate,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_matches_source_with_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_matches_file_with_options(engine, path, predicate, limit, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_matches_with_options(engine, reader, predicate, limit, writer, options)
+        }
+    }
 }
 
 fn drive_ndjson<R, F>(
@@ -717,7 +883,7 @@ fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
     }
 }
 
-fn row_eval_error(line_no: u64, err: crate::EvalError) -> JetroEngineError {
+pub(super) fn row_eval_error(line_no: u64, err: crate::EvalError) -> JetroEngineError {
     let message = err.0;
     if message.starts_with("Invalid JSON:") {
         RowError::InvalidJsonMessage { line_no, message }.into()
