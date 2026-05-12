@@ -340,6 +340,21 @@ impl JetroEngine {
         io::run_ndjson(self, reader, query, writer)
     }
 
+    /// Open an NDJSON file and evaluate `query` independently for every
+    /// non-empty row, writing one JSON result per output line.
+    pub fn run_ndjson_file<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file(self, path, query, writer)
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,
@@ -366,6 +381,18 @@ impl JetroEngine {
         R: std::io::BufRead,
     {
         io::collect_ndjson(self, reader, query)
+    }
+
+    /// Open an NDJSON file and collect per-row query results.
+    pub fn collect_ndjson_file<P>(
+        &self,
+        path: P,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_file(self, path, query)
     }
 
     /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.

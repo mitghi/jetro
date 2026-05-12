@@ -2,6 +2,7 @@ use jetro_core::io::NdjsonOptions;
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
+use std::path::PathBuf;
 
 #[test]
 fn collect_ndjson_evaluates_query_per_non_empty_row() {
@@ -139,4 +140,30 @@ fn utf8_bom_is_ignored_only_on_the_first_physical_line() {
         .expect("ndjson query should run");
 
     assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+}
+
+#[test]
+fn file_helpers_use_the_same_per_row_execution() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-basic");
+    std::fs::write(&path, b"{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
+
+    let out = engine
+        .collect_ndjson_file(&path, "name")
+        .expect("file query should run");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_file(&path, "name", &mut written)
+        .expect("file query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(written).unwrap(), "\"Ada\"\n\"Bob\"\n");
+}
+
+fn temp_path(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!("{}-{}.ndjson", name, std::process::id()));
+    path
 }

@@ -3,7 +3,9 @@ use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
 use memchr::memchr;
 use serde_json::Value;
+use std::fs::File;
 use std::io::{BufRead, BufWriter, Write};
+use std::path::Path;
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
@@ -221,6 +223,18 @@ where
     Ok(values)
 }
 
+pub fn collect_ndjson_file<P>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(path)?;
+    collect_ndjson(engine, std::io::BufReader::new(file), query)
+}
+
 pub fn run_ndjson<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -232,6 +246,20 @@ where
     W: Write,
 {
     run_ndjson_with_options(engine, reader, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    run_ndjson(engine, std::io::BufReader::new(file), query, writer)
 }
 
 pub fn run_ndjson_with_options<R, W>(
