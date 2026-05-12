@@ -29,8 +29,8 @@
   options-aware variants.
 - **Cold-path friendly row execution**. NDJSON rows now enter through the
   engine byte parser, reuse one prepared byte-backed query plan for the whole
-  stream, and execute with the engine-owned VM instead of performing a per-row
-  plan lookup.
+  stream, remain lazy/tape-eligible until execution needs materialization, and
+  execute with the engine-owned VM instead of performing a per-row plan lookup.
 - **Bounded, row-aware input handling**. The reader supports empty input,
   blank-line skipping, CRLF, trailing-newline-less final rows, first-line UTF-8
   BOM stripping, configurable maximum line length, and row-numbered invalid
@@ -38,7 +38,9 @@
   callers that know their typical row width.
 - **Lower-copy line scanning**. The per-row driver uses `fill_buf` plus
   `memchr` to find line boundaries and transfers the owned row buffer directly
-  into JSON parsing, avoiding an extra row byte copy.
+  into JSON parsing, avoiding an extra row byte copy while preserving reusable
+  scanner-buffer capacity. `run_ndjson` serializes internal `Val` results
+  directly instead of building an intermediate `serde_json::Value` tree.
 
 ### Demand/tape architecture cleanup
 
