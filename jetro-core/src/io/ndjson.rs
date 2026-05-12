@@ -1,6 +1,7 @@
 use super::RowError;
 use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
+use memchr::memchr;
 use serde_json::Value;
 use std::io::{BufRead, BufWriter, Write};
 
@@ -60,7 +61,7 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
     ) -> Result<Option<(u64, &'a [u8])>, RowError> {
         loop {
             buf.clear();
-            let read = self.reader.read_until(b'\n', buf)?;
+            let read = self.read_physical_line(buf)?;
             if read == 0 {
                 return Ok(None);
             }
@@ -96,7 +97,7 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
     ) -> Result<Option<(u64, Vec<u8>)>, RowError> {
         loop {
             buf.clear();
-            let read = self.reader.read_until(b'\n', buf)?;
+            let read = self.read_physical_line(buf)?;
             if read == 0 {
                 return Ok(None);
             }
@@ -120,6 +121,25 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             }
 
             return Ok(Some((self.line_no, std::mem::take(buf))));
+        }
+    }
+
+    fn read_physical_line(&mut self, buf: &mut Vec<u8>) -> Result<usize, RowError> {
+        loop {
+            let available = self.reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(buf.len());
+            }
+
+            if let Some(pos) = memchr(b'\n', available) {
+                buf.extend_from_slice(&available[..=pos]);
+                self.reader.consume(pos + 1);
+                return Ok(buf.len());
+            }
+
+            let len = available.len();
+            buf.extend_from_slice(available);
+            self.reader.consume(len);
         }
     }
 }
