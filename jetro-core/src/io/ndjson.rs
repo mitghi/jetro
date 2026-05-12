@@ -6,17 +6,20 @@ use serde_json::Value;
 use std::io::{BufRead, BufWriter, Write};
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
+const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 
 /// Configuration for per-row NDJSON execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NdjsonOptions {
     pub max_line_len: usize,
+    pub initial_buffer_capacity: usize,
 }
 
 impl Default for NdjsonOptions {
     fn default() -> Self {
         Self {
             max_line_len: DEFAULT_MAX_LINE_LEN,
+            initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
         }
     }
 }
@@ -24,6 +27,11 @@ impl Default for NdjsonOptions {
 impl NdjsonOptions {
     pub fn with_max_line_len(mut self, max_line_len: usize) -> Self {
         self.max_line_len = max_line_len;
+        self
+    }
+
+    pub fn with_initial_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.initial_buffer_capacity = capacity;
         self
     }
 }
@@ -260,7 +268,7 @@ where
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
-    let mut buf = Vec::with_capacity(8192);
+    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
