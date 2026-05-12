@@ -626,6 +626,29 @@ fn reverse_match_helpers_stop_from_tail() {
 }
 
 #[test]
+fn reverse_match_writer_preserves_raw_matching_rows() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-match-raw");
+    std::fs::write(
+        &path,
+        b" { \"name\" : \"Ada\" , \"active\" : true }\n{\"name\":\"Bob\",\"active\":false}\n { \"name\" : \"Cid\" , \"active\" : true }\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_rev_matches(&path, "active", 2, &mut out)
+        .expect("reverse match writer should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        " { \"name\" : \"Cid\" , \"active\" : true }\n { \"name\" : \"Ada\" , \"active\" : true }\n"
+    );
+}
+
+#[test]
 fn reverse_options_enforce_max_line_length() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-max-line");
