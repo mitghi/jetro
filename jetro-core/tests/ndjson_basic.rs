@@ -277,6 +277,24 @@ not-json
 }
 
 #[test]
+fn stream_mode_bounds_offset_windows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"n":1}
+{"n":2}
+{"n":3}
+{"n":4}
+{"n":5}
+not-json
+"#;
+
+    let out = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.skip(2).take(3).map(n)")
+        .expect("bounded stream query should not read past the offset window");
+
+    assert_eq!(out, json!([3, 4, 5]));
+}
+
+#[test]
 fn source_helpers_dispatch_reader_and_file_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(

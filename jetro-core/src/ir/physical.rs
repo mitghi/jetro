@@ -8,13 +8,16 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
+use crate::builtins::{
+    registry::{propagate_demand as propagate_builtin_demand, BuiltinDemandArg, BuiltinId},
+    BuiltinArgs, BuiltinCall, BuiltinMethod,
+};
 use crate::data::value::Val;
 use crate::exec::pipeline::PipelineBody;
 use crate::exec::structural::StructuralPlan;
 use crate::parse::ast::{BinOp, KindType, PatchOp, PathStep};
+use crate::plan::demand::{Demand, PullDemand, ValueNeed};
 use crate::plan::update::{UpdateDependencySummary, UpdateTriePlan};
-use crate::plan::demand::PullDemand;
 use crate::vm::Program;
 
 /// Compiled query plan: a DAG of `PhysicalNode`s plus a root selector.
@@ -91,7 +94,7 @@ impl QueryPlan {
         let QueryRoot::Node(root) = self.root() else {
             return None;
         };
-        self.node_root_input_limit(*root)
+        self.node_root_input_limit(*root, Demand::RESULT)
     }
 
     /// Returns the `ExecutionFacts` for the root node; used by tests to assert byte-native status.
@@ -107,47 +110,80 @@ impl QueryPlan {
         }
     }
 
-    fn node_root_input_limit(&self, root: NodeId) -> Option<usize> {
+    fn node_root_input_limit(&self, root: NodeId, downstream: Demand) -> Option<usize> {
         match self.node(root) {
-            PlanNode::Call { receiver, call, .. } if self.is_root_node(*receiver) => {
-                match (call.method, &call.args) {
-                    (BuiltinMethod::First, BuiltinArgs::None) => Some(1),
-                    (BuiltinMethod::First, BuiltinArgs::I64(n)) => Some((*n).max(0) as usize),
-                    (BuiltinMethod::Take, BuiltinArgs::Usize(n)) => Some(*n),
-                    (BuiltinMethod::Nth, BuiltinArgs::None) => Some(1),
-                    (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => {
-                        Some((*i as usize).saturating_add(1))
-                    }
-                    _ => None,
-                }
+            PlanNode::Root => input_limit_from_pull(downstream.pull),
+            PlanNode::RootPath(steps) if steps.is_empty() => input_limit_from_pull(downstream.pull),
+            PlanNode::Call { receiver, call, .. } => {
+                let upstream = call_upstream_demand(call, downstream);
+                self.node_root_input_limit(*receiver, upstream)
             }
-            PlanNode::Call { .. } => None,
             PlanNode::Pipeline {
                 source: PipelinePlanSource::Expr(source),
                 body,
-            } if self.is_root_node(*source) => match body.pull_demand() {
-                PullDemand::FirstInput(n) => Some(n),
-                PullDemand::NthInput(i) => Some(i.saturating_add(1)),
-                _ => None,
-            },
+            } => self.node_root_input_limit(
+                *source,
+                Demand {
+                    pull: body.pull_demand(),
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+            ),
             PlanNode::Pipeline {
                 source: PipelinePlanSource::FieldChain { keys },
                 body,
             } if keys.is_empty() => match body.pull_demand() {
-                PullDemand::FirstInput(n) => Some(n),
-                PullDemand::NthInput(i) => Some(i.saturating_add(1)),
-                _ => None,
+                pull => input_limit_from_pull(pull),
             },
             _ => None,
         }
     }
+}
 
-    fn is_root_node(&self, id: NodeId) -> bool {
-        match self.node(id) {
-            PlanNode::Root => true,
-            PlanNode::RootPath(steps) => steps.is_empty(),
-            _ => false,
-        }
+fn input_limit_from_pull(pull: PullDemand) -> Option<usize> {
+    match pull {
+        PullDemand::FirstInput(n) => Some(n),
+        PullDemand::NthInput(i) => Some(i.saturating_add(1)),
+        _ => None,
+    }
+}
+
+fn call_upstream_demand(call: &BuiltinCall, downstream: Demand) -> Demand {
+    match (call.method, &call.args) {
+        (BuiltinMethod::First, BuiltinArgs::None) => Demand::first(ValueNeed::Whole),
+        (BuiltinMethod::First, BuiltinArgs::I64(n)) => Demand {
+            pull: PullDemand::FirstInput((*n).max(0) as usize),
+            value: ValueNeed::Whole,
+            order: true,
+        },
+        (BuiltinMethod::Last, BuiltinArgs::None) => Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        },
+        (BuiltinMethod::Last, BuiltinArgs::I64(n)) => Demand {
+            pull: PullDemand::LastInput((*n).max(0) as usize),
+            value: ValueNeed::Whole,
+            order: true,
+        },
+        (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => Demand {
+            pull: PullDemand::NthInput(*i as usize),
+            value: ValueNeed::Whole,
+            order: true,
+        },
+        _ => propagate_builtin_demand(
+            BuiltinId::from_method(call.method),
+            demand_arg_from_call(call),
+            downstream,
+        ),
+    }
+}
+
+fn demand_arg_from_call(call: &BuiltinCall) -> BuiltinDemandArg {
+    match &call.args {
+        BuiltinArgs::Usize(n) => BuiltinDemandArg::Usize(*n),
+        BuiltinArgs::I64(n) if *n >= 0 => BuiltinDemandArg::Usize(*n as usize),
+        _ => BuiltinDemandArg::None,
     }
 }
 
