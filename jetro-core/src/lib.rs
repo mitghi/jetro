@@ -25,6 +25,7 @@ pub(crate) mod builtins;
 pub(crate) mod compile;
 pub(crate) mod data;
 pub(crate) mod exec;
+pub mod io;
 pub(crate) mod ir;
 pub(crate) mod parse;
 pub(crate) mod plan;
@@ -34,12 +35,12 @@ pub(crate) mod vm;
 #[cfg(test)]
 mod tests;
 
+use data::value::Val;
 use serde_json::Value;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use data::value::Val;
 
 pub use data::context::EvalError;
 #[cfg(test)]
@@ -54,7 +55,6 @@ pub mod __fuzz_internal {
     pub use crate::parse::parser::{parse, ParseError};
     pub use crate::plan::physical::plan_query;
 }
-
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -129,7 +129,6 @@ pub struct Jetro {
     vm: RefCell<VM>,
 }
 
-
 /// Long-lived multi-document query engine with an explicit plan cache.
 /// Use when the same process evaluates many expressions over many documents —
 /// parse/lower/compile work is amortised by this object, not hidden in
@@ -155,6 +154,10 @@ pub struct JetroEngine {
 pub enum JetroEngineError {
     /// JSON parsing failed before evaluation could begin.
     Json(serde_json::Error),
+    /// Reading from a stream or writing results failed.
+    Io(std::io::Error),
+    /// NDJSON row parsing failed with row context.
+    Ndjson(io::RowError),
     /// Expression evaluation failed (the JSON was valid but the query errored).
     Eval(EvalError),
 }
@@ -163,6 +166,8 @@ impl std::fmt::Display for JetroEngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(err) => write!(f, "{}", err),
+            Self::Io(err) => write!(f, "{}", err),
+            Self::Ndjson(err) => write!(f, "{}", err),
             Self::Eval(err) => write!(f, "{}", err),
         }
     }
@@ -172,6 +177,8 @@ impl std::error::Error for JetroEngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Json(err) => Some(err),
+            Self::Io(err) => Some(err),
+            Self::Ndjson(err) => Some(err),
             Self::Eval(_) => None,
         }
     }
@@ -180,6 +187,18 @@ impl std::error::Error for JetroEngineError {
 impl From<serde_json::Error> for JetroEngineError {
     fn from(err: serde_json::Error) -> Self {
         Self::Json(err)
+    }
+}
+
+impl From<std::io::Error> for JetroEngineError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<io::RowError> for JetroEngineError {
+    fn from(err: io::RowError) -> Self {
+        Self::Ndjson(err)
     }
 }
 
@@ -240,10 +259,7 @@ impl JetroEngine {
     /// interned into this engine's key cache. With `simd-json`, the tape
     /// is materialised eagerly so interning happens once at parse time
     /// (subsequent `collect` calls reuse the cached `Val` tree).
-    pub fn parse_bytes(
-        &self,
-        bytes: Vec<u8>,
-    ) -> std::result::Result<Jetro, JetroEngineError> {
+    pub fn parse_bytes(&self, bytes: Vec<u8>) -> std::result::Result<Jetro, JetroEngineError> {
         let document = Jetro::from_bytes(bytes)?;
         // Force materialisation so keys are interned through this
         // engine's cache rather than the default thread-local one when
@@ -289,9 +305,56 @@ impl JetroEngine {
         Ok(self.collect(&document, expr)?)
     }
 
+    /// Evaluate `query` independently for every non-empty NDJSON row and write
+    /// one JSON result per output line.
+    pub fn run_ndjson<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson(self, reader, query, writer)
+    }
+
+    /// Evaluate `query` independently for every non-empty NDJSON row and collect
+    /// the per-row results.
+    pub fn collect_ndjson<R>(
+        &self,
+        reader: R,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson(self, reader, query)
+    }
+
+    /// Evaluate `query` independently for every non-empty NDJSON row and call
+    /// `f` with each result as it is produced.
+    pub fn for_each_ndjson<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson(self, reader, query, f)
+    }
+
     /// Look up a compiled `QueryPlan` by expression string and planning context,
     /// compiling and inserting it if not already cached; evicts the whole cache if full.
-    fn cached_plan(&self, expr: &str, context: plan::physical::PlanningContext) -> ir::physical::QueryPlan {
+    fn cached_plan(
+        &self,
+        expr: &str,
+        context: plan::physical::PlanningContext,
+    ) -> ir::physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
         let cache_key = format!("{}\0{}", context.cache_key(), expr);
         if let Some(plan) = cache.get(&cache_key) {
@@ -425,8 +488,6 @@ impl Jetro {
     /// When the `simd-json` feature is enabled the bytes are not parsed eagerly;
     /// the tape is built lazily on the first query that needs it.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
-        
-        
         #[cfg(feature = "simd-json")]
         {
             return Ok(Self {
