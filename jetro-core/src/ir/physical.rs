@@ -111,8 +111,10 @@ impl QueryPlan {
         match self.node(root) {
             PlanNode::Call { receiver, call, .. } if self.is_root_node(*receiver) => {
                 match (call.method, &call.args) {
+                    (BuiltinMethod::First, BuiltinArgs::None) => Some(1),
                     (BuiltinMethod::First, BuiltinArgs::I64(n)) => Some((*n).max(0) as usize),
                     (BuiltinMethod::Take, BuiltinArgs::Usize(n)) => Some(*n),
+                    (BuiltinMethod::Nth, BuiltinArgs::None) => Some(1),
                     (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => {
                         Some((*i as usize).saturating_add(1))
                     }
@@ -124,6 +126,14 @@ impl QueryPlan {
                 source: PipelinePlanSource::Expr(source),
                 body,
             } if self.is_root_node(*source) => match body.pull_demand() {
+                PullDemand::FirstInput(n) => Some(n),
+                PullDemand::NthInput(i) => Some(i.saturating_add(1)),
+                _ => None,
+            },
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { keys },
+                body,
+            } if keys.is_empty() => match body.pull_demand() {
                 PullDemand::FirstInput(n) => Some(n),
                 PullDemand::NthInput(i) => Some(i.saturating_add(1)),
                 _ => None,

@@ -1879,6 +1879,9 @@ impl BuiltinCall {
                 Self::new(method, BuiltinArgs::I64(n))
             }
             BuiltinMethod::Nth => Self::new(method, BuiltinArgs::I64(args.i64(0)?)),
+            BuiltinMethod::Take | BuiltinMethod::Skip => {
+                Self::new(method, BuiltinArgs::Usize(args.usize(0)?))
+            }
             BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
                 let item = if arg_len > 0 { args.val(0)? } else { Val::Null };
                 Self::new(method, BuiltinArgs::Val(item))
