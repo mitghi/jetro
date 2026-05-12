@@ -63,6 +63,19 @@
 - **Reverse query callbacks**. Added `for_each_ndjson_rev*` APIs so arbitrary
   reverse NDJSON queries can stop through `NdjsonControl` while staying on the
   same byte/tape row execution path as `run_ndjson_rev`.
+- **Writer-limit APIs and faster output**. Added writer-based forward, source,
+  file, and reverse NDJSON limit helpers so callers can stop after N emitted
+  query results without routing through callback `serde_json::Value`
+  materialization. NDJSON output now uses a shared direct writer for scalars,
+  arrays, objects, small objects, typed lanes, and object-vector rows, with a
+  fast no-escape string path and larger options-driven buffering.
+- **Raw match-row emission**. `run_ndjson_matches*` and reverse match writer
+  APIs now write retained row bytes directly for truthy matches instead of
+  materializing the full root value before serialization, preserving original
+  row formatting and reducing matched-row overhead.
+- **Core NDJSON benchmark**. Added `bench_ndjson` as a core-only cold-path
+  benchmark for simple field extraction, array length, nested first access,
+  nested mapping, and filter/count-style row queries.
 
 ### Demand/tape architecture cleanup
 
