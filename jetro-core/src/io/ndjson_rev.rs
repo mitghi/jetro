@@ -1,6 +1,5 @@
 use super::RowError;
 use crate::data::value::ValRef;
-use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
@@ -373,12 +372,11 @@ where
     F: FnMut(crate::data::value::Val) -> Result<super::ndjson::NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let executor = super::ndjson::NdjsonRowExecutor::new(engine, query);
     let mut count = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
-        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
-        let out = super::ndjson::collect_row_val(engine, &document, &plan, reverse_row_no)?;
+        let out = executor.eval_owned_row(reverse_row_no, row)?;
         count += 1;
         if matches!(emit(out)?, super::ndjson::NdjsonControl::Stop) {
             break;
@@ -405,18 +403,18 @@ where
     }
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
-    let plan = engine.cached_plan(predicate, PlanningContext::bytes());
+    let executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
     let mut emitted = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
-        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
-        let matched = super::ndjson::collect_row_val(engine, &document, &plan, reverse_row_no)?;
+        let document = executor.parse_owned_row(reverse_row_no, row)?;
+        let matched = executor.eval_document(reverse_row_no, &document)?;
         if !is_truthy(&matched) {
             continue;
         }
 
         let root = document
-            .root_val_with(engine.keys())
+            .root_val_with(executor.engine().keys())
             .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
         emitted += 1;
         if matches!(emit(root)?, super::ndjson::NdjsonControl::Stop) || emitted >= limit {

@@ -904,13 +904,12 @@ where
     F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let executor = NdjsonRowExecutor::new(engine, query);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let document = parse_row(engine, line_no, row)?;
-        let out = collect_row_val(engine, &document, &plan, line_no)?;
+        let out = executor.eval_owned_row(line_no, row)?;
         count += 1;
         if matches!(emit(Value::from(out))?, NdjsonControl::Stop) {
             break;
@@ -932,17 +931,13 @@ where
     F: FnMut(Val) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let executor = NdjsonRowExecutor::new(engine, query);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let document = parse_row(engine, line_no, row)?;
         count += 1;
-        if matches!(
-            emit(collect_row_val(engine, &document, &plan, line_no)?)?,
-            NdjsonControl::Stop
-        ) {
+        if matches!(emit(executor.eval_owned_row(line_no, row)?)?, NdjsonControl::Stop) {
             break;
         }
     }
@@ -967,13 +962,13 @@ where
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let plan = engine.cached_plan(predicate, PlanningContext::bytes());
+    let executor = NdjsonRowExecutor::new(engine, predicate);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let document = parse_row(engine, line_no, row)?;
-        let matched = collect_row_val(engine, &document, &plan, line_no)?;
+        let document = executor.parse_owned_row(line_no, row)?;
+        let matched = executor.eval_document(line_no, &document)?;
         if !is_truthy(&matched) {
             continue;
         }
@@ -988,6 +983,49 @@ where
     }
 
     Ok(emitted)
+}
+
+pub(super) struct NdjsonRowExecutor<'a> {
+    engine: &'a JetroEngine,
+    plan: crate::ir::physical::QueryPlan,
+}
+
+impl<'a> NdjsonRowExecutor<'a> {
+    pub(super) fn new(engine: &'a JetroEngine, query: &str) -> Self {
+        Self {
+            engine,
+            plan: engine.cached_plan(query, PlanningContext::bytes()),
+        }
+    }
+
+    pub(super) fn eval_owned_row(
+        &self,
+        line_no: u64,
+        row: Vec<u8>,
+    ) -> Result<Val, JetroEngineError> {
+        let document = self.parse_owned_row(line_no, row)?;
+        self.eval_document(line_no, &document)
+    }
+
+    pub(super) fn parse_owned_row(
+        &self,
+        line_no: u64,
+        row: Vec<u8>,
+    ) -> Result<Jetro, JetroEngineError> {
+        parse_row(self.engine, line_no, row)
+    }
+
+    pub(super) fn eval_document(
+        &self,
+        line_no: u64,
+        document: &Jetro,
+    ) -> Result<Val, JetroEngineError> {
+        collect_row_val(self.engine, document, &self.plan, line_no)
+    }
+
+    pub(super) fn engine(&self) -> &'a JetroEngine {
+        self.engine
+    }
 }
 
 pub(super) fn collect_row_val(
