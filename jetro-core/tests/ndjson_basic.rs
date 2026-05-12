@@ -67,6 +67,32 @@ fn run_ndjson_writes_scalar_results_directly() {
 }
 
 #[test]
+fn run_ndjson_writes_array_and_object_results_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"attributes":[{"key":"a","value":1},{"key":"b","value":2}]}
+"#;
+
+    let mut array_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "attributes.map(@.key)", &mut array_out)
+        .expect("array projection should write");
+    assert_eq!(String::from_utf8(array_out).unwrap(), "[\"a\",\"b\"]\n");
+
+    let mut object_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "{id: id, first: attributes.first().value}",
+            &mut object_out,
+        )
+        .expect("object projection should write");
+    assert_eq!(
+        String::from_utf8(object_out).unwrap(),
+        "{\"id\":7,\"first\":1}\n"
+    );
+}
+
+#[test]
 fn run_ndjson_limit_writes_and_stops_without_value_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"n":1}

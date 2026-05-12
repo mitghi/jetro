@@ -1050,8 +1050,122 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         }
         Val::Str(s) => write_json_str(writer, s.as_ref())?,
         Val::StrSlice(s) => write_json_str(writer, s.as_str())?,
+        Val::Arr(items) => write_json_array(writer, items.iter())?,
+        Val::IntVec(items) => write_json_int_array(writer, items.iter().copied())?,
+        Val::FloatVec(items) => write_json_float_array(writer, items.iter().copied())?,
+        Val::StrVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_ref()))?,
+        Val::StrSliceVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_str()))?,
+        Val::Obj(entries) => {
+            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
+        }
+        Val::ObjSmall(entries) => {
+            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
+        }
         _ => serde_json::to_writer(&mut *writer, &ValRef(value))?,
     }
+    Ok(())
+}
+
+fn write_json_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
+where
+    W: Write,
+    I: IntoIterator<Item = &'a Val>,
+{
+    writer.write_all(b"[")?;
+    let mut first = true;
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            writer.write_all(b",")?;
+        }
+        write_val_json(writer, item)?;
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+fn write_json_int_array<W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
+where
+    W: Write,
+    I: IntoIterator<Item = i64>,
+{
+    writer.write_all(b"[")?;
+    let mut first = true;
+    let mut buf = itoa::Buffer::new();
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            writer.write_all(b",")?;
+        }
+        writer.write_all(buf.format(item).as_bytes())?;
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+fn write_json_float_array<W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
+where
+    W: Write,
+    I: IntoIterator<Item = f64>,
+{
+    writer.write_all(b"[")?;
+    let mut first = true;
+    let mut buf = ryu::Buffer::new();
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            writer.write_all(b",")?;
+        }
+        if item.is_finite() {
+            writer.write_all(buf.format(item).as_bytes())?;
+        } else {
+            writer.write_all(b"0")?;
+        }
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+fn write_json_str_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
+where
+    W: Write,
+    I: IntoIterator<Item = &'a str>,
+{
+    writer.write_all(b"[")?;
+    let mut first = true;
+    for item in items {
+        if first {
+            first = false;
+        } else {
+            writer.write_all(b",")?;
+        }
+        write_json_str(writer, item)?;
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+fn write_json_object<'a, W, I>(writer: &mut W, entries: I) -> Result<(), JetroEngineError>
+where
+    W: Write,
+    I: IntoIterator<Item = (&'a str, &'a Val)>,
+{
+    writer.write_all(b"{")?;
+    let mut first = true;
+    for (key, value) in entries {
+        if first {
+            first = false;
+        } else {
+            writer.write_all(b",")?;
+        }
+        write_json_str(writer, key)?;
+        writer.write_all(b":")?;
+        write_val_json(writer, value)?;
+    }
+    writer.write_all(b"}")?;
     Ok(())
 }
 
