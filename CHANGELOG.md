@@ -52,6 +52,10 @@
   correctness fallback that materializes the row vector; it uses the engine
   plan/VM caches and establishes the public semantics for the later
   provider-backed non-materializing source.
+- **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
+  helpers so callers can route file paths and existing `BufRead` inputs through
+  one API while preserving the same options-aware per-row and stream-as-array
+  execution paths.
 
 ### Demand/tape architecture cleanup
 
