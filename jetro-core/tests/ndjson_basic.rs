@@ -178,6 +178,50 @@ fn file_helpers_use_the_same_per_row_execution() {
 }
 
 #[test]
+fn stream_helpers_query_rows_as_one_array() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada","score":2}
+{"name":"Bob","score":3}
+"#;
+
+    let out = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.map(score).sum()")
+        .expect("stream query should run");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_stream(Cursor::new(input), "$.map(name)", &mut written)
+        .expect("stream query should run");
+
+    assert_eq!(out, json!(5));
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(written).unwrap(), "[\"Ada\",\"Bob\"]\n");
+}
+
+#[test]
+fn stream_file_helpers_query_rows_as_one_array() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-stream-file");
+    std::fs::write(&path, b"{\"score\":2}\n{\"score\":3}\n").unwrap();
+
+    let out = engine
+        .collect_ndjson_stream_file_with_options(
+            &path,
+            "$.map(score).sum()",
+            NdjsonOptions::default().with_initial_buffer_capacity(8),
+        )
+        .expect("stream file query should run");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_stream_file(&path, "len()", &mut written)
+        .expect("stream file query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, json!(5));
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(written).unwrap(), "2\n");
+}
+
+#[test]
 fn reverse_file_helpers_evaluate_rows_from_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-api");
