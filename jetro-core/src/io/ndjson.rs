@@ -1,4 +1,5 @@
 use super::RowError;
+use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
 use serde_json::Value;
 use std::io::{BufRead, BufWriter, Write};
@@ -111,12 +112,13 @@ where
     F: FnMut(Value),
 {
     let mut driver = NdjsonPerRowDriver::new(reader);
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
-        let out = engine.collect(&document, query)?;
+        let out = engine.collect_prepared(&document, &plan)?;
         f(out);
         count += 1;
     }
@@ -149,12 +151,13 @@ where
 {
     let mut writer = BufWriter::new(writer);
     let mut driver = NdjsonPerRowDriver::new(reader);
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
-        let out = engine.collect(&document, query)?;
+        let out = engine.collect_prepared(&document, &plan)?;
         serde_json::to_writer(&mut writer, &out)?;
         writer.write_all(b"\n")?;
         count += 1;

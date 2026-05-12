@@ -276,6 +276,14 @@ impl JetroEngine {
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
         let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
+        self.collect_prepared(document, &plan)
+    }
+
+    pub(crate) fn collect_prepared(
+        &self,
+        document: &Jetro,
+        plan: &ir::physical::QueryPlan,
+    ) -> std::result::Result<Value, EvalError> {
         let mut vm = self.vm.lock().expect("vm cache poisoned");
         exec::router::collect_plan_json_with_vm(document, &plan, &mut vm)
     }
@@ -350,7 +358,7 @@ impl JetroEngine {
 
     /// Look up a compiled `QueryPlan` by expression string and planning context,
     /// compiling and inserting it if not already cached; evicts the whole cache if full.
-    fn cached_plan(
+    pub(crate) fn cached_plan(
         &self,
         expr: &str,
         context: plan::physical::PlanningContext,
