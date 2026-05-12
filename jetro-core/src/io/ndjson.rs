@@ -219,6 +219,45 @@ where
     })
 }
 
+pub fn for_each_ndjson_source<F>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    F: FnMut(Value),
+{
+    for_each_ndjson_source_with_options(engine, source, query, NdjsonOptions::default(), f)
+}
+
+pub fn for_each_ndjson_source_with_options<F>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    options: NdjsonOptions,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    F: FnMut(Value),
+{
+    match source {
+        NdjsonSource::File(path) => {
+            let file = File::open(path)?;
+            for_each_ndjson_with_options(
+                engine,
+                std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+                query,
+                options,
+                f,
+            )
+        }
+        NdjsonSource::Reader(reader) => {
+            for_each_ndjson_with_options(engine, reader, query, options, f)
+        }
+    }
+}
+
 pub fn collect_ndjson<R>(
     engine: &JetroEngine,
     reader: R,

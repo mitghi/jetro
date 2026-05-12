@@ -252,6 +252,18 @@ fn source_helpers_dispatch_reader_and_file_inputs() {
     let out = engine
         .collect_ndjson_source(reader, "name")
         .expect("source query should run");
+    let mut callback_out = Vec::new();
+    let callback_rows = engine
+        .for_each_ndjson_source(
+            NdjsonSource::reader(Cursor::new(
+                br#"{"name":"Ada"}
+{"name":"Bob"}
+"#,
+            )),
+            "name",
+            |value| callback_out.push(value),
+        )
+        .expect("source query should run");
 
     let path = temp_path("jetro-ndjson-source-file");
     std::fs::write(&path, b"{\"score\":2}\n{\"score\":3}\n").unwrap();
@@ -262,6 +274,8 @@ fn source_helpers_dispatch_reader_and_file_inputs() {
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+    assert_eq!(callback_rows, 2);
+    assert_eq!(callback_out, out);
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(written).unwrap(), "2\n3\n");
 }
@@ -269,9 +283,11 @@ fn source_helpers_dispatch_reader_and_file_inputs() {
 #[test]
 fn source_helpers_dispatch_stream_inputs() {
     let engine = JetroEngine::new();
-    let reader = NdjsonSource::reader(Cursor::new(br#"{"score":2}
+    let reader = NdjsonSource::reader(Cursor::new(
+        br#"{"score":2}
 {"score":3}
-"#));
+"#,
+    ));
 
     let out = engine
         .collect_ndjson_stream_source(reader, "$.map(score).sum()")
@@ -281,7 +297,11 @@ fn source_helpers_dispatch_stream_inputs() {
     std::fs::write(&path, b"{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
     let mut written = Vec::new();
     let rows = engine
-        .run_ndjson_stream_source(NdjsonSource::file(path.clone()), "$.map(name)", &mut written)
+        .run_ndjson_stream_source(
+            NdjsonSource::file(path.clone()),
+            "$.map(name)",
+            &mut written,
+        )
         .expect("source stream query should run");
 
     let _ = std::fs::remove_file(&path);

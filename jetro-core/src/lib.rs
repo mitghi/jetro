@@ -726,6 +726,34 @@ impl JetroEngine {
         io::for_each_ndjson(self, reader, query, f)
     }
 
+    /// Evaluate `query` for every row from an [`io::NdjsonSource`] and call
+    /// `f` with each result as it is produced.
+    pub fn for_each_ndjson_source<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_source(self, source, query, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_source`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_source_with_options<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_source_with_options(self, source, query, options, f)
+    }
+
     /// Like [`JetroEngine::for_each_ndjson`] with explicit NDJSON reader options.
     pub fn for_each_ndjson_with_options<R, F>(
         &self,
