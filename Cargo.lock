@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "jetro"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "jetro-core",
  "serde_json",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "jetro-core"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "criterion",
  "indexmap",

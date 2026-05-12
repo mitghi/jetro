@@ -32,6 +32,26 @@
 //! let names = engine.collect_ndjson(rows, "name").unwrap();
 //! assert_eq!(names, vec![serde_json::json!("Ada"), serde_json::json!("Bob")]);
 //! ```
+//!
+//! Match-limited NDJSON helpers evaluate a predicate per row, return the
+//! original full row for truthy matches, and stop after the requested number of
+//! matches:
+//!
+//! ```rust
+//! use jetro_core::JetroEngine;
+//! use std::io::Cursor;
+//!
+//! let engine = JetroEngine::new();
+//! let rows = Cursor::new(br#"{"id":1,"active":true}
+//! {"id":2,"active":false}
+//! {"id":3,"active":true}
+//! "#);
+//! let first_two = engine.collect_ndjson_matches(rows, "active", 2).unwrap();
+//! assert_eq!(first_two, vec![
+//!     serde_json::json!({"id": 1, "active": true}),
+//!     serde_json::json!({"id": 3, "active": true}),
+//! ]);
+//! ```
 
 pub(crate) mod builtins;
 pub(crate) mod compile;

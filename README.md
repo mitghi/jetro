@@ -152,19 +152,74 @@ cargo run -p jetro-core --release --example bench_cold
 
 ```toml
 [dependencies]
-jetro = "0.5.7"
+jetro = "0.5.8"
 ```
 
 ## API
 
 ```rust
-use jetro::Jetro;
+use jetro::{Jetro, JetroEngine};
 
 let jetro = Jetro::from_bytes(json_bytes)?;
 let value = jetro.collect("$.some.expression")?;
+
+let engine = JetroEngine::new();
+let first_two = engine.collect_ndjson_matches_file(
+    "events.ndjson",
+    "level == \"error\"",
+    2,
+)?;
 ```
 
-That is the stable top-level API.
+`Jetro` is the byte-oriented document handle. `JetroEngine` is the long-lived
+engine for cached plans, reusable VM state, and NDJSON processing.
+
+### NDJSON
+
+NDJSON APIs evaluate each non-empty line as an independent JSON document while
+reusing one prepared query plan for the stream.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"id":1,"active":true}
+{"id":2,"active":false}
+{"id":3,"active":true}
+"#);
+
+let ids = engine.collect_ndjson(rows, "id")?;
+assert_eq!(ids, vec![
+    serde_json::json!(1),
+    serde_json::json!(2),
+    serde_json::json!(3),
+]);
+```
+
+For first-N document search, use the match-limited APIs. They evaluate the
+predicate per row, emit the original full row for truthy matches, and stop as
+soon as the limit is reached.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"id":1,"level":"info"}
+{"id":2,"level":"error"}
+{"id":3,"level":"error"}
+{"id":4,"level":"error"}
+"#);
+
+let first_two_errors = engine.collect_ndjson_matches(rows, r#"level == "error""#, 2)?;
+assert_eq!(first_two_errors.len(), 2);
+```
+
+File, source-dispatch, and reverse-file variants are public too:
+`collect_ndjson_matches_file`, `run_ndjson_matches_file`,
+`collect_ndjson_matches_source`, `run_ndjson_matches_source`,
+`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
 
 ## Quick Language Preview
 

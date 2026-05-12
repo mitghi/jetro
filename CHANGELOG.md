@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.7
+## 0.5.8
 
 ### Release focus
 
@@ -57,6 +57,9 @@
   per row, emit the original full row only for truthy matches, and stop as soon
   as the requested match limit is reached, without exposing stream-as-array
   semantics.
+- **Public facade exports**. The top-level `jetro` crate now re-exports
+  `JetroEngine`, `JetroEngineError`, and `io` so applications can use NDJSON
+  APIs directly from the crate they install.
 
 ### Demand/tape architecture cleanup
 
