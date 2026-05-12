@@ -55,7 +55,8 @@
 - **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
   helpers so callers can route file paths and existing `BufRead` inputs through
   one API while preserving the same options-aware per-row and stream-as-array
-  execution paths.
+  execution paths. Callback-based per-row iteration is also available through
+  `for_each_ndjson_source`.
 
 ### Demand/tape architecture cleanup
 
