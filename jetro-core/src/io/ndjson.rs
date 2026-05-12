@@ -44,19 +44,9 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             }
             self.line_no += 1;
 
-            while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                buf.pop();
-            }
+            trim_line_ending(buf);
 
-            let start = buf
-                .iter()
-                .position(|b| !b.is_ascii_whitespace())
-                .unwrap_or(buf.len());
-            let end = buf
-                .iter()
-                .rposition(|b| !b.is_ascii_whitespace())
-                .map(|idx| idx + 1)
-                .unwrap_or(start);
+            let (start, end) = non_ws_range(buf);
             if start == end {
                 continue;
             }
@@ -71,6 +61,41 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             }
 
             return Ok(Some((self.line_no, &buf[start..end])));
+        }
+    }
+
+    /// Read the next non-empty row and transfer ownership of `buf` to the
+    /// caller. This is the hot path used by `JetroEngine` NDJSON execution so
+    /// the row can be parsed without an extra bytes copy.
+    pub fn read_next_owned(
+        &mut self,
+        buf: &mut Vec<u8>,
+    ) -> Result<Option<(u64, Vec<u8>)>, RowError> {
+        loop {
+            buf.clear();
+            let read = self.reader.read_until(b'\n', buf)?;
+            if read == 0 {
+                return Ok(None);
+            }
+            self.line_no += 1;
+
+            trim_line_ending(buf);
+
+            let (start, end) = non_ws_range(buf);
+            if start == end {
+                continue;
+            }
+
+            let len = end - start;
+            if len > self.max_line_len {
+                return Err(RowError::LineTooLarge {
+                    line_no: self.line_no,
+                    len,
+                    max: self.max_line_len,
+                });
+            }
+
+            return Ok(Some((self.line_no, std::mem::take(buf))));
         }
     }
 }
@@ -89,7 +114,7 @@ where
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;
 
-    while let Some((line_no, row)) = driver.read_next_nonempty(&mut buf)? {
+    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
         let out = engine.collect(&document, query)?;
         f(out);
@@ -127,7 +152,7 @@ where
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0;
 
-    while let Some((line_no, row)) = driver.read_next_nonempty(&mut buf)? {
+    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
         let out = engine.collect(&document, query)?;
         serde_json::to_writer(&mut writer, &out)?;
@@ -139,9 +164,9 @@ where
     Ok(count)
 }
 
-fn parse_row(engine: &JetroEngine, line_no: u64, row: &[u8]) -> Result<Jetro, JetroEngineError> {
+fn parse_row(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Jetro, JetroEngineError> {
     engine
-        .parse_bytes(row.to_vec())
+        .parse_bytes(row)
         .map_err(|err| row_parse_error(line_no, err))
 }
 
@@ -155,4 +180,23 @@ fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
         .into(),
         other => other,
     }
+}
+
+fn trim_line_ending(buf: &mut Vec<u8>) {
+    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+        buf.pop();
+    }
+}
+
+fn non_ws_range(buf: &[u8]) -> (usize, usize) {
+    let start = buf
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(buf.len());
+    let end = buf
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map(|idx| idx + 1)
+        .unwrap_or(start);
+    (start, end)
 }
