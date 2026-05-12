@@ -57,6 +57,10 @@
   the propagated input demand before evaluating the prepared plan. This keeps
   cold-path stream queries from parsing unused NDJSON rows while preserving the
   materialized fallback semantics for unbounded chains.
+- **Offset windows use recursive root demand**. Direct call chains such as
+  `$.skip(a).take(b)` now propagate bounded demand through the physical call
+  graph, so stream-as-array inputs read only `a + b` rows before executing the
+  prepared plan.
 - **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
   helpers so callers can route file paths and existing `BufRead` inputs through
   one API while preserving the same options-aware per-row and stream-as-array
