@@ -37,6 +37,52 @@ fn run_ndjson_writes_one_json_result_per_row() {
 }
 
 #[test]
+fn run_ndjson_limit_writes_and_stops_without_value_callback() {
+    let engine = JetroEngine::new();
+    let input = br#"{"n":1}
+{"n":2}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_limit(Cursor::new(input), "n + 1", 2, &mut out)
+        .expect("writer limit should stop before invalid tail");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "2\n3\n");
+}
+
+#[test]
+fn run_ndjson_source_limit_dispatches_file_and_reader_inputs() {
+    let engine = JetroEngine::new();
+    let reader = NdjsonSource::reader(Cursor::new(b"{\"n\":1}\n{\"n\":2}\nnot-json\n".to_vec()));
+    let mut reader_out = Vec::new();
+    let reader_rows = engine
+        .run_ndjson_source_limit(reader, "n", 1, &mut reader_out)
+        .expect("reader limit should stop after one row");
+
+    let path = temp_path("jetro-ndjson-source-limit");
+    std::fs::write(&path, b"{\"n\":3}\n{\"n\":4}\nnot-json\n").unwrap();
+    let mut file_out = Vec::new();
+    let file_rows = engine
+        .run_ndjson_source_limit_with_options(
+            NdjsonSource::file(path.clone()),
+            "n",
+            2,
+            &mut file_out,
+            NdjsonOptions::default().with_reader_buffer_capacity(8),
+        )
+        .expect("file limit should stop before invalid tail");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(reader_rows, 1);
+    assert_eq!(String::from_utf8(reader_out).unwrap(), "1\n");
+    assert_eq!(file_rows, 2);
+    assert_eq!(String::from_utf8(file_out).unwrap(), "3\n4\n");
+}
+
+#[test]
 fn collect_ndjson_matches_stops_after_limit() {
     let engine = JetroEngine::new();
     let input = br#"{"name":"Ada","active":true}
@@ -387,6 +433,28 @@ fn reverse_file_helpers_evaluate_rows_from_tail() {
     assert_eq!(out_with_options, out);
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(written).unwrap(), "\"Bob\"\n\"Ada\"\n");
+}
+
+#[test]
+fn reverse_run_limit_writes_from_tail_and_stops() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-run-limit");
+    std::fs::write(&path, b"not-json\n{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_rev_limit_with_options(
+            &path,
+            "name",
+            2,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(5),
+        )
+        .expect("reverse writer limit should stop before invalid head");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"Bob\"\n\"Ada\"\n");
 }
 
 #[test]

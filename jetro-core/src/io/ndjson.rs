@@ -590,6 +590,105 @@ where
     Ok(count)
 }
 
+pub fn run_ndjson_limit<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_ndjson_limit_with_options(
+        engine,
+        reader,
+        query,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_limit_with_options<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let mut writer = BufWriter::new(writer);
+    let mut emitted = 0usize;
+    let count = drive_ndjson_val(engine, reader, query, options, |value| {
+        serde_json::to_writer(&mut writer, &ValRef(&value))?;
+        writer.write_all(b"\n")?;
+        emitted += 1;
+        Ok(if emitted >= limit {
+            NdjsonControl::Stop
+        } else {
+            NdjsonControl::Continue
+        })
+    })?;
+    writer.flush()?;
+    Ok(count)
+}
+
+pub fn run_ndjson_file_limit<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    let options = NdjsonOptions::default();
+    run_ndjson_limit_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        query,
+        limit,
+        writer,
+        options,
+    )
+}
+
+pub fn run_ndjson_file_limit_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    run_ndjson_limit_with_options(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        query,
+        limit,
+        writer,
+        options,
+    )
+}
+
 pub fn run_ndjson_source<W>(
     engine: &JetroEngine,
     source: NdjsonSource,
@@ -618,6 +717,47 @@ where
         }
         NdjsonSource::Reader(reader) => {
             run_ndjson_with_options(engine, reader, query, writer, options)
+        }
+    }
+}
+
+pub fn run_ndjson_source_limit<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_source_limit_with_options(
+        engine,
+        source,
+        query,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_source_limit_with_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_file_limit_with_options(engine, path, query, limit, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_limit_with_options(engine, reader, query, limit, writer, options)
         }
     }
 }

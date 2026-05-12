@@ -265,6 +265,59 @@ where
     Ok(count)
 }
 
+pub fn run_ndjson_rev_limit<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_limit_with_options(
+        engine,
+        path,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_limit_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let mut writer = BufWriter::new(writer);
+    let mut emitted = 0usize;
+    let count = drive_rev(engine, path, query, options, |value| {
+        serde_json::to_writer(&mut writer, &ValRef(&value))?;
+        writer.write_all(b"\n")?;
+        emitted += 1;
+        Ok(if emitted >= limit {
+            super::ndjson::NdjsonControl::Stop
+        } else {
+            super::ndjson::NdjsonControl::Continue
+        })
+    })?;
+    writer.flush()?;
+    Ok(count)
+}
+
 pub fn run_ndjson_rev_matches<P, W>(
     engine: &JetroEngine,
     path: P,

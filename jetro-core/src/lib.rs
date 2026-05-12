@@ -408,6 +408,37 @@ impl JetroEngine {
         io::run_ndjson_file_with_options(self, path, query, writer, options)
     }
 
+    /// Open an NDJSON file, write at most `limit` query results, and stop reading.
+    pub fn run_ndjson_file_limit<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit(self, path, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_file_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_file_limit_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit_with_options(self, path, query, limit, writer, options)
+    }
+
     /// Evaluate `query` independently for every row from an [`io::NdjsonSource`].
     pub fn run_ndjson_source<W>(
         &self,
@@ -433,6 +464,36 @@ impl JetroEngine {
         W: std::io::Write,
     {
         io::run_ndjson_source_with_options(self, source, query, writer, options)
+    }
+
+    /// Evaluate `query` for rows from an [`io::NdjsonSource`], write at most
+    /// `limit` results, and stop reading.
+    pub fn run_ndjson_source_limit<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit(self, source, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_source_limit_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit_with_options(self, source, query, limit, writer, options)
     }
 
     /// Read an NDJSON file from tail to head and write one query result per row.
@@ -464,6 +525,38 @@ impl JetroEngine {
         io::run_ndjson_rev_with_options(self, path, query, writer, options)
     }
 
+    /// Read an NDJSON file from tail to head, write at most `limit` query
+    /// results, and stop reading.
+    pub fn run_ndjson_rev_limit<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_limit(self, path, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_limit_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_limit_with_options(self, path, query, limit, writer, options)
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,
@@ -477,6 +570,37 @@ impl JetroEngine {
         W: std::io::Write,
     {
         io::run_ndjson_with_options(self, reader, query, writer, options)
+    }
+
+    /// Evaluate `query` for NDJSON rows, write at most `limit` results, and stop reading.
+    pub fn run_ndjson_limit<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_limit(self, reader, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_limit_with_options<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_limit_with_options(self, reader, query, limit, writer, options)
     }
 
     /// Evaluate `predicate` for each NDJSON row, write matching original rows,

@@ -15,17 +15,20 @@ pub use ndjson::{
     collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_source,
     for_each_ndjson_source_until, for_each_ndjson_source_until_with_options,
     for_each_ndjson_source_with_options, for_each_ndjson_until, for_each_ndjson_until_with_options,
-    for_each_ndjson_with_options, run_ndjson, run_ndjson_file, run_ndjson_file_with_options,
-    run_ndjson_matches, run_ndjson_matches_file, run_ndjson_matches_file_with_options,
-    run_ndjson_matches_source, run_ndjson_matches_source_with_options,
-    run_ndjson_matches_with_options, run_ndjson_source, run_ndjson_source_with_options,
+    for_each_ndjson_with_options, run_ndjson, run_ndjson_file, run_ndjson_file_limit,
+    run_ndjson_file_limit_with_options, run_ndjson_file_with_options, run_ndjson_limit,
+    run_ndjson_limit_with_options, run_ndjson_matches, run_ndjson_matches_file,
+    run_ndjson_matches_file_with_options, run_ndjson_matches_source,
+    run_ndjson_matches_source_with_options, run_ndjson_matches_with_options, run_ndjson_source,
+    run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
     run_ndjson_with_options, NdjsonControl, NdjsonOptions, NdjsonPerRowDriver,
 };
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
-    run_ndjson_rev, run_ndjson_rev_matches, run_ndjson_rev_matches_with_options,
-    run_ndjson_rev_with_options, NdjsonReverseFileDriver,
+    run_ndjson_rev, run_ndjson_rev_limit, run_ndjson_rev_limit_with_options,
+    run_ndjson_rev_matches, run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options,
+    NdjsonReverseFileDriver,
 };
 pub use source::NdjsonSource;
 use std::fmt;
