@@ -1679,6 +1679,9 @@ impl BuiltinCall {
             (BuiltinMethod::HasAll, BuiltinArgs::Val(v)) => {
                 apply_or_recv!(has_all_apply(recv, v))
             }
+            (BuiltinMethod::HasAll, BuiltinArgs::StrVec(keys)) => {
+                apply_or_recv!(has_all_keys_apply(recv, keys))
+            }
             (BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => return Some(has_key_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
@@ -2082,6 +2085,23 @@ impl BuiltinCall {
                 [Arg::Pos(expr)] => {
                     Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?)))
                 }
+                _ => None,
+            };
+        }
+
+        if method == BuiltinMethod::HasAll {
+            return match args {
+                [Arg::Pos(Expr::Array(elems))] => {
+                    let mut keys = Vec::with_capacity(elems.len());
+                    for elem in elems {
+                        let ArrayElem::Expr(expr) = elem else {
+                            return None;
+                        };
+                        keys.push(Arc::from(crate::util::val_to_key(&literal_val(expr)?)));
+                    }
+                    Some(Self::new(method, BuiltinArgs::StrVec(keys)))
+                }
+                [Arg::Pos(expr)] => Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?))),
                 _ => None,
             };
         }

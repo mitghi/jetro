@@ -302,6 +302,16 @@ pub fn has_all_apply(recv: &Val, needles: &Val) -> Option<Val> {
     Some(Val::Bool(found))
 }
 
+/// Pre-normalized variant of `has_all_apply` used when the planner can decode
+/// literal needles once into string keys.
+#[inline]
+pub fn has_all_keys_apply(recv: &Val, keys: &[Arc<str>]) -> Option<Val> {
+    let found = keys
+        .iter()
+        .all(|key| matches!(has_apply(recv, key.as_ref()), Some(Val::Bool(true))));
+    Some(Val::Bool(found))
+}
+
 /// Returns `Val::Bool(true)` when the receiver is an object containing `key`.
 ///
 /// Unlike `has`, this is deliberately object-only: arrays use `has` for

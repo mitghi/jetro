@@ -90,6 +90,11 @@
   `BuiltinCall` metadata instead of falling back to VM-only execution. This
   makes the same positional facts visible to source demand planning and owned
   value execution.
+- **Array RHS `has` is explicit and bounded**. `lhs has [a, b]` now lowers to
+  a `has_all` builtin with pre-normalized literal needles, so strings require
+  every substring, arrays require every element, and objects require every key.
+  Non-literal array RHS forms are rejected instead of silently matching every
+  string via empty-substring containment.
 - **Nested pipeline plans are first-class execution units**. Nested collection
   maps such as `items.map(...).sum()` now carry their source, stage
   expressions, stage kernels, and sink kernels in the shared plan object.

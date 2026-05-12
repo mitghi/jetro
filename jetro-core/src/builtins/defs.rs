@@ -3088,6 +3088,7 @@ impl Builtin for HasAll {
     ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(v) => super::has_all_apply(recv, v),
+            super::BuiltinArgs::StrVec(keys) => super::has_all_keys_apply(recv, keys),
             _ => None,
         }
     }

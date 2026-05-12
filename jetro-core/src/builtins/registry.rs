@@ -881,6 +881,7 @@ mod tests {
             BuiltinMethod::FilterKeys,
             BuiltinMethod::FilterValues,
             BuiltinMethod::Has,
+            BuiltinMethod::HasAll,
             BuiltinMethod::HasKey,
             BuiltinMethod::Missing,
             BuiltinMethod::GetPath,
@@ -1173,6 +1174,7 @@ mod tests {
             // input scalar (not element-wise) - no wrap, no element-wise
             // vectorisation. Same for `Keys` / `Values` / `Entries`.
             BuiltinMethod::HasKey,
+            BuiltinMethod::HasAll,
             BuiltinMethod::Lines,
             BuiltinMethod::GetPath,
         ] {
