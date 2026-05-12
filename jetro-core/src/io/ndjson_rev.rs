@@ -1,8 +1,12 @@
 use super::RowError;
+use crate::data::value::ValRef;
+use crate::plan::physical::PlanningContext;
+use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
+use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
@@ -86,6 +90,70 @@ impl NdjsonReverseFileDriver {
             }
         }
     }
+}
+
+pub fn collect_ndjson_rev<P>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let mut values = Vec::new();
+    drive_rev(engine, path, query, |value| {
+        values.push(Value::from(value));
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+pub fn run_ndjson_rev<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let mut writer = BufWriter::new(writer);
+    let count = drive_rev(engine, path, query, |value| {
+        serde_json::to_writer(&mut writer, &ValRef(&value))?;
+        writer.write_all(b"\n")?;
+        Ok(())
+    })?;
+    writer.flush()?;
+    Ok(count)
+}
+
+fn drive_rev<P, F>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    mut emit: F,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    F: FnMut(crate::data::value::Val) -> Result<(), JetroEngineError>,
+{
+    let mut driver = NdjsonReverseFileDriver::open(path)?;
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let mut reverse_row_no = 0u64;
+
+    while let Some(row) = driver.next_line()? {
+        reverse_row_no += 1;
+        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
+        emit(super::ndjson::collect_row_val(
+            engine,
+            &document,
+            &plan,
+            reverse_row_no,
+        )?)?;
+    }
+
+    Ok(reverse_row_no as usize)
 }
 
 fn trim_line_ending(buf: &mut Vec<u8>) {

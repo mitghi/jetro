@@ -177,6 +177,26 @@ fn file_helpers_use_the_same_per_row_execution() {
     assert_eq!(String::from_utf8(written).unwrap(), "\"Ada\"\n\"Bob\"\n");
 }
 
+#[test]
+fn reverse_file_helpers_evaluate_rows_from_tail() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-api");
+    std::fs::write(&path, b"{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
+
+    let out = engine
+        .collect_ndjson_rev(&path, "name")
+        .expect("reverse file query should run");
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_rev(&path, "name", &mut written)
+        .expect("reverse file query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, vec![json!("Bob"), json!("Ada")]);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(written).unwrap(), "\"Bob\"\n\"Ada\"\n");
+}
+
 fn temp_path(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     path.push(format!("{}-{}.ndjson", name, std::process::id()));

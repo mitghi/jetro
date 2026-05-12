@@ -399,7 +399,7 @@ where
     Ok(count)
 }
 
-fn collect_row_val(
+pub(super) fn collect_row_val(
     engine: &JetroEngine,
     document: &Jetro,
     plan: &crate::ir::physical::QueryPlan,
@@ -410,7 +410,11 @@ fn collect_row_val(
         .map_err(|err| row_eval_error(line_no, err))
 }
 
-fn parse_row(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Jetro, JetroEngineError> {
+pub(super) fn parse_row(
+    engine: &JetroEngine,
+    line_no: u64,
+    row: Vec<u8>,
+) -> Result<Jetro, JetroEngineError> {
     engine
         .parse_bytes_lazy(row)
         .map_err(|err| row_parse_error(line_no, err))

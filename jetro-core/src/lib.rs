@@ -388,6 +388,20 @@ impl JetroEngine {
         io::run_ndjson_file_with_options(self, path, query, writer, options)
     }
 
+    /// Read an NDJSON file from tail to head and write one query result per row.
+    pub fn run_ndjson_rev<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev(self, path, query, writer)
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,
@@ -439,6 +453,18 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
     {
         io::collect_ndjson_file_with_options(self, path, query, options)
+    }
+
+    /// Read an NDJSON file from tail to head and collect per-row query results.
+    pub fn collect_ndjson_rev<P>(
+        &self,
+        path: P,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev(self, path, query)
     }
 
     /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.
