@@ -134,13 +134,27 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             if let Some(pos) = memchr(b'\n', available) {
                 buf.extend_from_slice(&available[..=pos]);
                 self.reader.consume(pos + 1);
+                self.check_physical_line_len(buf.len())?;
                 return Ok(buf.len());
             }
 
             let len = available.len();
             buf.extend_from_slice(available);
             self.reader.consume(len);
+            self.check_physical_line_len(buf.len())?;
         }
+    }
+
+    fn check_physical_line_len(&self, len: usize) -> Result<(), RowError> {
+        let hard_max = self.max_line_len.saturating_add(2);
+        if len > hard_max {
+            return Err(RowError::LineTooLarge {
+                line_no: self.line_no + 1,
+                len,
+                max: self.max_line_len,
+            });
+        }
+        Ok(())
     }
 }
 
