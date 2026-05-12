@@ -235,6 +235,19 @@ where
     collect_ndjson(engine, std::io::BufReader::new(file), query)
 }
 
+pub fn collect_ndjson_file_with_options<P>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(path)?;
+    collect_ndjson_with_options(engine, std::io::BufReader::new(file), query, options)
+}
+
 pub fn run_ndjson<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -260,6 +273,27 @@ where
 {
     let file = File::open(path)?;
     run_ndjson(engine, std::io::BufReader::new(file), query, writer)
+}
+
+pub fn run_ndjson_file_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    run_ndjson_with_options(
+        engine,
+        std::io::BufReader::new(file),
+        query,
+        writer,
+        options,
+    )
 }
 
 pub fn run_ndjson_with_options<R, W>(

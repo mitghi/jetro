@@ -151,13 +151,26 @@ fn file_helpers_use_the_same_per_row_execution() {
     let out = engine
         .collect_ndjson_file(&path, "name")
         .expect("file query should run");
+    let out_with_options = engine
+        .collect_ndjson_file_with_options(
+            &path,
+            "name",
+            NdjsonOptions::default().with_initial_buffer_capacity(64),
+        )
+        .expect("file query should run");
     let mut written = Vec::new();
     let rows = engine
-        .run_ndjson_file(&path, "name", &mut written)
+        .run_ndjson_file_with_options(
+            &path,
+            "name",
+            &mut written,
+            NdjsonOptions::default().with_initial_buffer_capacity(64),
+        )
         .expect("file query should run");
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+    assert_eq!(out_with_options, out);
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(written).unwrap(), "\"Ada\"\n\"Bob\"\n");
 }

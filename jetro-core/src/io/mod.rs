@@ -9,9 +9,10 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use ndjson::{
-    collect_ndjson, collect_ndjson_file, collect_ndjson_with_options, for_each_ndjson,
-    for_each_ndjson_with_options, run_ndjson, run_ndjson_file, run_ndjson_with_options,
-    NdjsonOptions, NdjsonPerRowDriver,
+    collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options,
+    collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_with_options, run_ndjson,
+    run_ndjson_file, run_ndjson_file_with_options, run_ndjson_with_options, NdjsonOptions,
+    NdjsonPerRowDriver,
 };
 
 /// Source descriptor for future multi-source NDJSON APIs.
