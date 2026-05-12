@@ -1,5 +1,8 @@
 use super::{NdjsonSource, RowError};
+use crate::builtins::{BuiltinArgs, BuiltinMethod};
 use crate::data::value::{Val, ValRef};
+use crate::ir::physical::{PipelinePlanSource, PlanNode, QueryPlan, QueryRoot};
+use crate::plan::demand::PullDemand;
 use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
 use memchr::memchr;
@@ -698,9 +701,9 @@ fn collect_ndjson_stream_val<R>(
 where
     R: BufRead,
 {
-    let root = collect_ndjson_rows_val(engine, reader, options)?;
-    let document = Jetro::from_val_and_value(root, Value::Null);
     let plan = engine.cached_plan(query, PlanningContext::val());
+    let root = collect_ndjson_rows_val(engine, reader, options, stream_input_limit(&plan))?;
+    let document = Jetro::from_val_and_value(root, Value::Null);
     engine
         .collect_prepared_val(&document, &plan)
         .map_err(JetroEngineError::from)
@@ -710,13 +713,18 @@ fn collect_ndjson_rows_val<R>(
     engine: &JetroEngine,
     reader: R,
     options: NdjsonOptions,
+    limit: Option<usize>,
 ) -> Result<Val, JetroEngineError>
 where
     R: BufRead,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
-    let mut rows = Vec::new();
+    let mut rows = Vec::with_capacity(limit.unwrap_or(0));
+
+    if matches!(limit, Some(0)) {
+        return Ok(Val::arr(rows));
+    }
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
@@ -725,9 +733,50 @@ where
                 .root_val_with(engine.keys())
                 .map_err(|err| row_eval_error(line_no, err))?,
         );
+        if let Some(limit) = limit {
+            if rows.len() >= limit {
+                break;
+            }
+        }
     }
 
     Ok(Val::arr(rows))
+}
+
+fn stream_input_limit(plan: &QueryPlan) -> Option<usize> {
+    let QueryRoot::Node(root) = plan.root() else {
+        return None;
+    };
+    match plan.node(*root) {
+        PlanNode::Call { receiver, call, .. } if is_plan_root(plan.node(*receiver)) => {
+            match (call.method, &call.args) {
+                (BuiltinMethod::First, BuiltinArgs::I64(n)) => Some((*n).max(0) as usize),
+                (BuiltinMethod::Take, BuiltinArgs::Usize(n)) => Some(*n),
+                (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => {
+                    Some((*i as usize).saturating_add(1))
+                }
+                _ => None,
+            }
+        }
+        PlanNode::Call { .. } => None,
+        PlanNode::Pipeline {
+            source: PipelinePlanSource::Expr(source),
+            body,
+        } if is_plan_root(plan.node(*source)) => match body.pull_demand() {
+            PullDemand::FirstInput(n) => Some(n),
+            PullDemand::NthInput(i) => Some(i.saturating_add(1)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn is_plan_root(node: &PlanNode) -> bool {
+    match node {
+        PlanNode::Root => true,
+        PlanNode::RootPath(steps) => steps.is_empty(),
+        _ => false,
+    }
 }
 
 pub(super) fn collect_row_val(

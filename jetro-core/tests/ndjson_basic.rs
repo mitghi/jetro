@@ -259,6 +259,24 @@ fn stream_mode_supports_root_positional_sinks() {
 }
 
 #[test]
+fn stream_mode_stops_reading_for_bounded_root_demand() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada"}
+not-json
+"#;
+
+    let first = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.first()")
+        .expect("bounded stream query should not read unused rows");
+    let taken = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.take(1)")
+        .expect("bounded stream query should not read unused rows");
+
+    assert_eq!(first, json!({"name": "Ada"}));
+    assert_eq!(taken, json!([{"name": "Ada"}]));
+}
+
+#[test]
 fn source_helpers_dispatch_reader_and_file_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(
