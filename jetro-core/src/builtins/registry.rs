@@ -1178,7 +1178,10 @@ mod tests {
             BuiltinMethod::Lines,
             BuiltinMethod::GetPath,
         ] {
-            assert!(pipeline_element(BuiltinId::from_method(method)));
+            assert!(
+                pipeline_element(BuiltinId::from_method(method)),
+                "{method:?} should be classified as a pipeline element"
+            );
         }
 
         for method in [

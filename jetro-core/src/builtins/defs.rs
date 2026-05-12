@@ -3080,6 +3080,7 @@ impl Builtin for HasAll {
             .view_native()
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
     }
     #[inline]
     fn apply_args(
