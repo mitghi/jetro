@@ -1,4 +1,4 @@
-use jetro_core::io::{NdjsonOptions, NdjsonSource};
+use jetro_core::io::{NdjsonControl, NdjsonOptions, NdjsonSource};
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
@@ -50,6 +50,25 @@ fn for_each_ndjson_streams_results_to_callback() {
 
     assert_eq!(rows, 2);
     assert_eq!(out, vec![json!(10), json!(20)]);
+}
+
+#[test]
+fn for_each_ndjson_until_stops_reading_when_callback_stops() {
+    let engine = JetroEngine::new();
+    let input = br#"{"price":10}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .for_each_ndjson_until(Cursor::new(input), "price", |value| {
+            out.push(value);
+            Ok(NdjsonControl::Stop)
+        })
+        .expect("callback stop should not read the next row");
+
+    assert_eq!(rows, 1);
+    assert_eq!(out, vec![json!(10)]);
 }
 
 #[test]

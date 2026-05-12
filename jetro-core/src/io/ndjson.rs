@@ -189,6 +189,12 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NdjsonControl {
+    Continue,
+    Stop,
+}
+
 pub fn for_each_ndjson<R, F>(
     engine: &JetroEngine,
     reader: R,
@@ -215,8 +221,35 @@ where
 {
     drive_ndjson(engine, reader, query, options, |value| {
         f(value);
-        Ok(())
+        Ok(NdjsonControl::Continue)
     })
+}
+
+pub fn for_each_ndjson_until<R, F>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
+{
+    for_each_ndjson_until_with_options(engine, reader, query, NdjsonOptions::default(), f)
+}
+
+pub fn for_each_ndjson_until_with_options<R, F>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    options: NdjsonOptions,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
+{
+    drive_ndjson(engine, reader, query, options, f)
 }
 
 pub fn for_each_ndjson_source<F>(
@@ -254,6 +287,45 @@ where
         }
         NdjsonSource::Reader(reader) => {
             for_each_ndjson_with_options(engine, reader, query, options, f)
+        }
+    }
+}
+
+pub fn for_each_ndjson_source_until<F>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
+{
+    for_each_ndjson_source_until_with_options(engine, source, query, NdjsonOptions::default(), f)
+}
+
+pub fn for_each_ndjson_source_until_with_options<F>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    options: NdjsonOptions,
+    f: F,
+) -> Result<usize, JetroEngineError>
+where
+    F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            let file = File::open(path)?;
+            for_each_ndjson_until_with_options(
+                engine,
+                std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+                query,
+                options,
+                f,
+            )
+        }
+        NdjsonSource::Reader(reader) => {
+            for_each_ndjson_until_with_options(engine, reader, query, options, f)
         }
     }
 }
@@ -409,7 +481,7 @@ where
     let count = drive_ndjson_val(engine, reader, query, options, |value| {
         serde_json::to_writer(&mut writer, &ValRef(&value))?;
         writer.write_all(b"\n")?;
-        Ok(())
+        Ok(NdjsonControl::Continue)
     })?;
     writer.flush()?;
     Ok(count)
@@ -456,7 +528,7 @@ fn drive_ndjson<R, F>(
 ) -> Result<usize, JetroEngineError>
 where
     R: BufRead,
-    F: FnMut(Value) -> Result<(), JetroEngineError>,
+    F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
@@ -466,8 +538,10 @@ where
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
         let out = collect_row_val(engine, &document, &plan, line_no)?;
-        emit(Value::from(out))?;
         count += 1;
+        if matches!(emit(Value::from(out))?, NdjsonControl::Stop) {
+            break;
+        }
     }
 
     Ok(count)
@@ -482,7 +556,7 @@ fn drive_ndjson_val<R, F>(
 ) -> Result<usize, JetroEngineError>
 where
     R: BufRead,
-    F: FnMut(Val) -> Result<(), JetroEngineError>,
+    F: FnMut(Val) -> Result<NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
@@ -491,8 +565,13 @@ where
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
-        emit(collect_row_val(engine, &document, &plan, line_no)?)?;
         count += 1;
+        if matches!(
+            emit(collect_row_val(engine, &document, &plan, line_no)?)?,
+            NdjsonControl::Stop
+        ) {
+            break;
+        }
     }
 
     Ok(count)

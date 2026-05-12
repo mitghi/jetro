@@ -569,6 +569,21 @@ impl JetroEngine {
         io::for_each_ndjson(self, reader, query, f)
     }
 
+    /// Evaluate `query` independently for every non-empty NDJSON row and call
+    /// `f` until it returns [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_until<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_until(self, reader, query, f)
+    }
+
     /// Evaluate `query` for every row from an [`io::NdjsonSource`] and call
     /// `f` with each result as it is produced.
     pub fn for_each_ndjson_source<F>(
@@ -581,6 +596,34 @@ impl JetroEngine {
         F: FnMut(Value),
     {
         io::for_each_ndjson_source(self, source, query, f)
+    }
+
+    /// Evaluate `query` for every row from an [`io::NdjsonSource`] and call
+    /// `f` until it returns [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_source_until<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_source_until(self, source, query, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_source_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_source_until_with_options<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_source_until_with_options(self, source, query, options, f)
     }
 
     /// Like [`JetroEngine::for_each_ndjson_source`] with explicit NDJSON reader options.
@@ -610,6 +653,21 @@ impl JetroEngine {
         F: FnMut(Value),
     {
         io::for_each_ndjson_with_options(self, reader, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_until_with_options<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_until_with_options(self, reader, query, options, f)
     }
 
     /// Look up a compiled `QueryPlan` by expression string and planning context,
