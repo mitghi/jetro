@@ -8,12 +8,13 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinCall;
+use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
 use crate::data::value::Val;
 use crate::exec::pipeline::PipelineBody;
 use crate::exec::structural::StructuralPlan;
 use crate::parse::ast::{BinOp, KindType, PatchOp, PathStep};
 use crate::plan::update::{UpdateDependencySummary, UpdateTriePlan};
+use crate::plan::demand::PullDemand;
 use crate::vm::Program;
 
 /// Compiled query plan: a DAG of `PhysicalNode`s plus a root selector.
@@ -83,6 +84,16 @@ impl QueryPlan {
         self.nodes[id.0].facts
     }
 
+    /// Returns the number of root input rows required by a bounded positional
+    /// root query, if the plan shape can prove one.
+    #[inline]
+    pub(crate) fn bounded_root_input_limit(&self) -> Option<usize> {
+        let QueryRoot::Node(root) = self.root() else {
+            return None;
+        };
+        self.node_root_input_limit(*root)
+    }
+
     /// Returns the `ExecutionFacts` for the root node; used by tests to assert byte-native status.
     #[inline]
     #[cfg(test)]
@@ -93,6 +104,39 @@ impl QueryPlan {
                 contains_vm_fallback: true,
                 ..ExecutionFacts::default()
             },
+        }
+    }
+
+    fn node_root_input_limit(&self, root: NodeId) -> Option<usize> {
+        match self.node(root) {
+            PlanNode::Call { receiver, call, .. } if self.is_root_node(*receiver) => {
+                match (call.method, &call.args) {
+                    (BuiltinMethod::First, BuiltinArgs::I64(n)) => Some((*n).max(0) as usize),
+                    (BuiltinMethod::Take, BuiltinArgs::Usize(n)) => Some(*n),
+                    (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => {
+                        Some((*i as usize).saturating_add(1))
+                    }
+                    _ => None,
+                }
+            }
+            PlanNode::Call { .. } => None,
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::Expr(source),
+                body,
+            } if self.is_root_node(*source) => match body.pull_demand() {
+                PullDemand::FirstInput(n) => Some(n),
+                PullDemand::NthInput(i) => Some(i.saturating_add(1)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn is_root_node(&self, id: NodeId) -> bool {
+        match self.node(id) {
+            PlanNode::Root => true,
+            PlanNode::RootPath(steps) => steps.is_empty(),
+            _ => false,
         }
     }
 }

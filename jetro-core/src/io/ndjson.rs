@@ -1,8 +1,5 @@
 use super::{NdjsonSource, RowError};
-use crate::builtins::{BuiltinArgs, BuiltinMethod};
 use crate::data::value::{Val, ValRef};
-use crate::ir::physical::{PipelinePlanSource, PlanNode, QueryPlan, QueryRoot};
-use crate::plan::demand::PullDemand;
 use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
 use memchr::memchr;
@@ -702,7 +699,7 @@ where
     R: BufRead,
 {
     let plan = engine.cached_plan(query, PlanningContext::val());
-    let root = collect_ndjson_rows_val(engine, reader, options, stream_input_limit(&plan))?;
+    let root = collect_ndjson_rows_val(engine, reader, options, plan.bounded_root_input_limit())?;
     let document = Jetro::from_val_and_value(root, Value::Null);
     engine
         .collect_prepared_val(&document, &plan)
@@ -741,42 +738,6 @@ where
     }
 
     Ok(Val::arr(rows))
-}
-
-fn stream_input_limit(plan: &QueryPlan) -> Option<usize> {
-    let QueryRoot::Node(root) = plan.root() else {
-        return None;
-    };
-    match plan.node(*root) {
-        PlanNode::Call { receiver, call, .. } if is_plan_root(plan.node(*receiver)) => {
-            match (call.method, &call.args) {
-                (BuiltinMethod::First, BuiltinArgs::I64(n)) => Some((*n).max(0) as usize),
-                (BuiltinMethod::Take, BuiltinArgs::Usize(n)) => Some(*n),
-                (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => {
-                    Some((*i as usize).saturating_add(1))
-                }
-                _ => None,
-            }
-        }
-        PlanNode::Call { .. } => None,
-        PlanNode::Pipeline {
-            source: PipelinePlanSource::Expr(source),
-            body,
-        } if is_plan_root(plan.node(*source)) => match body.pull_demand() {
-            PullDemand::FirstInput(n) => Some(n),
-            PullDemand::NthInput(i) => Some(i.saturating_add(1)),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn is_plan_root(node: &PlanNode) -> bool {
-    match node {
-        PlanNode::Root => true,
-        PlanNode::RootPath(steps) => steps.is_empty(),
-        _ => false,
-    }
 }
 
 pub(super) fn collect_row_val(
