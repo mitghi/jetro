@@ -5,25 +5,13 @@
 
 mod ndjson;
 
-use std::fmt;
-use std::path::PathBuf;
-
 pub use ndjson::{
     collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options,
     collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_with_options, run_ndjson,
     run_ndjson_file, run_ndjson_file_with_options, run_ndjson_with_options, NdjsonOptions,
     NdjsonPerRowDriver,
 };
-
-/// Source descriptor for future multi-source NDJSON APIs.
-pub enum NdjsonSource<R> {
-    /// Read rows from any buffered reader.
-    Reader(R),
-    /// Read rows from a file path.
-    File(PathBuf),
-    /// Read rows from a memory-mapped file path when the platform supports it.
-    Mmap(PathBuf),
-}
+use std::fmt;
 
 /// Error with enough row context for users to find malformed input quickly.
 #[derive(Debug)]
