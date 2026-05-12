@@ -148,19 +148,10 @@ where
     R: BufRead,
     F: FnMut(Value),
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
-    let mut buf = Vec::with_capacity(8192);
-    let mut count = 0;
-
-    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let document = parse_row(engine, line_no, row)?;
-        let out = engine.collect_prepared(&document, &plan)?;
-        f(out);
-        count += 1;
-    }
-
-    Ok(count)
+    drive_ndjson(engine, reader, query, options, |value| {
+        f(value);
+        Ok(())
+    })
 }
 
 pub fn collect_ndjson<R>(
@@ -213,6 +204,26 @@ where
     W: Write,
 {
     let mut writer = BufWriter::new(writer);
+    let count = drive_ndjson(engine, reader, query, options, |value| {
+        serde_json::to_writer(&mut writer, &value)?;
+        writer.write_all(b"\n")?;
+        Ok(())
+    })?;
+    writer.flush()?;
+    Ok(count)
+}
+
+fn drive_ndjson<R, F>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    options: NdjsonOptions,
+    mut emit: F,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(Value) -> Result<(), JetroEngineError>,
+{
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(8192);
@@ -221,12 +232,10 @@ where
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
         let out = engine.collect_prepared(&document, &plan)?;
-        serde_json::to_writer(&mut writer, &out)?;
-        writer.write_all(b"\n")?;
+        emit(out)?;
         count += 1;
     }
 
-    writer.flush()?;
     Ok(count)
 }
 
