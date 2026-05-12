@@ -402,6 +402,21 @@ impl JetroEngine {
         io::run_ndjson_rev(self, path, query, writer)
     }
 
+    /// Like [`JetroEngine::run_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_with_options(self, path, query, writer, options)
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,
@@ -465,6 +480,19 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
     {
         io::collect_ndjson_rev(self, path, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_rev_with_options<P>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_with_options(self, path, query, options)
     }
 
     /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.

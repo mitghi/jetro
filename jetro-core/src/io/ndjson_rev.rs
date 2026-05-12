@@ -9,8 +9,6 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
-
 /// Reverse NDJSON line reader over a seekable file.
 ///
 /// The reader scans fixed-size chunks from EOF to BOF and returns owned line
@@ -21,32 +19,47 @@ pub struct NdjsonReverseFileDriver {
     file: File,
     pos: u64,
     chunk_size: usize,
+    max_line_len: usize,
     carry: Vec<u8>,
     pending: VecDeque<Vec<u8>>,
     finished_head: bool,
+    reverse_line_no: u64,
 }
 
 impl NdjsonReverseFileDriver {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, RowError> {
-        Self::with_chunk_size(path, DEFAULT_REVERSE_CHUNK_SIZE)
+        Self::with_options(path, super::ndjson::NdjsonOptions::default())
     }
 
     pub fn with_chunk_size<P: AsRef<Path>>(path: P, chunk_size: usize) -> Result<Self, RowError> {
+        Self::with_options(
+            path,
+            super::ndjson::NdjsonOptions::default().with_reverse_chunk_size(chunk_size),
+        )
+    }
+
+    pub fn with_options<P: AsRef<Path>>(
+        path: P,
+        options: super::ndjson::NdjsonOptions,
+    ) -> Result<Self, RowError> {
         let mut file = File::open(path)?;
         let pos = file.seek(SeekFrom::End(0))?;
         Ok(Self {
             file,
             pos,
-            chunk_size: chunk_size.max(1),
+            chunk_size: options.reverse_chunk_size.max(1),
+            max_line_len: options.max_line_len,
             carry: Vec::new(),
             pending: VecDeque::new(),
             finished_head: false,
+            reverse_line_no: 0,
         })
     }
 
     pub fn next_line(&mut self) -> Result<Option<Vec<u8>>, RowError> {
         loop {
             if let Some(line) = self.pending.pop_front() {
+                self.reverse_line_no += 1;
                 return Ok(Some(line));
             }
 
@@ -57,7 +70,9 @@ impl NdjsonReverseFileDriver {
                 self.finished_head = true;
                 let mut line = std::mem::take(&mut self.carry);
                 trim_line_ending(&mut line);
+                self.check_line_len(line.len())?;
                 if line.iter().any(|b| !b.is_ascii_whitespace()) {
+                    self.reverse_line_no += 1;
                     return Ok(Some(line));
                 }
                 return Ok(None);
@@ -77,6 +92,7 @@ impl NdjsonReverseFileDriver {
                 self.carry.clear();
                 end = nl;
                 trim_line_ending(&mut line);
+                self.check_line_len(line.len())?;
                 if line.iter().any(|b| !b.is_ascii_whitespace()) {
                     self.pending.push_back(line);
                 }
@@ -86,9 +102,21 @@ impl NdjsonReverseFileDriver {
                 let mut next = Vec::with_capacity(end + self.carry.len());
                 next.extend_from_slice(&chunk[..end]);
                 next.extend_from_slice(&self.carry);
+                self.check_line_len(next.len())?;
                 self.carry = next;
             }
         }
+    }
+
+    fn check_line_len(&self, len: usize) -> Result<(), RowError> {
+        if len > self.max_line_len {
+            return Err(RowError::LineTooLarge {
+                line_no: self.reverse_line_no + self.pending.len() as u64 + 1,
+                len,
+                max: self.max_line_len,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -100,8 +128,20 @@ pub fn collect_ndjson_rev<P>(
 where
     P: AsRef<Path>,
 {
+    collect_ndjson_rev_with_options(engine, path, query, super::ndjson::NdjsonOptions::default())
+}
+
+pub fn collect_ndjson_rev_with_options<P>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
     let mut values = Vec::new();
-    drive_rev(engine, path, query, |value| {
+    drive_rev(engine, path, query, options, |value| {
         values.push(Value::from(value));
         Ok(())
     })?;
@@ -118,8 +158,28 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    run_ndjson_rev_with_options(
+        engine,
+        path,
+        query,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
     let mut writer = BufWriter::new(writer);
-    let count = drive_rev(engine, path, query, |value| {
+    let count = drive_rev(engine, path, query, options, |value| {
         serde_json::to_writer(&mut writer, &ValRef(&value))?;
         writer.write_all(b"\n")?;
         Ok(())
@@ -132,13 +192,14 @@ fn drive_rev<P, F>(
     engine: &JetroEngine,
     path: P,
     query: &str,
+    options: super::ndjson::NdjsonOptions,
     mut emit: F,
 ) -> Result<usize, JetroEngineError>
 where
     P: AsRef<Path>,
     F: FnMut(crate::data::value::Val) -> Result<(), JetroEngineError>,
 {
-    let mut driver = NdjsonReverseFileDriver::open(path)?;
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut reverse_row_no = 0u64;
 

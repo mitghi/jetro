@@ -186,15 +186,53 @@ fn reverse_file_helpers_evaluate_rows_from_tail() {
     let out = engine
         .collect_ndjson_rev(&path, "name")
         .expect("reverse file query should run");
+    let out_with_options = engine
+        .collect_ndjson_rev_with_options(
+            &path,
+            "name",
+            NdjsonOptions::default().with_reverse_chunk_size(5),
+        )
+        .expect("reverse file query should run");
     let mut written = Vec::new();
     let rows = engine
-        .run_ndjson_rev(&path, "name", &mut written)
+        .run_ndjson_rev_with_options(
+            &path,
+            "name",
+            &mut written,
+            NdjsonOptions::default().with_reverse_chunk_size(5),
+        )
         .expect("reverse file query should run");
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(out, vec![json!("Bob"), json!("Ada")]);
+    assert_eq!(out_with_options, out);
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(written).unwrap(), "\"Bob\"\n\"Ada\"\n");
+}
+
+#[test]
+fn reverse_options_enforce_max_line_length() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-max-line");
+    std::fs::write(&path, b"{\"name\":\"Ada\"}\n").unwrap();
+
+    let err = engine
+        .collect_ndjson_rev_with_options(
+            &path,
+            "name",
+            NdjsonOptions::default()
+                .with_reverse_chunk_size(4)
+                .with_max_line_len(4),
+        )
+        .expect_err("long row should fail");
+
+    let _ = std::fs::remove_file(&path);
+    match err {
+        JetroEngineError::Ndjson(row) => {
+            assert!(row.to_string().contains("too large"), "{row}");
+        }
+        other => panic!("expected row error, got {other:?}"),
+    }
 }
 
 fn temp_path(name: &str) -> PathBuf {

@@ -12,7 +12,10 @@ pub use ndjson::{
     run_ndjson_file, run_ndjson_file_with_options, run_ndjson_with_options, NdjsonOptions,
     NdjsonPerRowDriver,
 };
-pub use ndjson_rev::{collect_ndjson_rev, run_ndjson_rev, NdjsonReverseFileDriver};
+pub use ndjson_rev::{
+    collect_ndjson_rev, collect_ndjson_rev_with_options, run_ndjson_rev,
+    run_ndjson_rev_with_options, NdjsonReverseFileDriver,
+};
 use std::fmt;
 
 /// Error with enough row context for users to find malformed input quickly.

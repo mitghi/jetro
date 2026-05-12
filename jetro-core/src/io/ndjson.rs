@@ -11,6 +11,7 @@ use std::path::Path;
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 const DEFAULT_READER_BUFFER_CAPACITY: usize = 64 * 1024;
+pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Configuration for per-row NDJSON execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +19,7 @@ pub struct NdjsonOptions {
     pub max_line_len: usize,
     pub initial_buffer_capacity: usize,
     pub reader_buffer_capacity: usize,
+    pub reverse_chunk_size: usize,
 }
 
 impl Default for NdjsonOptions {
@@ -26,6 +28,7 @@ impl Default for NdjsonOptions {
             max_line_len: DEFAULT_MAX_LINE_LEN,
             initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
             reader_buffer_capacity: DEFAULT_READER_BUFFER_CAPACITY,
+            reverse_chunk_size: DEFAULT_REVERSE_CHUNK_SIZE,
         }
     }
 }
@@ -43,6 +46,11 @@ impl NdjsonOptions {
 
     pub fn with_reader_buffer_capacity(mut self, capacity: usize) -> Self {
         self.reader_buffer_capacity = capacity;
+        self
+    }
+
+    pub fn with_reverse_chunk_size(mut self, capacity: usize) -> Self {
+        self.reverse_chunk_size = capacity;
         self
     }
 }
