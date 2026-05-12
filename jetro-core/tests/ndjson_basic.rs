@@ -222,6 +222,25 @@ fn stream_file_helpers_query_rows_as_one_array() {
 }
 
 #[test]
+fn stream_mode_reports_invalid_row_line_number() {
+    let engine = JetroEngine::new();
+    let input = br#"{"ok":true}
+not-json
+"#;
+
+    let err = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.len()")
+        .expect_err("invalid row should fail");
+
+    match err {
+        JetroEngineError::Ndjson(row) => {
+            assert!(row.to_string().contains("line 2"), "{row}");
+        }
+        other => panic!("expected row error, got {other:?}"),
+    }
+}
+
+#[test]
 fn reverse_file_helpers_evaluate_rows_from_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-api");
