@@ -52,6 +52,28 @@ fn for_each_ndjson_streams_results_to_callback() {
 }
 
 #[test]
+fn empty_input_returns_no_rows() {
+    let engine = JetroEngine::new();
+
+    let out = engine
+        .collect_ndjson(Cursor::new(b""), "name")
+        .expect("empty input should be valid");
+
+    assert!(out.is_empty());
+}
+
+#[test]
+fn single_line_without_final_newline_is_processed() {
+    let engine = JetroEngine::new();
+
+    let out = engine
+        .collect_ndjson(Cursor::new(br#"{"name":"Ada"}"#), "name")
+        .expect("single row should run");
+
+    assert_eq!(out, vec![json!("Ada")]);
+}
+
+#[test]
 fn invalid_json_reports_the_physical_line_number() {
     let engine = JetroEngine::new();
     let input = br#"{"ok":true}
