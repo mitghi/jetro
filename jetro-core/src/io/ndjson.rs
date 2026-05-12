@@ -1,4 +1,4 @@
-use super::RowError;
+use super::{NdjsonSource, RowError};
 use crate::data::value::{Val, ValRef};
 use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
@@ -305,6 +305,26 @@ where
     )
 }
 
+pub fn collect_ndjson_source(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+) -> Result<Vec<Value>, JetroEngineError> {
+    collect_ndjson_source_with_options(engine, source, query, NdjsonOptions::default())
+}
+
+pub fn collect_ndjson_source_with_options(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<Vec<Value>, JetroEngineError> {
+    match source {
+        NdjsonSource::File(path) => collect_ndjson_file_with_options(engine, path, query, options),
+        NdjsonSource::Reader(reader) => collect_ndjson_with_options(engine, reader, query, options),
+    }
+}
+
 pub fn collect_ndjson_stream_file<P>(
     engine: &JetroEngine,
     path: P,
@@ -339,6 +359,30 @@ where
         query,
         options,
     )
+}
+
+pub fn collect_ndjson_stream_source(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+) -> Result<Value, JetroEngineError> {
+    collect_ndjson_stream_source_with_options(engine, source, query, NdjsonOptions::default())
+}
+
+pub fn collect_ndjson_stream_source_with_options(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<Value, JetroEngineError> {
+    match source {
+        NdjsonSource::File(path) => {
+            collect_ndjson_stream_file_with_options(engine, path, query, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            collect_ndjson_stream_with_options(engine, reader, query, options)
+        }
+    }
 }
 
 pub fn run_ndjson<R, W>(
@@ -417,6 +461,38 @@ where
     Ok(count)
 }
 
+pub fn run_ndjson_source<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_source_with_options(engine, source, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_source_with_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_file_with_options(engine, path, query, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_with_options(engine, reader, query, writer, options)
+        }
+    }
+}
+
 pub fn run_ndjson_stream<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -489,6 +565,38 @@ where
         writer,
         options,
     )
+}
+
+pub fn run_ndjson_stream_source<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_stream_source_with_options(engine, source, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_stream_source_with_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_stream_file_with_options(engine, path, query, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_stream_with_options(engine, reader, query, writer, options)
+        }
+    }
 }
 
 fn drive_ndjson<R, F>(

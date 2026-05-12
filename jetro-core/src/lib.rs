@@ -388,6 +388,33 @@ impl JetroEngine {
         io::run_ndjson_file_with_options(self, path, query, writer, options)
     }
 
+    /// Evaluate `query` independently for every row from an [`io::NdjsonSource`].
+    pub fn run_ndjson_source<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source(self, source, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source`] with explicit NDJSON reader options.
+    pub fn run_ndjson_source_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_with_options(self, source, query, writer, options)
+    }
+
     /// Read an NDJSON file from tail to head and write one query result per row.
     pub fn run_ndjson_rev<P, W>(
         &self,
@@ -492,6 +519,34 @@ impl JetroEngine {
         io::run_ndjson_stream_file_with_options(self, path, query, writer, options)
     }
 
+    /// Treat an [`io::NdjsonSource`] as one virtual array, evaluate `query`
+    /// once, and write the single JSON result.
+    pub fn run_ndjson_stream_source<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_stream_source(self, source, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_stream_source`] with explicit NDJSON reader options.
+    pub fn run_ndjson_stream_source_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_stream_source_with_options(self, source, query, writer, options)
+    }
+
     /// Evaluate `query` independently for every non-empty NDJSON row and collect
     /// the per-row results.
     pub fn collect_ndjson<R>(
@@ -528,6 +583,25 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
     {
         io::collect_ndjson_file_with_options(self, path, query, options)
+    }
+
+    /// Collect per-row query results from an [`io::NdjsonSource`].
+    pub fn collect_ndjson_source(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_source(self, source, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_source`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_source_with_options(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_source_with_options(self, source, query, options)
     }
 
     /// Read an NDJSON file from tail to head and collect per-row query results.
@@ -616,6 +690,25 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
     {
         io::collect_ndjson_stream_file_with_options(self, path, query, options)
+    }
+
+    /// Treat an [`io::NdjsonSource`] as one virtual array and evaluate `query` once.
+    pub fn collect_ndjson_stream_source(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+    ) -> std::result::Result<Value, JetroEngineError> {
+        io::collect_ndjson_stream_source(self, source, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_stream_source`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_stream_source_with_options(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Value, JetroEngineError> {
+        io::collect_ndjson_stream_source_with_options(self, source, query, options)
     }
 
     /// Evaluate `query` independently for every non-empty NDJSON row and call

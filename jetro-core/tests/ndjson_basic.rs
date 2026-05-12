@@ -1,4 +1,4 @@
-use jetro_core::io::NdjsonOptions;
+use jetro_core::io::{NdjsonOptions, NdjsonSource};
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
@@ -238,6 +238,32 @@ not-json
         }
         other => panic!("expected row error, got {other:?}"),
     }
+}
+
+#[test]
+fn source_helpers_dispatch_reader_and_file_inputs() {
+    let engine = JetroEngine::new();
+    let reader = NdjsonSource::reader(Cursor::new(
+        br#"{"name":"Ada"}
+{"name":"Bob"}
+"#,
+    ));
+
+    let out = engine
+        .collect_ndjson_source(reader, "name")
+        .expect("source query should run");
+
+    let path = temp_path("jetro-ndjson-source-file");
+    std::fs::write(&path, b"{\"score\":2}\n{\"score\":3}\n").unwrap();
+    let mut written = Vec::new();
+    let rows = engine
+        .run_ndjson_source(NdjsonSource::file(path.clone()), "score", &mut written)
+        .expect("source query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(written).unwrap(), "2\n3\n");
 }
 
 #[test]
