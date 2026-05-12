@@ -581,7 +581,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut writer = BufWriter::new(writer);
+    let mut writer = ndjson_writer(writer);
     let count = drive_ndjson_val(engine, reader, query, options, |value| {
         write_val_line(&mut writer, &value)?;
         Ok(NdjsonControl::Continue)
@@ -627,7 +627,7 @@ where
         return Ok(0);
     }
 
-    let mut writer = BufWriter::new(writer);
+    let mut writer = ndjson_writer(writer);
     let mut emitted = 0usize;
     let count = drive_ndjson_val(engine, reader, query, options, |value| {
         write_val_line(&mut writer, &value)?;
@@ -794,7 +794,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut writer = BufWriter::new(writer);
+    let mut writer = ndjson_writer(writer);
     let count = drive_ndjson_matches(engine, reader, predicate, limit, options, |value| {
         write_val_line(&mut writer, &value)?;
         Ok(NdjsonControl::Continue)
@@ -1034,6 +1034,10 @@ pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<()
     write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+pub(super) fn ndjson_writer<W: Write>(writer: W) -> BufWriter<W> {
+    BufWriter::with_capacity(DEFAULT_READER_BUFFER_CAPACITY, writer)
 }
 
 fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {

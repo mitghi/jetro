@@ -5,7 +5,7 @@ use memchr::memrchr;
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Reverse NDJSON line reader over a seekable file.
@@ -253,7 +253,7 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let mut writer = BufWriter::new(writer);
+    let mut writer = super::ndjson::ndjson_writer(writer);
     let count = drive_rev(engine, path, query, options, |value| {
         super::ndjson::write_val_line(&mut writer, &value)?;
         Ok(super::ndjson::NdjsonControl::Continue)
@@ -299,7 +299,7 @@ where
         return Ok(0);
     }
 
-    let mut writer = BufWriter::new(writer);
+    let mut writer = super::ndjson::ndjson_writer(writer);
     let mut emitted = 0usize;
     let count = drive_rev(engine, path, query, options, |value| {
         super::ndjson::write_val_line(&mut writer, &value)?;
@@ -347,7 +347,7 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let mut writer = BufWriter::new(writer);
+    let mut writer = super::ndjson::ndjson_writer(writer);
     let count = drive_rev_matches(engine, path, predicate, limit, options, |value| {
         super::ndjson::write_val_line(&mut writer, &value)?;
         Ok(super::ndjson::NdjsonControl::Continue)
