@@ -347,13 +347,7 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let mut writer = super::ndjson::ndjson_writer(writer);
-    let count = drive_rev_matches(engine, path, predicate, limit, options, |value| {
-        super::ndjson::write_val_line(&mut writer, &value)?;
-        Ok(super::ndjson::NdjsonControl::Continue)
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_rev_matches_writer(engine, path, predicate, limit, options, writer)
 }
 
 fn drive_rev<P, F>(
@@ -418,6 +412,50 @@ where
         }
     }
 
+    Ok(emitted)
+}
+
+fn drive_rev_matches_writer<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
+    let mut writer = super::ndjson::ndjson_writer(writer);
+    let mut emitted = 0usize;
+
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        let document = executor.parse_owned_row(reverse_row_no, row)?;
+        let matched = executor.eval_document(reverse_row_no, &document)?;
+        if !is_truthy(&matched) {
+            continue;
+        }
+
+        super::ndjson::write_document_line(
+            &mut writer,
+            &document,
+            reverse_row_no,
+            executor.engine(),
+        )?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
     Ok(emitted)
 }
 

@@ -181,6 +181,25 @@ fn run_ndjson_matches_writes_matching_original_rows() {
 }
 
 #[test]
+fn run_ndjson_matches_writes_raw_matching_rows() {
+    let engine = JetroEngine::new();
+    let input = br#" { "name" : "Ada" , "score" : 10 }
+{"name":"Bob","score":5}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_matches(Cursor::new(input), "score > 9", 10, &mut out)
+        .expect("match query should run");
+
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        " { \"name\" : \"Ada\" , \"score\" : 10 }\n"
+    );
+}
+
+#[test]
 fn file_match_helpers_stop_after_limit() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-match-file");

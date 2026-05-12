@@ -794,13 +794,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut writer = ndjson_writer(writer);
-    let count = drive_ndjson_matches(engine, reader, predicate, limit, options, |value| {
-        write_val_line(&mut writer, &value)?;
-        Ok(NdjsonControl::Continue)
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_ndjson_matches_writer(engine, reader, predicate, limit, options, writer)
 }
 
 pub fn run_ndjson_matches_file<P, W>(
@@ -984,6 +978,46 @@ where
     Ok(emitted)
 }
 
+fn drive_ndjson_matches_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    predicate: &str,
+    limit: usize,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut executor = NdjsonRowExecutor::new(engine, predicate);
+    let mut writer = ndjson_writer(writer);
+    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+
+    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        let document = executor.parse_owned_row(line_no, row)?;
+        let matched = executor.eval_document(line_no, &document)?;
+        if !is_truthy(&matched) {
+            continue;
+        }
+
+        write_document_line(&mut writer, &document, line_no, executor.engine())?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
 pub(super) struct NdjsonRowExecutor<'a> {
     engine: &'a JetroEngine,
     plan: crate::ir::physical::QueryPlan,
@@ -1034,6 +1068,24 @@ pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<()
     write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+pub(super) fn write_document_line<W: Write>(
+    writer: &mut W,
+    document: &Jetro,
+    line_no: u64,
+    engine: &JetroEngine,
+) -> Result<(), JetroEngineError> {
+    if let Some(bytes) = document.raw_bytes() {
+        writer.write_all(bytes)?;
+        writer.write_all(b"\n")?;
+        return Ok(());
+    }
+
+    let root = document
+        .root_val_with(engine.keys())
+        .map_err(|err| row_eval_error(line_no, err))?;
+    write_val_line(writer, &root)
 }
 
 pub(super) fn ndjson_writer<W: Write>(writer: W) -> BufWriter<W> {
