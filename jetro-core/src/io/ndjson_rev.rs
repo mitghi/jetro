@@ -57,10 +57,14 @@ impl NdjsonReverseFileDriver {
     }
 
     pub fn next_line(&mut self) -> Result<Option<Vec<u8>>, RowError> {
+        Ok(self.next_line_with_reverse_no()?.map(|(_, line)| line))
+    }
+
+    pub fn next_line_with_reverse_no(&mut self) -> Result<Option<(u64, Vec<u8>)>, RowError> {
         loop {
             if let Some(line) = self.pending.pop_front() {
                 self.reverse_line_no += 1;
-                return Ok(Some(line));
+                return Ok(Some((self.reverse_line_no, line)));
             }
 
             if self.pos == 0 {
@@ -73,7 +77,7 @@ impl NdjsonReverseFileDriver {
                 self.check_line_len(line.len())?;
                 if line.iter().any(|b| !b.is_ascii_whitespace()) {
                     self.reverse_line_no += 1;
-                    return Ok(Some(line));
+                    return Ok(Some((self.reverse_line_no, line)));
                 }
                 return Ok(None);
             }
@@ -201,10 +205,9 @@ where
 {
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let plan = engine.cached_plan(query, PlanningContext::bytes());
-    let mut reverse_row_no = 0u64;
+    let mut count = 0usize;
 
-    while let Some(row) = driver.next_line()? {
-        reverse_row_no += 1;
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
         let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
         emit(super::ndjson::collect_row_val(
             engine,
@@ -212,9 +215,10 @@ where
             &plan,
             reverse_row_no,
         )?)?;
+        count += 1;
     }
 
-    Ok(reverse_row_no as usize)
+    Ok(count)
 }
 
 fn trim_line_ending(buf: &mut Vec<u8>) {
@@ -251,6 +255,25 @@ mod tests {
         assert_eq!(driver.next_line().unwrap().unwrap(), br#"{"n":2}"#);
         assert_eq!(driver.next_line().unwrap().unwrap(), br#"{"n":1}"#);
         assert!(driver.next_line().unwrap().is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reverse_driver_reports_reverse_row_numbers() {
+        let path = temp_path("jetro-ndjson-rev-row-no");
+        std::fs::write(&path, b"{\"n\":1}\n{\"n\":2}\n").unwrap();
+        let mut driver = NdjsonReverseFileDriver::with_chunk_size(&path, 3).unwrap();
+
+        assert_eq!(
+            driver.next_line_with_reverse_no().unwrap().unwrap(),
+            (1, br#"{"n":2}"#.to_vec())
+        );
+        assert_eq!(
+            driver.next_line_with_reverse_no().unwrap().unwrap(),
+            (2, br#"{"n":1}"#.to_vec())
+        );
+        assert!(driver.next_line_with_reverse_no().unwrap().is_none());
 
         let _ = std::fs::remove_file(path);
     }
