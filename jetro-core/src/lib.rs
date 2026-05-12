@@ -20,6 +20,18 @@
 //! let j = Jetro::from_bytes(br#"{"books":[{"price":12}]}"#.to_vec()).unwrap();
 //! assert_eq!(j.collect("$.books.len()").unwrap(), serde_json::json!(1));
 //! ```
+//!
+//! ```rust
+//! use jetro_core::JetroEngine;
+//! use std::io::Cursor;
+//!
+//! let engine = JetroEngine::new();
+//! let rows = Cursor::new(br#"{"name":"Ada"}
+//! {"name":"Bob"}
+//! "#);
+//! let names = engine.collect_ndjson(rows, "name").unwrap();
+//! assert_eq!(names, vec![serde_json::json!("Ada"), serde_json::json!("Bob")]);
+//! ```
 
 pub(crate) mod builtins;
 pub(crate) mod compile;
