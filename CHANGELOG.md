@@ -52,6 +52,11 @@
   correctness fallback that materializes the row vector; it uses the engine
   plan/VM caches and establishes the public semantics for the later
   provider-backed non-materializing source.
+- **Bounded stream-as-array reads**. Root positional stream queries such as
+  `$.first()`, `$.take(n)`, and `$.nth(i)` now read only the rows required by
+  the propagated input demand before evaluating the prepared plan. This keeps
+  cold-path stream queries from parsing unused NDJSON rows while preserving the
+  materialized fallback semantics for unbounded chains.
 - **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
   helpers so callers can route file paths and existing `BufRead` inputs through
   one API while preserving the same options-aware per-row and stream-as-array
