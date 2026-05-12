@@ -106,3 +106,15 @@ fn crlf_and_trailing_newline_less_rows_are_supported() {
 
     assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
 }
+
+#[test]
+fn utf8_bom_is_ignored_only_on_the_first_physical_line() {
+    let engine = JetroEngine::new();
+    let input = b"\xEF\xBB\xBF{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n";
+
+    let out = engine
+        .collect_ndjson(Cursor::new(input), "name")
+        .expect("ndjson query should run");
+
+    assert_eq!(out, vec![json!("Ada"), json!("Bob")]);
+}

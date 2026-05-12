@@ -66,6 +66,7 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             }
             self.line_no += 1;
 
+            strip_initial_bom(self.line_no, buf);
             trim_line_ending(buf);
 
             let (start, end) = non_ws_range(buf);
@@ -101,6 +102,7 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             }
             self.line_no += 1;
 
+            strip_initial_bom(self.line_no, buf);
             trim_line_ending(buf);
 
             let (start, end) = non_ws_range(buf);
@@ -249,6 +251,12 @@ fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
 fn trim_line_ending(buf: &mut Vec<u8>) {
     while matches!(buf.last(), Some(b'\n' | b'\r')) {
         buf.pop();
+    }
+}
+
+fn strip_initial_bom(line_no: u64, buf: &mut Vec<u8>) {
+    if line_no == 1 && buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        buf.drain(..3);
     }
 }
 
