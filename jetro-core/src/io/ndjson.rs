@@ -1,5 +1,5 @@
 use super::RowError;
-use crate::{JetroEngine, JetroEngineError};
+use crate::{Jetro, JetroEngine, JetroEngineError};
 use serde_json::Value;
 use std::io::{BufRead, BufWriter, Write};
 
@@ -90,9 +90,8 @@ where
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut buf)? {
-        let value: Value = serde_json::from_slice(row)
-            .map_err(|err| JetroEngineError::from(RowError::invalid_json(line_no, err)))?;
-        let out = engine.collect_value(value, query)?;
+        let document = parse_row(engine, line_no, row)?;
+        let out = engine.collect(&document, query)?;
         f(out);
         count += 1;
     }
@@ -129,9 +128,8 @@ where
     let mut count = 0;
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut buf)? {
-        let value: Value = serde_json::from_slice(row)
-            .map_err(|err| JetroEngineError::from(RowError::invalid_json(line_no, err)))?;
-        let out = engine.collect_value(value, query)?;
+        let document = parse_row(engine, line_no, row)?;
+        let out = engine.collect(&document, query)?;
         serde_json::to_writer(&mut writer, &out)?;
         writer.write_all(b"\n")?;
         count += 1;
@@ -139,4 +137,22 @@ where
 
     writer.flush()?;
     Ok(count)
+}
+
+fn parse_row(engine: &JetroEngine, line_no: u64, row: &[u8]) -> Result<Jetro, JetroEngineError> {
+    engine
+        .parse_bytes(row.to_vec())
+        .map_err(|err| row_parse_error(line_no, err))
+}
+
+fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
+    match err {
+        JetroEngineError::Json(source) => RowError::InvalidJson { line_no, source }.into(),
+        JetroEngineError::Eval(eval) => RowError::InvalidJsonMessage {
+            line_no,
+            message: eval.to_string(),
+        }
+        .into(),
+        other => other,
+    }
 }

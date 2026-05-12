@@ -28,6 +28,10 @@ pub enum RowError {
         line_no: u64,
         source: serde_json::Error,
     },
+    InvalidJsonMessage {
+        line_no: u64,
+        message: String,
+    },
     LineTooLarge {
         line_no: u64,
         len: usize,
@@ -48,6 +52,9 @@ impl fmt::Display for RowError {
             Self::InvalidJson { line_no, source } => {
                 write!(f, "invalid JSON on NDJSON line {line_no}: {source}")
             }
+            Self::InvalidJsonMessage { line_no, message } => {
+                write!(f, "invalid JSON on NDJSON line {line_no}: {message}")
+            }
             Self::LineTooLarge { line_no, len, max } => write!(
                 f,
                 "NDJSON line {line_no} is too large: {len} bytes exceeds {max} byte limit"
@@ -61,6 +68,7 @@ impl std::error::Error for RowError {
         match self {
             Self::Io(err) => Some(err),
             Self::InvalidJson { source, .. } => Some(source),
+            Self::InvalidJsonMessage { .. } => None,
             Self::LineTooLarge { .. } => None,
         }
     }
