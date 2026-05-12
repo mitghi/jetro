@@ -177,7 +177,9 @@ engine for cached plans, reusable VM state, and NDJSON processing.
 ### NDJSON
 
 NDJSON APIs evaluate each non-empty line as an independent JSON document while
-reusing one prepared query plan for the stream.
+reusing one prepared query plan for the stream. Use `collect_*` helpers when
+you want `serde_json::Value`s back, and `run_*` helpers when you want results
+written directly to an output stream.
 
 ```rust
 use jetro::JetroEngine;
@@ -197,9 +199,28 @@ assert_eq!(ids, vec![
 ]);
 ```
 
+For first-N result queries, use the limit writers. They stop reading as soon as
+the requested number of query results has been written.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"n":1}
+{"n":2}
+not-json
+"#);
+
+let mut out = Vec::new();
+engine.run_ndjson_limit(rows, "n + 1", 2, &mut out)?;
+assert_eq!(std::str::from_utf8(&out)?, "2\n3\n");
+```
+
 For first-N document search, use the match-limited APIs. They evaluate the
-predicate per row, emit the original full row for truthy matches, and stop as
-soon as the limit is reached.
+predicate per row, write the original full row for truthy matches, and stop as
+soon as the limit is reached. The writer variants preserve matching rows as raw
+NDJSON where possible, avoiding collect-and-reencode work.
 
 ```rust
 use jetro::JetroEngine;
@@ -217,12 +238,16 @@ assert_eq!(first_two_errors.len(), 2);
 ```
 
 File, source-dispatch, and reverse-file variants are public too:
+`run_ndjson_limit`, `run_ndjson_file_limit`, `run_ndjson_source_limit`,
+`run_ndjson_rev_limit`, plus their `_with_options` forms for reader settings.
+For predicate matches, use
 `collect_ndjson_matches_file`, `run_ndjson_matches_file`,
 `collect_ndjson_matches_source`, `run_ndjson_matches_source`,
-`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`. For arbitrary
-reverse queries with caller-controlled early stop, use
-`for_each_ndjson_rev_until`; it uses the same byte/tape row path as
-`run_ndjson_rev`.
+`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
+
+Reverse limit and reverse match APIs use the same byte/tape row execution path
+as forward NDJSON. For arbitrary reverse queries with caller-controlled early
+stop, use `for_each_ndjson_rev_until`.
 
 ## Quick Language Preview
 
