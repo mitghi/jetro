@@ -23,8 +23,9 @@ pub use ndjson::{
 };
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
-    collect_ndjson_rev_with_options, run_ndjson_rev, run_ndjson_rev_matches,
-    run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonReverseFileDriver,
+    collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
+    run_ndjson_rev, run_ndjson_rev_matches, run_ndjson_rev_matches_with_options,
+    run_ndjson_rev_with_options, NdjsonReverseFileDriver,
 };
 pub use source::NdjsonSource;
 use std::fmt;

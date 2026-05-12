@@ -390,6 +390,46 @@ fn reverse_file_helpers_evaluate_rows_from_tail() {
 }
 
 #[test]
+fn reverse_for_each_until_stops_before_head_rows() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-until");
+    std::fs::write(&path, b"not-json\n{\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n").unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .for_each_ndjson_rev_until(&path, "name", |value| {
+            out.push(value);
+            Ok(NdjsonControl::Stop)
+        })
+        .expect("reverse callback stop should not read the invalid head row");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(out, vec![json!("Bob")]);
+}
+
+#[test]
+fn reverse_for_each_helpers_stream_query_results() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-callback");
+    std::fs::write(&path, b"{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n").unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .for_each_ndjson_rev_with_options(
+            &path,
+            "n + 1",
+            NdjsonOptions::default().with_reverse_chunk_size(4),
+            |value| out.push(value),
+        )
+        .expect("reverse callback query should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 3);
+    assert_eq!(out, vec![json!(4), json!(3), json!(2)]);
+}
+
+#[test]
 fn reverse_match_helpers_stop_from_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-match");

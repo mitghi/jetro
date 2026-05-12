@@ -60,6 +60,9 @@
 - **Public facade exports**. The top-level `jetro` crate now re-exports
   `JetroEngine`, `JetroEngineError`, and `io` so applications can use NDJSON
   APIs directly from the crate they install.
+- **Reverse query callbacks**. Added `for_each_ndjson_rev*` APIs so arbitrary
+  reverse NDJSON queries can stop through `NdjsonControl` while staying on the
+  same byte/tape row execution path as `run_ndjson_rev`.
 
 ### Demand/tape architecture cleanup
 

@@ -686,6 +686,69 @@ impl JetroEngine {
         io::collect_ndjson_rev_with_options(self, path, query, options)
     }
 
+    /// Read an NDJSON file from tail to head and call `f` with each query result
+    /// as it is produced.
+    pub fn for_each_ndjson_rev<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_rev(self, path, query, f)
+    }
+
+    /// Read an NDJSON file from tail to head and call `f` until it returns
+    /// [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_rev_until<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, io::NdjsonOptions::default(), f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_rev_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_rev_until_with_options<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_rev_with_options<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+        mut f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, options, |value| {
+            f(value);
+            Ok(io::NdjsonControl::Continue)
+        })
+    }
+
     /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.
     pub fn collect_ndjson_with_options<R>(
         &self,

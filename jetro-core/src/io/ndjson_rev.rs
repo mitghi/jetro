@@ -148,9 +148,45 @@ where
     let mut values = Vec::new();
     drive_rev(engine, path, query, options, |value| {
         values.push(Value::from(value));
-        Ok(())
+        Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     Ok(values)
+}
+
+pub fn for_each_ndjson_rev<P, F>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    mut f: F,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    F: FnMut(Value),
+{
+    for_each_ndjson_rev_with_options(
+        engine,
+        path,
+        query,
+        super::ndjson::NdjsonOptions::default(),
+        |value| {
+            f(value);
+            Ok(super::ndjson::NdjsonControl::Continue)
+        },
+    )
+}
+
+pub fn for_each_ndjson_rev_with_options<P, F>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    options: super::ndjson::NdjsonOptions,
+    mut f: F,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    F: FnMut(Value) -> Result<super::ndjson::NdjsonControl, JetroEngineError>,
+{
+    drive_rev(engine, path, query, options, |value| f(Value::from(value)))
 }
 
 pub fn collect_ndjson_rev_matches<P>(
@@ -223,7 +259,7 @@ where
     let count = drive_rev(engine, path, query, options, |value| {
         serde_json::to_writer(&mut writer, &ValRef(&value))?;
         writer.write_all(b"\n")?;
-        Ok(())
+        Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     writer.flush()?;
     Ok(count)
@@ -281,7 +317,7 @@ fn drive_rev<P, F>(
 ) -> Result<usize, JetroEngineError>
 where
     P: AsRef<Path>,
-    F: FnMut(crate::data::value::Val) -> Result<(), JetroEngineError>,
+    F: FnMut(crate::data::value::Val) -> Result<super::ndjson::NdjsonControl, JetroEngineError>,
 {
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let plan = engine.cached_plan(query, PlanningContext::bytes());
@@ -289,13 +325,11 @@ where
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
         let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
-        emit(super::ndjson::collect_row_val(
-            engine,
-            &document,
-            &plan,
-            reverse_row_no,
-        )?)?;
+        let out = super::ndjson::collect_row_val(engine, &document, &plan, reverse_row_no)?;
         count += 1;
+        if matches!(emit(out)?, super::ndjson::NdjsonControl::Stop) {
+            break;
+        }
     }
 
     Ok(count)

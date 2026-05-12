@@ -219,7 +219,10 @@ assert_eq!(first_two_errors.len(), 2);
 File, source-dispatch, and reverse-file variants are public too:
 `collect_ndjson_matches_file`, `run_ndjson_matches_file`,
 `collect_ndjson_matches_source`, `run_ndjson_matches_source`,
-`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
+`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`. For arbitrary
+reverse queries with caller-controlled early stop, use
+`for_each_ndjson_rev_until`; it uses the same byte/tape row path as
+`run_ndjson_rev`.
 
 ## Quick Language Preview
 
