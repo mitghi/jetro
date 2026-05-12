@@ -1181,6 +1181,12 @@ where
 fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngineError> {
     writer.write_all(b"\"")?;
     let bytes = value.as_bytes();
+    if !needs_json_escape(bytes) {
+        writer.write_all(bytes)?;
+        writer.write_all(b"\"")?;
+        return Ok(());
+    }
+
     let mut start = 0usize;
 
     for (idx, &byte) in bytes.iter().enumerate() {
@@ -1211,6 +1217,13 @@ fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngi
     }
     writer.write_all(b"\"")?;
     Ok(())
+}
+
+#[inline]
+fn needs_json_escape(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .any(|byte| matches!(byte, b'"' | b'\\' | 0x00..=0x1f))
 }
 
 fn write_control_escape<W: Write>(writer: &mut W, byte: u8) -> Result<(), JetroEngineError> {
