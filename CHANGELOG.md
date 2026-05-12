@@ -41,6 +41,17 @@
   into JSON parsing, avoiding an extra row byte copy while preserving reusable
   scanner-buffer capacity. `run_ndjson` serializes internal `Val` results
   directly instead of building an intermediate `serde_json::Value` tree.
+- **Reverse file scans**. Added tail-to-head NDJSON file helpers backed by a
+  chunked `memrchr` reverse reader. `run_ndjson_rev` and
+  `collect_ndjson_rev` reuse the same prepared byte-backed plan and direct
+  `Val` serialization path as forward per-row execution, with configurable
+  reverse chunk sizing and maximum line-length enforcement.
+- **Stream-as-array fallback**. Added `run_ndjson_stream` and
+  `collect_ndjson_stream` APIs that bind `$` to the whole NDJSON input as a
+  virtual array and evaluate the query once. The current implementation is the
+  correctness fallback that materializes the row vector; it uses the engine
+  plan/VM caches and establishes the public semantics for the later
+  provider-backed non-materializing source.
 
 ### Demand/tape architecture cleanup
 
