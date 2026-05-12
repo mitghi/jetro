@@ -1,4 +1,5 @@
 use super::RowError;
+use crate::data::value::{Val, ValRef};
 use crate::plan::physical::PlanningContext;
 use crate::{Jetro, JetroEngine, JetroEngineError};
 use memchr::memchr;
@@ -308,8 +309,8 @@ where
     W: Write,
 {
     let mut writer = BufWriter::new(writer);
-    let count = drive_ndjson(engine, reader, query, options, |value| {
-        serde_json::to_writer(&mut writer, &value)?;
+    let count = drive_ndjson_val(engine, reader, query, options, |value| {
+        serde_json::to_writer(&mut writer, &ValRef(&value))?;
         writer.write_all(b"\n")?;
         Ok(())
     })?;
@@ -335,14 +336,48 @@ where
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         let document = parse_row(engine, line_no, row)?;
-        let out = engine
-            .collect_prepared(&document, &plan)
-            .map_err(|err| row_eval_error(line_no, err))?;
-        emit(out)?;
+        let out = collect_row_val(engine, &document, &plan, line_no)?;
+        emit(Value::from(out))?;
         count += 1;
     }
 
     Ok(count)
+}
+
+fn drive_ndjson_val<R, F>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    options: NdjsonOptions,
+    mut emit: F,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(Val) -> Result<(), JetroEngineError>,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut count = 0;
+
+    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        let document = parse_row(engine, line_no, row)?;
+        emit(collect_row_val(engine, &document, &plan, line_no)?)?;
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+fn collect_row_val(
+    engine: &JetroEngine,
+    document: &Jetro,
+    plan: &crate::ir::physical::QueryPlan,
+    line_no: u64,
+) -> Result<Val, JetroEngineError> {
+    engine
+        .collect_prepared_val(document, plan)
+        .map_err(|err| row_eval_error(line_no, err))
 }
 
 fn parse_row(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Jetro, JetroEngineError> {

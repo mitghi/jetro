@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use crate::data::context::EvalError;
+use crate::data::value::Val;
 use crate::exec::interpreted as physical_eval;
 use crate::ir::physical::{QueryPlan, QueryRoot};
 use crate::plan::physical as planner;
@@ -35,11 +36,21 @@ pub(crate) fn collect_plan_json_with_vm(
     plan: &QueryPlan,
     vm: &mut VM,
 ) -> Result<Value, EvalError> {
+    collect_plan_val_with_vm(j, plan, vm).map(Value::from)
+}
+
+/// Executes a pre-built plan and returns the internal `Val` result, avoiding a
+/// `serde_json::Value` tree when the caller can serialize or consume `Val`.
+pub(crate) fn collect_plan_val_with_vm(
+    j: &Jetro,
+    plan: &QueryPlan,
+    vm: &mut VM,
+) -> Result<Val, EvalError> {
     match plan.root() {
-        QueryRoot::Node(root) => physical_eval::run_with_vm(j, plan, *root, vm).map(Value::from),
+        QueryRoot::Node(root) => physical_eval::run_with_vm(j, plan, *root, vm),
         QueryRoot::SourceVm(source) => {
             let prog = vm.get_or_compile(source.as_ref())?;
-            vm.execute_val(&prog, j.root_val()?)
+            vm.execute_val_raw(&prog, j.root_val()?)
         }
     }
 }
@@ -747,9 +758,7 @@ mod tests {
         let picked = j
             .collect(r#"$.books.map(@.pick("title", "score")).last()"#)
             .unwrap();
-        let omitted = j
-            .collect(r#"$.books.map(@.omit("debug")).last()"#)
-            .unwrap();
+        let omitted = j.collect(r#"$.books.map(@.omit("debug")).last()"#).unwrap();
 
         assert_eq!(keys, json!(["title", "score", "debug"]));
         assert_eq!(picked, json!({"title": "b", "score": 902}));
@@ -963,7 +972,8 @@ mod tests {
     #[test]
     fn tape_view_remove_last_stays_borrowed() {
         let j = Jetro::from_bytes(
-            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":2}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":2}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
@@ -995,7 +1005,8 @@ mod tests {
     #[test]
     fn tape_view_remove_take_stays_borrowed() {
         let j = Jetro::from_bytes(
-            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":4}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"xs":[{"id":1},{"id":2},{"id":3},{"id":4}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
@@ -1011,7 +1022,8 @@ mod tests {
     #[test]
     fn tape_view_compact_take_stays_borrowed() {
         let j = Jetro::from_bytes(
-            br#"{"xs":[null,{"id":1},null,{"id":2},{"id":3}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"xs":[null,{"id":1},null,{"id":2},{"id":3}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
@@ -1876,7 +1888,8 @@ mod tests {
     #[test]
     fn view_membership_dynamic_target_stops_without_row_materialization() {
         let j = Jetro::from_bytes(
-            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
@@ -1892,7 +1905,8 @@ mod tests {
     #[test]
     fn view_index_dynamic_target_stops_without_row_materialization() {
         let j = Jetro::from_bytes(
-            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();

@@ -306,8 +306,16 @@ impl JetroEngine {
         document: &Jetro,
         plan: &ir::physical::QueryPlan,
     ) -> std::result::Result<Value, EvalError> {
+        self.collect_prepared_val(document, plan).map(Value::from)
+    }
+
+    pub(crate) fn collect_prepared_val(
+        &self,
+        document: &Jetro,
+        plan: &ir::physical::QueryPlan,
+    ) -> std::result::Result<Val, EvalError> {
         let mut vm = self.vm.lock().expect("vm cache poisoned");
-        exec::router::collect_plan_json_with_vm(document, &plan, &mut vm)
+        exec::router::collect_plan_val_with_vm(document, plan, &mut vm)
     }
 
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
