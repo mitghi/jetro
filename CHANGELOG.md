@@ -25,6 +25,8 @@
 - **`JetroEngine` NDJSON APIs**. Added `run_ndjson`, `collect_ndjson`, and
   `for_each_ndjson` for evaluating one query independently against each
   non-empty NDJSON row. `run_ndjson` writes one JSON result per output line.
+  File-path helpers are available for the common cold-path case, with matching
+  options-aware variants.
 - **Cold-path friendly row execution**. NDJSON rows now enter through the
   engine byte parser, reuse one prepared byte-backed query plan for the whole
   stream, and execute with the engine-owned VM instead of performing a per-row
@@ -32,7 +34,8 @@
 - **Bounded, row-aware input handling**. The reader supports empty input,
   blank-line skipping, CRLF, trailing-newline-less final rows, first-line UTF-8
   BOM stripping, configurable maximum line length, and row-numbered invalid
-  JSON errors.
+  JSON errors. `NdjsonOptions` also exposes initial row-buffer sizing for
+  callers that know their typical row width.
 - **Lower-copy line scanning**. The per-row driver uses `fill_buf` plus
   `memchr` to find line boundaries and transfers the owned row buffer directly
   into JSON parsing, avoiding an extra row byte copy.
