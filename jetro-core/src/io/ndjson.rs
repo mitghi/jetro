@@ -1103,18 +1103,8 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         Val::Null => writer.write_all(b"null")?,
         Val::Bool(true) => writer.write_all(b"true")?,
         Val::Bool(false) => writer.write_all(b"false")?,
-        Val::Int(n) => {
-            let mut buf = itoa::Buffer::new();
-            writer.write_all(buf.format(*n).as_bytes())?;
-        }
-        Val::Float(n) => {
-            if n.is_finite() {
-                let mut buf = ryu::Buffer::new();
-                writer.write_all(buf.format(*n).as_bytes())?;
-            } else {
-                writer.write_all(b"0")?;
-            }
-        }
+        Val::Int(n) => write_i64(writer, *n)?,
+        Val::Float(n) => write_f64(writer, *n)?,
         Val::Str(s) => write_json_str(writer, s.as_ref())?,
         Val::StrSlice(s) => write_json_str(writer, s.as_str())?,
         Val::Arr(items) => write_json_array(writer, items.iter())?,
@@ -1298,6 +1288,24 @@ fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngi
         writer.write_all(&bytes[start..])?;
     }
     writer.write_all(b"\"")?;
+    Ok(())
+}
+
+#[inline]
+fn write_i64<W: Write>(writer: &mut W, value: i64) -> Result<(), JetroEngineError> {
+    let mut buf = itoa::Buffer::new();
+    writer.write_all(buf.format(value).as_bytes())?;
+    Ok(())
+}
+
+#[inline]
+fn write_f64<W: Write>(writer: &mut W, value: f64) -> Result<(), JetroEngineError> {
+    if value.is_finite() {
+        let mut buf = ryu::Buffer::new();
+        writer.write_all(buf.format(value).as_bytes())?;
+    } else {
+        writer.write_all(b"0")?;
+    }
     Ok(())
 }
 
