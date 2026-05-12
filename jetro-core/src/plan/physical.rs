@@ -1494,19 +1494,6 @@ mod tests {
     }
 
     #[test]
-    fn root_positional_plans_expose_bounded_input_limits() {
-        let first = plan_query_with_context(r#"$.first()"#, PlanningContext::val());
-        let take = plan_query_with_context(r#"$.take(3)"#, PlanningContext::val());
-        let nth = plan_query_with_context(r#"$.nth(2)"#, PlanningContext::val());
-        let window = plan_query_with_context(r#"$.skip(2).take(3)"#, PlanningContext::val());
-
-        assert_eq!(first.bounded_root_input_limit(), Some(1));
-        assert_eq!(take.bounded_root_input_limit(), Some(3));
-        assert_eq!(nth.bounded_root_input_limit(), Some(3));
-        assert_eq!(window.bounded_root_input_limit(), Some(5));
-    }
-
-    #[test]
     fn object_shape_keeps_receiver_pipeline_children() {
         let plan = plan_query(
             r#"let books = $.books in {"top": books.filter(score > 900).take(2).map(title), "first": books.filter(score > 900).first()}"#,

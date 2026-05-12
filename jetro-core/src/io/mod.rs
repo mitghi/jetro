@@ -9,15 +9,10 @@ mod source;
 
 pub use ndjson::{
     collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options, collect_ndjson_source,
-    collect_ndjson_source_with_options, collect_ndjson_stream, collect_ndjson_stream_file,
-    collect_ndjson_stream_file_with_options, collect_ndjson_stream_source,
-    collect_ndjson_stream_source_with_options, collect_ndjson_stream_with_options,
-    collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_source,
-    for_each_ndjson_source_with_options, for_each_ndjson_with_options, run_ndjson, run_ndjson_file,
-    run_ndjson_file_with_options, run_ndjson_source, run_ndjson_source_with_options,
-    run_ndjson_stream, run_ndjson_stream_file, run_ndjson_stream_file_with_options,
-    run_ndjson_stream_source, run_ndjson_stream_source_with_options,
-    run_ndjson_stream_with_options, run_ndjson_with_options, NdjsonOptions, NdjsonPerRowDriver,
+    collect_ndjson_source_with_options, collect_ndjson_with_options, for_each_ndjson,
+    for_each_ndjson_source, for_each_ndjson_source_with_options, for_each_ndjson_with_options,
+    run_ndjson, run_ndjson_file, run_ndjson_file_with_options, run_ndjson_source,
+    run_ndjson_source_with_options, run_ndjson_with_options, NdjsonOptions, NdjsonPerRowDriver,
 };
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_with_options, run_ndjson_rev,

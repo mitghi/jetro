@@ -46,25 +46,10 @@
   `collect_ndjson_rev` reuse the same prepared byte-backed plan and direct
   `Val` serialization path as forward per-row execution, with configurable
   reverse chunk sizing and maximum line-length enforcement.
-- **Stream-as-array fallback**. Added `run_ndjson_stream` and
-  `collect_ndjson_stream` APIs that bind `$` to the whole NDJSON input as a
-  virtual array and evaluate the query once. The current implementation is the
-  correctness fallback that materializes the row vector; it uses the engine
-  plan/VM caches and establishes the public semantics for the later
-  provider-backed non-materializing source.
-- **Bounded stream-as-array reads**. Root positional stream queries such as
-  `$.first()`, `$.take(n)`, and `$.nth(i)` now read only the rows required by
-  the propagated input demand before evaluating the prepared plan. This keeps
-  cold-path stream queries from parsing unused NDJSON rows while preserving the
-  materialized fallback semantics for unbounded chains.
-- **Offset windows use recursive root demand**. Direct call chains such as
-  `$.skip(a).take(b)` now propagate bounded demand through the physical call
-  graph, so stream-as-array inputs read only `a + b` rows before executing the
-  prepared plan.
 - **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
   helpers so callers can route file paths and existing `BufRead` inputs through
-  one API while preserving the same options-aware per-row and stream-as-array
-  execution paths. Callback-based per-row iteration is also available through
+  one API while preserving the same options-aware per-row execution paths.
+  Callback-based per-row iteration is also available through
   `for_each_ndjson_source`.
 
 ### Demand/tape architecture cleanup

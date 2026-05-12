@@ -8,15 +8,11 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{
-    registry::{propagate_demand as propagate_builtin_demand, BuiltinDemandArg, BuiltinId},
-    BuiltinArgs, BuiltinCall, BuiltinMethod,
-};
+use crate::builtins::BuiltinCall;
 use crate::data::value::Val;
 use crate::exec::pipeline::PipelineBody;
 use crate::exec::structural::StructuralPlan;
 use crate::parse::ast::{BinOp, KindType, PatchOp, PathStep};
-use crate::plan::demand::{Demand, PullDemand, ValueNeed};
 use crate::plan::update::{UpdateDependencySummary, UpdateTriePlan};
 use crate::vm::Program;
 
@@ -87,16 +83,6 @@ impl QueryPlan {
         self.nodes[id.0].facts
     }
 
-    /// Returns the number of root input rows required by a bounded positional
-    /// root query, if the plan shape can prove one.
-    #[inline]
-    pub(crate) fn bounded_root_input_limit(&self) -> Option<usize> {
-        let QueryRoot::Node(root) = self.root() else {
-            return None;
-        };
-        self.node_root_input_limit(*root, Demand::RESULT)
-    }
-
     /// Returns the `ExecutionFacts` for the root node; used by tests to assert byte-native status.
     #[inline]
     #[cfg(test)]
@@ -110,81 +96,6 @@ impl QueryPlan {
         }
     }
 
-    fn node_root_input_limit(&self, root: NodeId, downstream: Demand) -> Option<usize> {
-        match self.node(root) {
-            PlanNode::Root => input_limit_from_pull(downstream.pull),
-            PlanNode::RootPath(steps) if steps.is_empty() => input_limit_from_pull(downstream.pull),
-            PlanNode::Call { receiver, call, .. } => {
-                let upstream = call_upstream_demand(call, downstream);
-                self.node_root_input_limit(*receiver, upstream)
-            }
-            PlanNode::Pipeline {
-                source: PipelinePlanSource::Expr(source),
-                body,
-            } => self.node_root_input_limit(
-                *source,
-                Demand {
-                    pull: body.pull_demand(),
-                    value: ValueNeed::Whole,
-                    order: true,
-                },
-            ),
-            PlanNode::Pipeline {
-                source: PipelinePlanSource::FieldChain { keys },
-                body,
-            } if keys.is_empty() => match body.pull_demand() {
-                pull => input_limit_from_pull(pull),
-            },
-            _ => None,
-        }
-    }
-}
-
-fn input_limit_from_pull(pull: PullDemand) -> Option<usize> {
-    match pull {
-        PullDemand::FirstInput(n) => Some(n),
-        PullDemand::NthInput(i) => Some(i.saturating_add(1)),
-        _ => None,
-    }
-}
-
-fn call_upstream_demand(call: &BuiltinCall, downstream: Demand) -> Demand {
-    match (call.method, &call.args) {
-        (BuiltinMethod::First, BuiltinArgs::None) => Demand::first(ValueNeed::Whole),
-        (BuiltinMethod::First, BuiltinArgs::I64(n)) => Demand {
-            pull: PullDemand::FirstInput((*n).max(0) as usize),
-            value: ValueNeed::Whole,
-            order: true,
-        },
-        (BuiltinMethod::Last, BuiltinArgs::None) => Demand {
-            pull: PullDemand::LastInput(1),
-            value: ValueNeed::Whole,
-            order: true,
-        },
-        (BuiltinMethod::Last, BuiltinArgs::I64(n)) => Demand {
-            pull: PullDemand::LastInput((*n).max(0) as usize),
-            value: ValueNeed::Whole,
-            order: true,
-        },
-        (BuiltinMethod::Nth, BuiltinArgs::I64(i)) if *i >= 0 => Demand {
-            pull: PullDemand::NthInput(*i as usize),
-            value: ValueNeed::Whole,
-            order: true,
-        },
-        _ => propagate_builtin_demand(
-            BuiltinId::from_method(call.method),
-            demand_arg_from_call(call),
-            downstream,
-        ),
-    }
-}
-
-fn demand_arg_from_call(call: &BuiltinCall) -> BuiltinDemandArg {
-    match &call.args {
-        BuiltinArgs::Usize(n) => BuiltinDemandArg::Usize(*n),
-        BuiltinArgs::I64(n) if *n >= 0 => BuiltinDemandArg::Usize(*n as usize),
-        _ => BuiltinDemandArg::None,
-    }
 }
 
 /// Selects the execution entry point for a `QueryPlan`.

@@ -283,31 +283,6 @@ where
     Ok(values)
 }
 
-pub fn collect_ndjson_stream<R>(
-    engine: &JetroEngine,
-    reader: R,
-    query: &str,
-) -> Result<Value, JetroEngineError>
-where
-    R: BufRead,
-{
-    collect_ndjson_stream_with_options(engine, reader, query, NdjsonOptions::default())
-}
-
-pub fn collect_ndjson_stream_with_options<R>(
-    engine: &JetroEngine,
-    reader: R,
-    query: &str,
-    options: NdjsonOptions,
-) -> Result<Value, JetroEngineError>
-where
-    R: BufRead,
-{
-    Ok(Value::from(collect_ndjson_stream_val(
-        engine, reader, query, options,
-    )?))
-}
-
 pub fn collect_ndjson_file<P>(
     engine: &JetroEngine,
     path: P,
@@ -361,66 +336,6 @@ pub fn collect_ndjson_source_with_options(
     match source {
         NdjsonSource::File(path) => collect_ndjson_file_with_options(engine, path, query, options),
         NdjsonSource::Reader(reader) => collect_ndjson_with_options(engine, reader, query, options),
-    }
-}
-
-pub fn collect_ndjson_stream_file<P>(
-    engine: &JetroEngine,
-    path: P,
-    query: &str,
-) -> Result<Value, JetroEngineError>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(path)?;
-    let options = NdjsonOptions::default();
-    collect_ndjson_stream_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        options,
-    )
-}
-
-pub fn collect_ndjson_stream_file_with_options<P>(
-    engine: &JetroEngine,
-    path: P,
-    query: &str,
-    options: NdjsonOptions,
-) -> Result<Value, JetroEngineError>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(path)?;
-    collect_ndjson_stream_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        options,
-    )
-}
-
-pub fn collect_ndjson_stream_source(
-    engine: &JetroEngine,
-    source: NdjsonSource,
-    query: &str,
-) -> Result<Value, JetroEngineError> {
-    collect_ndjson_stream_source_with_options(engine, source, query, NdjsonOptions::default())
-}
-
-pub fn collect_ndjson_stream_source_with_options(
-    engine: &JetroEngine,
-    source: NdjsonSource,
-    query: &str,
-    options: NdjsonOptions,
-) -> Result<Value, JetroEngineError> {
-    match source {
-        NdjsonSource::File(path) => {
-            collect_ndjson_stream_file_with_options(engine, path, query, options)
-        }
-        NdjsonSource::Reader(reader) => {
-            collect_ndjson_stream_with_options(engine, reader, query, options)
-        }
     }
 }
 
@@ -532,112 +447,6 @@ where
     }
 }
 
-pub fn run_ndjson_stream<R, W>(
-    engine: &JetroEngine,
-    reader: R,
-    query: &str,
-    writer: W,
-) -> Result<usize, JetroEngineError>
-where
-    R: BufRead,
-    W: Write,
-{
-    run_ndjson_stream_with_options(engine, reader, query, writer, NdjsonOptions::default())
-}
-
-pub fn run_ndjson_stream_with_options<R, W>(
-    engine: &JetroEngine,
-    reader: R,
-    query: &str,
-    writer: W,
-    options: NdjsonOptions,
-) -> Result<usize, JetroEngineError>
-where
-    R: BufRead,
-    W: Write,
-{
-    let value = collect_ndjson_stream_val(engine, reader, query, options)?;
-    let mut writer = BufWriter::new(writer);
-    serde_json::to_writer(&mut writer, &ValRef(&value))?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(1)
-}
-
-pub fn run_ndjson_stream_file<P, W>(
-    engine: &JetroEngine,
-    path: P,
-    query: &str,
-    writer: W,
-) -> Result<usize, JetroEngineError>
-where
-    P: AsRef<Path>,
-    W: Write,
-{
-    let file = File::open(path)?;
-    let options = NdjsonOptions::default();
-    run_ndjson_stream_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        writer,
-        options,
-    )
-}
-
-pub fn run_ndjson_stream_file_with_options<P, W>(
-    engine: &JetroEngine,
-    path: P,
-    query: &str,
-    writer: W,
-    options: NdjsonOptions,
-) -> Result<usize, JetroEngineError>
-where
-    P: AsRef<Path>,
-    W: Write,
-{
-    let file = File::open(path)?;
-    run_ndjson_stream_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        writer,
-        options,
-    )
-}
-
-pub fn run_ndjson_stream_source<W>(
-    engine: &JetroEngine,
-    source: NdjsonSource,
-    query: &str,
-    writer: W,
-) -> Result<usize, JetroEngineError>
-where
-    W: Write,
-{
-    run_ndjson_stream_source_with_options(engine, source, query, writer, NdjsonOptions::default())
-}
-
-pub fn run_ndjson_stream_source_with_options<W>(
-    engine: &JetroEngine,
-    source: NdjsonSource,
-    query: &str,
-    writer: W,
-    options: NdjsonOptions,
-) -> Result<usize, JetroEngineError>
-where
-    W: Write,
-{
-    match source {
-        NdjsonSource::File(path) => {
-            run_ndjson_stream_file_with_options(engine, path, query, writer, options)
-        }
-        NdjsonSource::Reader(reader) => {
-            run_ndjson_stream_with_options(engine, reader, query, writer, options)
-        }
-    }
-}
-
 fn drive_ndjson<R, F>(
     engine: &JetroEngine,
     reader: R,
@@ -687,57 +496,6 @@ where
     }
 
     Ok(count)
-}
-
-fn collect_ndjson_stream_val<R>(
-    engine: &JetroEngine,
-    reader: R,
-    query: &str,
-    options: NdjsonOptions,
-) -> Result<Val, JetroEngineError>
-where
-    R: BufRead,
-{
-    let plan = engine.cached_plan(query, PlanningContext::val());
-    let root = collect_ndjson_rows_val(engine, reader, options, plan.bounded_root_input_limit())?;
-    let document = Jetro::from_val_and_value(root, Value::Null);
-    engine
-        .collect_prepared_val(&document, &plan)
-        .map_err(JetroEngineError::from)
-}
-
-fn collect_ndjson_rows_val<R>(
-    engine: &JetroEngine,
-    reader: R,
-    options: NdjsonOptions,
-    limit: Option<usize>,
-) -> Result<Val, JetroEngineError>
-where
-    R: BufRead,
-{
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
-    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
-    let mut rows = Vec::with_capacity(limit.unwrap_or(0));
-
-    if matches!(limit, Some(0)) {
-        return Ok(Val::arr(rows));
-    }
-
-    while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        let document = parse_row(engine, line_no, row)?;
-        rows.push(
-            document
-                .root_val_with(engine.keys())
-                .map_err(|err| row_eval_error(line_no, err))?,
-        );
-        if let Some(limit) = limit {
-            if rows.len() >= limit {
-                break;
-            }
-        }
-    }
-
-    Ok(Val::arr(rows))
 }
 
 pub(super) fn collect_row_val(
