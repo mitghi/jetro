@@ -459,6 +459,38 @@ impl JetroEngine {
         io::run_ndjson_with_options(self, reader, query, writer, options)
     }
 
+    /// Evaluate `predicate` for each NDJSON row, write matching original rows,
+    /// and stop after `limit` matches.
+    pub fn run_ndjson_matches<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches(self, reader, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_with_options<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_with_options(self, reader, predicate, limit, writer, options)
+    }
+
     /// Evaluate `query` independently for every non-empty NDJSON row and collect
     /// the per-row results.
     pub fn collect_ndjson<R>(
@@ -552,6 +584,34 @@ impl JetroEngine {
         R: std::io::BufRead,
     {
         io::collect_ndjson_with_options(self, reader, query, options)
+    }
+
+    /// Evaluate `predicate` for each NDJSON row, collect matching original
+    /// rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches<R>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_matches(self, reader, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_with_options<R>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_matches_with_options(self, reader, predicate, limit, options)
     }
 
     /// Evaluate `query` independently for every non-empty NDJSON row and call

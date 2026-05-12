@@ -37,6 +37,48 @@ fn run_ndjson_writes_one_json_result_per_row() {
 }
 
 #[test]
+fn collect_ndjson_matches_stops_after_limit() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada","active":true}
+{"name":"Bob","active":false}
+{"name":"Cid","active":true}
+not-json
+"#;
+
+    let out = engine
+        .collect_ndjson_matches(Cursor::new(input), "active", 2)
+        .expect("match query should stop after two matching rows");
+
+    assert_eq!(
+        out,
+        vec![
+            json!({"name": "Ada", "active": true}),
+            json!({"name": "Cid", "active": true})
+        ]
+    );
+}
+
+#[test]
+fn run_ndjson_matches_writes_matching_original_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada","score":10}
+{"name":"Bob","score":5}
+{"name":"Cid","score":20}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_matches(Cursor::new(input), "score > 9", 10, &mut out)
+        .expect("match query should run");
+
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"name\":\"Ada\",\"score\":10}\n{\"name\":\"Cid\",\"score\":20}\n"
+    );
+}
+
+#[test]
 fn for_each_ndjson_streams_results_to_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"price":10}
