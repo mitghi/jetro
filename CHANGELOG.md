@@ -81,6 +81,11 @@
   now shares constructors for positional, predicate, membership, arg-extreme,
   count, numeric, and keyed reducer sinks, reducing handwritten builtin
   classification drift.
+- **Root positional calls lower statically**. Direct root calls such as
+  `$.take(n)` and `$.skip(n)` now decode their static numeric arguments into
+  `BuiltinCall` metadata instead of falling back to VM-only execution. This
+  makes the same positional facts visible to source demand planning and owned
+  value execution.
 - **Nested pipeline plans are first-class execution units**. Nested collection
   maps such as `items.map(...).sum()` now carry their source, stage
   expressions, stage kernels, and sink kernels in the shared plan object.
