@@ -1026,8 +1026,80 @@ impl<'a> NdjsonRowExecutor<'a> {
 }
 
 pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
-    serde_json::to_writer(&mut *writer, &ValRef(value))?;
+    write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
+    Ok(())
+}
+
+fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
+    match value {
+        Val::Null => writer.write_all(b"null")?,
+        Val::Bool(true) => writer.write_all(b"true")?,
+        Val::Bool(false) => writer.write_all(b"false")?,
+        Val::Int(n) => {
+            let mut buf = itoa::Buffer::new();
+            writer.write_all(buf.format(*n).as_bytes())?;
+        }
+        Val::Float(n) => {
+            if n.is_finite() {
+                let mut buf = ryu::Buffer::new();
+                writer.write_all(buf.format(*n).as_bytes())?;
+            } else {
+                writer.write_all(b"0")?;
+            }
+        }
+        Val::Str(s) => write_json_str(writer, s.as_ref())?,
+        Val::StrSlice(s) => write_json_str(writer, s.as_str())?,
+        _ => serde_json::to_writer(&mut *writer, &ValRef(value))?,
+    }
+    Ok(())
+}
+
+fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngineError> {
+    writer.write_all(b"\"")?;
+    let bytes = value.as_bytes();
+    let mut start = 0usize;
+
+    for (idx, &byte) in bytes.iter().enumerate() {
+        let escaped = match byte {
+            b'"' => Some(br#"\""#.as_slice()),
+            b'\\' => Some(br#"\\"#.as_slice()),
+            b'\n' => Some(br#"\n"#.as_slice()),
+            b'\r' => Some(br#"\r"#.as_slice()),
+            b'\t' => Some(br#"\t"#.as_slice()),
+            0x08 => Some(br#"\b"#.as_slice()),
+            0x0c => Some(br#"\f"#.as_slice()),
+            0x00..=0x1f => None,
+            _ => continue,
+        };
+
+        if start < idx {
+            writer.write_all(&bytes[start..idx])?;
+        }
+        match escaped {
+            Some(seq) => writer.write_all(seq)?,
+            None => write_control_escape(writer, byte)?,
+        }
+        start = idx + 1;
+    }
+
+    if start < bytes.len() {
+        writer.write_all(&bytes[start..])?;
+    }
+    writer.write_all(b"\"")?;
+    Ok(())
+}
+
+fn write_control_escape<W: Write>(writer: &mut W, byte: u8) -> Result<(), JetroEngineError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    writer.write_all(&[
+        b'\\',
+        b'u',
+        b'0',
+        b'0',
+        HEX[(byte >> 4) as usize],
+        HEX[(byte & 0x0f) as usize],
+    ])?;
     Ok(())
 }
 

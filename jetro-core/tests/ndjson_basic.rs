@@ -37,6 +37,36 @@ fn run_ndjson_writes_one_json_result_per_row() {
 }
 
 #[test]
+fn run_ndjson_writes_scalar_results_directly() {
+    let engine = JetroEngine::new();
+    let input = b"{\"s\":\"a\\\"b\\\\c\\n\",\"b\":true,\"z\":null,\"f\":1.25}\n";
+
+    let mut string_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "s", &mut string_out)
+        .expect("string scalar should write");
+    assert_eq!(String::from_utf8(string_out).unwrap(), "\"a\\\"b\\\\c\\n\"\n");
+
+    let mut bool_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "b", &mut bool_out)
+        .expect("bool scalar should write");
+    assert_eq!(String::from_utf8(bool_out).unwrap(), "true\n");
+
+    let mut null_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "z", &mut null_out)
+        .expect("null scalar should write");
+    assert_eq!(String::from_utf8(null_out).unwrap(), "null\n");
+
+    let mut float_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "f", &mut float_out)
+        .expect("float scalar should write");
+    assert_eq!(String::from_utf8(float_out).unwrap(), "1.25\n");
+}
+
+#[test]
 fn run_ndjson_limit_writes_and_stops_without_value_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"n":1}
