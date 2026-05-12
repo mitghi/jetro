@@ -9,12 +9,15 @@
 use pest::iterators::Pair;
 use pest::Parser as PestParser;
 use pest_derive::Parser;
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use super::ast::*;
+use crate::data::value::Val;
 use super::write_terminal::{
     build_patch_op, is_chain_write_terminal, steps_to_path as write_steps_to_path,
 };
+
+const INVALID_HAS_ARRAY_RHS: &str = "__jetro_invalid_has_array_rhs";
 
 /// Pest-derived parser for the v2 grammar. The grammar file is embedded at
 /// compile time via the `#[grammar]` attribute and is not loaded at runtime.
@@ -56,6 +59,7 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
     let program = pairs.next().unwrap();
     let expr_pair = program.into_inner().next().unwrap();
     let expr = parse_expr(expr_pair);
+    validate_has_array_rhs(&expr)?;
     validate_pattern_linearity(&expr)?;
     if strict_match_lint_enabled() {
         validate_match_exhaustiveness(&expr)?;
@@ -65,6 +69,173 @@ pub fn parse(input: &str) -> Result<Expr, ParseError> {
     // lambda directly. Pure AST rewrite; no runtime closure value.
     let expr = crate::compile::lambda_lower::inline_let_bound_lambdas(expr);
     Ok(expr)
+}
+
+fn validate_has_array_rhs(expr: &Expr) -> Result<(), ParseError> {
+    fn check(expr: &Expr) -> Result<(), ParseError> {
+        match expr {
+            Expr::Chain(base, steps) => {
+                check(base)?;
+                for step in steps {
+                    match step {
+                        Step::Method(name, _) if name == INVALID_HAS_ARRAY_RHS => {
+                            return Err(ParseError(
+                                "has [...] requires scalar literal elements".to_string(),
+                            ));
+                        }
+                        Step::DynIndex(expr) | Step::InlineFilter(expr) => check(expr)?,
+                        Step::Method(_, args) | Step::OptMethod(_, args) => {
+                            for arg in args {
+                                match arg {
+                                    Arg::Pos(expr) | Arg::Named(_, expr) => check(expr)?,
+                                }
+                            }
+                        }
+                        Step::DeepMatch { arms, .. } => {
+                            for arm in arms {
+                                if let Some(guard) = &arm.guard {
+                                    check(guard)?;
+                                }
+                                check(&arm.body)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Expr::BinOp(lhs, _, rhs) | Expr::Coalesce(lhs, rhs) => {
+                check(lhs)?;
+                check(rhs)?;
+            }
+            Expr::UnaryNeg(inner) | Expr::Not(inner) => check(inner)?,
+            Expr::Kind { expr, .. } => check(expr)?,
+            Expr::Array(elems) => {
+                for elem in elems {
+                    match elem {
+                        ArrayElem::Expr(expr) | ArrayElem::Spread(expr) => check(expr)?,
+                    }
+                }
+            }
+            Expr::Object(fields) => {
+                for field in fields {
+                    match field {
+                        ObjField::Kv { val, cond, .. } => {
+                            check(val)?;
+                            if let Some(cond) = cond {
+                                check(cond)?;
+                            }
+                        }
+                        ObjField::Dynamic { key, val } => {
+                            check(key)?;
+                            check(val)?;
+                        }
+                        ObjField::Short(_) => {}
+                        ObjField::Spread(expr) | ObjField::SpreadDeep(expr) => check(expr)?,
+                    }
+                }
+            }
+            Expr::Pipeline { base, steps } => {
+                check(base)?;
+                for step in steps {
+                    match step {
+                        PipeStep::Forward(expr) => check(expr)?,
+                        PipeStep::Bind(_) => {}
+                    }
+                }
+            }
+            Expr::ListComp { expr, iter, cond, .. }
+            | Expr::GenComp { expr, iter, cond, .. }
+            | Expr::SetComp { expr, iter, cond, .. } => {
+                check(expr)?;
+                check(iter)?;
+                if let Some(cond) = cond {
+                    check(cond)?;
+                }
+            }
+            Expr::DictComp {
+                key,
+                val,
+                iter,
+                cond,
+                ..
+            } => {
+                check(key)?;
+                check(val)?;
+                check(iter)?;
+                if let Some(cond) = cond {
+                    check(cond)?;
+                }
+            }
+            Expr::Lambda { body, .. } => check(body)?,
+            Expr::Let { init, body, .. } => {
+                check(init)?;
+                check(body)?;
+            }
+            Expr::IfElse { cond, then_, else_ } => {
+                check(cond)?;
+                check(then_)?;
+                check(else_)?;
+            }
+            Expr::Try { body, default } => {
+                check(body)?;
+                check(default)?;
+            }
+            Expr::GlobalCall { args, .. } => {
+                for arg in args {
+                    match arg {
+                        Arg::Pos(expr) | Arg::Named(_, expr) => check(expr)?,
+                    }
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                check(scrutinee)?;
+                for arm in arms {
+                    if let Some(guard) = &arm.guard {
+                        check(guard)?;
+                    }
+                    check(&arm.body)?;
+                }
+            }
+            Expr::Cast { expr, .. } => check(expr)?,
+            Expr::Patch { root, ops } => {
+                check(root)?;
+                for op in ops {
+                    check_patch_op(op)?;
+                }
+            }
+            Expr::UpdateBatch { root, ops, .. } => {
+                check(root)?;
+                for op in ops {
+                    check_patch_op(op)?;
+                }
+            }
+            Expr::DeleteMark => {}
+            Expr::FString(parts) => {
+                for part in parts {
+                    if let FStringPart::Interp { expr, .. } = part {
+                        check(expr)?;
+                    }
+                }
+            }
+            Expr::Null
+            | Expr::Bool(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Str(_)
+            | Expr::Root
+            | Expr::Current
+            | Expr::Ident(_) => {}
+        }
+        Ok(())
+    }
+    fn check_patch_op(op: &PatchOp) -> Result<(), ParseError> {
+        check(&op.val)?;
+        if let Some(cond) = &op.cond {
+            check(cond)?;
+        }
+        Ok(())
+    }
+    check(expr)
 }
 
 /// Read the `JETRO_STRICT_MATCH` environment variable on every parse.
@@ -535,11 +706,61 @@ fn parse_contains(pair: Pair<Rule>) -> Expr {
         None => lhs,
         Some(_op_pair) => {
             let rhs = parse_expr(inner.next().unwrap());
+            let method = match has_array_literal_arg(&rhs) {
+                Some(arg) => Step::Method("has_all".to_string(), vec![Arg::Pos(arg)]),
+                None if matches!(rhs, Expr::Array(_)) => {
+                    Step::Method(INVALID_HAS_ARRAY_RHS.to_string(), Vec::new())
+                }
+                None => Step::Method("includes".to_string(), vec![Arg::Pos(rhs)]),
+            };
             Expr::Chain(
                 Box::new(lhs),
-                vec![Step::Method("includes".to_string(), vec![Arg::Pos(rhs)])],
+                vec![method],
             )
         }
+    }
+}
+
+fn has_array_literal_arg(expr: &Expr) -> Option<Expr> {
+    let Expr::Array(elems) = expr else {
+        return None;
+    };
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        let ArrayElem::Expr(expr) = elem else {
+            return None;
+        };
+        out.push(scalar_literal_to_val(expr)?);
+    }
+    Some(val_to_expr(Val::Arr(Arc::new(out))))
+}
+
+fn scalar_literal_to_val(expr: &Expr) -> Option<Val> {
+    match expr {
+        Expr::Null => Some(Val::Null),
+        Expr::Bool(b) => Some(Val::Bool(*b)),
+        Expr::Int(n) => Some(Val::Int(*n)),
+        Expr::Float(f) => Some(Val::Float(*f)),
+        Expr::Str(s) => Some(Val::Str(Arc::from(s.as_str()))),
+        _ => None,
+    }
+}
+
+fn val_to_expr(value: Val) -> Expr {
+    match value {
+        Val::Null => Expr::Null,
+        Val::Bool(b) => Expr::Bool(b),
+        Val::Int(n) => Expr::Int(n),
+        Val::Float(f) => Expr::Float(f),
+        Val::Str(s) => Expr::Str(s.to_string()),
+        Val::Arr(items) => Expr::Array(
+            items
+                .iter()
+                .cloned()
+                .map(|item| ArrayElem::Expr(val_to_expr(item)))
+                .collect(),
+        ),
+        other => panic!("unexpected has literal value: {other:?}"),
     }
 }
 
