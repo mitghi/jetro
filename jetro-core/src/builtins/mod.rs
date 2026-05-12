@@ -224,6 +224,8 @@ pub enum BuiltinMethod {
     Or,
     /// Returns true if the object contains the given key.
     Has,
+    /// Returns true if every literal needle is present in the receiver.
+    HasAll,
     /// Returns true if the object contains the given key.
     HasKey,
     /// Returns true if a field path is absent or null in the receiver.
@@ -419,7 +421,7 @@ macro_rules! for_each_builtin {
             DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
             FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
             FlatMap, Flatten, FlattenKeys, Floor, Fold, FromBase64, FromJson, FromPairs, GetPath,
-            GroupBy, GroupShape, Has, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
+            GroupBy, GroupShape, Has, HasAll, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
             Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
             IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
             LastIndexOf, Lead, Len, Lines, Lower, Map, Matches, Max, MaxBy, Merge, Min,
@@ -1674,6 +1676,12 @@ impl BuiltinCall {
             (BuiltinMethod::Has, BuiltinArgs::Str(k)) => {
                 apply_or_recv!(has_apply(recv, k))
             }
+            (BuiltinMethod::HasAll, BuiltinArgs::Val(v)) => {
+                apply_or_recv!(has_all_apply(recv, v))
+            }
+            (BuiltinMethod::HasAll, BuiltinArgs::StrVec(keys)) => {
+                apply_or_recv!(has_all_keys_apply(recv, keys))
+            }
             (BuiltinMethod::HasKey, BuiltinArgs::Str(k)) => return Some(has_key_apply(recv, k)),
             (BuiltinMethod::GetPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(get_path_apply(recv, p))
@@ -1879,6 +1887,9 @@ impl BuiltinCall {
                 Self::new(method, BuiltinArgs::I64(n))
             }
             BuiltinMethod::Nth => Self::new(method, BuiltinArgs::I64(args.i64(0)?)),
+            BuiltinMethod::Take | BuiltinMethod::Skip => {
+                Self::new(method, BuiltinArgs::Usize(args.usize(0)?))
+            }
             BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
                 let item = if arg_len > 0 { args.val(0)? } else { Val::Null };
                 Self::new(method, BuiltinArgs::Val(item))
@@ -1936,6 +1947,7 @@ impl BuiltinCall {
                 let path = args.str(0)?;
                 Self::new(method, BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()))
             }
+            BuiltinMethod::HasAll => Self::new(method, BuiltinArgs::Val(args.val(0)?)),
             BuiltinMethod::Has
             | BuiltinMethod::HasKey
             | BuiltinMethod::Join
@@ -2073,6 +2085,23 @@ impl BuiltinCall {
                 [Arg::Pos(expr)] => {
                     Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?)))
                 }
+                _ => None,
+            };
+        }
+
+        if method == BuiltinMethod::HasAll {
+            return match args {
+                [Arg::Pos(Expr::Array(elems))] => {
+                    let mut keys = Vec::with_capacity(elems.len());
+                    for elem in elems {
+                        let ArrayElem::Expr(expr) = elem else {
+                            return None;
+                        };
+                        keys.push(Arc::from(crate::util::val_to_key(&literal_val(expr)?)));
+                    }
+                    Some(Self::new(method, BuiltinArgs::StrVec(keys)))
+                }
+                [Arg::Pos(expr)] => Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?))),
                 _ => None,
             };
         }
@@ -2708,6 +2737,9 @@ where
             BuiltinCall::new(method, BuiltinArgs::I64(n))
         }
         BuiltinMethod::Nth => BuiltinCall::new(method, BuiltinArgs::I64(i64_arg!(0)?)),
+        BuiltinMethod::Take | BuiltinMethod::Skip => {
+            BuiltinCall::new(method, BuiltinArgs::Usize(i64_arg!(0)?.max(0) as usize))
+        }
         BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
             let item = if args.is_empty() {
                 Val::Null
@@ -2855,6 +2887,7 @@ where
                 BuiltinArgs::Path(parse_path_segs(str_arg!(0)?.as_ref()).into()),
             )
         }
+        BuiltinMethod::HasAll => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
         BuiltinMethod::Has
         | BuiltinMethod::HasKey
         | BuiltinMethod::Missing

@@ -749,7 +749,7 @@ fn iter_lazy_filter_map() {
 #[test]
 fn iter_lazy_take_skip() {
     let j = j(json!([10, 20, 30, 40, 50]));
-    assert!(j.collect("$.skip(1).take(2)").is_err());
+    assert_eq!(j.collect("$.skip(1).take(2)").unwrap(), json!([20, 30]));
 }
 
 #[test]

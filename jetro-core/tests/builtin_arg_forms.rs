@@ -692,6 +692,40 @@ fn has_key_forms() {
 }
 
 #[test]
+fn has_array_rhs_forms() {
+    let d = json!({
+        "text": "hello world",
+        "tags": ["x", "y", "z"],
+        "nums": [1, 2, 3],
+        "obj": {"x": 1, "y": 2}
+    });
+
+    assert_eq!(run(r#"$.text has ["hello", "world"]"#, &d), "true");
+    assert_eq!(run(r#"$.text has ["hello", "missing"]"#, &d), "false");
+    assert_eq!(run(r#"$.tags has ["x", "y"]"#, &d), "true");
+    assert_eq!(run(r#"$.tags has ["x", "q"]"#, &d), "false");
+    assert_eq!(run(r#"$.nums has [1, 2]"#, &d), "true");
+    assert_eq!(run(r#"$.obj has ["x", "y"]"#, &d), "true");
+    assert_eq!(run(r#"$.obj has ["x", "z"]"#, &d), "false");
+    assert_eq!(run(r#"$.obj has []"#, &d), "true");
+}
+
+#[test]
+fn has_array_rhs_rejects_non_literal_needles() {
+    let d = json!({"tags": ["x", "y"], "needle": "x"});
+    let bytes = serde_json::to_vec(&d).unwrap();
+    let j = Jetro::from_bytes(bytes).unwrap();
+    let err = j
+        .collect("$.tags has [needle]")
+        .expect_err("dynamic has array RHS should fail at parse time");
+
+    assert!(
+        err.0.contains("has [...] requires scalar literal elements"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn deep_shape_forms() {
     let d = json!({
         "rows": [

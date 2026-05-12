@@ -1,6 +1,6 @@
 [package]
 name = "jetro-core"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"

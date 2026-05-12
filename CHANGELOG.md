@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.7
+## 0.5.8
 
 ### Release focus
 
@@ -20,6 +20,63 @@
   harness was added for cross-runtime comparison. The release also includes the
   updated logo asset.
 
+### NDJSON per-row execution
+
+- **`JetroEngine` NDJSON APIs**. Added `run_ndjson`, `collect_ndjson`, and
+  `for_each_ndjson` for evaluating one query independently against each
+  non-empty NDJSON row. `run_ndjson` writes one JSON result per output line.
+  File-path helpers are available for the common cold-path case, with matching
+  options-aware variants.
+- **Cold-path friendly row execution**. NDJSON rows now enter through the
+  engine byte parser, reuse one prepared byte-backed query plan for the whole
+  stream, remain lazy/tape-eligible until execution needs materialization, and
+  execute with the engine-owned VM instead of performing a per-row plan lookup.
+- **Bounded, row-aware input handling**. The reader supports empty input,
+  blank-line skipping, CRLF, trailing-newline-less final rows, first-line UTF-8
+  BOM stripping, configurable maximum line length, and row-numbered invalid
+  JSON errors. `NdjsonOptions` also exposes initial row-buffer sizing for
+  callers that know their typical row width.
+- **Lower-copy line scanning**. The per-row driver uses `fill_buf` plus
+  `memchr` to find line boundaries and transfers the owned row buffer directly
+  into JSON parsing, avoiding an extra row byte copy while preserving reusable
+  scanner-buffer capacity. `run_ndjson` serializes internal `Val` results
+  directly instead of building an intermediate `serde_json::Value` tree.
+- **Reverse file scans**. Added tail-to-head NDJSON file helpers backed by a
+  chunked `memrchr` reverse reader. `run_ndjson_rev` and
+  `collect_ndjson_rev` reuse the same prepared byte-backed plan and direct
+  `Val` serialization path as forward per-row execution, with configurable
+  reverse chunk sizing and maximum line-length enforcement.
+- **Source-dispatch helpers**. Added `NdjsonSource` plus source-based engine
+  helpers so callers can route file paths and existing `BufRead` inputs through
+  one API while preserving the same options-aware per-row execution paths.
+  Callback-based per-row iteration is also available through
+  `for_each_ndjson_source`.
+- **Early-stop NDJSON matching**. Added `for_each_ndjson_until` plus
+  `collect_ndjson_matches*` and `run_ndjson_matches*` APIs for reader, file,
+  source-dispatch, and reverse-file inputs. Match helpers evaluate a predicate
+  per row, emit the original full row only for truthy matches, and stop as soon
+  as the requested match limit is reached, without exposing stream-as-array
+  semantics.
+- **Public facade exports**. The top-level `jetro` crate now re-exports
+  `JetroEngine`, `JetroEngineError`, and `io` so applications can use NDJSON
+  APIs directly from the crate they install.
+- **Reverse query callbacks**. Added `for_each_ndjson_rev*` APIs so arbitrary
+  reverse NDJSON queries can stop through `NdjsonControl` while staying on the
+  same byte/tape row execution path as `run_ndjson_rev`.
+- **Writer-limit APIs and faster output**. Added writer-based forward, source,
+  file, and reverse NDJSON limit helpers so callers can stop after N emitted
+  query results without routing through callback `serde_json::Value`
+  materialization. NDJSON output now uses a shared direct writer for scalars,
+  arrays, objects, small objects, typed lanes, and object-vector rows, with a
+  fast no-escape string path and larger options-driven buffering.
+- **Raw match-row emission**. `run_ndjson_matches*` and reverse match writer
+  APIs now write retained row bytes directly for truthy matches instead of
+  materializing the full root value before serialization, preserving original
+  row formatting and reducing matched-row overhead.
+- **Core NDJSON benchmark**. Added `bench_ndjson` as a core-only cold-path
+  benchmark for simple field extraction, array length, nested first access,
+  nested mapping, and filter/count-style row queries.
+
 ### Demand/tape architecture cleanup
 
 - **Demand metadata stays in planner/executor APIs**. Pipeline bodies now expose
@@ -38,6 +95,16 @@
   now shares constructors for positional, predicate, membership, arg-extreme,
   count, numeric, and keyed reducer sinks, reducing handwritten builtin
   classification drift.
+- **Root positional calls lower statically**. Direct root calls such as
+  `$.take(n)` and `$.skip(n)` now decode their static numeric arguments into
+  `BuiltinCall` metadata instead of falling back to VM-only execution. This
+  makes the same positional facts visible to source demand planning and owned
+  value execution.
+- **Array RHS `has` is explicit and bounded**. `lhs has [a, b]` now lowers to
+  a `has_all` builtin with pre-normalized literal needles, so strings require
+  every substring, arrays require every element, and objects require every key.
+  Non-literal array RHS forms are rejected instead of silently matching every
+  string via empty-substring containment.
 - **Nested pipeline plans are first-class execution units**. Nested collection
   maps such as `items.map(...).sum()` now carry their source, stage
   expressions, stage kernels, and sink kernels in the shared plan object.

@@ -2243,6 +2243,11 @@ where
                         .map(|found| ViewKernelValue::Owned(Val::Bool(found)))
                 }
                 (
+                    crate::builtins::BuiltinMethod::HasAll,
+                    crate::builtins::BuiltinArgs::StrVec(keys),
+                ) => view_has_all(&view, keys)
+                    .map(|found| ViewKernelValue::Owned(Val::Bool(found))),
+                (
                     crate::builtins::BuiltinMethod::HasKey,
                     crate::builtins::BuiltinArgs::Str(key),
                 ) => Some(ViewKernelValue::Owned(Val::Bool(
@@ -2456,6 +2461,13 @@ where
         return Some(iter.any(|item| scalar_matches_key(item.scalar(), key)));
     }
     None
+}
+
+fn view_has_all<'a, V>(view: &V, keys: &[Arc<str>]) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    keys.iter().try_fold(true, |_, key| view_has(view, key.as_ref()))
 }
 
 #[inline]

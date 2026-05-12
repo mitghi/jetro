@@ -420,7 +420,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         Len | Count | Sum | ApproxCountDistinct | IndexOf | LastIndexOf | ByteLen | ParseInt
         | Ceil | Floor | Round => AbstractVal::scalar(VType::Int),
         // Boolean-returning methods.
-        Any | All | Has | HasKey | Missing | Includes | StartsWith | EndsWith | IsBlank
+        Any | All | Has | HasAll | HasKey | Missing | Includes | StartsWith | EndsWith | IsBlank
         | IsNumeric | IsAlpha | IsAscii | ParseBool | ReMatch | ContainsAny | ContainsAll => {
             AbstractVal::scalar(VType::Bool)
         }

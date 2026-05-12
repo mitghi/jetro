@@ -1,0 +1,57 @@
+use std::io::Cursor;
+use std::time::Instant;
+
+use jetro_core::JetroEngine;
+
+fn build_ndjson(rows: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows * 128);
+    for i in 0..rows {
+        let active = if i % 3 == 0 { "true" } else { "false" };
+        let score = 10_000usize.saturating_sub(i % 10_000);
+        out.extend_from_slice(
+            format!(
+                r#"{{"id":{i},"name":"user_{i}","active":{active},"score":{score},"attributes":[{{"key":"k1","value":"v_{i}_1"}},{{"key":"k2","value":"v_{i}_2"}},{{"key":"k3","value":"v_{i}_3"}}]}}"#
+            )
+            .as_bytes(),
+        );
+        out.push(b'\n');
+    }
+    out
+}
+
+fn bench(engine: &JetroEngine, data: &[u8], label: &str, query: &str) {
+    let start = Instant::now();
+    let rows = engine
+        .run_ndjson(Cursor::new(data), query, std::io::sink())
+        .expect("NDJSON query should run");
+    let elapsed = start.elapsed();
+    let mb = data.len() as f64 / (1024.0 * 1024.0);
+    let mb_s = mb / elapsed.as_secs_f64();
+    println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
+}
+
+fn main() {
+    let rows = std::env::args()
+        .nth(1)
+        .and_then(|arg| arg.parse::<usize>().ok())
+        .unwrap_or(200_000);
+    let data = build_ndjson(rows);
+    let engine = JetroEngine::new();
+
+    println!(
+        "NDJSON cold-path core bench: {} rows, {:.1} MiB",
+        rows,
+        data.len() as f64 / (1024.0 * 1024.0)
+    );
+    bench(&engine, &data, "root int field", "id");
+    bench(&engine, &data, "root string field", "name");
+    bench(&engine, &data, "array len", "attributes.len()");
+    bench(&engine, &data, "first nested value", "attributes.first().value");
+    bench(&engine, &data, "map nested keys", "attributes.map(@.key)");
+    bench(
+        &engine,
+        &data,
+        "filter nested count",
+        r#"attributes.filter(@.value.contains("_3")).len()"#,
+    );
+}

@@ -95,6 +95,7 @@ impl QueryPlan {
             },
         }
     }
+
 }
 
 /// Selects the execution entry point for a `QueryPlan`.

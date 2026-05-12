@@ -368,6 +368,20 @@ pub fn last_apply(recv: &Val, n: i64) -> Option<Val> {
     }
 }
 
+/// Returns the first `n` elements of any array-like value as an array.
+#[inline]
+pub fn take_apply(recv: &Val, n: usize) -> Option<Val> {
+    let items = recv.as_vals()?;
+    Some(Val::arr(items.iter().take(n).cloned().collect()))
+}
+
+/// Drops the first `n` elements of any array-like value and returns the suffix as an array.
+#[inline]
+pub fn skip_apply(recv: &Val, n: usize) -> Option<Val> {
+    let items = recv.as_vals()?;
+    Some(Val::arr(items.iter().skip(n).cloned().collect()))
+}
+
 /// Returns the element at index `i` (negative indices count from the end); delegates to `Val::get_index`.
 #[inline]
 pub fn nth_any_apply(recv: &Val, i: i64) -> Option<Val> {
@@ -742,4 +756,3 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
     }
     Some(Val::Obj(Arc::new(out)))
 }
-

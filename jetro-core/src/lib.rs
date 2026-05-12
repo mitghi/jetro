@@ -20,11 +20,44 @@
 //! let j = Jetro::from_bytes(br#"{"books":[{"price":12}]}"#.to_vec()).unwrap();
 //! assert_eq!(j.collect("$.books.len()").unwrap(), serde_json::json!(1));
 //! ```
+//!
+//! ```rust
+//! use jetro_core::JetroEngine;
+//! use std::io::Cursor;
+//!
+//! let engine = JetroEngine::new();
+//! let rows = Cursor::new(br#"{"name":"Ada"}
+//! {"name":"Bob"}
+//! "#);
+//! let names = engine.collect_ndjson(rows, "name").unwrap();
+//! assert_eq!(names, vec![serde_json::json!("Ada"), serde_json::json!("Bob")]);
+//! ```
+//!
+//! Match-limited NDJSON helpers evaluate a predicate per row, return the
+//! original full row for truthy matches, and stop after the requested number of
+//! matches:
+//!
+//! ```rust
+//! use jetro_core::JetroEngine;
+//! use std::io::Cursor;
+//!
+//! let engine = JetroEngine::new();
+//! let rows = Cursor::new(br#"{"id":1,"active":true}
+//! {"id":2,"active":false}
+//! {"id":3,"active":true}
+//! "#);
+//! let first_two = engine.collect_ndjson_matches(rows, "active", 2).unwrap();
+//! assert_eq!(first_two, vec![
+//!     serde_json::json!({"id": 1, "active": true}),
+//!     serde_json::json!({"id": 3, "active": true}),
+//! ]);
+//! ```
 
 pub(crate) mod builtins;
 pub(crate) mod compile;
 pub(crate) mod data;
 pub(crate) mod exec;
+pub mod io;
 pub(crate) mod ir;
 pub(crate) mod parse;
 pub(crate) mod plan;
@@ -34,12 +67,12 @@ pub(crate) mod vm;
 #[cfg(test)]
 mod tests;
 
+use data::value::Val;
 use serde_json::Value;
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use data::value::Val;
 
 pub use data::context::EvalError;
 #[cfg(test)]
@@ -54,7 +87,6 @@ pub mod __fuzz_internal {
     pub use crate::parse::parser::{parse, ParseError};
     pub use crate::plan::physical::plan_query;
 }
-
 
 #[cfg(test)]
 #[derive(Debug)]
@@ -129,7 +161,6 @@ pub struct Jetro {
     vm: RefCell<VM>,
 }
 
-
 /// Long-lived multi-document query engine with an explicit plan cache.
 /// Use when the same process evaluates many expressions over many documents —
 /// parse/lower/compile work is amortised by this object, not hidden in
@@ -155,6 +186,10 @@ pub struct JetroEngine {
 pub enum JetroEngineError {
     /// JSON parsing failed before evaluation could begin.
     Json(serde_json::Error),
+    /// Reading from a stream or writing results failed.
+    Io(std::io::Error),
+    /// NDJSON row parsing failed with row context.
+    Ndjson(io::RowError),
     /// Expression evaluation failed (the JSON was valid but the query errored).
     Eval(EvalError),
 }
@@ -163,6 +198,8 @@ impl std::fmt::Display for JetroEngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(err) => write!(f, "{}", err),
+            Self::Io(err) => write!(f, "{}", err),
+            Self::Ndjson(err) => write!(f, "{}", err),
             Self::Eval(err) => write!(f, "{}", err),
         }
     }
@@ -172,6 +209,8 @@ impl std::error::Error for JetroEngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Json(err) => Some(err),
+            Self::Io(err) => Some(err),
+            Self::Ndjson(err) => Some(err),
             Self::Eval(_) => None,
         }
     }
@@ -180,6 +219,18 @@ impl std::error::Error for JetroEngineError {
 impl From<serde_json::Error> for JetroEngineError {
     fn from(err: serde_json::Error) -> Self {
         Self::Json(err)
+    }
+}
+
+impl From<std::io::Error> for JetroEngineError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<io::RowError> for JetroEngineError {
+    fn from(err: io::RowError) -> Self {
+        Self::Ndjson(err)
     }
 }
 
@@ -240,16 +291,23 @@ impl JetroEngine {
     /// interned into this engine's key cache. With `simd-json`, the tape
     /// is materialised eagerly so interning happens once at parse time
     /// (subsequent `collect` calls reuse the cached `Val` tree).
-    pub fn parse_bytes(
-        &self,
-        bytes: Vec<u8>,
-    ) -> std::result::Result<Jetro, JetroEngineError> {
+    pub fn parse_bytes(&self, bytes: Vec<u8>) -> std::result::Result<Jetro, JetroEngineError> {
         let document = Jetro::from_bytes(bytes)?;
         // Force materialisation so keys are interned through this
         // engine's cache rather than the default thread-local one when
         // `collect` later asks for `root_val`.
         let _ = document.root_val_with(&self.keys)?;
         Ok(document)
+    }
+
+    /// Parse raw JSON bytes into a `Jetro` document without forcing the `Val`
+    /// tree. This keeps byte-backed callers eligible for tape/view execution;
+    /// object keys are interned only if execution later materialises the row.
+    pub(crate) fn parse_bytes_lazy(
+        &self,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<Jetro, JetroEngineError> {
+        Ok(Jetro::from_bytes(bytes)?)
     }
 
     /// Evaluate a Jetro expression against an already-constructed `Jetro` document,
@@ -260,8 +318,28 @@ impl JetroEngine {
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
         let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
+        self.collect_prepared(document, &plan)
+    }
+
+    pub(crate) fn collect_prepared(
+        &self,
+        document: &Jetro,
+        plan: &ir::physical::QueryPlan,
+    ) -> std::result::Result<Value, EvalError> {
+        self.collect_prepared_val(document, plan).map(Value::from)
+    }
+
+    pub(crate) fn collect_prepared_val(
+        &self,
+        document: &Jetro,
+        plan: &ir::physical::QueryPlan,
+    ) -> std::result::Result<Val, EvalError> {
         let mut vm = self.vm.lock().expect("vm cache poisoned");
-        exec::router::collect_plan_json_with_vm(document, &plan, &mut vm)
+        exec::router::collect_plan_val_with_vm(document, plan, &mut vm)
+    }
+
+    pub(crate) fn lock_vm(&self) -> std::sync::MutexGuard<'_, VM> {
+        self.vm.lock().expect("vm cache poisoned")
     }
 
     /// Convenience wrapper: wrap a `serde_json::Value` in a `Jetro` and evaluate `expr`.
@@ -289,9 +367,757 @@ impl JetroEngine {
         Ok(self.collect(&document, expr)?)
     }
 
+    /// Evaluate `query` independently for every non-empty NDJSON row and write
+    /// one JSON result per output line.
+    pub fn run_ndjson<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson(self, reader, query, writer)
+    }
+
+    /// Open an NDJSON file and evaluate `query` independently for every
+    /// non-empty row, writing one JSON result per output line.
+    pub fn run_ndjson_file<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file(self, path, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_file`] with explicit NDJSON reader options.
+    pub fn run_ndjson_file_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_with_options(self, path, query, writer, options)
+    }
+
+    /// Open an NDJSON file, write at most `limit` query results, and stop reading.
+    pub fn run_ndjson_file_limit<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit(self, path, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_file_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_file_limit_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit_with_options(self, path, query, limit, writer, options)
+    }
+
+    /// Evaluate `query` independently for every row from an [`io::NdjsonSource`].
+    pub fn run_ndjson_source<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source(self, source, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source`] with explicit NDJSON reader options.
+    pub fn run_ndjson_source_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_with_options(self, source, query, writer, options)
+    }
+
+    /// Evaluate `query` for rows from an [`io::NdjsonSource`], write at most
+    /// `limit` results, and stop reading.
+    pub fn run_ndjson_source_limit<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit(self, source, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_source_limit_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit_with_options(self, source, query, limit, writer, options)
+    }
+
+    /// Read an NDJSON file from tail to head and write one query result per row.
+    pub fn run_ndjson_rev<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev(self, path, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_with_options(self, path, query, writer, options)
+    }
+
+    /// Read an NDJSON file from tail to head, write at most `limit` query
+    /// results, and stop reading.
+    pub fn run_ndjson_rev_limit<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_limit(self, path, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_limit_with_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_limit_with_options(self, path, query, limit, writer, options)
+    }
+
+    /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
+    pub fn run_ndjson_with_options<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_with_options(self, reader, query, writer, options)
+    }
+
+    /// Evaluate `query` for NDJSON rows, write at most `limit` results, and stop reading.
+    pub fn run_ndjson_limit<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_limit(self, reader, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_limit`] with explicit NDJSON reader options.
+    pub fn run_ndjson_limit_with_options<R, W>(
+        &self,
+        reader: R,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_limit_with_options(self, reader, query, limit, writer, options)
+    }
+
+    /// Evaluate `predicate` for each NDJSON row, write matching original rows,
+    /// and stop after `limit` matches.
+    pub fn run_ndjson_matches<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches(self, reader, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_with_options<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_with_options(self, reader, predicate, limit, writer, options)
+    }
+
+    /// Open an NDJSON file, write matching original rows, and stop after `limit` matches.
+    pub fn run_ndjson_matches_file<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_file`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_file_with_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file_with_options(self, path, predicate, limit, writer, options)
+    }
+
+    /// Evaluate `predicate` against each row from an [`io::NdjsonSource`], write
+    /// matching original rows, and stop after `limit` matches.
+    pub fn run_ndjson_matches_source<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source(self, source, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_source`] with explicit NDJSON reader options.
+    pub fn run_ndjson_matches_source_with_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source_with_options(self, source, predicate, limit, writer, options)
+    }
+
+    /// Read an NDJSON file from tail to head, write matching original rows, and
+    /// stop after `limit` matches.
+    pub fn run_ndjson_rev_matches<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_matches`] with explicit NDJSON reader options.
+    pub fn run_ndjson_rev_matches_with_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches_with_options(self, path, predicate, limit, writer, options)
+    }
+
+    /// Evaluate `query` independently for every non-empty NDJSON row and collect
+    /// the per-row results.
+    pub fn collect_ndjson<R>(
+        &self,
+        reader: R,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson(self, reader, query)
+    }
+
+    /// Open an NDJSON file and collect per-row query results.
+    pub fn collect_ndjson_file<P>(
+        &self,
+        path: P,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_file(self, path, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_file`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_file_with_options<P>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_file_with_options(self, path, query, options)
+    }
+
+    /// Collect per-row query results from an [`io::NdjsonSource`].
+    pub fn collect_ndjson_source(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_source(self, source, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_source`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_source_with_options(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_source_with_options(self, source, query, options)
+    }
+
+    /// Read an NDJSON file from tail to head and collect per-row query results.
+    pub fn collect_ndjson_rev<P>(
+        &self,
+        path: P,
+        query: &str,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev(self, path, query)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_rev_with_options<P>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_with_options(self, path, query, options)
+    }
+
+    /// Read an NDJSON file from tail to head and call `f` with each query result
+    /// as it is produced.
+    pub fn for_each_ndjson_rev<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_rev(self, path, query, f)
+    }
+
+    /// Read an NDJSON file from tail to head and call `f` until it returns
+    /// [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_rev_until<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, io::NdjsonOptions::default(), f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_rev_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_rev_until_with_options<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_rev`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_rev_with_options<P, F>(
+        &self,
+        path: P,
+        query: &str,
+        options: io::NdjsonOptions,
+        mut f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_rev_with_options(self, path, query, options, |value| {
+            f(value);
+            Ok(io::NdjsonControl::Continue)
+        })
+    }
+
+    /// Like [`JetroEngine::collect_ndjson`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_with_options<R>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_with_options(self, reader, query, options)
+    }
+
+    /// Evaluate `predicate` for each NDJSON row, collect matching original
+    /// rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches<R>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_matches(self, reader, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_with_options<R>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        R: std::io::BufRead,
+    {
+        io::collect_ndjson_matches_with_options(self, reader, predicate, limit, options)
+    }
+
+    /// Open an NDJSON file, collect matching original rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches_file<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_matches_file(self, path, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches_file`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_file_with_options<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_matches_file_with_options(self, path, predicate, limit, options)
+    }
+
+    /// Evaluate `predicate` against each row from an [`io::NdjsonSource`],
+    /// collect matching original rows, and stop after `limit` matches.
+    pub fn collect_ndjson_matches_source(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_matches_source(self, source, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_matches_source`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_matches_source_with_options(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError> {
+        io::collect_ndjson_matches_source_with_options(self, source, predicate, limit, options)
+    }
+
+    /// Read an NDJSON file from tail to head, collect matching original rows,
+    /// and stop after `limit` matches.
+    pub fn collect_ndjson_rev_matches<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_matches(self, path, predicate, limit)
+    }
+
+    /// Like [`JetroEngine::collect_ndjson_rev_matches`] with explicit NDJSON reader options.
+    pub fn collect_ndjson_rev_matches_with_options<P>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<Vec<Value>, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+    {
+        io::collect_ndjson_rev_matches_with_options(self, path, predicate, limit, options)
+    }
+
+    /// Evaluate `query` independently for every non-empty NDJSON row and call
+    /// `f` with each result as it is produced.
+    pub fn for_each_ndjson<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson(self, reader, query, f)
+    }
+
+    /// Evaluate `query` independently for every non-empty NDJSON row and call
+    /// `f` until it returns [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_until<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_until(self, reader, query, f)
+    }
+
+    /// Evaluate `query` for every row from an [`io::NdjsonSource`] and call
+    /// `f` with each result as it is produced.
+    pub fn for_each_ndjson_source<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_source(self, source, query, f)
+    }
+
+    /// Evaluate `query` for every row from an [`io::NdjsonSource`] and call
+    /// `f` until it returns [`io::NdjsonControl::Stop`] or input is exhausted.
+    pub fn for_each_ndjson_source_until<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_source_until(self, source, query, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_source_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_source_until_with_options<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_source_until_with_options(self, source, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_source`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_source_with_options<F>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_source_with_options(self, source, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_with_options<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value),
+    {
+        io::for_each_ndjson_with_options(self, reader, query, options, f)
+    }
+
+    /// Like [`JetroEngine::for_each_ndjson_until`] with explicit NDJSON reader options.
+    pub fn for_each_ndjson_until_with_options<R, F>(
+        &self,
+        reader: R,
+        query: &str,
+        options: io::NdjsonOptions,
+        f: F,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        F: FnMut(Value) -> std::result::Result<io::NdjsonControl, JetroEngineError>,
+    {
+        io::for_each_ndjson_until_with_options(self, reader, query, options, f)
+    }
+
     /// Look up a compiled `QueryPlan` by expression string and planning context,
     /// compiling and inserting it if not already cached; evicts the whole cache if full.
-    fn cached_plan(&self, expr: &str, context: plan::physical::PlanningContext) -> ir::physical::QueryPlan {
+    pub(crate) fn cached_plan(
+        &self,
+        expr: &str,
+        context: plan::physical::PlanningContext,
+    ) -> ir::physical::QueryPlan {
         let mut cache = self.plan_cache.lock().expect("plan cache poisoned");
         let cache_key = format!("{}\0{}", context.cache_key(), expr);
         if let Some(plan) = cache.get(&cache_key) {
@@ -425,8 +1251,6 @@ impl Jetro {
     /// When the `simd-json` feature is enabled the bytes are not parsed eagerly;
     /// the tape is built lazily on the first query that needs it.
     pub fn from_bytes(bytes: Vec<u8>) -> std::result::Result<Self, serde_json::Error> {
-        
-        
         #[cfg(feature = "simd-json")]
         {
             return Ok(Self {

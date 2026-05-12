@@ -152,19 +152,102 @@ cargo run -p jetro-core --release --example bench_cold
 
 ```toml
 [dependencies]
-jetro = "0.5.7"
+jetro = "0.5.8"
 ```
 
 ## API
 
 ```rust
-use jetro::Jetro;
+use jetro::{Jetro, JetroEngine};
 
 let jetro = Jetro::from_bytes(json_bytes)?;
 let value = jetro.collect("$.some.expression")?;
+
+let engine = JetroEngine::new();
+let first_two = engine.collect_ndjson_matches_file(
+    "events.ndjson",
+    "level == \"error\"",
+    2,
+)?;
 ```
 
-That is the stable top-level API.
+`Jetro` is the byte-oriented document handle. `JetroEngine` is the long-lived
+engine for cached plans, reusable VM state, and NDJSON processing.
+
+### NDJSON
+
+NDJSON APIs evaluate each non-empty line as an independent JSON document while
+reusing one prepared query plan for the stream. Use `collect_*` helpers when
+you want `serde_json::Value`s back, and `run_*` helpers when you want results
+written directly to an output stream.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"id":1,"active":true}
+{"id":2,"active":false}
+{"id":3,"active":true}
+"#);
+
+let ids = engine.collect_ndjson(rows, "id")?;
+assert_eq!(ids, vec![
+    serde_json::json!(1),
+    serde_json::json!(2),
+    serde_json::json!(3),
+]);
+```
+
+For first-N result queries, use the limit writers. They stop reading as soon as
+the requested number of query results has been written.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"n":1}
+{"n":2}
+not-json
+"#);
+
+let mut out = Vec::new();
+engine.run_ndjson_limit(rows, "n + 1", 2, &mut out)?;
+assert_eq!(std::str::from_utf8(&out)?, "2\n3\n");
+```
+
+For first-N document search, use the match-limited APIs. They evaluate the
+predicate per row, write the original full row for truthy matches, and stop as
+soon as the limit is reached. The writer variants preserve matching rows as raw
+NDJSON where possible, avoiding collect-and-reencode work.
+
+```rust
+use jetro::JetroEngine;
+use std::io::Cursor;
+
+let engine = JetroEngine::new();
+let rows = Cursor::new(br#"{"id":1,"level":"info"}
+{"id":2,"level":"error"}
+{"id":3,"level":"error"}
+{"id":4,"level":"error"}
+"#);
+
+let first_two_errors = engine.collect_ndjson_matches(rows, r#"level == "error""#, 2)?;
+assert_eq!(first_two_errors.len(), 2);
+```
+
+File, source-dispatch, and reverse-file variants are public too:
+`run_ndjson_limit`, `run_ndjson_file_limit`, `run_ndjson_source_limit`,
+`run_ndjson_rev_limit`, plus their `_with_options` forms for reader settings.
+For predicate matches, use
+`collect_ndjson_matches_file`, `run_ndjson_matches_file`,
+`collect_ndjson_matches_source`, `run_ndjson_matches_source`,
+`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
+
+Reverse limit and reverse match APIs use the same byte/tape row execution path
+as forward NDJSON. For arbitrary reverse queries with caller-controlled early
+stop, use `for_each_ndjson_rev_until`.
 
 ## Quick Language Preview
 
@@ -268,6 +351,7 @@ Full syntax reference: [jetro-core/src/SYNTAX.md](jetro-core/src/SYNTAX.md)
 - **[Jetrocli](https://github.com/mitghi/jetrocli)**: For interactive use in Terminal.
 - **[Jetro Emacs Plugin](https://github.com/mitghi/jetromacs)** use Jetro in Emacs.
 - **[Jetro Python Binding](https://github.com/mitghi/jetro-py)**: Python Binding for Jetro.
+- **[Jetro Dart Binding](https://github.com/mitghi/jetro-dart)**: Dart/Flutter Binding for Jetro.
 
 ## Learn More
 

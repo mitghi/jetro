@@ -330,6 +330,14 @@ impl Builtin for Take {
         buf.truncate(n);
         Some(Ok(()))
     }
+
+    #[inline]
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => super::take_apply(recv, *n),
+            _ => None,
+        }
+    }
 }
 
 /// Skip first N elements; bounded positional offset.
@@ -380,6 +388,14 @@ impl Builtin for Skip {
             buf.drain(..n);
         }
         Some(Ok(()))
+    }
+
+    #[inline]
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => super::skip_apply(recv, *n),
+            _ => None,
+        }
     }
 }
 
@@ -3048,6 +3064,32 @@ impl Builtin for Has {
                 let key = crate::util::val_to_key(v);
                 super::has_apply(recv, &key)
             }
+            _ => None,
+        }
+    }
+}
+
+/// `has_all([a, b, ...])` — every literal needle is present in the receiver.
+pub(crate) struct HasAll;
+impl Builtin for HasAll {
+    const METHOD: BuiltinMethod = BuiltinMethod::HasAll;
+    const NAME: &'static str = "has_all";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+            .indexed()
+            .view_native()
+            .demand_law(BuiltinDemandLaw::MapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .element()
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Val(v) => super::has_all_apply(recv, v),
+            super::BuiltinArgs::StrVec(keys) => super::has_all_keys_apply(recv, keys),
             _ => None,
         }
     }
