@@ -330,6 +330,14 @@ impl Builtin for Take {
         buf.truncate(n);
         Some(Ok(()))
     }
+
+    #[inline]
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => super::take_apply(recv, *n),
+            _ => None,
+        }
+    }
 }
 
 /// Skip first N elements; bounded positional offset.
@@ -380,6 +388,14 @@ impl Builtin for Skip {
             buf.drain(..n);
         }
         Some(Ok(()))
+    }
+
+    #[inline]
+    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => super::skip_apply(recv, *n),
+            _ => None,
+        }
     }
 }
 

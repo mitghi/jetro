@@ -241,6 +241,24 @@ not-json
 }
 
 #[test]
+fn stream_mode_supports_root_positional_sinks() {
+    let engine = JetroEngine::new();
+    let input = br#"{"name":"Ada"}
+{"name":"Bob"}
+"#;
+
+    let first = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.first()")
+        .expect("stream first should run");
+    let taken = engine
+        .collect_ndjson_stream(Cursor::new(input), "$.take(1)")
+        .expect("stream take should run");
+
+    assert_eq!(first, json!({"name": "Ada"}));
+    assert_eq!(taken, json!([{"name": "Ada"}]));
+}
+
+#[test]
 fn source_helpers_dispatch_reader_and_file_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(

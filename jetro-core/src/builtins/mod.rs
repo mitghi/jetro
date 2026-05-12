@@ -2708,6 +2708,9 @@ where
             BuiltinCall::new(method, BuiltinArgs::I64(n))
         }
         BuiltinMethod::Nth => BuiltinCall::new(method, BuiltinArgs::I64(i64_arg!(0)?)),
+        BuiltinMethod::Take | BuiltinMethod::Skip => {
+            BuiltinCall::new(method, BuiltinArgs::Usize(i64_arg!(0)?.max(0) as usize))
+        }
         BuiltinMethod::Append | BuiltinMethod::Prepend | BuiltinMethod::Set => {
             let item = if args.is_empty() {
                 Val::Null
