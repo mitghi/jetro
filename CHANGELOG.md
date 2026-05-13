@@ -95,6 +95,9 @@
   nested paths, while falling back safely when row field order changes. Static
   object and array projections with path, literal, and view-scalar values write
   directly from tape without materializing per-row `Val` objects.
+- **NDJSON projection benchmark coverage**. The core NDJSON benchmark now
+  includes object, scalar-call object, and array projection cases alongside
+  path, filter, reducer, and match workloads.
 
 ### Demand/tape architecture cleanup
 
