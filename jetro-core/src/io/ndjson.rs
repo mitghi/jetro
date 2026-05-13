@@ -12,7 +12,8 @@ use std::sync::MutexGuard;
 
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
-    eval_ndjson_byte_predicate_row, write_ndjson_byte_plan_row, BytePlanWrite,
+    eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
+    write_ndjson_byte_tape_plan_row, BytePlanWrite,
 };
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
@@ -928,6 +929,9 @@ where
 
     #[cfg(feature = "simd-json")]
     if let Some(plan) = direct_tape_plan(engine, query) {
+        if tape_plan_can_write_byte_row(&plan) {
+            return drive_ndjson_tape_byte_writer(engine, reader, &plan, limit, options, writer);
+        }
         return drive_ndjson_tape_writer(engine, reader, &plan, limit, options, writer);
     }
 
@@ -973,6 +977,53 @@ where
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
         match write_ndjson_byte_plan_row(&mut writer, row, byte_plan)? {
+            BytePlanWrite::Done => {}
+            BytePlanWrite::Fallback => {
+                scratch.parse_slice(row).map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })?;
+                tape_runner.write_row(&scratch, &mut writer)?;
+            }
+        }
+        writer.write_all(b"\n")?;
+        count += 1;
+        if limit.is_some_and(|limit| count >= limit) {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_byte_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    tape_plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut count = 0usize;
+
+    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan)? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
                 scratch.parse_slice(row).map_err(|message| {
@@ -3210,5 +3261,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} should not need tape fallback", predicate.0));
             assert_eq!(matched, predicate.1, "{}", predicate.0);
         }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_counts_filtered_rows() {
+        let engine = crate::JetroEngine::new();
+        let query = r#"attributes.filter(@.value.contains("_3")).len()"#;
+        let plan = super::direct_tape_plan(&engine, query).expect("filter count should be direct");
+        assert!(super::tape_plan_can_write_byte_row(&plan));
+
+        let row = br#"{"attributes":[{"value":"a_3"},{"value":"b"},{"value":"c_3"}]}"#;
+        let mut out = Vec::new();
+        let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan)
+            .expect("byte count should write");
+        assert!(matches!(wrote, super::BytePlanWrite::Done));
+        assert_eq!(out, b"2");
     }
 }

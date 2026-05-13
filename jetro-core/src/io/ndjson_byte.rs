@@ -1,5 +1,8 @@
 use super::ndjson::{write_i64, write_val_json};
-use super::ndjson_direct::{NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectPredicate};
+use super::ndjson_direct::{
+    NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan,
+};
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
@@ -98,6 +101,30 @@ pub(super) fn eval_ndjson_byte_predicate_row(
     predicate: &NdjsonDirectPredicate,
 ) -> Result<Option<bool>, JetroEngineError> {
     Ok(eval_raw_predicate(row, predicate))
+}
+
+pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool {
+    matches!(plan, NdjsonDirectTapePlan::CountFiltered { .. })
+}
+
+pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    plan: &NdjsonDirectTapePlan,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    match plan {
+        NdjsonDirectTapePlan::CountFiltered {
+            source_steps,
+            predicate,
+        } => {
+            let Some(count) = raw_json_count_filtered(row, source_steps, predicate) else {
+                return Ok(BytePlanWrite::Fallback);
+            };
+            write_i64(writer, count as i64)?;
+            Ok(BytePlanWrite::Done)
+        }
+        _ => Ok(BytePlanWrite::Fallback),
+    }
 }
 
 enum RawFieldValue<'a> {
@@ -526,6 +553,96 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
                 .map(|value| crate::util::is_truthy(&value))
         }
         NdjsonDirectPredicate::ViewPipeline { .. } => None,
+    }
+}
+
+fn raw_json_count_filtered(
+    row: &[u8],
+    source_steps: &[PhysicalPathStep],
+    predicate: &NdjsonDirectItemPredicate,
+) -> Option<usize> {
+    let source = raw_json_path_value(row, source_steps)?;
+    let mut count = 0usize;
+    raw_json_source_items(source, |item| {
+        if eval_raw_item_predicate(item, predicate)? {
+            count += 1;
+        }
+        Some(())
+    })?;
+    Some(count)
+}
+
+fn raw_json_source_items<F>(value: &[u8], mut visit: F) -> Option<()>
+where
+    F: FnMut(&[u8]) -> Option<()>,
+{
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    if value.get(start) != Some(&b'[') {
+        return visit(&value[start..end]);
+    }
+    let mut pos = skip_json_ws(value, start + 1);
+    if pos < end && value[pos] == b']' {
+        return Some(());
+    }
+    loop {
+        let value_start = skip_json_ws(value, pos);
+        let value_end = skip_json_value(value, value_start)?;
+        visit(&value[value_start..value_end])?;
+        pos = skip_json_ws(value, value_end);
+        match value.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => return Some(()),
+            _ => return None,
+        }
+    }
+}
+
+fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) -> Option<bool> {
+    use crate::parse::ast::BinOp;
+
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => {
+            raw_json_path_view(row, steps).map(json_view_truthy)
+        }
+        NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            let lhs = eval_raw_item_predicate(row, lhs)?;
+            if !lhs {
+                return Some(false);
+            }
+            eval_raw_item_predicate(row, rhs)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            let lhs = eval_raw_item_predicate(row, lhs)?;
+            if lhs {
+                return Some(true);
+            }
+            eval_raw_item_predicate(row, rhs)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } => {
+            let lhs = eval_raw_item_predicate_scalar(row, lhs)?;
+            let rhs = eval_raw_item_predicate_scalar(row, rhs)?;
+            Some(crate::util::json_cmp_binop(lhs, *op, rhs))
+        }
+        NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => raw_json_path_view(row, lhs)
+            .map(|value| crate::util::json_cmp_binop(value, *op, JsonView::from_val(lit))),
+        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
+            let value = raw_json_path_view(row, suffix_steps)?;
+            call.try_apply_json_view(value)
+                .map(|value| crate::util::is_truthy(&value))
+        }
+    }
+}
+
+fn eval_raw_item_predicate_scalar<'a>(
+    row: &'a [u8],
+    predicate: &'a NdjsonDirectItemPredicate,
+) -> Option<JsonView<'a>> {
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => raw_json_path_view(row, steps),
+        NdjsonDirectItemPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        _ => None,
     }
 }
 
