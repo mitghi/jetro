@@ -1,8 +1,10 @@
 use crate::data::value::Val;
+use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::plan::physical::PlanningContext;
 use crate::JetroEngine;
+use std::sync::Arc;
 
-pub(super) type NdjsonPhysicalPath = Vec<crate::ir::physical::PhysicalPathStep>;
+pub(super) type NdjsonPhysicalPath = Vec<PhysicalPathStep>;
 
 #[derive(Clone)]
 pub(super) enum NdjsonDirectTapePlan {
@@ -102,7 +104,7 @@ pub(super) enum NdjsonDirectItemPredicate {
 
 pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
     use crate::builtins::{BuiltinArgs, BuiltinMethod};
-    use crate::ir::physical::{PlanNode, QueryRoot};
+    use crate::ir::physical::QueryRoot;
 
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let QueryRoot::Node(root) = plan.root() else {
@@ -128,19 +130,9 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
             body,
-        } if body.stages.is_empty()
-            && matches!(
-                body.sink,
-                crate::exec::pipeline::Sink::Reducer(ref spec)
-                    if spec.op == crate::exec::pipeline::ReducerOp::Count
-                        && spec.predicate.is_none()
-            ) =>
-        {
+        } if body.stages.is_empty() && is_plain_count_sink(body) => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: keys
-                    .iter()
-                    .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-                    .collect(),
+                steps: keys_to_path(keys),
                 call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                 optional: false,
             })
@@ -148,19 +140,9 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::Expr(source),
             body,
-        } if body.stages.is_empty()
-            && matches!(
-                body.sink,
-                crate::exec::pipeline::Sink::Reducer(ref spec)
-                    if spec.op == crate::exec::pipeline::ReducerOp::Count
-                        && spec.predicate.is_none()
-            ) =>
-        {
-            let PlanNode::RootPath(steps) = plan.node(*source) else {
-                return None;
-            };
+        } if body.stages.is_empty() && is_plain_count_sink(body) => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: steps.clone(),
+                steps: root_path_steps(&plan, *source)?,
                 call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                 optional: false,
             })
@@ -170,11 +152,8 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             call,
             optional,
         } if call.method == BuiltinMethod::Len && matches!(call.args, BuiltinArgs::None) => {
-            let PlanNode::RootPath(steps) = plan.node(*receiver) else {
-                return None;
-            };
             Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: steps.clone(),
+                steps: root_path_steps(&plan, *receiver)?,
                 call: call.clone(),
                 optional: *optional,
             })
@@ -208,22 +187,37 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 fn pipeline_source_to_steps(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
 ) -> Option<NdjsonPhysicalPath> {
     match source {
-        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(
-            keys.iter()
-                .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-                .collect(),
-        ),
-        crate::ir::physical::PipelinePlanSource::Expr(source) => {
-            let crate::ir::physical::PlanNode::RootPath(steps) = plan.node(*source) else {
-                return None;
-            };
-            Some(steps.clone())
-        }
+        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(keys_to_path(keys)),
+        crate::ir::physical::PipelinePlanSource::Expr(source) => root_path_steps(plan, *source),
     }
+}
+
+fn is_plain_count_sink(body: &crate::exec::pipeline::PipelineBody) -> bool {
+    matches!(
+        body.sink,
+        crate::exec::pipeline::Sink::Reducer(ref spec)
+            if spec.op == crate::exec::pipeline::ReducerOp::Count && spec.predicate.is_none()
+    )
+}
+
+fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
+    keys.iter()
+        .map(|key| PhysicalPathStep::Field(key.clone()))
+        .collect()
+}
+
+fn root_path_steps(
+    plan: &QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<NdjsonPhysicalPath> {
+    let PlanNode::RootPath(steps) = plan.node(id) else {
+        return None;
+    };
+    Some(steps.clone())
 }
 
 pub(super) fn direct_tape_predicate(
@@ -238,11 +232,9 @@ pub(super) fn direct_tape_predicate(
 }
 
 fn direct_tape_predicate_node(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<NdjsonDirectPredicate> {
-    use crate::ir::physical::PlanNode;
-
     match plan.node(id) {
         PlanNode::Literal(value) => Some(NdjsonDirectPredicate::Literal(value.clone())),
         PlanNode::RootPath(steps) => Some(NdjsonDirectPredicate::Path(steps.clone())),
@@ -278,7 +270,7 @@ fn direct_tape_predicate_node(
 }
 
 fn direct_tape_map_path_plan(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
@@ -297,7 +289,7 @@ fn direct_tape_map_path_plan(
 }
 
 fn direct_tape_count_filtered_plan(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
@@ -322,7 +314,7 @@ fn direct_tape_count_filtered_plan(
 }
 
 fn direct_tape_numeric_reduce_path_plan(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
@@ -352,7 +344,7 @@ fn direct_tape_numeric_reduce_path_plan(
 }
 
 fn direct_tape_filter_numeric_reduce_path_plan(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
@@ -387,7 +379,7 @@ fn direct_tape_filter_numeric_reduce_path_plan(
 }
 
 fn direct_tape_filter_map_path_plan(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
@@ -425,17 +417,14 @@ fn direct_item_predicate_from_kernel(
         ),
         crate::exec::pipeline::BodyKernel::FieldCmpLit(field, op, lit) => {
             Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: vec![crate::ir::physical::PhysicalPathStep::Field(field.clone())],
+                lhs: vec![PhysicalPathStep::Field(field.clone())],
                 op: *op,
                 lit: lit.clone(),
             })
         }
         crate::exec::pipeline::BodyKernel::FieldChainCmpLit(keys, op, lit) => {
             Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: keys
-                    .iter()
-                    .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-                    .collect(),
+                lhs: keys_to_path(keys),
                 op: *op,
                 lit: lit.clone(),
             })
@@ -495,22 +484,16 @@ fn kernel_to_physical_path(
 ) -> Option<NdjsonPhysicalPath> {
     match kernel {
         crate::exec::pipeline::BodyKernel::FieldRead(key) => {
-            Some(vec![crate::ir::physical::PhysicalPathStep::Field(
-                key.clone(),
-            )])
+            Some(vec![PhysicalPathStep::Field(key.clone())])
         }
-        crate::exec::pipeline::BodyKernel::FieldChain(keys) => Some(
-            keys.iter()
-                .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-                .collect(),
-        ),
+        crate::exec::pipeline::BodyKernel::FieldChain(keys) => Some(keys_to_path(keys)),
         crate::exec::pipeline::BodyKernel::Current => Some(Vec::new()),
         _ => None,
     }
 }
 
 fn direct_tape_predicate_membership_sink(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectPredicate> {
@@ -534,17 +517,14 @@ fn direct_tape_predicate_membership_sink(
 }
 
 fn direct_tape_predicate_source_scalar_call(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     call: crate::builtins::BuiltinCall,
 ) -> Option<NdjsonDirectPredicate> {
     match source {
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
             Some(NdjsonDirectPredicate::ViewScalarCall {
-                steps: keys
-                    .iter()
-                    .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-                    .collect(),
+                steps: keys_to_path(keys),
                 call,
             })
         }
@@ -555,12 +535,10 @@ fn direct_tape_predicate_source_scalar_call(
 }
 
 fn direct_tape_predicate_scalar_call(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     receiver: crate::ir::physical::NodeId,
     call: crate::builtins::BuiltinCall,
 ) -> Option<NdjsonDirectPredicate> {
-    use crate::ir::physical::PlanNode;
-
     if let PlanNode::RootPath(steps) = plan.node(receiver) {
         return Some(NdjsonDirectPredicate::ViewScalarCall {
             steps: steps.clone(),
@@ -581,12 +559,12 @@ fn direct_tape_predicate_scalar_call(
 }
 
 fn direct_array_element_source(
-    plan: &crate::ir::physical::QueryPlan,
+    plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
     use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::Sink;
-    use crate::ir::physical::{PipelinePlanSource, PlanNode};
+    use crate::ir::physical::PipelinePlanSource;
 
     if let PlanNode::Call {
         receiver,
@@ -629,16 +607,8 @@ fn direct_array_element_source(
         _ => return None,
     };
     let source_steps = match source {
-        PipelinePlanSource::FieldChain { keys } => keys
-            .iter()
-            .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
-            .collect(),
-        PipelinePlanSource::Expr(source) => {
-            let PlanNode::RootPath(steps) = plan.node(*source) else {
-                return None;
-            };
-            steps.clone()
-        }
+        PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),
+        PipelinePlanSource::Expr(source) => root_path_steps(plan, *source)?,
     };
     Some((source_steps, element))
 }
@@ -650,10 +620,10 @@ fn physical_chain_to_path(
         .iter()
         .map(|step| match step {
             crate::ir::physical::PhysicalChainStep::Field(key) => {
-                Some(crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+                Some(PhysicalPathStep::Field(key.clone()))
             }
             crate::ir::physical::PhysicalChainStep::Index(idx) => {
-                Some(crate::ir::physical::PhysicalPathStep::Index(*idx))
+                Some(PhysicalPathStep::Index(*idx))
             }
             crate::ir::physical::PhysicalChainStep::DynIndex(_) => None,
         })
