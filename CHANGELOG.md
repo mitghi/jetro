@@ -113,6 +113,29 @@
   bytes and fall back to the tape writer only when the row requires full JSON
   interpretation. This keeps common cold-path CLI projections out of both
   `serde_json::Value` and simd-json tape construction.
+- **Rooted NDJSON queries stay on direct byte/tape plans**. NDJSON direct
+  planning now treats rooted row-local forms such as `$.id`,
+  `$.name.upper()`, and `$.attributes.first().value` equivalently to their
+  bare per-row forms, so CLI and API callers get the same fast path without
+  rewriting queries.
+- **Demand-aware byte access for first/nth array elements**. Direct byte
+  execution no longer scans the entire root array field before satisfying
+  `first()` or `nth()` element projections; it reads only the demanded prefix
+  and keeps `last()` on the full/reverse-aware path where the end is required.
+- **Byte-level NDJSON match predicates**. Forward match writers and callback
+  match APIs can now evaluate direct predicates from raw row bytes for simple
+  paths, scalar calls, comparisons, boolean combinations, and first/last/nth
+  scalar predicates, falling back to tape evaluation only when the row shape
+  requires it.
+- **Filtered-count byte fallback**. Direct filtered-count tape plans can count
+  supported row-local predicates from bytes before falling back to the shared
+  tape writer, preserving the existing physical-plan-driven selection model.
+- **10-query CLI NDJSON benchmark now clears the 10x target**. On the
+  4.76M-row `/tmp/bench.sh` suite, rebuilt `jetrocli` measured every listed
+  rooted NDJSON query above 10x faster than `jaq`; representative timings were
+  `$.id` 0.44s vs 28.73s, `$.attributes.first().value` 0.66s vs 29.09s,
+  `$.attributes.map([@.key, @.value])` 3.00s vs 54.90s, and
+  `$.attributes.filter(@.value.contains("_3")).len()` 1.58s vs 49.34s.
 
 ### Demand/tape architecture cleanup
 
