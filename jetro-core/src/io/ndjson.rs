@@ -1748,36 +1748,49 @@ fn write_json_tape_at<W: Write, T: JsonTape>(
 }
 
 #[cfg(feature = "simd-json")]
+fn visit_json_tape_source_items<T, E, F>(tape: &T, source_idx: usize, mut visit: F) -> Result<(), E>
+where
+    T: JsonTape,
+    F: FnMut(usize) -> Result<(), E>,
+{
+    use crate::data::tape::TapeNode;
+
+    match tape.nodes().get(source_idx).copied() {
+        Some(TapeNode::Array { len, .. }) => {
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                visit(cur)?;
+                cur += tape.span(cur);
+            }
+        }
+        Some(_) => visit(source_idx)?,
+        None => {}
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
 fn write_json_tape_map_path<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
 ) -> Result<(), JetroEngineError> {
-    use crate::data::tape::TapeNode;
-
     writer.write_all(b"[")?;
     let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
         writer.write_all(b"]")?;
         return Ok(());
     };
 
-    match tape.nodes().get(source_idx).copied() {
-        Some(TapeNode::Array { len, .. }) => {
-            let mut cur = source_idx + 1;
-            for item_idx in 0..len {
-                if item_idx > 0 {
-                    writer.write_all(b",")?;
-                }
-                write_json_tape_path_or_null(writer, tape, cur, suffix_steps)?;
-                cur += tape.span(cur);
-            }
+    let mut wrote = false;
+    visit_json_tape_source_items(tape, source_idx, |item_idx| {
+        if wrote {
+            writer.write_all(b",")?;
         }
-        Some(_) => {
-            write_json_tape_path_or_null(writer, tape, source_idx, suffix_steps)?;
-        }
-        None => {}
-    }
+        write_json_tape_path_or_null(writer, tape, item_idx, suffix_steps)?;
+        wrote = true;
+        Ok::<(), JetroEngineError>(())
+    })?;
 
     writer.write_all(b"]")?;
     Ok(())
@@ -1791,8 +1804,6 @@ fn write_json_tape_filter_map_path<W: Write, T: JsonTape>(
     predicate: &NdjsonDirectItemPredicate,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
 ) -> Result<(), JetroEngineError> {
-    use crate::data::tape::TapeNode;
-
     writer.write_all(b"[")?;
     let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
         writer.write_all(b"]")?;
@@ -1800,25 +1811,16 @@ fn write_json_tape_filter_map_path<W: Write, T: JsonTape>(
     };
 
     let mut wrote = false;
-    match tape.nodes().get(source_idx).copied() {
-        Some(TapeNode::Array { len, .. }) => {
-            let mut cur = source_idx + 1;
-            for _ in 0..len {
-                if eval_json_tape_item_predicate(tape, cur, predicate) {
-                    if wrote {
-                        writer.write_all(b",")?;
-                    }
-                    write_json_tape_path_or_null(writer, tape, cur, suffix_steps)?;
-                    wrote = true;
-                }
-                cur += tape.span(cur);
+    visit_json_tape_source_items(tape, source_idx, |item_idx| {
+        if eval_json_tape_item_predicate(tape, item_idx, predicate) {
+            if wrote {
+                writer.write_all(b",")?;
             }
+            write_json_tape_path_or_null(writer, tape, item_idx, suffix_steps)?;
+            wrote = true;
         }
-        Some(_) if eval_json_tape_item_predicate(tape, source_idx, predicate) => {
-            write_json_tape_path_or_null(writer, tape, source_idx, suffix_steps)?;
-        }
-        _ => {}
-    }
+        Ok::<(), JetroEngineError>(())
+    })?;
 
     writer.write_all(b"]")?;
     Ok(())
