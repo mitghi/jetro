@@ -968,8 +968,8 @@ where
         })?;
         match plan {
             NdjsonDirectTapePlan::RootPath(steps) => {
-                if let Some(idx) = scratch_path_index(&scratch, steps) {
-                    write_scratch_json_at(&mut writer, &scratch, idx)?;
+                if let Some(idx) = json_tape_path_index(&scratch, steps) {
+                    write_json_tape_at(&mut writer, &scratch, idx)?;
                 } else {
                     writer.write_all(b"null")?;
                 }
@@ -979,18 +979,18 @@ where
                 call,
                 optional,
             } => {
-                let value = scratch_path_index(&scratch, steps)
-                    .map(|idx| scratch_scalar(&scratch, idx))
+                let value = json_tape_path_index(&scratch, steps)
+                    .map(|idx| json_tape_scalar(&scratch, idx))
                     .unwrap_or(crate::util::JsonView::Null);
                 if *optional && matches!(value, crate::util::JsonView::Null) {
                     writer.write_all(b"null")?;
                 } else if let Some(value) = call.try_apply_json_view(value) {
                     write_val_json(&mut writer, &value)?;
                 } else {
-                    write_scratch_json_at(
+                    write_json_tape_at(
                         &mut writer,
                         &scratch,
-                        scratch_path_index(&scratch, steps).unwrap_or(usize::MAX),
+                        json_tape_path_index(&scratch, steps).unwrap_or(usize::MAX),
                     )?;
                 }
             }
@@ -1277,8 +1277,8 @@ impl<'a> NdjsonRowExecutor<'a> {
             else {
                 return Ok(false);
             };
-            if let Some(idx) = tape_path_index(tape, steps) {
-                write_tape_json_at(writer, tape, idx)?;
+            if let Some(idx) = json_tape_path_index(tape.as_ref(), steps) {
+                write_json_tape_at(writer, tape.as_ref(), idx)?;
             } else {
                 writer.write_all(b"null")?;
             }
@@ -1298,14 +1298,57 @@ impl<'a> NdjsonRowExecutor<'a> {
 }
 
 #[cfg(feature = "simd-json")]
-fn tape_path_index(
-    tape: &crate::data::tape::TapeData,
+trait JsonTape {
+    fn nodes(&self) -> &[crate::data::tape::TapeNode];
+    fn str_at(&self, idx: usize) -> &str;
+    fn span(&self, idx: usize) -> usize;
+}
+
+#[cfg(feature = "simd-json")]
+impl JsonTape for crate::data::tape::TapeData {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, idx: usize) -> &str {
+        self.str_at(idx)
+    }
+
+    #[inline]
+    fn span(&self, idx: usize) -> usize {
+        self.span(idx)
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl JsonTape for crate::data::tape::TapeScratch {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, idx: usize) -> &str {
+        self.str_at(idx)
+    }
+
+    #[inline]
+    fn span(&self, idx: usize) -> usize {
+        self.span(idx)
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index<T: JsonTape>(
+    tape: &T,
     steps: &[crate::ir::physical::PhysicalPathStep],
 ) -> Option<usize> {
     use crate::data::tape::TapeNode;
     use crate::ir::physical::PhysicalPathStep;
 
-    if tape.nodes.is_empty() {
+    if tape.nodes().is_empty() {
         return None;
     }
 
@@ -1313,7 +1356,7 @@ fn tape_path_index(
     for step in steps {
         match step {
             PhysicalPathStep::Field(key) => {
-                let TapeNode::Object { len, .. } = tape.nodes[idx] else {
+                let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
                     return None;
                 };
                 let mut cur = idx + 1;
@@ -1329,7 +1372,7 @@ fn tape_path_index(
                 idx = found?;
             }
             PhysicalPathStep::Index(wanted) => {
-                let TapeNode::Array { len, .. } = tape.nodes[idx] else {
+                let TapeNode::Array { len, .. } = tape.nodes()[idx] else {
                     return None;
                 };
                 let wanted = if *wanted < 0 {
@@ -1352,65 +1395,11 @@ fn tape_path_index(
 }
 
 #[cfg(feature = "simd-json")]
-fn scratch_path_index(
-    tape: &crate::data::tape::TapeScratch,
-    steps: &[crate::ir::physical::PhysicalPathStep],
-) -> Option<usize> {
-    use crate::data::tape::TapeNode;
-    use crate::ir::physical::PhysicalPathStep;
-
-    if tape.nodes.is_empty() {
-        return None;
-    }
-
-    let mut idx = 0usize;
-    for step in steps {
-        match step {
-            PhysicalPathStep::Field(key) => {
-                let TapeNode::Object { len, .. } = tape.nodes[idx] else {
-                    return None;
-                };
-                let mut cur = idx + 1;
-                let mut found = None;
-                for _ in 0..len {
-                    if tape.str_at(cur) == key.as_ref() {
-                        found = Some(cur + 1);
-                        break;
-                    }
-                    cur += 1;
-                    cur += tape.span(cur);
-                }
-                idx = found?;
-            }
-            PhysicalPathStep::Index(wanted) => {
-                let TapeNode::Array { len, .. } = tape.nodes[idx] else {
-                    return None;
-                };
-                let wanted = if *wanted < 0 {
-                    len.checked_sub(wanted.unsigned_abs() as usize)?
-                } else {
-                    *wanted as usize
-                };
-                if wanted >= len {
-                    return None;
-                }
-                let mut cur = idx + 1;
-                for _ in 0..wanted {
-                    cur += tape.span(cur);
-                }
-                idx = cur;
-            }
-        }
-    }
-    Some(idx)
-}
-
-#[cfg(feature = "simd-json")]
-fn scratch_scalar(tape: &crate::data::tape::TapeScratch, idx: usize) -> crate::util::JsonView<'_> {
+fn json_tape_scalar<T: JsonTape>(tape: &T, idx: usize) -> crate::util::JsonView<'_> {
     use crate::data::tape::TapeNode;
     use simd_json::StaticNode as SN;
 
-    let Some(node) = tape.nodes.get(idx).copied() else {
+    let Some(node) = tape.nodes().get(idx).copied() else {
         return crate::util::JsonView::Null;
     };
     match node {
@@ -1485,15 +1474,15 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
 }
 
 #[cfg(feature = "simd-json")]
-fn write_tape_json_at<W: Write>(
+fn write_json_tape_at<W: Write, T: JsonTape>(
     writer: &mut W,
-    tape: &crate::data::tape::TapeData,
+    tape: &T,
     idx: usize,
 ) -> Result<usize, JetroEngineError> {
     use crate::data::tape::TapeNode;
     use simd_json::StaticNode as SN;
 
-    let Some(node) = tape.nodes.get(idx).copied() else {
+    let Some(node) = tape.nodes().get(idx).copied() else {
         writer.write_all(b"null")?;
         return Ok(idx);
     };
@@ -1534,7 +1523,7 @@ fn write_tape_json_at<W: Write>(
                 if item_idx > 0 {
                     writer.write_all(b",")?;
                 }
-                cur = write_tape_json_at(writer, tape, cur)?;
+                cur = write_json_tape_at(writer, tape, cur)?;
             }
             writer.write_all(b"]")?;
             Ok(cur)
@@ -1548,79 +1537,7 @@ fn write_tape_json_at<W: Write>(
                 }
                 write_json_str(writer, tape.str_at(cur))?;
                 writer.write_all(b":")?;
-                cur = write_tape_json_at(writer, tape, cur + 1)?;
-            }
-            writer.write_all(b"}")?;
-            Ok(cur)
-        }
-    }
-}
-
-#[cfg(feature = "simd-json")]
-fn write_scratch_json_at<W: Write>(
-    writer: &mut W,
-    tape: &crate::data::tape::TapeScratch,
-    idx: usize,
-) -> Result<usize, JetroEngineError> {
-    use crate::data::tape::TapeNode;
-    use simd_json::StaticNode as SN;
-
-    let Some(node) = tape.nodes.get(idx).copied() else {
-        writer.write_all(b"null")?;
-        return Ok(idx);
-    };
-
-    match node {
-        TapeNode::Static(SN::Null) => {
-            writer.write_all(b"null")?;
-            Ok(idx + 1)
-        }
-        TapeNode::Static(SN::Bool(true)) => {
-            writer.write_all(b"true")?;
-            Ok(idx + 1)
-        }
-        TapeNode::Static(SN::Bool(false)) => {
-            writer.write_all(b"false")?;
-            Ok(idx + 1)
-        }
-        TapeNode::Static(SN::I64(value)) => {
-            write_i64(writer, value)?;
-            Ok(idx + 1)
-        }
-        TapeNode::Static(SN::U64(value)) => {
-            write_u64(writer, value)?;
-            Ok(idx + 1)
-        }
-        TapeNode::Static(SN::F64(value)) => {
-            write_f64(writer, value)?;
-            Ok(idx + 1)
-        }
-        TapeNode::String(_) => {
-            write_json_str(writer, tape.str_at(idx))?;
-            Ok(idx + 1)
-        }
-        TapeNode::Array { len, .. } => {
-            writer.write_all(b"[")?;
-            let mut cur = idx + 1;
-            for item_idx in 0..len {
-                if item_idx > 0 {
-                    writer.write_all(b",")?;
-                }
-                cur = write_scratch_json_at(writer, tape, cur)?;
-            }
-            writer.write_all(b"]")?;
-            Ok(cur)
-        }
-        TapeNode::Object { len, .. } => {
-            writer.write_all(b"{")?;
-            let mut cur = idx + 1;
-            for field_idx in 0..len {
-                if field_idx > 0 {
-                    writer.write_all(b",")?;
-                }
-                write_json_str(writer, tape.str_at(cur))?;
-                writer.write_all(b":")?;
-                cur = write_scratch_json_at(writer, tape, cur + 1)?;
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
             }
             writer.write_all(b"}")?;
             Ok(cur)
