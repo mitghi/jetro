@@ -1051,26 +1051,40 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 source_steps,
                 suffix_steps,
             } => {
-                write_json_tape_map_path(writer, scratch, source_steps, suffix_steps)?;
+                let caches = NdjsonPathCaches {
+                    source: &mut self.source_path,
+                    suffix: &mut self.suffix_path,
+                };
+                write_json_tape_map_path(writer, scratch, source_steps, suffix_steps, caches)?;
             }
             NdjsonDirectTapePlan::FilterMapPath {
                 source_steps,
                 predicate,
                 suffix_steps,
             } => {
+                let caches = NdjsonPathCaches {
+                    source: &mut self.source_path,
+                    suffix: &mut self.suffix_path,
+                };
                 write_json_tape_filter_map_path(
                     writer,
                     scratch,
                     source_steps,
                     predicate,
                     suffix_steps,
+                    caches,
                 )?;
             }
             NdjsonDirectTapePlan::CountFiltered {
                 source_steps,
                 predicate,
             } => {
-                let count = count_json_tape_filtered(scratch, source_steps, predicate);
+                let count = count_json_tape_filtered(
+                    scratch,
+                    source_steps,
+                    predicate,
+                    &mut self.source_path,
+                );
                 write_i64(writer, count as i64)?;
             }
             NdjsonDirectTapePlan::NumericReducePath {
@@ -1078,8 +1092,18 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 suffix_steps,
                 op,
             } => {
-                let value =
-                    reduce_json_tape_numeric_path(scratch, source_steps, None, suffix_steps, *op);
+                let caches = NdjsonPathCaches {
+                    source: &mut self.source_path,
+                    suffix: &mut self.suffix_path,
+                };
+                let value = reduce_json_tape_numeric_path(
+                    scratch,
+                    source_steps,
+                    None,
+                    suffix_steps,
+                    *op,
+                    caches,
+                );
                 write_val_json(writer, &value)?;
             }
             NdjsonDirectTapePlan::FilterNumericReducePath {
@@ -1088,12 +1112,17 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 suffix_steps,
                 op,
             } => {
+                let caches = NdjsonPathCaches {
+                    source: &mut self.source_path,
+                    suffix: &mut self.suffix_path,
+                };
                 let value = reduce_json_tape_numeric_path(
                     scratch,
                     source_steps,
                     Some(predicate),
                     suffix_steps,
                     *op,
+                    caches,
                 );
                 write_val_json(writer, &value)?;
             }
@@ -1123,6 +1152,12 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
 #[derive(Default)]
 struct NdjsonPathCache {
     first_field_slot: Option<usize>,
+}
+
+#[cfg(feature = "simd-json")]
+struct NdjsonPathCaches<'a> {
+    source: &'a mut NdjsonPathCache,
+    suffix: &'a mut NdjsonPathCache,
 }
 
 #[cfg(feature = "simd-json")]
@@ -1897,19 +1932,21 @@ fn write_json_tape_map_path<W: Write, T: JsonTape>(
     tape: &T,
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    caches: NdjsonPathCaches<'_>,
 ) -> Result<(), JetroEngineError> {
     writer.write_all(b"[")?;
-    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+    let Some(source_idx) = caches.source.index(tape, 0, source_steps) else {
         writer.write_all(b"]")?;
         return Ok(());
     };
 
     let mut wrote = false;
+    let suffix_cache = caches.suffix;
     visit_json_tape_source_items(tape, source_idx, |item_idx| {
         if wrote {
             writer.write_all(b",")?;
         }
-        write_json_tape_path_or_null(writer, tape, item_idx, suffix_steps)?;
+        write_json_tape_cached_path_or_null(writer, tape, item_idx, suffix_steps, suffix_cache)?;
         wrote = true;
         Ok::<(), JetroEngineError>(())
     })?;
@@ -1925,20 +1962,28 @@ fn write_json_tape_filter_map_path<W: Write, T: JsonTape>(
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     predicate: &NdjsonDirectItemPredicate,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    caches: NdjsonPathCaches<'_>,
 ) -> Result<(), JetroEngineError> {
     writer.write_all(b"[")?;
-    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+    let Some(source_idx) = caches.source.index(tape, 0, source_steps) else {
         writer.write_all(b"]")?;
         return Ok(());
     };
 
     let mut wrote = false;
+    let suffix_cache = caches.suffix;
     visit_json_tape_source_items(tape, source_idx, |item_idx| {
         if eval_json_tape_item_predicate(tape, item_idx, predicate) {
             if wrote {
                 writer.write_all(b",")?;
             }
-            write_json_tape_path_or_null(writer, tape, item_idx, suffix_steps)?;
+            write_json_tape_cached_path_or_null(
+                writer,
+                tape,
+                item_idx,
+                suffix_steps,
+                suffix_cache,
+            )?;
             wrote = true;
         }
         Ok::<(), JetroEngineError>(())
@@ -1949,13 +1994,14 @@ fn write_json_tape_filter_map_path<W: Write, T: JsonTape>(
 }
 
 #[cfg(feature = "simd-json")]
-fn write_json_tape_path_or_null<W: Write, T: JsonTape>(
+fn write_json_tape_cached_path_or_null<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
     start: usize,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    cache: &mut NdjsonPathCache,
 ) -> Result<(), JetroEngineError> {
-    if let Some(idx) = json_tape_path_index_from(tape, start, suffix_steps) {
+    if let Some(idx) = cache.index(tape, start, suffix_steps) {
         write_json_tape_at(writer, tape, idx)?;
     } else {
         writer.write_all(b"null")?;
@@ -1968,8 +2014,9 @@ fn count_json_tape_filtered<T: JsonTape>(
     tape: &T,
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     predicate: &NdjsonDirectItemPredicate,
+    source_cache: &mut NdjsonPathCache,
 ) -> usize {
-    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+    let Some(source_idx) = source_cache.index(tape, 0, source_steps) else {
         return 0;
     };
 
@@ -1990,6 +2037,7 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
     predicate: Option<&NdjsonDirectItemPredicate>,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
     op: crate::exec::pipeline::NumOp,
+    caches: NdjsonPathCaches<'_>,
 ) -> Val {
     let mut acc_i = 0i64;
     let mut acc_f = 0.0f64;
@@ -1998,17 +2046,18 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
     let mut max_f = f64::NEG_INFINITY;
     let mut n_obs = 0usize;
 
-    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+    let Some(source_idx) = caches.source.index(tape, 0, source_steps) else {
         return crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
     };
 
+    let suffix_cache = caches.suffix;
     let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
         if !predicate
             .is_none_or(|predicate| eval_json_tape_item_predicate(tape, item_idx, predicate))
         {
             return Ok(());
         }
-        if let Some(idx) = json_tape_path_index_from(tape, item_idx, suffix_steps) {
+        if let Some(idx) = suffix_cache.index(tape, item_idx, suffix_steps) {
             fold_json_tape_numeric(
                 json_tape_scalar(tape, idx),
                 op,
