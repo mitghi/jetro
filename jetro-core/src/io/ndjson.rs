@@ -1116,8 +1116,9 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
-    let mut vm = predicate_needs_vm(predicate).then(|| engine.lock_vm());
-    let env = crate::data::context::Env::new(Val::Null);
+    let needs_vm = predicate_needs_vm(predicate);
+    let mut vm = needs_vm.then(|| engine.lock_vm());
+    let env = needs_vm.then(|| crate::data::context::Env::new(Val::Null));
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
         scratch.parse_slice(&row).map_err(|message| {
@@ -1126,7 +1127,7 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        if !eval_tape_predicate(&scratch, predicate, &env, &mut vm)
+        if !eval_tape_predicate(&scratch, predicate, env.as_ref(), &mut vm)
             .map_err(JetroEngineError::Eval)?
         {
             continue;
@@ -1494,7 +1495,7 @@ fn json_tape_array_element<T: JsonTape>(
 pub(super) fn eval_tape_predicate(
     tape: &crate::data::tape::TapeScratch,
     predicate: &NdjsonDirectPredicate,
-    env: &crate::data::context::Env,
+    env: Option<&crate::data::context::Env>,
     vm: &mut Option<std::sync::MutexGuard<'_, crate::vm::exec::VM>>,
 ) -> Result<bool, crate::EvalError> {
     use crate::parse::ast::BinOp;
@@ -1536,7 +1537,7 @@ pub(super) fn eval_tape_predicate(
             .and_then(|value| call.try_apply_json_view(value))
             .is_some_and(|value| crate::util::is_truthy(&value)),
         NdjsonDirectPredicate::ViewPipeline { source_steps, body } => {
-            let Some(vm) = vm.as_deref_mut() else {
+            let (Some(vm), Some(env)) = (vm.as_deref_mut(), env) else {
                 return Err(crate::EvalError(
                     "view pipeline predicate requires VM state".to_string(),
                 ));

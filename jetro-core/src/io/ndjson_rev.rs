@@ -482,8 +482,9 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
-    let mut vm = super::ndjson::predicate_needs_vm(predicate).then(|| engine.lock_vm());
-    let env = crate::data::context::Env::new(crate::Val::Null);
+    let needs_vm = super::ndjson::predicate_needs_vm(predicate);
+    let mut vm = needs_vm.then(|| engine.lock_vm());
+    let env = needs_vm.then(|| crate::data::context::Env::new(crate::Val::Null));
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
         scratch.parse_slice(&row).map_err(|message| {
@@ -492,7 +493,7 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        if !super::ndjson::eval_tape_predicate(&scratch, predicate, &env, &mut vm)
+        if !super::ndjson::eval_tape_predicate(&scratch, predicate, env.as_ref(), &mut vm)
             .map_err(JetroEngineError::Eval)?
         {
             continue;
