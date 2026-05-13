@@ -958,6 +958,23 @@ enum NdjsonDirectElement {
 }
 
 #[cfg(feature = "simd-json")]
+#[derive(Clone)]
+enum NdjsonDirectPredicate {
+    Path(Vec<crate::ir::physical::PhysicalPathStep>),
+    Literal(Val),
+    Not(Box<NdjsonDirectPredicate>),
+    Binary {
+        lhs: Box<NdjsonDirectPredicate>,
+        op: crate::parse::ast::BinOp,
+        rhs: Box<NdjsonDirectPredicate>,
+    },
+    ViewScalarCall {
+        steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        call: crate::builtins::BuiltinCall,
+    },
+}
+
+#[cfg(feature = "simd-json")]
 fn drive_ndjson_tape_writer<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -1064,6 +1081,47 @@ where
     Ok(count)
 }
 
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_matches_writer<R, W>(
+    reader: R,
+    predicate: &NdjsonDirectPredicate,
+    limit: usize,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+
+    while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
+        scratch.parse_slice(&row).map_err(|message| {
+            row_parse_error(
+                line_no,
+                JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
+            )
+        })?;
+        if !eval_tape_predicate(&scratch, predicate) {
+            continue;
+        }
+        writer.write_all(&row)?;
+        writer.write_all(b"\n")?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
 fn drive_ndjson_matches<R, F>(
     engine: &JetroEngine,
     reader: R,
@@ -1118,6 +1176,11 @@ where
 {
     if limit == 0 {
         return Ok(0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    if let Some(predicate) = direct_tape_predicate(engine, predicate) {
+        return drive_ndjson_tape_matches_writer(reader, &predicate, limit, options, writer);
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
@@ -1397,6 +1460,49 @@ fn pipeline_source_to_steps(
 }
 
 #[cfg(feature = "simd-json")]
+fn direct_tape_predicate(
+    engine: &JetroEngine,
+    predicate: &str,
+) -> Option<NdjsonDirectPredicate> {
+    let plan = engine.cached_plan(predicate, PlanningContext::bytes());
+    let crate::ir::physical::QueryRoot::Node(root) = plan.root() else {
+        return None;
+    };
+    direct_tape_predicate_node(&plan, *root)
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_predicate_node(
+    plan: &crate::ir::physical::QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<NdjsonDirectPredicate> {
+    use crate::ir::physical::PlanNode;
+
+    match plan.node(id) {
+        PlanNode::Literal(value) => Some(NdjsonDirectPredicate::Literal(value.clone())),
+        PlanNode::RootPath(steps) => Some(NdjsonDirectPredicate::Path(steps.clone())),
+        PlanNode::Not(inner) => Some(NdjsonDirectPredicate::Not(Box::new(
+            direct_tape_predicate_node(plan, *inner)?,
+        ))),
+        PlanNode::Binary { lhs, op, rhs } => Some(NdjsonDirectPredicate::Binary {
+            lhs: Box::new(direct_tape_predicate_node(plan, *lhs)?),
+            op: *op,
+            rhs: Box::new(direct_tape_predicate_node(plan, *rhs)?),
+        }),
+        PlanNode::Call { receiver, call, optional } if !*optional && call.spec().view_scalar => {
+            let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+                return None;
+            };
+            Some(NdjsonDirectPredicate::ViewScalarCall {
+                steps: steps.clone(),
+                call: call.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
 fn direct_array_element_source(
     plan: &crate::ir::physical::QueryPlan,
     id: crate::ir::physical::NodeId,
@@ -1603,6 +1709,67 @@ fn json_tape_array_element<T: JsonTape>(
         cur += tape.span(cur);
     }
     Some(cur)
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_tape_predicate(
+    tape: &crate::data::tape::TapeScratch,
+    predicate: &NdjsonDirectPredicate,
+) -> bool {
+    use crate::parse::ast::BinOp;
+
+    match predicate {
+        NdjsonDirectPredicate::Path(steps) => json_tape_path_index(tape, steps)
+            .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
+            .unwrap_or(false),
+        NdjsonDirectPredicate::Literal(value) => crate::util::is_truthy(value),
+        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner),
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            eval_tape_predicate(tape, lhs) && eval_tape_predicate(tape, rhs)
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            eval_tape_predicate(tape, lhs) || eval_tape_predicate(tape, rhs)
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } => {
+            let Some(lhs) = eval_tape_scalar(tape, lhs) else {
+                return false;
+            };
+            let Some(rhs) = eval_tape_scalar(tape, rhs) else {
+                return false;
+            };
+            crate::util::json_cmp_binop(lhs, *op, rhs)
+        }
+        NdjsonDirectPredicate::ViewScalarCall { steps, call } => json_tape_path_index(tape, steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_tape_scalar<'a>(
+    tape: &'a crate::data::tape::TapeScratch,
+    predicate: &'a NdjsonDirectPredicate,
+) -> Option<crate::util::JsonView<'a>> {
+    match predicate {
+        NdjsonDirectPredicate::Path(steps) => json_tape_path_index(tape, steps)
+            .map(|idx| json_tape_scalar(tape, idx)),
+        NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_view_truthy(value: crate::util::JsonView<'_>) -> bool {
+    match value {
+        crate::util::JsonView::Null => false,
+        crate::util::JsonView::Bool(value) => value,
+        crate::util::JsonView::Int(value) => value != 0,
+        crate::util::JsonView::UInt(value) => value != 0,
+        crate::util::JsonView::Float(value) => value != 0.0,
+        crate::util::JsonView::Str(value) => !value.is_empty(),
+        crate::util::JsonView::ArrayLen(len) | crate::util::JsonView::ObjectLen(len) => len > 0,
+    }
 }
 
 #[cfg(feature = "simd-json")]
