@@ -951,7 +951,7 @@ enum NdjsonDirectTapePlan {
 
 #[cfg(feature = "simd-json")]
 #[derive(Clone, Copy)]
-enum NdjsonDirectElement {
+pub(super) enum NdjsonDirectElement {
     First,
     Last,
     Nth(usize),
@@ -971,6 +971,16 @@ pub(super) enum NdjsonDirectPredicate {
     ViewScalarCall {
         steps: Vec<crate::ir::physical::PhysicalPathStep>,
         call: crate::builtins::BuiltinCall,
+    },
+    ArrayElementViewScalarCall {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        element: NdjsonDirectElement,
+        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        call: crate::builtins::BuiltinCall,
+    },
+    ViewPipeline {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        body: crate::exec::pipeline::PipelineBody,
     },
 }
 
@@ -1052,13 +1062,9 @@ where
                         idx,
                     })
                     .unwrap_or(crate::data::view::TapeScratchView::Missing);
-                let Some(result) = crate::exec::view::run_with_env_and_vm(
-                    source,
-                    body,
-                    None,
-                    &env,
-                    &mut vm,
-                ) else {
+                let Some(result) =
+                    crate::exec::view::run_with_env_and_vm(source, body, None, &env, &mut vm)
+                else {
                     writer.write_all(b"null")?;
                     writer.write_all(b"\n")?;
                     count += 1;
@@ -1067,7 +1073,10 @@ where
                     }
                     continue;
                 };
-                write_val_json(&mut writer, &result.map_err(|err| JetroEngineError::Eval(err))?)?;
+                write_val_json(
+                    &mut writer,
+                    &result.map_err(|err| JetroEngineError::Eval(err))?,
+                )?;
             }
         }
         writer.write_all(b"\n")?;
@@ -1083,6 +1092,7 @@ where
 
 #[cfg(feature = "simd-json")]
 fn drive_ndjson_tape_matches_writer<R, W>(
+    engine: &JetroEngine,
     reader: R,
     predicate: &NdjsonDirectPredicate,
     limit: usize,
@@ -1099,6 +1109,8 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
+    let mut vm = predicate_needs_vm(predicate).then(|| engine.lock_vm());
+    let env = crate::data::context::Env::new(Val::Null);
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
         scratch.parse_slice(&row).map_err(|message| {
@@ -1107,7 +1119,9 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        if !eval_tape_predicate(&scratch, predicate) {
+        if !eval_tape_predicate(&scratch, predicate, &env, &mut vm)
+            .map_err(JetroEngineError::Eval)?
+        {
             continue;
         }
         writer.write_all(&row)?;
@@ -1180,7 +1194,9 @@ where
 
     #[cfg(feature = "simd-json")]
     if let Some(predicate) = direct_tape_predicate(engine, predicate) {
-        return drive_ndjson_tape_matches_writer(reader, &predicate, limit, options, writer);
+        return drive_ndjson_tape_matches_writer(
+            engine, reader, &predicate, limit, options, writer,
+        );
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
@@ -1223,10 +1239,7 @@ impl<'a> NdjsonRowExecutor<'a> {
     }
 
     #[cfg(feature = "simd-json")]
-    fn direct_tape_plan(
-        engine: &'a JetroEngine,
-        query: &str,
-    ) -> Option<NdjsonDirectTapePlan> {
+    fn direct_tape_plan(engine: &'a JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
         use crate::builtins::{BuiltinArgs, BuiltinMethod};
         use crate::ir::physical::{PlanNode, QueryRoot};
 
@@ -1252,10 +1265,7 @@ impl<'a> NdjsonRowExecutor<'a> {
         match plan.node(*root) {
             PlanNode::RootPath(steps) => Some(NdjsonDirectTapePlan::RootPath(steps.clone())),
             PlanNode::Pipeline {
-                source:
-                    crate::ir::physical::PipelinePlanSource::FieldChain {
-                        keys,
-                    },
+                source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
                 body,
             } if body.stages.is_empty()
                 && matches!(
@@ -1270,10 +1280,7 @@ impl<'a> NdjsonRowExecutor<'a> {
                         .iter()
                         .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
                         .collect(),
-                    call: crate::builtins::BuiltinCall::new(
-                        BuiltinMethod::Len,
-                        BuiltinArgs::None,
-                    ),
+                    call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                     optional: false,
                 })
             }
@@ -1293,10 +1300,7 @@ impl<'a> NdjsonRowExecutor<'a> {
                 };
                 Some(NdjsonDirectTapePlan::ViewScalarCall {
                     steps: steps.clone(),
-                    call: crate::builtins::BuiltinCall::new(
-                        BuiltinMethod::Len,
-                        BuiltinArgs::None,
-                    ),
+                    call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                     optional: false,
                 })
             }
@@ -1489,17 +1493,101 @@ fn direct_tape_predicate_node(
             op: *op,
             rhs: Box::new(direct_tape_predicate_node(plan, *rhs)?),
         }),
-        PlanNode::Call { receiver, call, optional } if !*optional && call.spec().view_scalar => {
-            let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } if !*optional && call.spec().view_scalar => {
+            direct_tape_predicate_scalar_call(plan, *receiver, call.clone())
+        }
+        PlanNode::Pipeline { source, body } => {
+            if let Some(predicate) = direct_tape_predicate_membership_sink(plan, source, body) {
+                return Some(predicate);
+            }
+            if !body.can_run_with_view() {
                 return None;
-            };
-            Some(NdjsonDirectPredicate::ViewScalarCall {
-                steps: steps.clone(),
-                call: call.clone(),
+            }
+            Some(NdjsonDirectPredicate::ViewPipeline {
+                source_steps: pipeline_source_to_steps(plan, source)?,
+                body: body.clone(),
             })
         }
         _ => None,
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_predicate_membership_sink(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectPredicate> {
+    use crate::builtins::{BuiltinArgs, BuiltinCall};
+    use crate::exec::pipeline::{MembershipSinkOp, MembershipSinkTarget, Sink};
+
+    if !body.stages.is_empty() {
+        return None;
+    }
+    let Sink::Membership(spec) = &body.sink else {
+        return None;
+    };
+    if spec.op != MembershipSinkOp::Includes {
+        return None;
+    }
+    let MembershipSinkTarget::Literal(target) = &spec.target else {
+        return None;
+    };
+    let call = BuiltinCall::new(spec.method, BuiltinArgs::Val(target.clone()));
+    direct_tape_predicate_source_scalar_call(plan, source, call)
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_predicate_source_scalar_call(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    call: crate::builtins::BuiltinCall,
+) -> Option<NdjsonDirectPredicate> {
+    match source {
+        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
+            Some(NdjsonDirectPredicate::ViewScalarCall {
+                steps: keys
+                    .iter()
+                    .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+                    .collect(),
+                call,
+            })
+        }
+        crate::ir::physical::PipelinePlanSource::Expr(receiver) => {
+            direct_tape_predicate_scalar_call(plan, *receiver, call)
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_predicate_scalar_call(
+    plan: &crate::ir::physical::QueryPlan,
+    receiver: crate::ir::physical::NodeId,
+    call: crate::builtins::BuiltinCall,
+) -> Option<NdjsonDirectPredicate> {
+    use crate::ir::physical::PlanNode;
+
+    if let PlanNode::RootPath(steps) = plan.node(receiver) {
+        return Some(NdjsonDirectPredicate::ViewScalarCall {
+            steps: steps.clone(),
+            call,
+        });
+    }
+
+    let PlanNode::Chain { base, steps } = plan.node(receiver) else {
+        return None;
+    };
+    let (source_steps, element) = direct_array_element_source(plan, *base)?;
+    Some(NdjsonDirectPredicate::ArrayElementViewScalarCall {
+        source_steps,
+        element,
+        suffix_steps: physical_chain_to_path(steps)?,
+        call,
+    })
 }
 
 #[cfg(feature = "simd-json")]
@@ -1543,8 +1631,14 @@ fn direct_array_element_source(
     let element = match body.sink {
         Sink::Terminal(BuiltinMethod::First) => NdjsonDirectElement::First,
         Sink::Terminal(BuiltinMethod::Last) => NdjsonDirectElement::Last,
-        Sink::SelectMany { n: 1, from_end: false } => NdjsonDirectElement::First,
-        Sink::SelectMany { n: 1, from_end: true } => NdjsonDirectElement::Last,
+        Sink::SelectMany {
+            n: 1,
+            from_end: false,
+        } => NdjsonDirectElement::First,
+        Sink::SelectMany {
+            n: 1,
+            from_end: true,
+        } => NdjsonDirectElement::Last,
         Sink::Nth(n) => NdjsonDirectElement::Nth(n),
         _ => return None,
     };
@@ -1715,27 +1809,29 @@ fn json_tape_array_element<T: JsonTape>(
 pub(super) fn eval_tape_predicate(
     tape: &crate::data::tape::TapeScratch,
     predicate: &NdjsonDirectPredicate,
-) -> bool {
+    env: &crate::data::context::Env,
+    vm: &mut Option<std::sync::MutexGuard<'_, crate::vm::exec::VM>>,
+) -> Result<bool, crate::EvalError> {
     use crate::parse::ast::BinOp;
 
-    match predicate {
+    Ok(match predicate {
         NdjsonDirectPredicate::Path(steps) => json_tape_path_index(tape, steps)
             .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
             .unwrap_or(false),
         NdjsonDirectPredicate::Literal(value) => crate::util::is_truthy(value),
-        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner),
+        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner, env, vm)?,
         NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
-            eval_tape_predicate(tape, lhs) && eval_tape_predicate(tape, rhs)
+            eval_tape_predicate(tape, lhs, env, vm)? && eval_tape_predicate(tape, rhs, env, vm)?
         }
         NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
-            eval_tape_predicate(tape, lhs) || eval_tape_predicate(tape, rhs)
+            eval_tape_predicate(tape, lhs, env, vm)? || eval_tape_predicate(tape, rhs, env, vm)?
         }
         NdjsonDirectPredicate::Binary { lhs, op, rhs } => {
             let Some(lhs) = eval_tape_scalar(tape, lhs) else {
-                return false;
+                return Ok(false);
             };
             let Some(rhs) = eval_tape_scalar(tape, rhs) else {
-                return false;
+                return Ok(false);
             };
             crate::util::json_cmp_binop(lhs, *op, rhs)
         }
@@ -1743,6 +1839,45 @@ pub(super) fn eval_tape_predicate(
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| call.try_apply_json_view(value))
             .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => json_tape_path_index(tape, source_steps)
+            .and_then(|idx| json_tape_array_element(tape, idx, *element))
+            .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ViewPipeline { source_steps, body } => {
+            let Some(vm) = vm.as_deref_mut() else {
+                return Err(crate::EvalError(
+                    "view pipeline predicate requires VM state".to_string(),
+                ));
+            };
+            let source = json_tape_path_index(tape, source_steps)
+                .map(|idx| crate::data::view::TapeScratchView::Node { tape, idx })
+                .unwrap_or(crate::data::view::TapeScratchView::Missing);
+            crate::exec::view::run_with_env_and_vm(source, body, None, env, vm)
+                .transpose()?
+                .is_some_and(|value| crate::util::is_truthy(&value))
+        }
+    })
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
+    match predicate {
+        NdjsonDirectPredicate::Not(inner) => predicate_needs_vm(inner),
+        NdjsonDirectPredicate::Binary { lhs, rhs, .. } => {
+            predicate_needs_vm(lhs) || predicate_needs_vm(rhs)
+        }
+        NdjsonDirectPredicate::ViewPipeline { .. } => true,
+        NdjsonDirectPredicate::Path(_)
+        | NdjsonDirectPredicate::Literal(_)
+        | NdjsonDirectPredicate::ViewScalarCall { .. }
+        | NdjsonDirectPredicate::ArrayElementViewScalarCall { .. } => false,
     }
 }
 
@@ -1752,8 +1887,9 @@ fn eval_tape_scalar<'a>(
     predicate: &'a NdjsonDirectPredicate,
 ) -> Option<crate::util::JsonView<'a>> {
     match predicate {
-        NdjsonDirectPredicate::Path(steps) => json_tape_path_index(tape, steps)
-            .map(|idx| json_tape_scalar(tape, idx)),
+        NdjsonDirectPredicate::Path(steps) => {
+            json_tape_path_index(tape, steps).map(|idx| json_tape_scalar(tape, idx))
+        }
         NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
         _ => None,
     }
@@ -1792,7 +1928,10 @@ fn json_tape_scalar<T: JsonTape>(tape: &T, idx: usize) -> crate::util::JsonView<
     }
 }
 
-pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
+pub(super) fn write_val_line<W: Write>(
+    writer: &mut W,
+    value: &Val,
+) -> Result<(), JetroEngineError> {
     write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
     Ok(())
@@ -1840,12 +1979,14 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         Val::FloatVec(items) => write_json_float_array(writer, items.iter().copied())?,
         Val::StrVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_ref()))?,
         Val::StrSliceVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_str()))?,
-        Val::Obj(entries) => {
-            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
-        }
-        Val::ObjSmall(entries) => {
-            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
-        }
+        Val::Obj(entries) => write_json_object(
+            writer,
+            entries.iter().map(|(key, value)| (key.as_ref(), value)),
+        )?,
+        Val::ObjSmall(entries) => write_json_object(
+            writer,
+            entries.iter().map(|(key, value)| (key.as_ref(), value)),
+        )?,
         Val::ObjVec(data) => write_json_objvec(writer, data)?,
     }
     Ok(())

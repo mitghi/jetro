@@ -433,7 +433,7 @@ where
 
     #[cfg(feature = "simd-json")]
     if let Some(predicate) = super::ndjson::direct_tape_predicate(engine, predicate) {
-        return drive_rev_matches_writer_tape(path, &predicate, limit, options, writer);
+        return drive_rev_matches_writer_tape(engine, path, &predicate, limit, options, writer);
     }
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
@@ -466,6 +466,7 @@ where
 
 #[cfg(feature = "simd-json")]
 fn drive_rev_matches_writer_tape<P, W>(
+    engine: &JetroEngine,
     path: P,
     predicate: &super::ndjson::NdjsonDirectPredicate,
     limit: usize,
@@ -481,6 +482,8 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
+    let mut vm = super::ndjson::predicate_needs_vm(predicate).then(|| engine.lock_vm());
+    let env = crate::data::context::Env::new(crate::Val::Null);
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
         scratch.parse_slice(&row).map_err(|message| {
@@ -489,7 +492,9 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        if !super::ndjson::eval_tape_predicate(&scratch, predicate) {
+        if !super::ndjson::eval_tape_predicate(&scratch, predicate, &env, &mut vm)
+            .map_err(JetroEngineError::Eval)?
+        {
             continue;
         }
         writer.write_all(&row)?;
