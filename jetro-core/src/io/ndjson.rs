@@ -20,7 +20,7 @@ pub(super) use super::ndjson_direct::{
     direct_byte_plan, direct_tape_plan, direct_tape_predicate, NdjsonDirectBytePlan,
     NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
     NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
-    NdjsonDirectTapePlan,
+    NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
@@ -1192,7 +1192,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 }
             }
             NdjsonDirectTapePlan::Stream(plan) => {
-                write_json_tape_stream_collect(
+                write_json_tape_stream(
                     writer,
                     scratch,
                     plan,
@@ -1201,60 +1201,6 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                     &mut self.predicate_path,
                     &mut self.object_paths,
                 )?;
-            }
-            NdjsonDirectTapePlan::CountFiltered {
-                source_steps,
-                predicate,
-            } => {
-                let count = count_json_tape_filtered(
-                    scratch,
-                    source_steps,
-                    predicate,
-                    &mut self.source_path,
-                    &mut self.predicate_path,
-                );
-                write_i64(writer, count as i64)?;
-            }
-            NdjsonDirectTapePlan::NumericReducePath {
-                source_steps,
-                suffix_steps,
-                op,
-            } => {
-                let caches = NdjsonPathCaches {
-                    source: &mut self.source_path,
-                    suffix: &mut self.suffix_path,
-                    predicate: &mut self.predicate_path,
-                };
-                let value = reduce_json_tape_numeric_path(
-                    scratch,
-                    source_steps,
-                    None,
-                    suffix_steps,
-                    *op,
-                    caches,
-                );
-                write_val_json(writer, &value)?;
-            }
-            NdjsonDirectTapePlan::FilterNumericReducePath {
-                source_steps,
-                predicate,
-                suffix_steps,
-                op,
-            } => {
-                let caches = NdjsonPathCaches {
-                    source: &mut self.source_path,
-                    suffix: &mut self.suffix_path,
-                    predicate: &mut self.predicate_path,
-                };
-                let value = reduce_json_tape_numeric_path(
-                    scratch,
-                    source_steps,
-                    Some(predicate),
-                    suffix_steps,
-                    *op,
-                    caches,
-                );
-                write_val_json(writer, &value)?;
             }
             NdjsonDirectTapePlan::Object(fields) => {
                 write_json_tape_object_projection(writer, scratch, fields, &mut self.object_paths)?;
@@ -2187,7 +2133,7 @@ where
 }
 
 #[cfg(feature = "simd-json")]
-fn write_json_tape_stream_collect<W: Write, T: JsonTape>(
+fn write_json_tape_stream<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
     plan: &NdjsonDirectStreamPlan,
@@ -2198,54 +2144,131 @@ fn write_json_tape_stream_collect<W: Write, T: JsonTape>(
 ) -> Result<(), JetroEngineError> {
     writer.write_all(b"[")?;
     let Some(source_idx) = source_cache.index(tape, 0, &plan.source_steps) else {
-        writer.write_all(b"]")?;
+        write_json_tape_empty_stream_result(writer, &plan.sink)?;
         return Ok(());
     };
 
-    let mut wrote_row = false;
-    visit_json_tape_source_items(tape, source_idx, |item_idx| {
-        if !plan.predicate.as_ref().is_none_or(|predicate| {
-            eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
-        }) {
-            return Ok::<(), JetroEngineError>(());
-        }
-        if wrote_row {
-            writer.write_all(b",")?;
-        }
-        match &plan.map {
-            NdjsonDirectStreamMap::Path(suffix_steps) => {
-                write_json_tape_cached_path_or_null(
+    match &plan.sink {
+        NdjsonDirectStreamSink::Collect(map) => {
+            writer.write_all(b"[")?;
+            let mut wrote_row = false;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if !plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    return Ok::<(), JetroEngineError>(());
+                }
+                if wrote_row {
+                    writer.write_all(b",")?;
+                }
+                write_json_tape_stream_map(
                     writer,
                     tape,
                     item_idx,
-                    suffix_steps,
+                    map,
                     suffix_cache,
-                )?;
-            }
-            NdjsonDirectStreamMap::Array(items) => {
-                write_json_tape_array_projection_from(
-                    writer,
-                    tape,
-                    item_idx,
-                    items,
                     projection_caches,
                 )?;
-            }
-            NdjsonDirectStreamMap::Object(fields) => {
-                write_json_tape_object_projection_from(
-                    writer,
-                    tape,
-                    item_idx,
-                    fields,
-                    projection_caches,
-                )?;
-            }
+                wrote_row = true;
+                Ok(())
+            })?;
+            writer.write_all(b"]")?;
         }
-        wrote_row = true;
-        Ok(())
-    })?;
+        NdjsonDirectStreamSink::Count => {
+            let mut count = 0usize;
+            let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    count += 1;
+                }
+                Ok(())
+            });
+            write_i64(writer, count as i64)?;
+        }
+        NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
+            let caches = NdjsonPathCaches {
+                source: source_cache,
+                suffix: suffix_cache,
+                predicate: predicate_cache,
+            };
+            let value = reduce_json_tape_numeric_path(
+                tape,
+                &plan.source_steps,
+                plan.predicate.as_ref(),
+                suffix_steps,
+                *op,
+                caches,
+            );
+            write_val_json(writer, &value)?;
+        }
+    }
 
-    writer.write_all(b"]")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_empty_stream_result<W: Write>(
+    writer: &mut W,
+    sink: &NdjsonDirectStreamSink,
+) -> Result<(), JetroEngineError> {
+    match sink {
+        NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+        NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
+        NdjsonDirectStreamSink::Numeric { op, .. } => {
+            let value = crate::exec::pipeline::num_finalise(
+                *op,
+                0,
+                0.0,
+                false,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                0,
+            );
+            write_val_json(writer, &value)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_stream_map<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    item_idx: usize,
+    map: &NdjsonDirectStreamMap,
+    suffix_cache: &mut NdjsonPathCache,
+    projection_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    match map {
+        NdjsonDirectStreamMap::Path(suffix_steps) => {
+            write_json_tape_cached_path_or_null(
+                writer,
+                tape,
+                item_idx,
+                suffix_steps,
+                suffix_cache,
+            )?;
+        }
+        NdjsonDirectStreamMap::Array(items) => {
+            write_json_tape_array_projection_from(
+                writer,
+                tape,
+                item_idx,
+                items,
+                projection_caches,
+            )?;
+        }
+        NdjsonDirectStreamMap::Object(fields) => {
+            write_json_tape_object_projection_from(
+                writer,
+                tape,
+                item_idx,
+                fields,
+                projection_caches,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -2462,28 +2485,6 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
     }
     writer.write_all(b"]")?;
     Ok(())
-}
-
-#[cfg(feature = "simd-json")]
-fn count_json_tape_filtered<T: JsonTape>(
-    tape: &T,
-    source_steps: &[crate::ir::physical::PhysicalPathStep],
-    predicate: &NdjsonDirectItemPredicate,
-    source_cache: &mut NdjsonPathCache,
-    predicate_cache: &mut NdjsonPathCache,
-) -> usize {
-    let Some(source_idx) = source_cache.index(tape, 0, source_steps) else {
-        return 0;
-    };
-
-    let mut count = 0usize;
-    let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
-        if eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache) {
-            count += 1;
-        }
-        Ok(())
-    });
-    count
 }
 
 #[cfg(feature = "simd-json")]

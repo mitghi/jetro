@@ -56,21 +56,6 @@ pub(super) enum NdjsonDirectTapePlan {
         suffix_steps: NdjsonPhysicalPath,
     },
     Stream(NdjsonDirectStreamPlan),
-    CountFiltered {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-    },
-    NumericReducePath {
-        source_steps: NdjsonPhysicalPath,
-        suffix_steps: NdjsonPhysicalPath,
-        op: crate::exec::pipeline::NumOp,
-    },
-    FilterNumericReducePath {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        suffix_steps: NdjsonPhysicalPath,
-        op: crate::exec::pipeline::NumOp,
-    },
     Object(Vec<NdjsonDirectObjectField>),
     Array(Vec<NdjsonDirectProjectionValue>),
     ViewPipeline {
@@ -83,7 +68,7 @@ pub(super) enum NdjsonDirectTapePlan {
 pub(super) struct NdjsonDirectStreamPlan {
     pub(super) source_steps: NdjsonPhysicalPath,
     pub(super) predicate: Option<NdjsonDirectItemPredicate>,
-    pub(super) map: NdjsonDirectStreamMap,
+    pub(super) sink: NdjsonDirectStreamSink,
 }
 
 #[derive(Clone)]
@@ -91,6 +76,16 @@ pub(super) enum NdjsonDirectStreamMap {
     Path(NdjsonPhysicalPath),
     Array(Vec<NdjsonDirectProjectionValue>),
     Object(Vec<NdjsonDirectObjectField>),
+}
+
+#[derive(Clone)]
+pub(super) enum NdjsonDirectStreamSink {
+    Collect(NdjsonDirectStreamMap),
+    Count,
+    Numeric {
+        suffix_steps: NdjsonPhysicalPath,
+        op: crate::exec::pipeline::NumOp,
+    },
 }
 
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
@@ -605,7 +600,7 @@ fn direct_tape_map_path_plan(
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps,
         predicate: None,
-        map: direct_stream_map_from_kernel(kernel)?,
+        sink: NdjsonDirectStreamSink::Collect(direct_stream_map_from_kernel(kernel)?),
     }))
 }
 
@@ -628,10 +623,13 @@ fn direct_tape_count_filtered_plan(
     if spec.op != ReducerOp::Count || spec.predicate.is_some() {
         return None;
     }
-    Some(NdjsonDirectTapePlan::CountFiltered {
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate: direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
-    })
+        predicate: Some(direct_item_predicate_from_kernel(
+            body.stage_kernels.first()?,
+        )?),
+        sink: NdjsonDirectStreamSink::Count,
+    }))
 }
 
 fn direct_tape_numeric_reduce_path_plan(
@@ -657,11 +655,11 @@ fn direct_tape_numeric_reduce_path_plan(
         [] if spec.projection.is_some() => kernel_to_physical_path(body.sink_kernels.first()?)?,
         _ => return None,
     };
-    Some(NdjsonDirectTapePlan::NumericReducePath {
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        suffix_steps,
-        op,
-    })
+        predicate: None,
+        sink: NdjsonDirectStreamSink::Numeric { suffix_steps, op },
+    }))
 }
 
 fn direct_tape_filter_numeric_reduce_path_plan(
@@ -691,12 +689,11 @@ fn direct_tape_filter_numeric_reduce_path_plan(
         ),
         _ => return None,
     };
-    Some(NdjsonDirectTapePlan::FilterNumericReducePath {
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate,
-        suffix_steps,
-        op,
-    })
+        predicate: Some(predicate),
+        sink: NdjsonDirectStreamSink::Numeric { suffix_steps, op },
+    }))
 }
 
 fn direct_tape_filter_map_path_plan(
@@ -718,7 +715,7 @@ fn direct_tape_filter_map_path_plan(
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps,
         predicate: Some(predicate),
-        map: direct_stream_map_from_kernel(kernel)?,
+        sink: NdjsonDirectStreamSink::Collect(direct_stream_map_from_kernel(kernel)?),
     }))
 }
 

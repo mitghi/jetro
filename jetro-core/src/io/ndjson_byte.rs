@@ -1,7 +1,7 @@
 use super::ndjson::{write_i64, write_val_json};
 use super::ndjson_direct::{
     NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPredicate, NdjsonDirectTapePlan,
+    NdjsonDirectPredicate, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
@@ -158,7 +158,12 @@ pub(super) fn eval_ndjson_byte_predicate_row(
 }
 
 pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool {
-    matches!(plan, NdjsonDirectTapePlan::CountFiltered { .. })
+    matches!(
+        plan,
+        NdjsonDirectTapePlan::Stream(stream)
+            if matches!(stream.sink, NdjsonDirectStreamSink::Count)
+                && stream.predicate.is_some()
+    )
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -167,11 +172,13 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
     plan: &NdjsonDirectTapePlan,
 ) -> Result<BytePlanWrite, JetroEngineError> {
     match plan {
-        NdjsonDirectTapePlan::CountFiltered {
-            source_steps,
-            predicate,
-        } => {
-            let Some(count) = raw_json_count_filtered(row, source_steps, predicate) else {
+        NdjsonDirectTapePlan::Stream(stream)
+            if matches!(stream.sink, NdjsonDirectStreamSink::Count) =>
+        {
+            let Some(predicate) = stream.predicate.as_ref() else {
+                return Ok(BytePlanWrite::Fallback);
+            };
+            let Some(count) = raw_json_count_filtered(row, &stream.source_steps, predicate) else {
                 return Ok(BytePlanWrite::Fallback);
             };
             write_i64(writer, count as i64)?;
