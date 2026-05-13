@@ -95,10 +95,14 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    direct_byte_plan_from_plan(&plan)
+}
+
+fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> {
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
     let QueryRoot::Node(root) = plan.root() else {
         return None;
     };
@@ -319,22 +323,26 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    direct_tape_plan_from_plan(&plan)
+}
+
+fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> {
     use crate::builtins::{BuiltinArgs, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
-    let plan = engine.cached_plan(query, PlanningContext::bytes());
     let QueryRoot::Node(root) = plan.root() else {
         return None;
     };
     if let PlanNode::Chain { base, steps } = plan.node(*root) {
-        let (source_steps, element) = direct_array_element_source(&plan, *base)?;
+        let (source_steps, element) = direct_array_element_source(plan, *base)?;
         return Some(NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
             element,
             suffix_steps: physical_chain_to_path(steps)?,
         });
     }
-    if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
+    if let Some((source_steps, element)) = direct_array_element_source(plan, *root) {
         return Some(NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
             element,
@@ -358,7 +366,7 @@ fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
             body,
         } if body.stages.is_empty() && is_plain_count_sink(body) => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: root_path_steps(&plan, *source)?,
+                steps: root_path_steps(plan, *source)?,
                 call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                 optional: false,
             })
@@ -373,7 +381,7 @@ fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
                 BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
             ) =>
         {
-            if let Some(steps) = root_path_steps(&plan, *receiver) {
+            if let Some(steps) = root_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
                     steps,
                     call: call.clone(),
@@ -383,7 +391,7 @@ fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
             let PlanNode::Chain { base, steps } = plan.node(*receiver) else {
                 return None;
             };
-            let (source_steps, element) = direct_array_element_source(&plan, *base)?;
+            let (source_steps, element) = direct_array_element_source(plan, *base)?;
             Some(NdjsonDirectTapePlan::ArrayElementViewScalarCall {
                 source_steps,
                 element,
@@ -402,36 +410,36 @@ fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
             && !*optional =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
-                steps: root_path_steps(&plan, *receiver)?,
+                steps: root_path_steps(plan, *receiver)?,
                 method: call.method,
             })
         }
         PlanNode::Pipeline { source, body } => {
-            if let Some(plan) = direct_tape_filter_numeric_reduce_path_plan(&plan, source, body) {
+            if let Some(plan) = direct_tape_filter_numeric_reduce_path_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_numeric_reduce_path_plan(&plan, source, body) {
+            if let Some(plan) = direct_tape_numeric_reduce_path_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_count_filtered_plan(&plan, source, body) {
+            if let Some(plan) = direct_tape_count_filtered_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_filter_map_path_plan(&plan, source, body) {
+            if let Some(plan) = direct_tape_filter_map_path_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_map_path_plan(&plan, source, body) {
+            if let Some(plan) = direct_tape_map_path_plan(plan, source, body) {
                 return Some(plan);
             }
             if !body.can_run_with_view() {
                 return None;
             }
             Some(NdjsonDirectTapePlan::ViewPipeline {
-                source_steps: pipeline_source_to_steps(&plan, source)?,
+                source_steps: pipeline_source_to_steps(plan, source)?,
                 body: body.clone(),
             })
         }
-        PlanNode::Object(fields) => direct_tape_object_plan(&plan, fields),
-        PlanNode::Array(elems) => direct_tape_array_plan(&plan, elems),
+        PlanNode::Object(fields) => direct_tape_object_plan(plan, fields),
+        PlanNode::Array(elems) => direct_tape_array_plan(plan, elems),
         _ => None,
     }
 }
@@ -548,10 +556,14 @@ fn direct_tape_predicate_inner(
     predicate: &str,
 ) -> Option<NdjsonDirectPredicate> {
     let plan = engine.cached_plan(predicate, PlanningContext::bytes());
+    direct_tape_predicate_from_plan(&plan)
+}
+
+fn direct_tape_predicate_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectPredicate> {
     let crate::ir::physical::QueryRoot::Node(root) = plan.root() else {
         return None;
     };
-    direct_tape_predicate_node(&plan, *root)
+    direct_tape_predicate_node(plan, *root)
 }
 
 fn rootless_ndjson_query(query: &str) -> Option<&str> {
