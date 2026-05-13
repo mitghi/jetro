@@ -977,19 +977,18 @@ where
                 call,
                 optional,
             } => {
-                let value = json_tape_path_index(&scratch, steps)
+                let idx = json_tape_path_index(&scratch, steps);
+                let value = idx
                     .map(|idx| json_tape_scalar(&scratch, idx))
                     .unwrap_or(crate::util::JsonView::Null);
                 if *optional && matches!(value, crate::util::JsonView::Null) {
                     writer.write_all(b"null")?;
                 } else if let Some(value) = call.try_apply_json_view(value) {
                     write_val_json(&mut writer, &value)?;
+                } else if let Some(idx) = idx {
+                    write_json_tape_at(&mut writer, &scratch, idx)?;
                 } else {
-                    write_json_tape_at(
-                        &mut writer,
-                        &scratch,
-                        json_tape_path_index(&scratch, steps).unwrap_or(usize::MAX),
-                    )?;
+                    writer.write_all(b"null")?;
                 }
             }
             NdjsonDirectTapePlan::ArrayElementPath {
