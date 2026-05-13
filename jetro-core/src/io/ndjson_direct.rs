@@ -43,10 +43,24 @@ pub(super) enum NdjsonDirectTapePlan {
         suffix_steps: NdjsonPhysicalPath,
         op: crate::exec::pipeline::NumOp,
     },
+    Object(Vec<NdjsonDirectObjectField>),
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
     },
+}
+
+#[derive(Clone)]
+pub(super) struct NdjsonDirectObjectField {
+    pub(super) key: Arc<str>,
+    pub(super) value: NdjsonDirectObjectValue,
+    pub(super) optional: bool,
+}
+
+#[derive(Clone)]
+pub(super) enum NdjsonDirectObjectValue {
+    Path(NdjsonPhysicalPath),
+    Literal(Val),
 }
 
 impl NdjsonDirectTapePlan {
@@ -188,8 +202,40 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
                 body: body.clone(),
             })
         }
+        PlanNode::Object(fields) => direct_tape_object_plan(&plan, fields),
         _ => None,
     }
+}
+
+fn direct_tape_object_plan(
+    plan: &QueryPlan,
+    fields: &[crate::ir::physical::PhysicalObjField],
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::ir::physical::PhysicalObjField;
+
+    let mut out = Vec::with_capacity(fields.len());
+    for field in fields {
+        let PhysicalObjField::Kv {
+            key,
+            val,
+            optional,
+            cond: None,
+        } = field
+        else {
+            return None;
+        };
+        let value = match plan.node(*val) {
+            PlanNode::RootPath(steps) => NdjsonDirectObjectValue::Path(steps.clone()),
+            PlanNode::Literal(value) => NdjsonDirectObjectValue::Literal(value.clone()),
+            _ => return None,
+        };
+        out.push(NdjsonDirectObjectField {
+            key: key.clone(),
+            value,
+            optional: *optional,
+        });
+    }
+    Some(NdjsonDirectTapePlan::Object(out))
 }
 
 fn pipeline_source_to_steps(

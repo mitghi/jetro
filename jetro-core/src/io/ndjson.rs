@@ -13,7 +13,7 @@ use std::sync::MutexGuard;
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
     direct_tape_plan, direct_tape_predicate, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPredicate, NdjsonDirectTapePlan,
+    NdjsonDirectObjectValue, NdjsonDirectPredicate, NdjsonDirectTapePlan,
 };
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
@@ -1133,6 +1133,9 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 );
                 write_val_json(writer, &value)?;
             }
+            NdjsonDirectTapePlan::Object(fields) => {
+                write_json_tape_object_projection(writer, scratch, fields, &mut self.root_path)?;
+            }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let (Some(vm), Some(env)) = (self.vm.as_deref_mut(), self.env.as_ref()) else {
                     return Err(JetroEngineError::Eval(crate::EvalError(
@@ -2028,6 +2031,59 @@ fn write_json_tape_cached_path_or_null<W: Write, T: JsonTape>(
     } else {
         writer.write_all(b"null")?;
     }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_object_projection<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    fields: &[super::ndjson_direct::NdjsonDirectObjectField],
+    path_cache: &mut NdjsonPathCache,
+) -> Result<(), JetroEngineError> {
+    writer.write_all(b"{")?;
+    let mut wrote = false;
+    for field in fields {
+        let mut missing_or_null = false;
+        match &field.value {
+            NdjsonDirectObjectValue::Path(steps) => {
+                let idx = path_cache.index(tape, 0, steps);
+                if field.optional
+                    && idx
+                        .map(|idx| {
+                            matches!(json_tape_scalar(tape, idx), crate::util::JsonView::Null)
+                        })
+                        .unwrap_or(true)
+                {
+                    missing_or_null = true;
+                }
+            }
+            NdjsonDirectObjectValue::Literal(Val::Null) if field.optional => {
+                missing_or_null = true;
+            }
+            NdjsonDirectObjectValue::Literal(_) => {}
+        }
+        if missing_or_null {
+            continue;
+        }
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        write_json_str(writer, field.key.as_ref())?;
+        writer.write_all(b":")?;
+        match &field.value {
+            NdjsonDirectObjectValue::Path(steps) => {
+                if let Some(idx) = path_cache.index(tape, 0, steps) {
+                    write_json_tape_at(writer, tape, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectObjectValue::Literal(value) => write_val_json(writer, value)?,
+        }
+        wrote = true;
+    }
+    writer.write_all(b"}")?;
     Ok(())
 }
 
