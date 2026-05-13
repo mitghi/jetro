@@ -118,6 +118,7 @@ fn main() {
         "array projection",
         r#"[id, name, score, active]"#,
     );
+    bench(&engine, &data, "object keys", "$.keys()");
     bench_matches(&engine, &data, "match active rows", "active", rows);
     bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
     bench_matches(

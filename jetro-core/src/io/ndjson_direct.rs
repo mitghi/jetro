@@ -17,6 +17,10 @@ pub(super) enum NdjsonDirectTapePlan {
         call: crate::builtins::BuiltinCall,
         optional: bool,
     },
+    ObjectItems {
+        steps: NdjsonPhysicalPath,
+        method: crate::builtins::BuiltinMethod,
+    },
     ArrayElementPath {
         source_steps: NdjsonPhysicalPath,
         element: NdjsonDirectElement,
@@ -189,6 +193,20 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
                 steps: root_path_steps(&plan, *receiver)?,
                 call: call.clone(),
                 optional: *optional,
+            })
+        }
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } if matches!(
+            call.method,
+            BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
+        ) && matches!(call.args, BuiltinArgs::None) && !*optional =>
+        {
+            Some(NdjsonDirectTapePlan::ObjectItems {
+                steps: root_path_steps(&plan, *receiver)?,
+                method: call.method,
             })
         }
         PlanNode::Pipeline { source, body } => {

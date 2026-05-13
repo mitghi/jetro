@@ -1035,6 +1035,10 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                     writer.write_all(b"null")?;
                 }
             }
+            NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+                let idx = self.root_path.index(scratch, 0, steps);
+                write_json_tape_object_items(writer, scratch, idx, *method)?;
+            }
             NdjsonDirectTapePlan::ArrayElementPath {
                 source_steps,
                 element,
@@ -2312,6 +2316,53 @@ fn write_json_tape_direct_value<W: Write, T: JsonTape>(
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
     }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_object_items<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    obj_idx: Option<usize>,
+    method: crate::builtins::BuiltinMethod,
+) -> Result<(), JetroEngineError> {
+    let Some(obj_idx) = obj_idx else {
+        writer.write_all(b"[]")?;
+        return Ok(());
+    };
+    let Some(crate::data::tape::TapeNode::Object { len, .. }) =
+        tape.nodes().get(obj_idx).copied()
+    else {
+        writer.write_all(b"[]")?;
+        return Ok(());
+    };
+
+    writer.write_all(b"[")?;
+    let mut cur = obj_idx + 1;
+    for field_idx in 0..len {
+        if field_idx > 0 {
+            writer.write_all(b",")?;
+        }
+        match method {
+            crate::builtins::BuiltinMethod::Keys => {
+                write_json_str(writer, tape.str_at(cur))?;
+                cur += 1;
+                cur += tape.span(cur);
+            }
+            crate::builtins::BuiltinMethod::Values => {
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+            }
+            crate::builtins::BuiltinMethod::Entries => {
+                writer.write_all(b"[")?;
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(b",")?;
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+                writer.write_all(b"]")?;
+            }
+            _ => unreachable!("non-object-items builtin"),
+        }
+    }
+    writer.write_all(b"]")?;
     Ok(())
 }
 

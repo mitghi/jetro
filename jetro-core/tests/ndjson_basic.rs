@@ -196,6 +196,34 @@ fn run_ndjson_writes_static_array_projection_directly() {
 }
 
 #[test]
+fn run_ndjson_writes_object_item_methods_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada"}
+"#;
+
+    let mut keys_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.keys()", &mut keys_out)
+        .expect("keys should write");
+    assert_eq!(String::from_utf8(keys_out).unwrap(), "[\"id\",\"name\"]\n");
+
+    let mut values_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.values()", &mut values_out)
+        .expect("values should write");
+    assert_eq!(String::from_utf8(values_out).unwrap(), "[7,\"Ada\"]\n");
+
+    let mut entries_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.entries()", &mut entries_out)
+        .expect("entries should write");
+    assert_eq!(
+        String::from_utf8(entries_out).unwrap(),
+        "[[\"id\",7],[\"name\",\"Ada\"]]\n"
+    );
+}
+
+#[test]
 fn run_ndjson_direct_path_cache_handles_field_order_changes() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"name":"Ada","score":10}
