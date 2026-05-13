@@ -148,6 +148,25 @@ fn run_ndjson_writes_direct_array_element_projections() {
 }
 
 #[test]
+fn run_ndjson_filtered_numeric_reduce_honors_scalar_source_predicate() {
+    let engine = JetroEngine::new();
+    let input = br#"{"attributes":{"active":false,"value":10}}
+{"attributes":{"active":true,"value":7}}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.active).map(@.value).sum()",
+            &mut out,
+        )
+        .expect("filtered scalar-source reducer should write");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "0\n7\n");
+}
+
+#[test]
 fn run_ndjson_limit_writes_and_stops_without_value_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"n":1}

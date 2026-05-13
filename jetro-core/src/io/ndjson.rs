@@ -1914,17 +1914,21 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
             }
         }
         Some(_) => {
-            if let Some(idx) = json_tape_path_index_from(tape, source_idx, suffix_steps) {
-                fold_json_tape_numeric(
-                    json_tape_scalar(tape, idx),
-                    op,
-                    &mut acc_i,
-                    &mut acc_f,
-                    &mut floated,
-                    &mut min_f,
-                    &mut max_f,
-                    &mut n_obs,
-                );
+            if predicate
+                .is_none_or(|predicate| eval_json_tape_item_predicate(tape, source_idx, predicate))
+            {
+                if let Some(idx) = json_tape_path_index_from(tape, source_idx, suffix_steps) {
+                    fold_json_tape_numeric(
+                        json_tape_scalar(tape, idx),
+                        op,
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                    );
+                }
             }
         }
         None => {}
