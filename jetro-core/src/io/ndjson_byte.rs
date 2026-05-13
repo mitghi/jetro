@@ -72,10 +72,14 @@ fn write_ndjson_byte_expr<W: Write>(
             }
         }
         NdjsonDirectByteExpr::ObjectItems { path, method } => {
-            if !path.is_empty() {
-                return Ok(BytePlanWrite::Fallback);
+            match raw_json_byte_path_value(row, path) {
+                RawFieldValue::Found(value) => write_json_object_items_raw(writer, value, *method),
+                RawFieldValue::Missing => {
+                    writer.write_all(b"[]")?;
+                    Ok(BytePlanWrite::Done)
+                }
+                RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
             }
-            write_root_object_items_raw(writer, row, *method)
         }
         NdjsonDirectByteExpr::ArrayElementPath {
             source_steps,
@@ -331,7 +335,7 @@ fn root_field_raw_value_prefix<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a
     }
 }
 
-fn write_root_object_items_raw<W: Write>(
+fn write_json_object_items_raw<W: Write>(
     writer: &mut W,
     row: &[u8],
     method: BuiltinMethod,

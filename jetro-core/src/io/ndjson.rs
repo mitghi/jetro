@@ -3010,6 +3010,7 @@ mod tests {
             "$.name.upper()",
             "$.name.lower()",
             "$.keys()",
+            "$.meta.keys()",
             "$.values()",
             "$.entries()",
             "$.attributes.first().value",

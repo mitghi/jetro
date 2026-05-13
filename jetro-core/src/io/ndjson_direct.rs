@@ -154,7 +154,10 @@ fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
             ) =>
         {
             let steps = root_path_steps(&plan, *receiver)?;
-            byte_path_is_root(&steps).then_some(NdjsonDirectBytePlan::Expr(
+            byte_path_has_root_field(&steps)
+                .then_some(())
+                .or_else(|| byte_path_is_root(&steps).then_some(()))?;
+            Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ObjectItems {
                     path: steps,
                     method: call.method,
