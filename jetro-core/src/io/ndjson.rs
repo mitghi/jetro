@@ -3077,6 +3077,10 @@ mod tests {
                 "attributes.map([@.key, @.value])",
                 r#"[["k1","v1"],["k2","v2"]]"#,
             ),
+            (
+                "attributes.map({key: @.key, value: @.value})",
+                r#"[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]"#,
+            ),
             ("attributes.map(@.key.upper())", r#"["K1","K2"]"#),
         ] {
             let plan = super::direct_tape_plan(&engine, query)

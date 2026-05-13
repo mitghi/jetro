@@ -202,7 +202,9 @@ fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
     match map {
         NdjsonDirectStreamMap::Value(value) => byte_projection_value_supported(value),
         NdjsonDirectStreamMap::Array(items) => items.iter().all(byte_projection_value_supported),
-        NdjsonDirectStreamMap::Object(_) => false,
+        NdjsonDirectStreamMap::Object(fields) => fields
+            .iter()
+            .all(|field| byte_projection_value_supported(&field.value)),
     }
 }
 
@@ -869,9 +871,56 @@ fn write_raw_json_stream_map<W: Write>(
             writer.write_all(b"]")?;
             Ok(())
         }
-        NdjsonDirectStreamMap::Object(_) => Err(JetroEngineError::Eval(crate::EvalError(
-            "unsupported byte stream object map".to_string(),
-        ))),
+        NdjsonDirectStreamMap::Object(fields) => {
+            writer.write_all(b"{")?;
+            let mut wrote = false;
+            for field in fields {
+                if field.optional
+                    && raw_json_projection_value_is_null_or_missing(item, &field.value)?
+                {
+                    continue;
+                }
+                if wrote {
+                    writer.write_all(b",")?;
+                }
+                write_val_json(writer, &crate::data::value::Val::Str(field.key.clone()))?;
+                writer.write_all(b":")?;
+                write_raw_json_projection_value(writer, item, &field.value)?;
+                wrote = true;
+            }
+            writer.write_all(b"}")?;
+            Ok(())
+        }
+    }
+}
+
+fn raw_json_projection_value_is_null_or_missing(
+    item: &[u8],
+    value: &NdjsonDirectProjectionValue,
+) -> Result<bool, JetroEngineError> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            match raw_json_path_value_demand(item, steps, None) {
+                RawFieldValue::Found(value) => Ok(raw_json_is_null(value)),
+                RawFieldValue::Missing => Ok(true),
+                RawFieldValue::Fallback => Err(JetroEngineError::Eval(crate::EvalError(
+                    "unsupported byte stream optional path".to_string(),
+                ))),
+            }
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall {
+            steps, optional, ..
+        } => match raw_json_path_value_demand(item, steps, None) {
+            RawFieldValue::Found(value) if *optional && raw_json_is_null(value) => Ok(true),
+            RawFieldValue::Found(_) => Ok(false),
+            RawFieldValue::Missing => Ok(true),
+            RawFieldValue::Fallback => Err(JetroEngineError::Eval(crate::EvalError(
+                "unsupported byte stream optional scalar".to_string(),
+            ))),
+        },
+        NdjsonDirectProjectionValue::Literal(value) => {
+            Ok(matches!(value, crate::data::value::Val::Null))
+        }
     }
 }
 
@@ -906,6 +955,12 @@ fn write_raw_json_projection_value<W: Write>(
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
     }
     Ok(())
+}
+
+fn raw_json_is_null(value: &[u8]) -> bool {
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    value.get(start..end) == Some(b"null")
 }
 
 fn raw_json_source_items<F>(value: &[u8], mut visit: F) -> Option<()>
