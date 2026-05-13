@@ -360,6 +360,9 @@ impl ExecCtx<'_, '_> {
                     optional,
                 },
             ) => {
+                if let Some(result) = self.eval_view_scalar_call_fast(*receiver, call, *optional) {
+                    return Some(result);
+                }
                 let receiver = match self.eval_fast(*receiver)? {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
@@ -793,6 +796,36 @@ impl ExecCtx<'_, '_> {
             };
         }
         Ok(cur)
+    }
+
+    fn eval_view_scalar_call_fast(
+        &mut self,
+        receiver: NodeId,
+        call: &crate::builtins::BuiltinCall,
+        optional: bool,
+    ) -> Option<Result<Val, EvalError>> {
+        #[cfg(feature = "simd-json")]
+        {
+            let PlanNode::RootPath(steps) = self.plan.node(receiver) else {
+                return None;
+            };
+            let tape = match self.j.lazy_tape() {
+                Ok(Some(tape)) => tape,
+                Ok(None) => return None,
+                Err(err) => return Some(Err(err)),
+            };
+            let root = crate::data::view::TapeView::root(tape);
+            let view = walk_path_view(root, steps);
+            if optional && matches!(view.scalar(), crate::util::JsonView::Null) {
+                return Some(Ok(Val::Null));
+            }
+            call.try_apply_json_view(view.scalar()).map(Ok)
+        }
+        #[cfg(not(feature = "simd-json"))]
+        {
+            let _ = (receiver, call, optional);
+            None
+        }
     }
 
     /// Evaluates a binary operation via `FastChildren`; uses short-circuit logic for `And`/`Or`;

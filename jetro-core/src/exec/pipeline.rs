@@ -517,6 +517,12 @@ impl PipelineBody {
         }
     }
 
+    /// Returns true when the body can execute end-to-end over a borrowed
+    /// `ValueView` source without requiring root materialization.
+    pub(crate) fn can_run_with_view(&self) -> bool {
+        capability::view_capabilities(self).is_some()
+    }
+
     /// Attaches `source` to this body, producing a complete executable `Pipeline`.
     /// Computes the execution `Strategy` once here so `run_with_env` can dispatch
     /// directly without re-walking stages on every call.

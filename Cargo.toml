@@ -4,7 +4,7 @@ exclude = ["jetro-core/fuzz"]
 
 [package]
 name = "jetro"
-version = "0.5.8"
+version = "0.5.9"
 edition = "2021"
 authors = ["Milad (Mike) Taghavi <mitghi.at.me.com>"]
 license = "MIT"

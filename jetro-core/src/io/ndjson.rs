@@ -10,9 +10,25 @@ use std::io::{BufRead, BufWriter, Write};
 use std::path::Path;
 use std::sync::MutexGuard;
 
+#[cfg(feature = "simd-json")]
+use super::ndjson_byte::{
+    eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
+    write_ndjson_byte_tape_plan_row, BytePlanWrite,
+};
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+pub(super) use super::ndjson_direct::direct_byte_plan;
+#[cfg(feature = "simd-json")]
+pub(super) use super::ndjson_direct::{
+    direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
+    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
+    NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
+    NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+};
+
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
-const DEFAULT_READER_BUFFER_CAPACITY: usize = 64 * 1024;
+const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Configuration for per-row NDJSON execution.
@@ -581,13 +597,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut writer = ndjson_writer_with_options(writer, options);
-    let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        write_val_line(&mut writer, &value)?;
-        Ok(NdjsonControl::Continue)
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
 
 pub fn run_ndjson_limit<R, W>(
@@ -627,19 +637,7 @@ where
         return Ok(0);
     }
 
-    let mut writer = ndjson_writer_with_options(writer, options);
-    let mut emitted = 0usize;
-    let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        write_val_line(&mut writer, &value)?;
-        emitted += 1;
-        Ok(if emitted >= limit {
-            NdjsonControl::Stop
-        } else {
-            NdjsonControl::Continue
-        })
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
 }
 
 pub fn run_ndjson_file_limit<P, W>(
@@ -912,30 +910,579 @@ where
     Ok(count)
 }
 
-fn drive_ndjson_val<R, F>(
+fn drive_ndjson_writer<R, W>(
     engine: &JetroEngine,
     reader: R,
     query: &str,
+    limit: Option<usize>,
     options: NdjsonOptions,
-    mut emit: F,
+    writer: W,
 ) -> Result<usize, JetroEngineError>
 where
     R: BufRead,
-    F: FnMut(Val) -> Result<NdjsonControl, JetroEngineError>,
+    W: Write,
 {
+    #[cfg(feature = "simd-json")]
+    if let Some((byte_plan, tape_plan)) = direct_writer_plans(engine, query) {
+        if let Some(byte_plan) = byte_plan {
+            return drive_ndjson_byte_writer(
+                engine, reader, &byte_plan, &tape_plan, limit, options, writer,
+            );
+        }
+        if tape_plan_can_write_byte_row(&tape_plan) {
+            return drive_ndjson_tape_byte_writer(
+                engine, reader, &tape_plan, limit, options, writer,
+            );
+        }
+        return drive_ndjson_tape_writer(engine, reader, &tape_plan, limit, options, writer);
+    }
+
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let mut executor = NdjsonRowExecutor::new(engine, query);
+    let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
-    let mut count = 0;
+    let mut count = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         count += 1;
-        if matches!(emit(executor.eval_owned_row(line_no, row)?)?, NdjsonControl::Stop) {
+        executor.write_owned_row(line_no, row, &mut writer)?;
+        if limit.is_some_and(|limit| count >= limit) {
             break;
         }
     }
 
+    writer.flush()?;
     Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_byte_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    byte_plan: &NdjsonDirectBytePlan,
+    tape_plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut count = 0usize;
+
+    visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
+        match write_ndjson_byte_plan_row(&mut writer, row, byte_plan)? {
+            BytePlanWrite::Done => {}
+            BytePlanWrite::Fallback => {
+                scratch.parse_slice(row).map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })?;
+                tape_runner.write_row(&scratch, &mut writer)?;
+            }
+        }
+        writer.write_all(b"\n")?;
+        count += 1;
+        Ok(!limit.is_some_and(|limit| count >= limit))
+    })?;
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_byte_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    tape_plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut count = 0usize;
+
+    visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
+        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan, &mut byte_scratch)? {
+            BytePlanWrite::Done => {}
+            BytePlanWrite::Fallback => {
+                scratch.parse_slice(row).map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })?;
+                tape_runner.write_row(&scratch, &mut writer)?;
+            }
+        }
+        writer.write_all(b"\n")?;
+        count += 1;
+        Ok(!limit.is_some_and(|limit| count >= limit))
+    })?;
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn visit_ndjson_borrowed_rows<R, F>(
+    driver: &mut NdjsonPerRowDriver<R>,
+    spill: &mut Vec<u8>,
+    mut visit: F,
+) -> Result<(), JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(u64, &[u8]) -> Result<bool, JetroEngineError>,
+{
+    loop {
+        spill.clear();
+        let available = driver.reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = memchr(b'\n', available) {
+            driver.line_no += 1;
+            let line_no = driver.line_no;
+            let mut row = &available[..pos];
+            if row.last() == Some(&b'\r') {
+                row = &row[..row.len() - 1];
+            }
+            if line_no == 1 && row.starts_with(&[0xef, 0xbb, 0xbf]) {
+                row = &row[3..];
+            }
+            let (start, end) = non_ws_range(row);
+            let keep_going = if start == end {
+                true
+            } else {
+                let row = &row[start..end];
+                if row.len() > driver.max_line_len {
+                    return Err(RowError::LineTooLarge {
+                        line_no,
+                        len: row.len(),
+                        max: driver.max_line_len,
+                    }
+                    .into());
+                }
+                visit(line_no, row)?
+            };
+            driver.reader.consume(pos + 1);
+            if !keep_going {
+                return Ok(());
+            }
+        } else {
+            let read = driver.read_physical_line(spill)?;
+            if read == 0 {
+                return Ok(());
+            }
+            driver.line_no += 1;
+            strip_initial_bom(driver.line_no, spill);
+            trim_line_ending(spill);
+            let (start, end) = non_ws_range(spill);
+            if start == end {
+                continue;
+            }
+            let len = end - start;
+            if len > driver.max_line_len {
+                return Err(RowError::LineTooLarge {
+                    line_no: driver.line_no,
+                    len,
+                    max: driver.max_line_len,
+                }
+                .into());
+            }
+            if !visit(driver.line_no, &spill[start..end])? {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut count = 0usize;
+    let mut runner = NdjsonTapeWriterRunner::new(engine, plan);
+
+    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        scratch.parse_slice(row).map_err(|message| {
+            row_parse_error(
+                line_no,
+                JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
+            )
+        })?;
+        runner.write_row(&scratch, &mut writer)?;
+        writer.write_all(b"\n")?;
+        count += 1;
+        if limit.is_some_and(|limit| count >= limit) {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) struct NdjsonTapeWriterRunner<'a, 'p> {
+    plan: &'p NdjsonDirectTapePlan,
+    vm: Option<MutexGuard<'a, VM>>,
+    env: Option<crate::data::context::Env>,
+    root_path: NdjsonPathCache,
+    source_path: NdjsonPathCache,
+    suffix_path: NdjsonPathCache,
+    predicate_path: NdjsonPathCache,
+    object_paths: Vec<NdjsonPathCache>,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
+    pub(super) fn new(engine: &'a JetroEngine, plan: &'p NdjsonDirectTapePlan) -> Self {
+        let needs_vm = plan.needs_vm();
+        Self {
+            plan,
+            vm: needs_vm.then(|| engine.lock_vm()),
+            env: needs_vm.then(|| crate::data::context::Env::new(Val::Null)),
+            root_path: NdjsonPathCache::default(),
+            source_path: NdjsonPathCache::default(),
+            suffix_path: NdjsonPathCache::default(),
+            predicate_path: NdjsonPathCache::default(),
+            object_paths: Vec::new(),
+        }
+    }
+
+    pub(super) fn write_row<W: Write>(
+        &mut self,
+        scratch: &crate::data::tape::TapeScratch,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        match self.plan {
+            NdjsonDirectTapePlan::RootPath(steps) => {
+                if let Some(idx) = self.root_path.index(scratch, 0, steps) {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => {
+                let idx = self.root_path.index(scratch, 0, steps);
+                let value = idx
+                    .map(|idx| json_tape_scalar(scratch, idx))
+                    .unwrap_or(crate::util::JsonView::Null);
+                if *optional && matches!(value, crate::util::JsonView::Null) {
+                    writer.write_all(b"null")?;
+                } else if let Some(value) = call.try_apply_json_view(value) {
+                    write_val_json(writer, &value)?;
+                } else if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+                source_steps,
+                element,
+                suffix_steps,
+                call,
+            } => {
+                let idx = self
+                    .source_path
+                    .index(scratch, 0, source_steps)
+                    .and_then(|idx| json_tape_array_element(scratch, idx, *element))
+                    .and_then(|idx| self.suffix_path.index(scratch, idx, suffix_steps));
+                if let Some(value) = idx
+                    .map(|idx| json_tape_scalar(scratch, idx))
+                    .and_then(|value| call.try_apply_json_view(value))
+                {
+                    write_val_json(writer, &value)?;
+                } else if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+                let idx = self.root_path.index(scratch, 0, steps);
+                write_json_tape_object_items(writer, scratch, idx, *method)?;
+            }
+            NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps,
+            } => {
+                let idx = self
+                    .source_path
+                    .index(scratch, 0, source_steps)
+                    .and_then(|idx| json_tape_array_element(scratch, idx, *element))
+                    .and_then(|idx| self.suffix_path.index(scratch, idx, suffix_steps));
+                if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::Stream(plan) => {
+                write_json_tape_stream(
+                    writer,
+                    scratch,
+                    plan,
+                    &mut self.source_path,
+                    &mut self.suffix_path,
+                    &mut self.predicate_path,
+                    &mut self.object_paths,
+                )?;
+            }
+            NdjsonDirectTapePlan::Object(fields) => {
+                write_json_tape_object_projection(writer, scratch, fields, &mut self.object_paths)?;
+            }
+            NdjsonDirectTapePlan::Array(items) => {
+                write_json_tape_array_projection(writer, scratch, items, &mut self.object_paths)?;
+            }
+            NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
+                let (Some(vm), Some(env)) = (self.vm.as_deref_mut(), self.env.as_ref()) else {
+                    return Err(JetroEngineError::Eval(crate::EvalError(
+                        "NDJSON view pipeline requires VM state".to_string(),
+                    )));
+                };
+                let source = json_tape_path_index(scratch, source_steps)
+                    .map(|idx| crate::data::view::TapeScratchView::Node { tape: scratch, idx })
+                    .unwrap_or(crate::data::view::TapeScratchView::Missing);
+                let Some(result) =
+                    crate::exec::view::run_with_env_and_vm(source, body, None, &env, vm)
+                else {
+                    writer.write_all(b"null")?;
+                    return Ok(());
+                };
+                write_val_json(writer, &result.map_err(JetroEngineError::Eval)?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Default)]
+pub(super) struct NdjsonPathCache {
+    // Per-depth verified field deltas for stable object layouts. Every use
+    // checks the cached key before returning the value node, so mixed-schema
+    // rows safely fall back to a normal object scan.
+    fields: Vec<Option<NdjsonFieldCache>>,
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+struct NdjsonFieldCache {
+    key_delta: usize,
+    value_delta: usize,
+}
+
+#[cfg(feature = "simd-json")]
+struct NdjsonPathCaches<'a> {
+    source: &'a mut NdjsonPathCache,
+    suffix: &'a mut NdjsonPathCache,
+    predicate: &'a mut NdjsonPathCache,
+}
+
+#[cfg(feature = "simd-json")]
+impl NdjsonPathCache {
+    fn index<T: JsonTape>(
+        &mut self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+    ) -> Option<usize> {
+        if let Some(idx) = self.index_cached(tape, start, steps) {
+            return Some(idx);
+        }
+        self.index_uncached(tape, start, steps)
+    }
+
+    fn index_cached<T: JsonTape>(
+        &self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+    ) -> Option<usize> {
+        use crate::ir::physical::PhysicalPathStep;
+
+        let [PhysicalPathStep::Field(key), rest @ ..] = steps else {
+            return None;
+        };
+        if rest
+            .iter()
+            .any(|step| matches!(step, PhysicalPathStep::Field(_)))
+        {
+            return None;
+        }
+        let Some(field) = self
+            .fields
+            .first()
+            .copied()
+            .flatten()
+            .filter(|field| field.key_delta > 1)
+        else {
+            return None;
+        };
+        let idx = json_tape_object_cached_field(tape, start, field, key.as_ref())?;
+        let mut cur = idx;
+        for step in rest {
+            cur = json_tape_step_index(tape, cur, step)?;
+        }
+        Some(cur)
+    }
+
+    fn index_uncached<T: JsonTape>(
+        &mut self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+    ) -> Option<usize> {
+        self.index_from_depth(tape, start, steps, 0)
+    }
+
+    fn index_from_depth<T: JsonTape>(
+        &mut self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+        depth: usize,
+    ) -> Option<usize> {
+        use crate::ir::physical::PhysicalPathStep;
+
+        match steps {
+            [] => Some(start),
+            [PhysicalPathStep::Field(key), rest @ ..] => {
+                if self.fields.len() <= depth {
+                    self.fields.resize(depth + 1, None);
+                }
+
+                if let Some(field) = self.fields[depth].filter(|field| field.key_delta > 1) {
+                    if let Some(idx) =
+                        json_tape_object_cached_field(tape, start, field, key.as_ref())
+                    {
+                        return self.index_from_depth(tape, idx, rest, depth + 1);
+                    }
+                }
+
+                let (idx, field) =
+                    json_tape_object_field_index_and_cache(tape, start, key.as_ref())?;
+                self.fields[depth] = Some(field);
+                self.index_from_depth(tape, idx, rest, depth + 1)
+            }
+            [step, rest @ ..] => {
+                let idx = json_tape_step_index(tape, start, step)?;
+                self.index_from_depth(tape, idx, rest, depth + 1)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_matches_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    predicate: &NdjsonDirectPredicate,
+    limit: usize,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+    let needs_vm = predicate_needs_vm(predicate);
+    let mut vm = needs_vm.then(|| engine.lock_vm());
+    let env = needs_vm.then(|| crate::data::context::Env::new(Val::Null));
+    let mut predicate_path = NdjsonPathCache::default();
+
+    while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
+        if let Some(matched) = eval_ndjson_byte_predicate_row(&row, predicate)? {
+            if !matched {
+                continue;
+            }
+            writer.write_all(&row)?;
+            writer.write_all(b"\n")?;
+            emitted += 1;
+            if emitted >= limit {
+                break;
+            }
+            continue;
+        }
+
+        scratch.parse_slice(&row).map_err(|message| {
+            row_parse_error(
+                line_no,
+                JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
+            )
+        })?;
+        if !eval_tape_predicate(
+            &scratch,
+            predicate,
+            env.as_ref(),
+            &mut vm,
+            &mut predicate_path,
+        )
+        .map_err(JetroEngineError::Eval)?
+        {
+            continue;
+        }
+        writer.write_all(&row)?;
+        writer.write_all(b"\n")?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
 }
 
 fn drive_ndjson_matches<R, F>(
@@ -955,11 +1502,20 @@ where
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    #[cfg(feature = "simd-json")]
+    let direct_predicate = direct_tape_predicate(engine, predicate);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        #[cfg(feature = "simd-json")]
+        if let Some(predicate) = direct_predicate.as_ref() {
+            if let Some(false) = eval_ndjson_byte_predicate_row(&row, predicate)? {
+                continue;
+            }
+        }
+
         let document = executor.parse_owned_row(line_no, row)?;
         let matched = executor.eval_document(line_no, &document)?;
         if !is_truthy(&matched) {
@@ -992,6 +1548,13 @@ where
 {
     if limit == 0 {
         return Ok(0);
+    }
+
+    #[cfg(feature = "simd-json")]
+    if let Some(predicate) = direct_tape_predicate(engine, predicate) {
+        return drive_ndjson_tape_matches_writer(
+            engine, reader, &predicate, limit, options, writer,
+        );
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
@@ -1042,6 +1605,40 @@ impl<'a> NdjsonRowExecutor<'a> {
         self.eval_document(line_no, &document)
     }
 
+    pub(super) fn write_owned_row<W: Write>(
+        &mut self,
+        line_no: u64,
+        row: Vec<u8>,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        let document = self.parse_owned_result_row(line_no, row)?;
+        self.write_document_result(line_no, &document, writer)
+    }
+
+    fn parse_owned_result_row(
+        &self,
+        line_no: u64,
+        row: Vec<u8>,
+    ) -> Result<Jetro, JetroEngineError> {
+        #[cfg(feature = "simd-json")]
+        {
+            crate::data::tape::TapeData::parse(row)
+                .map(Jetro::from_tape_data)
+                .map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })
+        }
+        #[cfg(not(feature = "simd-json"))]
+        {
+            self.parse_owned_row(line_no, row)
+        }
+    }
+
     pub(super) fn parse_owned_row(
         &self,
         line_no: u64,
@@ -1059,12 +1656,396 @@ impl<'a> NdjsonRowExecutor<'a> {
             .map_err(|err| row_eval_error(line_no, err))
     }
 
+    pub(super) fn write_document_result<W: Write>(
+        &mut self,
+        line_no: u64,
+        document: &Jetro,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        if self.try_write_tape_result(line_no, document, writer)? {
+            return Ok(());
+        }
+        let value = self.eval_document(line_no, document)?;
+        write_val_line(writer, &value)
+    }
+
+    fn try_write_tape_result<W: Write>(
+        &self,
+        line_no: u64,
+        document: &Jetro,
+        writer: &mut W,
+    ) -> Result<bool, JetroEngineError> {
+        #[cfg(feature = "simd-json")]
+        {
+            use crate::ir::physical::{PlanNode, QueryRoot};
+
+            let QueryRoot::Node(root) = self.plan.root() else {
+                return Ok(false);
+            };
+            let PlanNode::RootPath(steps) = self.plan.node(*root) else {
+                return Ok(false);
+            };
+            let Some(tape) = document
+                .lazy_tape()
+                .map_err(|err| row_eval_error(line_no, err))?
+            else {
+                return Ok(false);
+            };
+            if let Some(idx) = json_tape_path_index(tape.as_ref(), steps) {
+                write_json_tape_at(writer, tape.as_ref(), idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+            writer.write_all(b"\n")?;
+            Ok(true)
+        }
+        #[cfg(not(feature = "simd-json"))]
+        {
+            let _ = (line_no, document, writer);
+            Ok(false)
+        }
+    }
+
     pub(super) fn engine(&self) -> &'a JetroEngine {
         self.engine
     }
 }
 
-pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
+#[cfg(feature = "simd-json")]
+trait JsonTape {
+    fn nodes(&self) -> &[crate::data::tape::TapeNode];
+    fn str_at(&self, idx: usize) -> &str;
+    fn span(&self, idx: usize) -> usize;
+}
+
+#[cfg(feature = "simd-json")]
+impl JsonTape for crate::data::tape::TapeData {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, idx: usize) -> &str {
+        self.str_at(idx)
+    }
+
+    #[inline]
+    fn span(&self, idx: usize) -> usize {
+        self.span(idx)
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl JsonTape for crate::data::tape::TapeScratch {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, idx: usize) -> &str {
+        self.str_at(idx)
+    }
+
+    #[inline]
+    fn span(&self, idx: usize) -> usize {
+        self.span(idx)
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index<T: JsonTape>(
+    tape: &T,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
+    json_tape_path_index_from(tape, 0, steps)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index_from<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
+    if tape.nodes().is_empty() {
+        return None;
+    }
+
+    return match steps {
+        [] => Some(start),
+        [step] => json_tape_step_index(tape, start, step),
+        [first, second] => json_tape_step_index(tape, start, first)
+            .and_then(|idx| json_tape_step_index(tape, idx, second)),
+        _ => json_tape_path_index_slow(tape, start, steps),
+    };
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index_slow<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
+    let mut idx = start;
+    for step in steps {
+        idx = json_tape_step_index(tape, idx, step)?;
+    }
+    Some(idx)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_step_index<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    step: &crate::ir::physical::PhysicalPathStep,
+) -> Option<usize> {
+    use crate::data::tape::TapeNode;
+    use crate::ir::physical::PhysicalPathStep;
+
+    match step {
+        PhysicalPathStep::Field(key) => {
+            let TapeNode::Object { len, .. } = tape.nodes()[start] else {
+                return None;
+            };
+            let mut cur = start + 1;
+            for _ in 0..len {
+                if tape.str_at(cur) == key.as_ref() {
+                    return Some(cur + 1);
+                }
+                cur += 1;
+                cur += tape.span(cur);
+            }
+            None
+        }
+        PhysicalPathStep::Index(wanted) => {
+            let TapeNode::Array { len, .. } = tape.nodes()[start] else {
+                return None;
+            };
+            let wanted = if *wanted < 0 {
+                len.checked_sub(wanted.unsigned_abs() as usize)?
+            } else {
+                *wanted as usize
+            };
+            if wanted >= len {
+                return None;
+            }
+            let mut cur = start + 1;
+            for _ in 0..wanted {
+                cur += tape.span(cur);
+            }
+            Some(cur)
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_object_cached_field<T: JsonTape>(
+    tape: &T,
+    obj_idx: usize,
+    cache: NdjsonFieldCache,
+    key: &str,
+) -> Option<usize> {
+    let crate::data::tape::TapeNode::Object { .. } = tape.nodes().get(obj_idx).copied()? else {
+        return None;
+    };
+    let key_idx = obj_idx.checked_add(cache.key_delta)?;
+    let value_idx = obj_idx.checked_add(cache.value_delta)?;
+    if value_idx >= tape.nodes().len() {
+        return None;
+    }
+    if !matches!(
+        tape.nodes().get(key_idx),
+        Some(crate::data::tape::TapeNode::String(_))
+    ) {
+        return None;
+    }
+    (tape.str_at(key_idx) == key).then_some(value_idx)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_object_field_index_and_cache<T: JsonTape>(
+    tape: &T,
+    obj_idx: usize,
+    key: &str,
+) -> Option<(usize, NdjsonFieldCache)> {
+    let crate::data::tape::TapeNode::Object { len, .. } = tape.nodes()[obj_idx] else {
+        return None;
+    };
+    let mut cur = obj_idx + 1;
+    for _ in 0..len {
+        if tape.str_at(cur) == key {
+            return Some((
+                cur + 1,
+                NdjsonFieldCache {
+                    key_delta: cur - obj_idx,
+                    value_delta: cur + 1 - obj_idx,
+                },
+            ));
+        }
+        cur += 1;
+        cur += tape.span(cur);
+    }
+    None
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_array_element<T: JsonTape>(
+    tape: &T,
+    idx: usize,
+    element: NdjsonDirectElement,
+) -> Option<usize> {
+    let crate::data::tape::TapeNode::Array { len, .. } = tape.nodes().get(idx).copied()? else {
+        return None;
+    };
+    let wanted = match element {
+        NdjsonDirectElement::First => 0,
+        NdjsonDirectElement::Last => len.checked_sub(1)?,
+        NdjsonDirectElement::Nth(n) => n,
+    };
+    if wanted >= len {
+        return None;
+    }
+    let mut cur = idx + 1;
+    for _ in 0..wanted {
+        cur += tape.span(cur);
+    }
+    Some(cur)
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) fn eval_tape_predicate(
+    tape: &crate::data::tape::TapeScratch,
+    predicate: &NdjsonDirectPredicate,
+    env: Option<&crate::data::context::Env>,
+    vm: &mut Option<std::sync::MutexGuard<'_, crate::vm::exec::VM>>,
+    cache: &mut NdjsonPathCache,
+) -> Result<bool, crate::EvalError> {
+    use crate::parse::ast::BinOp;
+
+    Ok(match predicate {
+        NdjsonDirectPredicate::Path(steps) => cache
+            .index(tape, 0, steps)
+            .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
+            .unwrap_or(false),
+        NdjsonDirectPredicate::Literal(value) => crate::util::is_truthy(value),
+        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner, env, vm, cache)?,
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            eval_tape_predicate(tape, lhs, env, vm, cache)?
+                && eval_tape_predicate(tape, rhs, env, vm, cache)?
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            eval_tape_predicate(tape, lhs, env, vm, cache)?
+                || eval_tape_predicate(tape, rhs, env, vm, cache)?
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } => {
+            let Some(lhs) = eval_tape_scalar(tape, lhs, cache) else {
+                return Ok(false);
+            };
+            let Some(rhs) = eval_tape_scalar(tape, rhs, cache) else {
+                return Ok(false);
+            };
+            crate::util::json_cmp_binop(lhs, *op, rhs)
+        }
+        NdjsonDirectPredicate::ViewScalarCall { steps, call } => cache
+            .index(tape, 0, steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => json_tape_path_index(tape, source_steps)
+            .and_then(|idx| json_tape_array_element(tape, idx, *element))
+            .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ViewPipeline { source_steps, body } => {
+            let (Some(vm), Some(env)) = (vm.as_deref_mut(), env) else {
+                return Err(crate::EvalError(
+                    "view pipeline predicate requires VM state".to_string(),
+                ));
+            };
+            let source = json_tape_path_index(tape, source_steps)
+                .map(|idx| crate::data::view::TapeScratchView::Node { tape, idx })
+                .unwrap_or(crate::data::view::TapeScratchView::Missing);
+            crate::exec::view::run_with_env_and_vm(source, body, None, env, vm)
+                .transpose()?
+                .is_some_and(|value| crate::util::is_truthy(&value))
+        }
+    })
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
+    match predicate {
+        NdjsonDirectPredicate::Not(inner) => predicate_needs_vm(inner),
+        NdjsonDirectPredicate::Binary { lhs, rhs, .. } => {
+            predicate_needs_vm(lhs) || predicate_needs_vm(rhs)
+        }
+        NdjsonDirectPredicate::ViewPipeline { .. } => true,
+        NdjsonDirectPredicate::Path(_)
+        | NdjsonDirectPredicate::Literal(_)
+        | NdjsonDirectPredicate::ViewScalarCall { .. }
+        | NdjsonDirectPredicate::ArrayElementViewScalarCall { .. } => false,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_tape_scalar<'a>(
+    tape: &'a crate::data::tape::TapeScratch,
+    predicate: &'a NdjsonDirectPredicate,
+    cache: &mut NdjsonPathCache,
+) -> Option<crate::util::JsonView<'a>> {
+    match predicate {
+        NdjsonDirectPredicate::Path(steps) => cache
+            .index(tape, 0, steps)
+            .map(|idx| json_tape_scalar(tape, idx)),
+        NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_view_truthy(value: crate::util::JsonView<'_>) -> bool {
+    match value {
+        crate::util::JsonView::Null => false,
+        crate::util::JsonView::Bool(value) => value,
+        crate::util::JsonView::Int(value) => value != 0,
+        crate::util::JsonView::UInt(value) => value != 0,
+        crate::util::JsonView::Float(value) => value != 0.0,
+        crate::util::JsonView::Str(value) => !value.is_empty(),
+        crate::util::JsonView::ArrayLen(len) | crate::util::JsonView::ObjectLen(len) => len > 0,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_scalar<T: JsonTape>(tape: &T, idx: usize) -> crate::util::JsonView<'_> {
+    use crate::data::tape::TapeNode;
+    use simd_json::StaticNode as SN;
+
+    let Some(node) = tape.nodes().get(idx).copied() else {
+        return crate::util::JsonView::Null;
+    };
+    match node {
+        TapeNode::Static(SN::Null) => crate::util::JsonView::Null,
+        TapeNode::Static(SN::Bool(value)) => crate::util::JsonView::Bool(value),
+        TapeNode::Static(SN::I64(value)) => crate::util::JsonView::Int(value),
+        TapeNode::Static(SN::U64(value)) => crate::util::JsonView::UInt(value),
+        TapeNode::Static(SN::F64(value)) => crate::util::JsonView::Float(value),
+        TapeNode::String(_) => crate::util::JsonView::Str(tape.str_at(idx)),
+        TapeNode::Array { len, .. } => crate::util::JsonView::ArrayLen(len),
+        TapeNode::Object { len, .. } => crate::util::JsonView::ObjectLen(len),
+    }
+}
+
+pub(super) fn write_val_line<W: Write>(
+    writer: &mut W,
+    value: &Val,
+) -> Result<(), JetroEngineError> {
     write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
     Ok(())
@@ -1098,7 +2079,10 @@ pub(super) fn ndjson_writer_with_options<W: Write>(
     BufWriter::with_capacity(capacity, writer)
 }
 
-fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
+pub(super) fn write_val_json<W: Write>(
+    writer: &mut W,
+    value: &Val,
+) -> Result<(), JetroEngineError> {
     match value {
         Val::Null => writer.write_all(b"null")?,
         Val::Bool(true) => writer.write_all(b"true")?,
@@ -1112,15 +2096,603 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         Val::FloatVec(items) => write_json_float_array(writer, items.iter().copied())?,
         Val::StrVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_ref()))?,
         Val::StrSliceVec(items) => write_json_str_array(writer, items.iter().map(|s| s.as_str()))?,
-        Val::Obj(entries) => {
-            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
-        }
-        Val::ObjSmall(entries) => {
-            write_json_object(writer, entries.iter().map(|(key, value)| (key.as_ref(), value)))?
-        }
+        Val::Obj(entries) => write_json_object(
+            writer,
+            entries.iter().map(|(key, value)| (key.as_ref(), value)),
+        )?,
+        Val::ObjSmall(entries) => write_json_object(
+            writer,
+            entries.iter().map(|(key, value)| (key.as_ref(), value)),
+        )?,
         Val::ObjVec(data) => write_json_objvec(writer, data)?,
     }
     Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_at<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    idx: usize,
+) -> Result<usize, JetroEngineError> {
+    use crate::data::tape::TapeNode;
+    use simd_json::StaticNode as SN;
+
+    let Some(node) = tape.nodes().get(idx).copied() else {
+        writer.write_all(b"null")?;
+        return Ok(idx);
+    };
+
+    match node {
+        TapeNode::Static(SN::Null) => {
+            writer.write_all(b"null")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(true)) => {
+            writer.write_all(b"true")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(false)) => {
+            writer.write_all(b"false")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::I64(value)) => {
+            write_i64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::U64(value)) => {
+            write_u64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::F64(value)) => {
+            write_f64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::String(_) => {
+            write_json_str(writer, tape.str_at(idx))?;
+            Ok(idx + 1)
+        }
+        TapeNode::Array { len, .. } => {
+            writer.write_all(b"[")?;
+            let mut cur = idx + 1;
+            for item_idx in 0..len {
+                if item_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                cur = write_json_tape_at(writer, tape, cur)?;
+            }
+            writer.write_all(b"]")?;
+            Ok(cur)
+        }
+        TapeNode::Object { len, .. } => {
+            writer.write_all(b"{")?;
+            let mut cur = idx + 1;
+            for field_idx in 0..len {
+                if field_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(b":")?;
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+            }
+            writer.write_all(b"}")?;
+            Ok(cur)
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn visit_json_tape_source_items<T, E, F>(tape: &T, source_idx: usize, mut visit: F) -> Result<(), E>
+where
+    T: JsonTape,
+    F: FnMut(usize) -> Result<(), E>,
+{
+    use crate::data::tape::TapeNode;
+
+    match tape.nodes().get(source_idx).copied() {
+        Some(TapeNode::Array { len, .. }) => {
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                visit(cur)?;
+                cur += tape.span(cur);
+            }
+        }
+        Some(_) => visit(source_idx)?,
+        None => {}
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_stream<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    plan: &NdjsonDirectStreamPlan,
+    source_cache: &mut NdjsonPathCache,
+    suffix_cache: &mut NdjsonPathCache,
+    predicate_cache: &mut NdjsonPathCache,
+    projection_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    let Some(source_idx) = source_cache.index(tape, 0, &plan.source_steps) else {
+        write_json_tape_empty_stream_result(writer, &plan.sink)?;
+        return Ok(());
+    };
+
+    match &plan.sink {
+        NdjsonDirectStreamSink::Collect(map) => {
+            writer.write_all(b"[")?;
+            let mut wrote_row = false;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if !plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    return Ok::<(), JetroEngineError>(());
+                }
+                if wrote_row {
+                    writer.write_all(b",")?;
+                }
+                write_json_tape_stream_map(
+                    writer,
+                    tape,
+                    item_idx,
+                    map,
+                    suffix_cache,
+                    projection_caches,
+                )?;
+                wrote_row = true;
+                Ok(())
+            })?;
+            writer.write_all(b"]")?;
+        }
+        NdjsonDirectStreamSink::Count => {
+            let mut count = 0usize;
+            let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    count += 1;
+                }
+                Ok(())
+            });
+            write_i64(writer, count as i64)?;
+        }
+        NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
+            let caches = NdjsonPathCaches {
+                source: source_cache,
+                suffix: suffix_cache,
+                predicate: predicate_cache,
+            };
+            let value = reduce_json_tape_numeric_path(
+                tape,
+                &plan.source_steps,
+                plan.predicate.as_ref(),
+                suffix_steps,
+                *op,
+                caches,
+            );
+            write_val_json(writer, &value)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_empty_stream_result<W: Write>(
+    writer: &mut W,
+    sink: &NdjsonDirectStreamSink,
+) -> Result<(), JetroEngineError> {
+    match sink {
+        NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+        NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
+        NdjsonDirectStreamSink::Numeric { op, .. } => {
+            let value = crate::exec::pipeline::num_finalise(
+                *op,
+                0,
+                0.0,
+                false,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                0,
+            );
+            write_val_json(writer, &value)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_stream_map<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    item_idx: usize,
+    map: &NdjsonDirectStreamMap,
+    suffix_cache: &mut NdjsonPathCache,
+    projection_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    match map {
+        NdjsonDirectStreamMap::Value(value) => {
+            let path_idx = match value {
+                NdjsonDirectProjectionValue::Path(steps)
+                | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+                    suffix_cache.index(tape, item_idx, steps)
+                }
+                NdjsonDirectProjectionValue::Literal(_) => None,
+            };
+            write_json_tape_direct_value(writer, tape, value, path_idx)?;
+        }
+        NdjsonDirectStreamMap::Array(items) => {
+            write_json_tape_array_projection_from(
+                writer,
+                tape,
+                item_idx,
+                items,
+                projection_caches,
+            )?;
+        }
+        NdjsonDirectStreamMap::Object(fields) => {
+            write_json_tape_object_projection_from(
+                writer,
+                tape,
+                item_idx,
+                fields,
+                projection_caches,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_object_projection<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    fields: &[super::ndjson_direct::NdjsonDirectObjectField],
+    path_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    write_json_tape_object_projection_from(writer, tape, 0, fields, path_caches)
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_object_projection_from<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    start: usize,
+    fields: &[super::ndjson_direct::NdjsonDirectObjectField],
+    path_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    if path_caches.len() < fields.len() {
+        path_caches.resize_with(fields.len(), NdjsonPathCache::default);
+    }
+    writer.write_all(b"{")?;
+    let mut wrote = false;
+    for (field_idx, field) in fields.iter().enumerate() {
+        let path_cache = &mut path_caches[field_idx];
+        let mut path_idx = None;
+        match &field.value {
+            NdjsonDirectProjectionValue::Path(steps) => {
+                let idx = path_cache.index(tape, start, steps);
+                path_idx = idx;
+                if field.optional
+                    && idx
+                        .map(|idx| {
+                            matches!(json_tape_scalar(tape, idx), crate::util::JsonView::Null)
+                        })
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+            }
+            NdjsonDirectProjectionValue::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => {
+                let idx = path_cache.index(tape, start, steps);
+                path_idx = idx;
+                if (*optional || field.optional)
+                    && idx
+                        .map(|idx| {
+                            matches!(json_tape_scalar(tape, idx), crate::util::JsonView::Null)
+                        })
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+                if field.optional
+                    && idx
+                        .map(|idx| json_tape_scalar(tape, idx))
+                        .and_then(|value| call.try_apply_json_view(value))
+                        .is_some_and(|value| matches!(value, Val::Null))
+                {
+                    continue;
+                }
+            }
+            NdjsonDirectProjectionValue::Literal(Val::Null) if field.optional => {
+                continue;
+            }
+            NdjsonDirectProjectionValue::Literal(_) => {}
+        }
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        write_json_str(writer, field.key.as_ref())?;
+        writer.write_all(b":")?;
+        write_json_tape_direct_value(writer, tape, &field.value, path_idx)?;
+        wrote = true;
+    }
+    writer.write_all(b"}")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_projection<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    items: &[NdjsonDirectProjectionValue],
+    path_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    write_json_tape_array_projection_from(writer, tape, 0, items, path_caches)
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    start: usize,
+    items: &[NdjsonDirectProjectionValue],
+    path_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    if path_caches.len() < items.len() {
+        path_caches.resize_with(items.len(), NdjsonPathCache::default);
+    }
+    writer.write_all(b"[")?;
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            writer.write_all(b",")?;
+        }
+        let path_idx = match item {
+            NdjsonDirectProjectionValue::Path(steps)
+            | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+                path_caches[idx].index(tape, start, steps)
+            }
+            NdjsonDirectProjectionValue::Literal(_) => None,
+        };
+        write_json_tape_direct_value(writer, tape, item, path_idx)?;
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_direct_value<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    value: &NdjsonDirectProjectionValue,
+    path_idx: Option<usize>,
+) -> Result<(), JetroEngineError> {
+    match value {
+        NdjsonDirectProjectionValue::Path(_) => {
+            if let Some(idx) = path_idx {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => {
+            if let Some(idx) = path_idx {
+                let value = json_tape_scalar(tape, idx);
+                if let Some(value) = call.try_apply_json_view(value) {
+                    write_val_json(writer, &value)?;
+                } else {
+                    write_json_tape_at(writer, tape, idx)?;
+                }
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_object_items<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    obj_idx: Option<usize>,
+    method: crate::builtins::BuiltinMethod,
+) -> Result<(), JetroEngineError> {
+    let Some(obj_idx) = obj_idx else {
+        writer.write_all(b"[]")?;
+        return Ok(());
+    };
+    let Some(crate::data::tape::TapeNode::Object { len, .. }) = tape.nodes().get(obj_idx).copied()
+    else {
+        writer.write_all(b"[]")?;
+        return Ok(());
+    };
+
+    writer.write_all(b"[")?;
+    let mut cur = obj_idx + 1;
+    for field_idx in 0..len {
+        if field_idx > 0 {
+            writer.write_all(b",")?;
+        }
+        match method {
+            crate::builtins::BuiltinMethod::Keys => {
+                write_json_str(writer, tape.str_at(cur))?;
+                cur += 1;
+                cur += tape.span(cur);
+            }
+            crate::builtins::BuiltinMethod::Values => {
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+            }
+            crate::builtins::BuiltinMethod::Entries => {
+                writer.write_all(b"[")?;
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(b",")?;
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+                writer.write_all(b"]")?;
+            }
+            _ => unreachable!("non-object-items builtin"),
+        }
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn reduce_json_tape_numeric_path<T: JsonTape>(
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    predicate: Option<&NdjsonDirectItemPredicate>,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    op: crate::exec::pipeline::NumOp,
+    caches: NdjsonPathCaches<'_>,
+) -> Val {
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+
+    let Some(source_idx) = caches.source.index(tape, 0, source_steps) else {
+        return crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
+    };
+
+    let suffix_cache = caches.suffix;
+    let predicate_cache = caches.predicate;
+    let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
+        if !predicate.is_none_or(|predicate| {
+            eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+        }) {
+            return Ok(());
+        }
+        if let Some(idx) = suffix_cache.index(tape, item_idx, suffix_steps) {
+            fold_json_tape_numeric(
+                json_tape_scalar(tape, idx),
+                op,
+                &mut acc_i,
+                &mut acc_f,
+                &mut floated,
+                &mut min_f,
+                &mut max_f,
+                &mut n_obs,
+            );
+        }
+        Ok(())
+    });
+
+    crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
+}
+
+#[cfg(feature = "simd-json")]
+#[allow(clippy::too_many_arguments)]
+fn fold_json_tape_numeric(
+    value: crate::util::JsonView<'_>,
+    op: crate::exec::pipeline::NumOp,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+) {
+    match value {
+        crate::util::JsonView::Int(value) => crate::exec::pipeline::num_fold_i64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
+        crate::util::JsonView::UInt(value) if value <= i64::MAX as u64 => {
+            crate::exec::pipeline::num_fold_i64(
+                acc_i,
+                acc_f,
+                floated,
+                min_f,
+                max_f,
+                n_obs,
+                op,
+                value as i64,
+            )
+        }
+        crate::util::JsonView::UInt(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as f64,
+        ),
+        crate::util::JsonView::Float(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
+        _ => {}
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_json_tape_item_predicate_cached<T: JsonTape>(
+    tape: &T,
+    item_idx: usize,
+    predicate: &NdjsonDirectItemPredicate,
+    cache: &mut NdjsonPathCache,
+) -> bool {
+    use crate::parse::ast::BinOp;
+
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => cache
+            .index(tape, item_idx, steps)
+            .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
+            .unwrap_or(false),
+        NdjsonDirectItemPredicate::Literal(value) => crate::util::is_truthy(value),
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            eval_json_tape_item_predicate_cached(tape, item_idx, lhs, cache)
+                && eval_json_tape_item_predicate_cached(tape, item_idx, rhs, cache)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            eval_json_tape_item_predicate_cached(tape, item_idx, lhs, cache)
+                || eval_json_tape_item_predicate_cached(tape, item_idx, rhs, cache)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } => {
+            let Some(lhs) = eval_json_tape_item_scalar_cached(tape, item_idx, lhs, cache) else {
+                return false;
+            };
+            let Some(rhs) = eval_json_tape_item_scalar_cached(tape, item_idx, rhs, cache) else {
+                return false;
+            };
+            crate::util::json_cmp_binop(lhs, *op, rhs)
+        }
+        NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => cache
+            .index(tape, item_idx, lhs)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .is_some_and(|value| {
+                crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
+            }),
+        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => cache
+            .index(tape, item_idx, suffix_steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_json_tape_item_scalar_cached<'a, T: JsonTape>(
+    tape: &'a T,
+    item_idx: usize,
+    predicate: &'a NdjsonDirectItemPredicate,
+    cache: &mut NdjsonPathCache,
+) -> Option<crate::util::JsonView<'a>> {
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => cache
+            .index(tape, item_idx, steps)
+            .map(|idx| json_tape_scalar(tape, idx)),
+        NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
+        _ => None,
+    }
 }
 
 fn write_json_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
@@ -1292,7 +2864,14 @@ fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngi
 }
 
 #[inline]
-fn write_i64<W: Write>(writer: &mut W, value: i64) -> Result<(), JetroEngineError> {
+pub(super) fn write_i64<W: Write>(writer: &mut W, value: i64) -> Result<(), JetroEngineError> {
+    let mut buf = itoa::Buffer::new();
+    writer.write_all(buf.format(value).as_bytes())?;
+    Ok(())
+}
+
+#[inline]
+fn write_u64<W: Write>(writer: &mut W, value: u64) -> Result<(), JetroEngineError> {
     let mut buf = itoa::Buffer::new();
     writer.write_all(buf.format(value).as_bytes())?;
     Ok(())
@@ -1350,7 +2929,7 @@ pub(super) fn parse_row(
         .map_err(|err| row_parse_error(line_no, err))
 }
 
-fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
+pub(super) fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
     match err {
         JetroEngineError::Json(source) => RowError::InvalidJson { line_no, source }.into(),
         JetroEngineError::Eval(eval) => RowError::InvalidJsonMessage {
@@ -1429,5 +3008,245 @@ mod tests {
             .expect("second row exists");
         assert_eq!(second.1, br#"{"n":2}"#);
         assert_eq!(buf.capacity(), 128);
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_accepts_first_suffix() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "attributes.first().value",
+            "attributes.last().value",
+            "attributes.nth(1).value",
+        ] {
+            let plan =
+                super::direct_tape_plan(&engine, query).expect("array suffix should be direct");
+            assert!(matches!(
+                plan,
+                super::NdjsonDirectTapePlan::ArrayElementPath { .. }
+            ));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_accepts_rooted_bench_shapes() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.id",
+            "$.a.b.c",
+            "$.meta.id",
+            "$.name",
+            "$.attributes.len()",
+            "$.store.attributes.len()",
+            "$.attributes.map(@.key)",
+            "$.attributes.first().value",
+            "$.store.attributes.first().value",
+            "$.attributes.last().value",
+            "$.name.upper()",
+            "$.store.name.upper()",
+            "$.attributes.map([@.key, @.value])",
+            r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+            "$.keys()",
+        ] {
+            super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct NDJSON tape plan"));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_lowers_stream_shapes_generically() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.attributes.map(@.key)",
+            "$.attributes.map(@.key.upper())",
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
+            r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+            "$.attributes.map(@.weight).sum()",
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+        ] {
+            let plan =
+                super::direct_tape_plan(&engine, query).expect("query should be direct NDJSON");
+            assert!(
+                matches!(plan, super::NdjsonDirectTapePlan::Stream(_)),
+                "{query} should lower to a generic NDJSON stream plan"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_plan_accepts_fast_root_shapes() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.id",
+            "$.name",
+            "$.name.upper()",
+            "$.name.lower()",
+            "$.keys()",
+            "$.meta.keys()",
+            "$.values()",
+            "$.entries()",
+            "$.attributes.first().value",
+            "$.store.attributes.first().value",
+            "$.attributes.first().key.upper()",
+            "$.attributes.last().value",
+            "$.attributes.nth(1).value",
+        ] {
+            super::direct_byte_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct NDJSON byte plan"));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_predicates_cover_match_shapes() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"active":true,"score":9910,"attributes":[{"key":"k1","value":"v_1"}]}"#;
+        for predicate in [
+            ("active", true),
+            ("score > 9900", true),
+            ("score < 100", false),
+            (r#"attributes.first().value.contains("_1")"#, true),
+        ] {
+            let plan = super::direct_tape_predicate(&engine, predicate.0)
+                .unwrap_or_else(|| panic!("{} should have a direct predicate", predicate.0));
+            let matched = super::eval_ndjson_byte_predicate_row(row, &plan)
+                .expect("byte predicate should evaluate")
+                .unwrap_or_else(|| panic!("{} should not need tape fallback", predicate.0));
+            assert_eq!(matched, predicate.1, "{}", predicate.0);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_counts_filtered_rows() {
+        let engine = crate::JetroEngine::new();
+        let query = r#"attributes.filter(@.value.contains("_3")).len()"#;
+        let plan = super::direct_tape_plan(&engine, query).expect("filter count should be direct");
+        assert!(super::tape_plan_can_write_byte_row(&plan));
+
+        let row = br#"{"attributes":[{"value":"a_3"},{"value":"b"},{"value":"c_3"}]}"#;
+        let mut out = Vec::new();
+        let mut scratch = Vec::new();
+        let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+            .expect("byte count should write");
+        assert!(matches!(wrote, super::BytePlanWrite::Done));
+        assert_eq!(out, b"2");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_collects_stream_maps() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"attributes":[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]}"#;
+        for (query, expected) in [
+            ("attributes.map(@.key)", r#"["k1","k2"]"#),
+            (
+                "attributes.map([@.key, @.value])",
+                r#"[["k1","v1"],["k2","v2"]]"#,
+            ),
+            (
+                "attributes.map({key: @.key, value: @.value})",
+                r#"[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]"#,
+            ),
+            ("attributes.map(@.key.upper())", r#"["K1","K2"]"#),
+            (
+                r#"attributes.filter(@.value.contains("2")).map(@.key)"#,
+                r#"["k2"]"#,
+            ),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte stream should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_writes_static_projections() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"id":7,"a":{"b":{"c":1}}}"#;
+        for (query, expected) in [
+            ("$.a.b.c", "1"),
+            (r#"{test: $.a.b.c, b: $.a.b}"#, r#"{"test":1,"b":{"c":1}}"#),
+            (r#"[$.a.b.c, $.id]"#, r#"[1,7]"#),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte projection should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_uses_byte_paths_for_nested_object_items() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1}
+{"id":2}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.id", &mut out)
+            .expect("rooted byte path should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n");
+
+        let rows = std::io::Cursor::new(
+            br#"{"meta":{"id":1,"kind":"a"}}
+{"meta":{"id":2,"kind":"b"}}
+"#,
+        );
+
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.meta.id", &mut out)
+            .expect("nested byte path should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n");
+
+        let rows = std::io::Cursor::new(br#"{"meta":{"id":1,"kind":"a"}}"#);
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.meta.keys()", &mut out)
+            .expect("nested byte object items should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "[\"id\",\"kind\"]\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_uses_byte_paths_for_nested_array_demands() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}]}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}]}}
+"#,
+        );
+
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.store.attributes.first().value", &mut out)
+            .expect("nested byte array demand should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"c\"\n");
     }
 }

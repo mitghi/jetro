@@ -2764,6 +2764,7 @@ impl Builtin for Includes {
     const ALIASES: &'static [&'static str] = &["contains"];
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Includes)
+            .view_scalar()
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]

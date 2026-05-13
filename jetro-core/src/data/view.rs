@@ -667,6 +667,226 @@ impl<'a> Iterator for TapeArrayIter<'a> {
     }
 }
 
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+pub(crate) enum TapeScratchView<'a> {
+    Node {
+        tape: &'a crate::data::tape::TapeScratch,
+        idx: usize,
+    },
+    Missing,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> TapeScratchView<'a> {
+    #[inline]
+    fn materialize_at(tape: &'a crate::data::tape::TapeScratch, idx: &mut usize) -> Val {
+        use crate::data::tape::TapeNode;
+        use simd_json::StaticNode as SN;
+
+        let here = tape.nodes[*idx];
+        *idx += 1;
+        match here {
+            TapeNode::Static(SN::Null) => Val::Null,
+            TapeNode::Static(SN::Bool(b)) => Val::Bool(b),
+            TapeNode::Static(SN::I64(n)) => Val::Int(n),
+            TapeNode::Static(SN::U64(n)) => {
+                if n <= i64::MAX as u64 {
+                    Val::Int(n as i64)
+                } else {
+                    Val::Float(n as f64)
+                }
+            }
+            TapeNode::Static(SN::F64(f)) => Val::Float(f),
+            TapeNode::String(_) => Val::StrSlice(crate::data::tape::StrRef::from(tape.str_at(*idx - 1))),
+            TapeNode::Array { len, .. } => {
+                let mut out = Vec::with_capacity(len);
+                for _ in 0..len {
+                    out.push(Self::materialize_at(tape, idx));
+                }
+                Val::arr(out)
+            }
+            TapeNode::Object { len, .. } => {
+                let mut out = indexmap::IndexMap::with_capacity(len);
+                for _ in 0..len {
+                    let key = tape.str_at(*idx);
+                    *idx += 1;
+                    let value = Self::materialize_at(tape, idx);
+                    out.insert(crate::data::value::intern_key(key), value);
+                }
+                Val::Obj(std::sync::Arc::new(out))
+            }
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> ValueView<'a> for TapeScratchView<'a> {
+    #[inline]
+    fn scalar(&self) -> JsonView<'_> {
+        use crate::data::tape::TapeNode;
+        use simd_json::StaticNode as SN;
+
+        let Self::Node { tape, idx } = self else {
+            return JsonView::Null;
+        };
+        match tape.nodes[*idx] {
+            TapeNode::Static(SN::Null) => JsonView::Null,
+            TapeNode::Static(SN::Bool(b)) => JsonView::Bool(b),
+            TapeNode::Static(SN::I64(n)) => JsonView::Int(n),
+            TapeNode::Static(SN::U64(n)) => JsonView::UInt(n),
+            TapeNode::Static(SN::F64(f)) => JsonView::Float(f),
+            TapeNode::String(_) => JsonView::Str(tape.str_at(*idx)),
+            TapeNode::Array { len, .. } => JsonView::ArrayLen(len),
+            TapeNode::Object { len, .. } => JsonView::ObjectLen(len),
+        }
+    }
+
+    #[inline]
+    fn field(&self, key: &str) -> Self {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return Self::Missing;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return Self::Missing;
+        };
+
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if current_key == key {
+                return Self::Node { tape, idx: cur };
+            }
+            cur += tape.span(cur);
+        }
+        Self::Missing
+    }
+
+    #[inline]
+    fn has_key(&self, key: &str) -> Option<bool> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if current_key == key {
+                return Some(true);
+            }
+            cur += tape.span(cur);
+        }
+        Some(false)
+    }
+
+    fn object_keys(&self) -> Option<Val> {
+        let materialized = self.materialize();
+        ValView::new(&materialized).object_keys()
+    }
+
+    fn object_values(&self) -> Option<Val> {
+        let materialized = self.materialize();
+        ValView::new(&materialized).object_values()
+    }
+
+    fn object_entries(&self) -> Option<Val> {
+        let materialized = self.materialize();
+        ValView::new(&materialized).object_entries()
+    }
+
+    fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        let materialized = self.materialize();
+        ValView::new(&materialized).pick_keys(keys)
+    }
+
+    fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        let materialized = self.materialize();
+        ValView::new(&materialized).omit_keys(keys)
+    }
+
+    #[inline]
+    fn index(&self, idx: i64) -> Self {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx: node } = self else {
+            return Self::Missing;
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*node] else {
+            return Self::Missing;
+        };
+        let Some(target) = normalize_index(len, idx) else {
+            return Self::Missing;
+        };
+        let mut cur = *node + 1;
+        for _ in 0..target {
+            cur += tape.span(cur);
+        }
+        Self::Node { tape, idx: cur }
+    }
+
+    #[inline]
+    fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+        Some(Box::new(TapeScratchArrayIter {
+            tape,
+            remaining: len,
+            cur: *idx + 1,
+        }))
+    }
+
+    #[inline]
+    fn materialize(&self) -> Val {
+        match self {
+            Self::Node { tape, idx } => {
+                let mut idx = *idx;
+                Self::materialize_at(tape, &mut idx)
+            }
+            Self::Missing => Val::Null,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+struct TapeScratchArrayIter<'a> {
+    tape: &'a crate::data::tape::TapeScratch,
+    remaining: usize,
+    cur: usize,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a> Iterator for TapeScratchArrayIter<'a> {
+    type Item = TapeScratchView<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let idx = self.cur;
+        self.remaining -= 1;
+        self.cur += self.tape.span(self.cur);
+        Some(TapeScratchView::Node {
+            tape: self.tape,
+            idx,
+        })
+    }
+}
+
 #[inline]
 fn normalize_index(len: usize, idx: i64) -> Option<usize> {
     let idx = if idx < 0 {

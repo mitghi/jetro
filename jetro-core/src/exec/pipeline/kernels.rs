@@ -92,6 +92,8 @@ pub enum BodyKernel {
     FString(FStringKernel),
     /// Evaluates an object literal by evaluating each field-value kernel.
     Object(ObjectKernel),
+    /// Evaluates an array literal by evaluating each item kernel.
+    Array(Arc<[BodyKernel]>),
     /// Runs a nested array reducer such as `items.map(qty * price).sum()` without
     /// materialising the outer row.
     NestedArrayReducer {
@@ -180,6 +182,10 @@ impl ObjectKernel {
             .into()
     }
 
+    pub(crate) fn entries(&self) -> &[ObjectKernelEntry] {
+        &self.entries
+    }
+
     /// Evaluates each entry against `item`, appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
     pub(crate) fn eval_view_row_cells<'a, V>(&self, item: &V, cells: &mut Vec<Val>) -> Option<bool>
     where
@@ -230,6 +236,24 @@ impl ObjectKernel {
     }
 }
 
+impl ObjectKernelEntry {
+    pub(crate) fn key(&self) -> &Arc<str> {
+        &self.key
+    }
+
+    pub(crate) fn value(&self) -> &BodyKernel {
+        &self.value
+    }
+
+    pub(crate) fn optional(&self) -> bool {
+        self.optional
+    }
+
+    pub(crate) fn omit_null(&self) -> bool {
+        self.omit_null
+    }
+}
+
 fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
     let mut entries = Vec::with_capacity(fields.len());
     for field in fields {
@@ -264,6 +288,21 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
     BodyKernel::Object(ObjectKernel {
         entries: entries.into(),
     })
+}
+
+fn classify_array_expr(elems: &[crate::parse::ast::ArrayElem]) -> BodyKernel {
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        let crate::parse::ast::ArrayElem::Expr(expr) = elem else {
+            return BodyKernel::Generic;
+        };
+        let item = BodyKernel::classify_expr(expr);
+        if matches!(item, BodyKernel::Generic) {
+            return BodyKernel::Generic;
+        }
+        out.push(item);
+    }
+    BodyKernel::Array(out.into())
 }
 
 fn classify_fstring_expr(parts: &[crate::parse::ast::FStringPart]) -> BodyKernel {
@@ -460,6 +499,7 @@ impl BodyKernel {
             }
             Expr::FString(parts) => classify_fstring_expr(parts),
             Expr::Object(fields) => classify_object_expr(fields),
+            Expr::Array(elems) => classify_array_expr(elems),
             Expr::Chain(base, steps) => classify_chain_expr(base, steps),
             Expr::Match { .. } => {
                 let program = crate::compile::compiler::Compiler::compile(expr, "<match-kernel>");
@@ -503,6 +543,9 @@ impl BodyKernel {
                     })
             }
             Self::Object(object) => object.field_demand(),
+            Self::Array(items) => items.iter().fold(FieldDemand::None, |need, item| {
+                need.merge(item.field_demand())
+            }),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -565,6 +608,9 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .any(|entry| entry.value.mentions_any_field_like_ident(names)),
+            Self::Array(items) => items
+                .iter()
+                .any(|item| item.mentions_any_field_like_ident(names)),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -613,6 +659,7 @@ impl BodyKernel {
                 .entries
                 .iter()
                 .all(|entry| entry.value.is_view_native()),
+            Self::Array(items) => items.iter().all(Self::is_view_native),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -732,6 +779,20 @@ impl BodyKernel {
                 return Self::Object(ObjectKernel {
                     entries: out.into(),
                 });
+            }
+            [Opcode::MakeArr(items)] => {
+                let mut out = Vec::with_capacity(items.len());
+                for (program, spread) in items.iter() {
+                    if *spread {
+                        return Self::Generic;
+                    }
+                    let item = BodyKernel::classify(program);
+                    if matches!(item, BodyKernel::Generic) {
+                        return Self::Generic;
+                    }
+                    out.push(item);
+                }
+                return Self::Array(out.into());
             }
             [Opcode::FString(parts)] => {
                 let mut out = Vec::with_capacity(parts.len());
@@ -1404,6 +1465,13 @@ fn eval_native_kernel_with_vm(
         }
         BodyKernel::Object(object) => {
             eval_object_kernel(object, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
+        }
+        BodyKernel::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                out.push(eval_native_kernel_with_vm(item_kernel, item, vm)?);
+            }
+            Ok(Val::arr(out))
         }
         BodyKernel::NestedArrayReducer {
             source,
@@ -2219,6 +2287,17 @@ where
                 pairs.push((Arc::clone(&entry.key), value));
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
+        }
+        BodyKernel::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                out.push(view_kernel_value_to_owned(eval_view_kernel_inner(
+                    item_kernel,
+                    item,
+                    vm.as_deref_mut(),
+                )?));
+            }
+            Some(ViewKernelValue::Owned(Val::arr(out)))
         }
         BodyKernel::NestedArrayReducer {
             source,

@@ -45,7 +45,10 @@ fn run_ndjson_writes_scalar_results_directly() {
     engine
         .run_ndjson(Cursor::new(input), "s", &mut string_out)
         .expect("string scalar should write");
-    assert_eq!(String::from_utf8(string_out).unwrap(), "\"a\\\"b\\\\c\\n\"\n");
+    assert_eq!(
+        String::from_utf8(string_out).unwrap(),
+        "\"a\\\"b\\\\c\\n\"\n"
+    );
 
     let mut bool_out = Vec::new();
     engine
@@ -64,6 +67,34 @@ fn run_ndjson_writes_scalar_results_directly() {
         .run_ndjson(Cursor::new(input), "f", &mut float_out)
         .expect("float scalar should write");
     assert_eq!(String::from_utf8(float_out).unwrap(), "1.25\n");
+
+    let mut upper_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "s.upper()", &mut upper_out)
+        .expect("view-scalar call should write");
+    assert_eq!(
+        String::from_utf8(upper_out).unwrap(),
+        "\"A\\\"B\\\\C\\n\"\n"
+    );
+
+    let mut lower_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(b"{\"s\":\"ADA\"}\n"), "$.s.lower()", &mut lower_out)
+        .expect("byte scalar lower call should write");
+    assert_eq!(String::from_utf8(lower_out).unwrap(), "\"ada\"\n");
+}
+
+#[test]
+fn run_ndjson_writes_root_fields_from_byte_path() {
+    let engine = JetroEngine::new();
+    let input = b"{\"id\":1,\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n{\"i\\u0064\":3,\"name\":\"Cat\"}\n";
+    let mut id_out = Vec::new();
+
+    engine
+        .run_ndjson(Cursor::new(input), "$.id", &mut id_out)
+        .expect("root field should write");
+
+    assert_eq!(String::from_utf8(id_out).unwrap(), "1\nnull\n3\n");
 }
 
 #[test]
@@ -78,6 +109,88 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         .expect("array projection should write");
     assert_eq!(String::from_utf8(array_out).unwrap(), "[\"a\",\"b\"]\n");
 
+    let mut array_pair_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map([@.key, @.value])",
+            &mut array_pair_out,
+        )
+        .expect("array pair projection should write");
+    assert_eq!(
+        String::from_utf8(array_pair_out).unwrap(),
+        "[[\"a\",1],[\"b\",2]]\n"
+    );
+
+    let mut object_map_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map({k: @.key, v: @.value})",
+            &mut object_map_out,
+        )
+        .expect("object map projection should write");
+    assert_eq!(
+        String::from_utf8(object_map_out).unwrap(),
+        "[{\"k\":\"a\",\"v\":1},{\"k\":\"b\",\"v\":2}]\n"
+    );
+
+    let mut filtered_map_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map(@.key)",
+            &mut filtered_map_out,
+        )
+        .expect("filtered array projection should write");
+    assert_eq!(String::from_utf8(filtered_map_out).unwrap(), "[\"b\"]\n");
+
+    let mut filtered_pair_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map([@.key, @.value])",
+            &mut filtered_pair_out,
+        )
+        .expect("filtered array pair projection should write");
+    assert_eq!(
+        String::from_utf8(filtered_pair_out).unwrap(),
+        "[[\"b\",2]]\n"
+    );
+
+    let mut filtered_object_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map({k: @.key, v: @.value})",
+            &mut filtered_object_out,
+        )
+        .expect("filtered object projection should write");
+    assert_eq!(
+        String::from_utf8(filtered_object_out).unwrap(),
+        "[{\"k\":\"b\",\"v\":2}]\n"
+    );
+
+    let mut filtered_count_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).len()",
+            &mut filtered_count_out,
+        )
+        .expect("filtered count should write");
+    assert_eq!(String::from_utf8(filtered_count_out).unwrap(), "1\n");
+
+    let mut numeric_reduce_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map(@.value).sum()",
+            &mut numeric_reduce_out,
+        )
+        .expect("numeric reducer should write");
+    assert_eq!(String::from_utf8(numeric_reduce_out).unwrap(), "3\n");
+
     let mut object_out = Vec::new();
     engine
         .run_ndjson(
@@ -90,6 +203,156 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         String::from_utf8(object_out).unwrap(),
         "{\"id\":7,\"first\":1}\n"
     );
+}
+
+#[test]
+fn run_ndjson_writes_direct_array_element_projections() {
+    let engine = JetroEngine::new();
+    let input =
+        br#"{"attributes":[{"key":"a","value":1},{"key":"b","value":2},{"key":"c","value":3}]}
+"#;
+
+    let cases = [
+        ("attributes.first().key", "\"a\"\n"),
+        ("attributes.first().key.upper()", "\"A\"\n"),
+        ("attributes.last().key", "\"c\"\n"),
+        ("attributes.last().key.upper()", "\"C\"\n"),
+        ("attributes.nth(1).value", "2\n"),
+    ];
+
+    for (query, expected) in cases {
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(Cursor::new(input), query, &mut out)
+            .expect("array element projection should write");
+        assert_eq!(String::from_utf8(out).unwrap(), expected, "{query}");
+    }
+}
+
+#[test]
+fn run_ndjson_writes_static_object_projection_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada","score":42}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            r#"{id: id, label: name.upper(), score: score, kind: "user"}"#,
+            &mut out,
+        )
+        .expect("static object projection should write");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        r#"{"id":7,"label":"ADA","score":42,"kind":"user"}"#.to_string() + "\n"
+    );
+}
+
+#[test]
+fn run_ndjson_writes_static_array_projection_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada","score":42}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(Cursor::new(input), r#"[id, name.upper(), score]"#, &mut out)
+        .expect("static array projection should write");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "[7,\"ADA\",42]\n");
+}
+
+#[test]
+fn run_ndjson_writes_object_item_methods_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada"}
+"#;
+
+    let mut keys_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.keys()", &mut keys_out)
+        .expect("keys should write");
+    assert_eq!(String::from_utf8(keys_out).unwrap(), "[\"id\",\"name\"]\n");
+
+    let mut values_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.values()", &mut values_out)
+        .expect("values should write");
+    assert_eq!(String::from_utf8(values_out).unwrap(), "[7,\"Ada\"]\n");
+
+    let mut entries_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.entries()", &mut entries_out)
+        .expect("entries should write");
+    assert_eq!(
+        String::from_utf8(entries_out).unwrap(),
+        "[[\"id\",7],[\"name\",\"Ada\"]]\n"
+    );
+}
+
+#[test]
+fn run_ndjson_direct_path_cache_handles_field_order_changes() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"Ada","score":10}
+{"score":20,"name":"Bob","id":2}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            r#"{id: id, name: name, score: score}"#,
+            &mut out,
+        )
+        .expect("direct projection should handle field order changes");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"name\":\"Ada\",\"score\":10}\n{\"id\":2,\"name\":\"Bob\",\"score\":20}\n"
+    );
+}
+
+#[test]
+fn run_ndjson_direct_path_cache_handles_nested_field_order_changes() {
+    let engine = JetroEngine::new();
+    let input = br#"{"user":{"name":"Ada","profile":{"score":10,"city":"Berlin"}}}
+{"user":{"profile":{"city":"Paris","score":20},"name":"Bob"}}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            r#"{name: user.name, city: user.profile.city, score: user.profile.score}"#,
+            &mut out,
+        )
+        .expect("direct projection should handle nested field order changes");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"name\":\"Ada\",\"city\":\"Berlin\",\"score\":10}\n{\"name\":\"Bob\",\"city\":\"Paris\",\"score\":20}\n"
+    );
+}
+
+#[test]
+fn run_ndjson_filtered_numeric_reduce_honors_scalar_source_predicate() {
+    let engine = JetroEngine::new();
+    let input = br#"{"attributes":{"active":false,"value":10}}
+{"attributes":{"active":true,"value":7}}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.active).map(@.value).sum()",
+            &mut out,
+        )
+        .expect("filtered scalar-source reducer should write");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "0\n7\n");
 }
 
 #[test]

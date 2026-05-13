@@ -317,6 +317,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .map(|node| builder.push(node))
         .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
@@ -680,6 +681,46 @@ fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
     }
 }
 
+/// Lowers bare field identifiers in byte-backed root expressions to `RootPath` nodes.
+///
+/// Jetro's expression environment resolves an unbound identifier as a field on the
+/// current value. At the top level the current value is the document root, so
+/// `id`, `user.name`, and `score > 9` can read directly from the tape instead of
+/// materialising the whole row into `Val` just to build an `Env`.
+fn try_lower_implicit_root_path(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
+    if builder.context.input != InputMode::Bytes {
+        return None;
+    }
+
+    match expr {
+        Expr::Ident(name) if !builder.is_local(name) => Some(PlanNode::RootPath(vec![
+            PhysicalPathStep::Field(Arc::from(name.as_str())),
+        ])),
+        Expr::Chain(base, steps) => {
+            let Expr::Ident(name) = base.as_ref() else {
+                return None;
+            };
+            if builder.is_local(name) {
+                return None;
+            }
+
+            let mut out = Vec::with_capacity(steps.len() + 1);
+            out.push(PhysicalPathStep::Field(Arc::from(name.as_str())));
+            for step in steps {
+                match step {
+                    Step::Field(key) | Step::OptField(key) => {
+                        out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
+                    }
+                    Step::Index(idx) => out.push(PhysicalPathStep::Index(*idx)),
+                    _ => return None,
+                }
+            }
+            Some(PlanNode::RootPath(out))
+        }
+        _ => None,
+    }
+}
+
 /// Lowers a general `Expr::Chain` into a sequence of `PhysicalChainStep`s, flushing accumulated
 /// steps into `Chain` nodes whenever a method call interrupts the sequence.
 fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
@@ -687,7 +728,18 @@ fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
         return None;
     };
 
-    let mut cur = lower_expr(builder, base);
+    let mut cur = if builder.context.input == InputMode::Bytes {
+        match base.as_ref() {
+            Expr::Ident(name) if !builder.is_local(name) => {
+                builder.push(PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from(
+                    name.as_str(),
+                ))]))
+            }
+            _ => lower_expr(builder, base),
+        }
+    } else {
+        lower_expr(builder, base)
+    };
     let mut out = Vec::new();
     for step in steps {
         match step {
@@ -968,6 +1020,84 @@ mod tests {
                 BackendPreference::ValView,
             ]
         );
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_ident_to_root_path() {
+        let plan = plan_query_with_context("name", PlanningContext::bytes());
+        assert!(matches!(
+            root_node(&plan),
+            PlanNode::RootPath(steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "name")
+        ));
+        assert!(plan.root_execution_facts().is_byte_native());
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_ident_chain_to_root_path() {
+        let plan = plan_query_with_context("user.name", PlanningContext::bytes());
+        assert!(matches!(
+            root_node(&plan),
+            PlanNode::RootPath(steps)
+                if matches!(
+                    steps.as_slice(),
+                    [PhysicalPathStep::Field(user), PhysicalPathStep::Field(name)]
+                        if user.as_ref() == "user" && name.as_ref() == "name"
+                )
+        ));
+        assert!(plan.root_execution_facts().is_byte_native());
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_ident_method_receiver_to_root_path() {
+        let plan = plan_query_with_context("attributes.len()", PlanningContext::bytes());
+        let PlanNode::Pipeline { source, body } = root_node(&plan) else {
+            panic!("expected pipeline");
+        };
+        let PipelinePlanSource::Expr(source) = source else {
+            panic!("expected expr source");
+        };
+        assert!(matches!(
+            plan.node(*source),
+            PlanNode::RootPath(steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "attributes")
+        ));
+        assert!(body.stages.is_empty());
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_filter_count_to_view_pipeline() {
+        let plan = plan_query_with_context(
+            r#"attributes.filter(@.value.contains("_3")).len()"#,
+            PlanningContext::bytes(),
+        );
+        let PlanNode::Pipeline { body, .. } = root_node(&plan) else {
+            panic!("expected pipeline");
+        };
+        assert!(body.can_run_with_view(), "{body:?}");
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_first_suffix_to_pipeline_chain() {
+        let plan = plan_query_with_context("attributes.first().value", PlanningContext::bytes());
+        let PlanNode::Chain { base, steps } = root_node(&plan) else {
+            panic!("expected chain, got {:?}", std::mem::discriminant(root_node(&plan)));
+        };
+        assert!(matches!(steps.as_slice(), [PhysicalChainStep::Field(key)] if key.as_ref() == "value"));
+        assert!(
+            matches!(plan.node(*base), PlanNode::Pipeline { .. } | PlanNode::Call { .. }),
+            "{:?}",
+            std::mem::discriminant(plan.node(*base))
+        );
+        if let PlanNode::Pipeline { body, .. } = plan.node(*base) {
+            assert!(body.stages.is_empty(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn val_context_keeps_bare_ident_semantics() {
+        let plan = plan_query_with_context("name", PlanningContext::val());
+        assert!(matches!(root_node(&plan), PlanNode::Ident(name) if name.as_ref() == "name"));
     }
 
     #[test]

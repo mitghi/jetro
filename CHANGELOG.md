@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.8
+## 0.5.9
 
 ### Release focus
 
@@ -76,6 +76,76 @@
 - **Core NDJSON benchmark**. Added `bench_ndjson` as a core-only cold-path
   benchmark for simple field extraction, array length, nested first access,
   nested mapping, and filter/count-style row queries.
+- **Planner-derived NDJSON tape plans**. Common row-local shapes now execute
+  directly on reusable simd-json tape scratch: root paths, scalar path calls,
+  first/last/nth child access, path maps, filtered maps, filtered counts,
+  numeric reducers, and match-limited predicates. These optimizations are
+  selected from the physical plan and pipeline kernels rather than handwritten
+  query strings, preserving the same fallback semantics for unsupported chains.
+- **NDJSON direct-plan cleanup**. Direct tape plan metadata now lives in a
+  dedicated internal module, with planner construction separated from row
+  driving and tape writing. Focused coverage was added for direct
+  first/last/nth element projections.
+- **NDJSON direct executor cleanup**. Pure direct tape plans no longer lock the
+  engine VM, scalar-call fallback avoids redundant path lookup, and map,
+  filtered-map, filtered-count, and numeric reducer paths share one
+  array-or-single source traversal helper.
+- **Schema-adaptive NDJSON paths and projections**. Direct NDJSON execution now
+  caches verified tape-node deltas for stable object field layouts, including
+  nested paths, while falling back safely when row field order changes. Static
+  object and array projections with path, literal, and view-scalar values write
+  directly from tape without materializing per-row `Val` objects.
+- **NDJSON projection benchmark coverage**. The core NDJSON benchmark now
+  includes object, scalar-call object, and array projection cases alongside
+  path, filter, reducer, and match workloads.
+- **Wider NDJSON direct projection coverage**. Direct tape execution now covers
+  rooted scalar calls, object item methods (`keys`, `values`, `entries`),
+  array/object literals inside `map` and `filter(...).map`, and scalar calls on
+  first/last/nth array-element receivers. Rooted benchmark query shapes are
+  covered by direct-plan tests.
+- **Reverse NDJSON direct query writers**. `run_ndjson_rev*` now uses the same
+  direct tape row writer as forward NDJSON for eligible queries, including
+  reverse limit execution, instead of materializing each row through the
+  generic executor.
+- **Byte-level NDJSON row scanning for simple projected shapes**. Root field
+  projections, root string case calls, root object item methods, and simple
+  first/last/nth root-array element projections can now emit directly from row
+  bytes and fall back to the tape writer only when the row requires full JSON
+  interpretation. This keeps common cold-path CLI projections out of both
+  `serde_json::Value` and simd-json tape construction.
+- **Rooted NDJSON queries stay on direct byte/tape plans**. NDJSON direct
+  planning now treats rooted row-local forms such as `$.id`,
+  `$.name.upper()`, and `$.attributes.first().value` equivalently to their
+  bare per-row forms, so CLI and API callers get the same fast path without
+  rewriting queries.
+- **Rooted NDJSON normalization now prefers row-local plans**. Direct NDJSON
+  planning normalizes rooted row expressions before accepting a document-root
+  fallback, fixing `$.id`/`$.name` style CLI queries so they emit row fields
+  instead of `null` while preserving the bare `id`/`name` behavior.
+- **Static NDJSON projections can write directly from bytes**. Direct byte
+  execution now covers static path projections such as `$.id` and `$.a.b.c`,
+  plus simple static object and array shaping such as
+  `{test: $.a.b.c, b: $.a.b}` and `[$.id, $.name]`. These plans emit selected
+  raw subvalues directly from row bytes and avoid per-row tape or `Val`
+  materialization when the shape is safe.
+- **Demand-aware byte access for first/nth array elements**. Direct byte
+  execution no longer scans the entire root array field before satisfying
+  `first()` or `nth()` element projections; it reads only the demanded prefix
+  and keeps `last()` on the full/reverse-aware path where the end is required.
+- **Byte-level NDJSON match predicates**. Forward match writers and callback
+  match APIs can now evaluate direct predicates from raw row bytes for simple
+  paths, scalar calls, comparisons, boolean combinations, and first/last/nth
+  scalar predicates, falling back to tape evaluation only when the row shape
+  requires it.
+- **Filtered-count byte fallback**. Direct filtered-count tape plans can count
+  supported row-local predicates from bytes before falling back to the shared
+  tape writer, preserving the existing physical-plan-driven selection model.
+- **10-query CLI NDJSON benchmark now clears the 10x target**. On the
+  4.76M-row `/tmp/bench.sh` suite, rebuilt `jetrocli` measured every listed
+  rooted NDJSON query above 10x faster than `jaq`; representative timings were
+  `$.id` 0.44s vs 28.73s, `$.attributes.first().value` 0.66s vs 29.09s,
+  `$.attributes.map([@.key, @.value])` 3.00s vs 54.90s, and
+  `$.attributes.filter(@.value.contains("_3")).len()` 1.58s vs 49.34s.
 
 ### Demand/tape architecture cleanup
 
