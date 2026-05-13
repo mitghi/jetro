@@ -90,6 +90,11 @@
   engine VM, scalar-call fallback avoids redundant path lookup, and map,
   filtered-map, filtered-count, and numeric reducer paths share one
   array-or-single source traversal helper.
+- **Schema-adaptive NDJSON paths and projections**. Direct NDJSON execution now
+  caches verified tape-node deltas for stable object field layouts, including
+  nested paths, while falling back safely when row field order changes. Static
+  object and array projections with path, literal, and view-scalar values write
+  directly from tape without materializing per-row `Val` objects.
 
 ### Demand/tape architecture cleanup
 
