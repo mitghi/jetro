@@ -1038,6 +1038,23 @@ mod tests {
     }
 
     #[test]
+    fn byte_context_lowers_bare_ident_method_receiver_to_root_path() {
+        let plan = plan_query_with_context("attributes.len()", PlanningContext::bytes());
+        let PlanNode::Pipeline { source, body } = root_node(&plan) else {
+            panic!("expected pipeline");
+        };
+        let PipelinePlanSource::Expr(source) = source else {
+            panic!("expected expr source");
+        };
+        assert!(matches!(
+            plan.node(*source),
+            PlanNode::RootPath(steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "attributes")
+        ));
+        assert!(body.stages.is_empty());
+    }
+
+    #[test]
     fn val_context_keeps_bare_ident_semantics() {
         let plan = plan_query_with_context("name", PlanningContext::val());
         assert!(matches!(root_node(&plan), PlanNode::Ident(name) if name.as_ref() == "name"));

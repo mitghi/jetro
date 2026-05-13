@@ -906,6 +906,11 @@ where
     R: BufRead,
     W: Write,
 {
+    #[cfg(feature = "simd-json")]
+    if let Some(plan) = NdjsonRowExecutor::direct_tape_plan(engine, query) {
+        return drive_ndjson_tape_writer(reader, &plan, limit, options, writer);
+    }
+
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let mut executor = NdjsonRowExecutor::new(engine, query);
     let mut writer = ndjson_writer_with_options(writer, options);
@@ -915,6 +920,83 @@ where
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         count += 1;
         executor.write_owned_row(line_no, row, &mut writer)?;
+        if limit.is_some_and(|limit| count >= limit) {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone)]
+enum NdjsonDirectTapePlan {
+    RootPath(Vec<crate::ir::physical::PhysicalPathStep>),
+    ViewScalarCall {
+        steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        call: crate::builtins::BuiltinCall,
+        optional: bool,
+    },
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_tape_writer<R, W>(
+    reader: R,
+    plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut count = 0usize;
+
+    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        scratch.parse_slice(row).map_err(|message| {
+            row_parse_error(
+                line_no,
+                JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
+            )
+        })?;
+        match plan {
+            NdjsonDirectTapePlan::RootPath(steps) => {
+                if let Some(idx) = scratch_path_index(&scratch, steps) {
+                    write_scratch_json_at(&mut writer, &scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => {
+                let value = scratch_path_index(&scratch, steps)
+                    .map(|idx| scratch_scalar(&scratch, idx))
+                    .unwrap_or(crate::util::JsonView::Null);
+                if *optional && matches!(value, crate::util::JsonView::Null) {
+                    writer.write_all(b"null")?;
+                } else if let Some(value) = call.try_apply_json_view(value) {
+                    write_val_json(&mut writer, &value)?;
+                } else {
+                    write_scratch_json_at(
+                        &mut writer,
+                        &scratch,
+                        scratch_path_index(&scratch, steps).unwrap_or(usize::MAX),
+                    )?;
+                }
+            }
+        }
+        writer.write_all(b"\n")?;
+        count += 1;
         if limit.is_some_and(|limit| count >= limit) {
             break;
         }
@@ -1016,6 +1098,87 @@ impl<'a> NdjsonRowExecutor<'a> {
             engine,
             plan: engine.cached_plan(query, PlanningContext::bytes()),
             vm: engine.lock_vm(),
+        }
+    }
+
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan(
+        engine: &'a JetroEngine,
+        query: &str,
+    ) -> Option<NdjsonDirectTapePlan> {
+        use crate::builtins::{BuiltinArgs, BuiltinMethod};
+        use crate::ir::physical::{PlanNode, QueryRoot};
+
+        let plan = engine.cached_plan(query, PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            return None;
+        };
+        match plan.node(*root) {
+            PlanNode::RootPath(steps) => Some(NdjsonDirectTapePlan::RootPath(steps.clone())),
+            PlanNode::Pipeline {
+                source:
+                    crate::ir::physical::PipelinePlanSource::FieldChain {
+                        keys,
+                    },
+                body,
+            } if body.stages.is_empty()
+                && matches!(
+                    body.sink,
+                    crate::exec::pipeline::Sink::Reducer(ref spec)
+                        if spec.op == crate::exec::pipeline::ReducerOp::Count
+                            && spec.predicate.is_none()
+                ) =>
+            {
+                Some(NdjsonDirectTapePlan::ViewScalarCall {
+                    steps: keys
+                        .iter()
+                        .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+                        .collect(),
+                    call: crate::builtins::BuiltinCall::new(
+                        BuiltinMethod::Len,
+                        BuiltinArgs::None,
+                    ),
+                    optional: false,
+                })
+            }
+            PlanNode::Pipeline {
+                source: crate::ir::physical::PipelinePlanSource::Expr(source),
+                body,
+            } if body.stages.is_empty()
+                && matches!(
+                    body.sink,
+                    crate::exec::pipeline::Sink::Reducer(ref spec)
+                        if spec.op == crate::exec::pipeline::ReducerOp::Count
+                            && spec.predicate.is_none()
+                ) =>
+            {
+                let PlanNode::RootPath(steps) = plan.node(*source) else {
+                    return None;
+                };
+                Some(NdjsonDirectTapePlan::ViewScalarCall {
+                    steps: steps.clone(),
+                    call: crate::builtins::BuiltinCall::new(
+                        BuiltinMethod::Len,
+                        BuiltinArgs::None,
+                    ),
+                    optional: false,
+                })
+            }
+            PlanNode::Call {
+                receiver,
+                call,
+                optional,
+            } if call.method == BuiltinMethod::Len && matches!(call.args, BuiltinArgs::None) => {
+                let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+                    return None;
+                };
+                Some(NdjsonDirectTapePlan::ViewScalarCall {
+                    steps: steps.clone(),
+                    call: call.clone(),
+                    optional: *optional,
+                })
+            }
+            _ => None,
         }
     }
 
@@ -1188,6 +1351,80 @@ fn tape_path_index(
     Some(idx)
 }
 
+#[cfg(feature = "simd-json")]
+fn scratch_path_index(
+    tape: &crate::data::tape::TapeScratch,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
+    use crate::data::tape::TapeNode;
+    use crate::ir::physical::PhysicalPathStep;
+
+    if tape.nodes.is_empty() {
+        return None;
+    }
+
+    let mut idx = 0usize;
+    for step in steps {
+        match step {
+            PhysicalPathStep::Field(key) => {
+                let TapeNode::Object { len, .. } = tape.nodes[idx] else {
+                    return None;
+                };
+                let mut cur = idx + 1;
+                let mut found = None;
+                for _ in 0..len {
+                    if tape.str_at(cur) == key.as_ref() {
+                        found = Some(cur + 1);
+                        break;
+                    }
+                    cur += 1;
+                    cur += tape.span(cur);
+                }
+                idx = found?;
+            }
+            PhysicalPathStep::Index(wanted) => {
+                let TapeNode::Array { len, .. } = tape.nodes[idx] else {
+                    return None;
+                };
+                let wanted = if *wanted < 0 {
+                    len.checked_sub(wanted.unsigned_abs() as usize)?
+                } else {
+                    *wanted as usize
+                };
+                if wanted >= len {
+                    return None;
+                }
+                let mut cur = idx + 1;
+                for _ in 0..wanted {
+                    cur += tape.span(cur);
+                }
+                idx = cur;
+            }
+        }
+    }
+    Some(idx)
+}
+
+#[cfg(feature = "simd-json")]
+fn scratch_scalar(tape: &crate::data::tape::TapeScratch, idx: usize) -> crate::util::JsonView<'_> {
+    use crate::data::tape::TapeNode;
+    use simd_json::StaticNode as SN;
+
+    let Some(node) = tape.nodes.get(idx).copied() else {
+        return crate::util::JsonView::Null;
+    };
+    match node {
+        TapeNode::Static(SN::Null) => crate::util::JsonView::Null,
+        TapeNode::Static(SN::Bool(value)) => crate::util::JsonView::Bool(value),
+        TapeNode::Static(SN::I64(value)) => crate::util::JsonView::Int(value),
+        TapeNode::Static(SN::U64(value)) => crate::util::JsonView::UInt(value),
+        TapeNode::Static(SN::F64(value)) => crate::util::JsonView::Float(value),
+        TapeNode::String(_) => crate::util::JsonView::Str(tape.str_at(idx)),
+        TapeNode::Array { len, .. } => crate::util::JsonView::ArrayLen(len),
+        TapeNode::Object { len, .. } => crate::util::JsonView::ObjectLen(len),
+    }
+}
+
 pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
     write_val_json(writer, value)?;
     writer.write_all(b"\n")?;
@@ -1312,6 +1549,78 @@ fn write_tape_json_at<W: Write>(
                 write_json_str(writer, tape.str_at(cur))?;
                 writer.write_all(b":")?;
                 cur = write_tape_json_at(writer, tape, cur + 1)?;
+            }
+            writer.write_all(b"}")?;
+            Ok(cur)
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn write_scratch_json_at<W: Write>(
+    writer: &mut W,
+    tape: &crate::data::tape::TapeScratch,
+    idx: usize,
+) -> Result<usize, JetroEngineError> {
+    use crate::data::tape::TapeNode;
+    use simd_json::StaticNode as SN;
+
+    let Some(node) = tape.nodes.get(idx).copied() else {
+        writer.write_all(b"null")?;
+        return Ok(idx);
+    };
+
+    match node {
+        TapeNode::Static(SN::Null) => {
+            writer.write_all(b"null")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(true)) => {
+            writer.write_all(b"true")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(false)) => {
+            writer.write_all(b"false")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::I64(value)) => {
+            write_i64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::U64(value)) => {
+            write_u64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::F64(value)) => {
+            write_f64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::String(_) => {
+            write_json_str(writer, tape.str_at(idx))?;
+            Ok(idx + 1)
+        }
+        TapeNode::Array { len, .. } => {
+            writer.write_all(b"[")?;
+            let mut cur = idx + 1;
+            for item_idx in 0..len {
+                if item_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                cur = write_scratch_json_at(writer, tape, cur)?;
+            }
+            writer.write_all(b"]")?;
+            Ok(cur)
+        }
+        TapeNode::Object { len, .. } => {
+            writer.write_all(b"{")?;
+            let mut cur = idx + 1;
+            for field_idx in 0..len {
+                if field_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(b":")?;
+                cur = write_scratch_json_at(writer, tape, cur + 1)?;
             }
             writer.write_all(b"}")?;
             Ok(cur)

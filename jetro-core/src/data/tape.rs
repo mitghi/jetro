@@ -303,3 +303,47 @@ impl TapeData {
         }
     }
 }
+
+#[cfg(feature = "simd-json")]
+pub(crate) struct TapeScratch {
+    bytes_buf: Vec<u8>,
+    buffers: simd_json::Buffers,
+    pub(crate) nodes: Vec<TapeNode>,
+}
+
+#[cfg(feature = "simd-json")]
+impl TapeScratch {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes_buf: Vec::with_capacity(capacity),
+            buffers: simd_json::Buffers::new(capacity),
+            nodes: Vec::new(),
+        }
+    }
+
+    pub(crate) fn parse_slice(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.bytes_buf.clear();
+        self.bytes_buf.extend_from_slice(bytes);
+        let tape = simd_json::to_tape_with_buffers(&mut self.bytes_buf, &mut self.buffers)
+            .map_err(|err| err.to_string())?;
+        self.nodes =
+            unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn str_at(&self, i: usize) -> &str {
+        match self.nodes[i] {
+            TapeNode::String(s) => s,
+            _ => "",
+        }
+    }
+
+    #[inline]
+    pub(crate) fn span(&self, i: usize) -> usize {
+        match self.nodes[i] {
+            TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count + 1,
+            _ => 1,
+        }
+    }
+}
