@@ -961,6 +961,12 @@ enum NdjsonDirectTapePlan {
         suffix_steps: NdjsonPhysicalPath,
         op: crate::exec::pipeline::NumOp,
     },
+    FilterNumericReducePath {
+        source_steps: NdjsonPhysicalPath,
+        predicate: NdjsonDirectItemPredicate,
+        suffix_steps: NdjsonPhysicalPath,
+        op: crate::exec::pipeline::NumOp,
+    },
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
@@ -1129,7 +1135,22 @@ where
                 op,
             } => {
                 let value =
-                    reduce_json_tape_numeric_path(&scratch, source_steps, suffix_steps, *op);
+                    reduce_json_tape_numeric_path(&scratch, source_steps, None, suffix_steps, *op);
+                write_val_json(&mut writer, &value)?;
+            }
+            NdjsonDirectTapePlan::FilterNumericReducePath {
+                source_steps,
+                predicate,
+                suffix_steps,
+                op,
+            } => {
+                let value = reduce_json_tape_numeric_path(
+                    &scratch,
+                    source_steps,
+                    Some(predicate),
+                    suffix_steps,
+                    *op,
+                );
                 write_val_json(&mut writer, &value)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
@@ -1396,6 +1417,10 @@ impl<'a> NdjsonRowExecutor<'a> {
                 })
             }
             PlanNode::Pipeline { source, body } => {
+                if let Some(plan) = direct_tape_filter_numeric_reduce_path_plan(&plan, source, body)
+                {
+                    return Some(plan);
+                }
                 if let Some(plan) = direct_tape_numeric_reduce_path_plan(&plan, source, body) {
                     return Some(plan);
                 }
@@ -1681,6 +1706,34 @@ fn direct_tape_numeric_reduce_path_plan(
     Some(NdjsonDirectTapePlan::NumericReducePath {
         source_steps: pipeline_source_to_steps(plan, source)?,
         suffix_steps,
+        op,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_filter_numeric_reduce_path_plan(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
+
+    let Sink::Reducer(spec) = &body.sink else {
+        return None;
+    };
+    if spec.predicate.is_some() || spec.projection.is_some() {
+        return None;
+    }
+    let ReducerOp::Numeric(op) = spec.op else {
+        return None;
+    };
+    let [Stage::Filter(_, _), Stage::Map(_, _)] = body.stages.as_slice() else {
+        return None;
+    };
+    Some(NdjsonDirectTapePlan::FilterNumericReducePath {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        predicate: direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
+        suffix_steps: kernel_to_physical_path(body.stage_kernels.get(1)?)?,
         op,
     })
 }
@@ -2480,6 +2533,7 @@ fn count_json_tape_filtered<T: JsonTape>(
 fn reduce_json_tape_numeric_path<T: JsonTape>(
     tape: &T,
     source_steps: &[crate::ir::physical::PhysicalPathStep],
+    predicate: Option<&NdjsonDirectItemPredicate>,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
     op: crate::exec::pipeline::NumOp,
 ) -> Val {
@@ -2500,6 +2554,12 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
         Some(TapeNode::Array { len, .. }) => {
             let mut cur = source_idx + 1;
             for _ in 0..len {
+                if !predicate
+                    .is_none_or(|predicate| eval_json_tape_item_predicate(tape, cur, predicate))
+                {
+                    cur += tape.span(cur);
+                    continue;
+                }
                 if let Some(idx) = json_tape_path_index_from(tape, cur, suffix_steps) {
                     fold_json_tape_numeric(
                         json_tape_scalar(tape, idx),
