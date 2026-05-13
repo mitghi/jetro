@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.8
+## 0.5.9
 
 ### Release focus
 
@@ -118,6 +118,16 @@
   `$.name.upper()`, and `$.attributes.first().value` equivalently to their
   bare per-row forms, so CLI and API callers get the same fast path without
   rewriting queries.
+- **Rooted NDJSON normalization now prefers row-local plans**. Direct NDJSON
+  planning normalizes rooted row expressions before accepting a document-root
+  fallback, fixing `$.id`/`$.name` style CLI queries so they emit row fields
+  instead of `null` while preserving the bare `id`/`name` behavior.
+- **Static NDJSON projections can write directly from bytes**. Direct byte
+  execution now covers static path projections such as `$.id` and `$.a.b.c`,
+  plus simple static object and array shaping such as
+  `{test: $.a.b.c, b: $.a.b}` and `[$.id, $.name]`. These plans emit selected
+  raw subvalues directly from row bytes and avoid per-row tape or `Val`
+  materialization when the shape is safe.
 - **Demand-aware byte access for first/nth array elements**. Direct byte
   execution no longer scans the entire root array field before satisfying
   `first()` or `nth()` element projections; it reads only the demanded prefix
