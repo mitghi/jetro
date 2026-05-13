@@ -73,7 +73,7 @@ pub(super) struct NdjsonDirectStreamPlan {
 
 #[derive(Clone)]
 pub(super) enum NdjsonDirectStreamMap {
-    Path(NdjsonPhysicalPath),
+    Value(NdjsonDirectProjectionValue),
     Array(Vec<NdjsonDirectProjectionValue>),
     Object(Vec<NdjsonDirectObjectField>),
 }
@@ -722,8 +722,8 @@ fn direct_tape_filter_map_path_plan(
 fn direct_stream_map_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectStreamMap> {
-    if let Some(suffix_steps) = kernel_to_physical_path(kernel) {
-        return Some(NdjsonDirectStreamMap::Path(suffix_steps));
+    if let Some(value) = direct_projection_value_from_kernel(kernel) {
+        return Some(NdjsonDirectStreamMap::Value(value));
     }
     if let crate::exec::pipeline::BodyKernel::Array(items) = kernel {
         let items = items

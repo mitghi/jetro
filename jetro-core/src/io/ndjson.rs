@@ -2241,14 +2241,15 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
     projection_caches: &mut Vec<NdjsonPathCache>,
 ) -> Result<(), JetroEngineError> {
     match map {
-        NdjsonDirectStreamMap::Path(suffix_steps) => {
-            write_json_tape_cached_path_or_null(
-                writer,
-                tape,
-                item_idx,
-                suffix_steps,
-                suffix_cache,
-            )?;
+        NdjsonDirectStreamMap::Value(value) => {
+            let path_idx = match value {
+                NdjsonDirectProjectionValue::Path(steps)
+                | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+                    suffix_cache.index(tape, item_idx, steps)
+                }
+                NdjsonDirectProjectionValue::Literal(_) => None,
+            };
+            write_json_tape_direct_value(writer, tape, value, path_idx)?;
         }
         NdjsonDirectStreamMap::Array(items) => {
             write_json_tape_array_projection_from(
@@ -2268,22 +2269,6 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
                 projection_caches,
             )?;
         }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "simd-json")]
-fn write_json_tape_cached_path_or_null<W: Write, T: JsonTape>(
-    writer: &mut W,
-    tape: &T,
-    start: usize,
-    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
-    cache: &mut NdjsonPathCache,
-) -> Result<(), JetroEngineError> {
-    if let Some(idx) = cache.index(tape, start, suffix_steps) {
-        write_json_tape_at(writer, tape, idx)?;
-    } else {
-        writer.write_all(b"null")?;
     }
     Ok(())
 }
@@ -3000,6 +2985,7 @@ mod tests {
         let engine = crate::JetroEngine::new();
         for query in [
             "$.attributes.map(@.key)",
+            "$.attributes.map(@.key.upper())",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
             "$.attributes.map(@.weight).sum()",
