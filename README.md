@@ -152,7 +152,7 @@ cargo run -p jetro-core --release --example bench_cold
 
 ```toml
 [dependencies]
-jetro = "0.5.8"
+jetro = "0.5.9"
 ```
 
 ## API
@@ -177,104 +177,7 @@ engine for cached plans, reusable VM state, and NDJSON processing.
 ### NDJSON
 
 NDJSON APIs evaluate each non-empty line as an independent JSON document while
-reusing one prepared query plan for the stream. Use `collect_*` helpers when
-you want `serde_json::Value`s back, and `run_*` helpers when you want results
-written directly to an output stream.
-
-The cold path stays byte-first for common row-local shapes: root paths,
-scalar path calls, first/last/nth child access, path maps, filtered maps,
-array/object map projections, filtered counts, numeric reducers, static
-projections, object item methods such as `keys()`, and match-limited predicates
-can execute directly on reusable simd-json tape scratch without building a
-per-row `serde_json::Value` tree. Stable row layouts also reuse verified
-field-position caches, with fallback when a row changes shape.
-
-For the simplest CLI-style projections and predicates, Jetro can skip tape
-construction too. Rooted and bare row-local forms such as `$.id`, `id`,
-`$.name.upper()`, and `$.attributes.first().value` use the same direct plans;
-root fields, root string case calls, root object item methods, first/nth
-root-array child projections, and supported match predicates are scanned
-directly from row bytes with per-row fallback to the tape path when the raw
-shape is not safe.
-
-```rust
-use jetro::JetroEngine;
-use std::io::Cursor;
-
-let engine = JetroEngine::new();
-let rows = Cursor::new(br#"{"id":1,"active":true}
-{"id":2,"active":false}
-{"id":3,"active":true}
-"#);
-
-let ids = engine.collect_ndjson(rows, "id")?;
-assert_eq!(ids, vec![
-    serde_json::json!(1),
-    serde_json::json!(2),
-    serde_json::json!(3),
-]);
-
-let rows = Cursor::new(br#"{"id":1,"name":"ada","score":10}
-{"id":2,"name":"bob","score":20}
-"#);
-let mut out = Vec::new();
-engine.run_ndjson(rows, r#"{id: id, name: name.upper(), score: score}"#, &mut out)?;
-assert_eq!(
-    std::str::from_utf8(&out)?,
-    "{\"id\":1,\"name\":\"ADA\",\"score\":10}\n{\"id\":2,\"name\":\"BOB\",\"score\":20}\n",
-);
-```
-
-For first-N result queries, use the limit writers. They stop reading as soon as
-the requested number of query results has been written.
-
-```rust
-use jetro::JetroEngine;
-use std::io::Cursor;
-
-let engine = JetroEngine::new();
-let rows = Cursor::new(br#"{"n":1}
-{"n":2}
-not-json
-"#);
-
-let mut out = Vec::new();
-engine.run_ndjson_limit(rows, "n + 1", 2, &mut out)?;
-assert_eq!(std::str::from_utf8(&out)?, "2\n3\n");
-```
-
-For first-N document search, use the match-limited APIs. They evaluate the
-predicate per row, write the original full row for truthy matches, and stop as
-soon as the limit is reached. The writer variants preserve matching rows as raw
-NDJSON where possible, avoiding collect-and-reencode work.
-
-```rust
-use jetro::JetroEngine;
-use std::io::Cursor;
-
-let engine = JetroEngine::new();
-let rows = Cursor::new(br#"{"id":1,"level":"info"}
-{"id":2,"level":"error"}
-{"id":3,"level":"error"}
-{"id":4,"level":"error"}
-"#);
-
-let first_two_errors = engine.collect_ndjson_matches(rows, r#"level == "error""#, 2)?;
-assert_eq!(first_two_errors.len(), 2);
-```
-
-File, source-dispatch, and reverse-file variants are public too:
-`run_ndjson_limit`, `run_ndjson_file_limit`, `run_ndjson_source_limit`,
-`run_ndjson_rev_limit`, plus their `_with_options` forms for reader settings.
-For predicate matches, use
-`collect_ndjson_matches_file`, `run_ndjson_matches_file`,
-`collect_ndjson_matches_source`, `run_ndjson_matches_source`,
-`collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
-
-Reverse query writers, reverse limit writers, and reverse match APIs use the
-same byte/tape row execution path as forward NDJSON when a direct plan is
-available. For arbitrary reverse queries with caller-controlled early stop, use
-`for_each_ndjson_rev_until`.
+reusing one prepared query plan for the stream.
 
 ## Quick Language Preview
 
