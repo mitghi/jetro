@@ -728,7 +728,18 @@ fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
         return None;
     };
 
-    let mut cur = lower_expr(builder, base);
+    let mut cur = if builder.context.input == InputMode::Bytes {
+        match base.as_ref() {
+            Expr::Ident(name) if !builder.is_local(name) => {
+                builder.push(PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from(
+                    name.as_str(),
+                ))]))
+            }
+            _ => lower_expr(builder, base),
+        }
+    } else {
+        lower_expr(builder, base)
+    };
     let mut out = Vec::new();
     for step in steps {
         match step {
@@ -1052,6 +1063,35 @@ mod tests {
                 if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "attributes")
         ));
         assert!(body.stages.is_empty());
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_filter_count_to_view_pipeline() {
+        let plan = plan_query_with_context(
+            r#"attributes.filter(@.value.contains("_3")).len()"#,
+            PlanningContext::bytes(),
+        );
+        let PlanNode::Pipeline { body, .. } = root_node(&plan) else {
+            panic!("expected pipeline");
+        };
+        assert!(body.can_run_with_view(), "{body:?}");
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_first_suffix_to_pipeline_chain() {
+        let plan = plan_query_with_context("attributes.first().value", PlanningContext::bytes());
+        let PlanNode::Chain { base, steps } = root_node(&plan) else {
+            panic!("expected chain, got {:?}", std::mem::discriminant(root_node(&plan)));
+        };
+        assert!(matches!(steps.as_slice(), [PhysicalChainStep::Field(key)] if key.as_ref() == "value"));
+        assert!(
+            matches!(plan.node(*base), PlanNode::Pipeline { .. } | PlanNode::Call { .. }),
+            "{:?}",
+            std::mem::discriminant(plan.node(*base))
+        );
+        if let PlanNode::Pipeline { body, .. } = plan.node(*base) {
+            assert!(body.stages.is_empty(), "{body:?}");
+        }
     }
 
     #[test]

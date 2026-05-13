@@ -680,15 +680,6 @@ pub(crate) enum TapeScratchView<'a> {
 #[cfg(feature = "simd-json")]
 impl<'a> TapeScratchView<'a> {
     #[inline]
-    pub(crate) fn root(tape: &'a crate::data::tape::TapeScratch) -> Self {
-        if tape.nodes.is_empty() {
-            Self::Missing
-        } else {
-            Self::Node { tape, idx: 0 }
-        }
-    }
-
-    #[inline]
     fn materialize_at(tape: &'a crate::data::tape::TapeScratch, idx: &mut usize) -> Val {
         use crate::data::tape::TapeNode;
         use simd_json::StaticNode as SN;

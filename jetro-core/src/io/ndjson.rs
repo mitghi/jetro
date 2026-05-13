@@ -1405,7 +1405,6 @@ fn direct_array_element_source(
     NdjsonDirectElement,
 )> {
     use crate::builtins::BuiltinMethod;
-    use crate::builtins::BuiltinArgs;
     use crate::exec::pipeline::Sink;
     use crate::ir::physical::{PipelinePlanSource, PlanNode};
 
@@ -1415,7 +1414,7 @@ fn direct_array_element_source(
         optional,
     } = plan.node(id)
     {
-        if *optional || !matches!(call.args, BuiltinArgs::None) {
+        if *optional {
             return None;
         }
         let element = match call.method {
@@ -1438,6 +1437,8 @@ fn direct_array_element_source(
     let element = match body.sink {
         Sink::Terminal(BuiltinMethod::First) => NdjsonDirectElement::First,
         Sink::Terminal(BuiltinMethod::Last) => NdjsonDirectElement::Last,
+        Sink::SelectMany { n: 1, from_end: false } => NdjsonDirectElement::First,
+        Sink::SelectMany { n: 1, from_end: true } => NdjsonDirectElement::Last,
         Sink::Nth(n) => NdjsonDirectElement::Nth(n),
         _ => return None,
     };
@@ -2068,5 +2069,18 @@ mod tests {
             .expect("second row exists");
         assert_eq!(second.1, br#"{"n":2}"#);
         assert_eq!(buf.capacity(), 128);
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_accepts_first_suffix() {
+        let engine = crate::JetroEngine::new();
+        let query = "attributes.first().value";
+        let plan = super::NdjsonRowExecutor::direct_tape_plan(&engine, query)
+            .expect("first suffix should be direct");
+        assert!(matches!(
+            plan,
+            super::NdjsonDirectTapePlan::ArrayElementPath { .. }
+        ));
     }
 }

@@ -2151,6 +2151,14 @@ impl BuiltinCall {
                 let value = json_view_str(recv)?;
                 str_arg_scalar_apply(method, value, arg.as_ref())
             }
+            (BuiltinMethod::Includes, BuiltinArgs::Val(Val::Str(arg))) => {
+                let value = json_view_str(recv)?;
+                Some(Val::Bool(value.contains(arg.as_ref())))
+            }
+            (BuiltinMethod::Includes, BuiltinArgs::Val(Val::StrSlice(arg))) => {
+                let value = json_view_str(recv)?;
+                Some(Val::Bool(value.contains(arg.as_str())))
+            }
             _ => None,
         }
     }
