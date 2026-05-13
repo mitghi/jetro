@@ -1034,8 +1034,32 @@ impl<'a> NdjsonRowExecutor<'a> {
         row: Vec<u8>,
         writer: &mut W,
     ) -> Result<(), JetroEngineError> {
-        let document = self.parse_owned_row(line_no, row)?;
+        let document = self.parse_owned_result_row(line_no, row)?;
         self.write_document_result(line_no, &document, writer)
+    }
+
+    fn parse_owned_result_row(
+        &self,
+        line_no: u64,
+        row: Vec<u8>,
+    ) -> Result<Jetro, JetroEngineError> {
+        #[cfg(feature = "simd-json")]
+        {
+            crate::data::tape::TapeData::parse(row)
+                .map(Jetro::from_tape_data)
+                .map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })
+        }
+        #[cfg(not(feature = "simd-json"))]
+        {
+            self.parse_owned_row(line_no, row)
+        }
     }
 
     pub(super) fn parse_owned_row(
