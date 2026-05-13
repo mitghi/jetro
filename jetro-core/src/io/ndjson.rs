@@ -2988,6 +2988,7 @@ mod tests {
             "$.attributes.map(@.key)",
             "$.attributes.map(@.key.upper())",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
             "$.attributes.map(@.weight).sum()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
