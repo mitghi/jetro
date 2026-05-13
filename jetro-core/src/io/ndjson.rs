@@ -2105,7 +2105,9 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                 }
             }
             NdjsonDirectProjectionValue::ViewScalarCall {
-                steps, optional, ..
+                steps,
+                call,
+                optional,
             } => {
                 let idx = path_cache.index(tape, 0, steps);
                 path_idx = idx;
@@ -2115,6 +2117,14 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                             matches!(json_tape_scalar(tape, idx), crate::util::JsonView::Null)
                         })
                         .unwrap_or(true)
+                {
+                    continue;
+                }
+                if field.optional
+                    && idx
+                        .map(|idx| json_tape_scalar(tape, idx))
+                        .and_then(|value| call.try_apply_json_view(value))
+                        .is_some_and(|value| matches!(value, Val::Null))
                 {
                     continue;
                 }
