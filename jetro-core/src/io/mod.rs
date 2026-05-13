@@ -1,7 +1,7 @@
 //! Streaming input/output adapters for query execution.
 //!
-//! The initial NDJSON path evaluates each non-empty row independently while
-//! reusing the caller's [`crate::JetroEngine`] plan and VM caches.
+//! NDJSON adapters evaluate each non-empty row independently while reusing the
+//! caller's [`crate::JetroEngine`] plan, VM, and tape execution caches.
 
 mod ndjson;
 #[cfg(feature = "simd-json")]
