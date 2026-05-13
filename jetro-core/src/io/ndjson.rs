@@ -12,8 +12,9 @@ use std::sync::MutexGuard;
 
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
-    direct_tape_plan, direct_tape_predicate, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectTapePlan,
+    direct_byte_plan, direct_tape_plan, direct_tape_predicate, NdjsonDirectBytePlan,
+    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
+    NdjsonDirectProjectionValue, NdjsonDirectTapePlan,
 };
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
@@ -913,6 +914,15 @@ where
     W: Write,
 {
     #[cfg(feature = "simd-json")]
+    if let Some(byte_plan) = direct_byte_plan(engine, query) {
+        if let Some(tape_plan) = direct_tape_plan(engine, query) {
+            return drive_ndjson_byte_writer(
+                engine, reader, &byte_plan, &tape_plan, limit, options, writer,
+            );
+        }
+    }
+
+    #[cfg(feature = "simd-json")]
     if let Some(plan) = direct_tape_plan(engine, query) {
         return drive_ndjson_tape_writer(engine, reader, &plan, limit, options, writer);
     }
@@ -933,6 +943,82 @@ where
 
     writer.flush()?;
     Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_ndjson_byte_writer<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    byte_plan: &NdjsonDirectBytePlan,
+    tape_plan: &NdjsonDirectTapePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut count = 0usize;
+
+    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        match write_ndjson_byte_plan_row(&mut writer, row, byte_plan)? {
+            BytePlanWrite::Done => {}
+            BytePlanWrite::Fallback => {
+                scratch.parse_slice(row).map_err(|message| {
+                    row_parse_error(
+                        line_no,
+                        JetroEngineError::Eval(crate::EvalError(format!(
+                            "Invalid JSON: {message}"
+                        ))),
+                    )
+                })?;
+                tape_runner.write_row(&scratch, &mut writer)?;
+            }
+        }
+        writer.write_all(b"\n")?;
+        count += 1;
+        if limit.is_some_and(|limit| count >= limit) {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+enum BytePlanWrite {
+    Done,
+    Fallback,
+}
+
+#[cfg(feature = "simd-json")]
+fn write_ndjson_byte_plan_row<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    plan: &NdjsonDirectBytePlan,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    match plan {
+        NdjsonDirectBytePlan::RootField(key) => match root_field_raw_value(row, key.as_ref()) {
+            RawFieldValue::Found(value) => {
+                writer.write_all(value)?;
+                Ok(BytePlanWrite::Done)
+            }
+            RawFieldValue::Missing => {
+                writer.write_all(b"null")?;
+                Ok(BytePlanWrite::Done)
+            }
+            RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
+        },
+    }
 }
 
 #[cfg(feature = "simd-json")]
@@ -2100,6 +2186,141 @@ fn write_json_tape_at<W: Write, T: JsonTape>(
             Ok(cur)
         }
     }
+}
+
+#[cfg(feature = "simd-json")]
+enum RawFieldValue<'a> {
+    Found(&'a [u8]),
+    Missing,
+    Fallback,
+}
+
+#[cfg(feature = "simd-json")]
+fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
+    let mut pos = skip_json_ws(row, 0);
+    if row.get(pos) != Some(&b'{') {
+        return RawFieldValue::Fallback;
+    }
+    pos += 1;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied() {
+            Some(b'}') => return RawFieldValue::Missing,
+            Some(b'"') => {}
+            _ => return RawFieldValue::Fallback,
+        }
+        let Some((field_key, next)) = parse_simple_json_string(row, pos) else {
+            return RawFieldValue::Fallback;
+        };
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return RawFieldValue::Fallback;
+        }
+        pos += 1;
+        let value_start = skip_json_ws(row, pos);
+        let Some(value_end) = skip_json_value(row, value_start) else {
+            return RawFieldValue::Fallback;
+        };
+        if field_key == key.as_bytes() {
+            return RawFieldValue::Found(&row[value_start..value_end]);
+        }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b'}') => return RawFieldValue::Missing,
+            _ => return RawFieldValue::Fallback,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn skip_json_ws(row: &[u8], mut pos: usize) -> usize {
+    while matches!(row.get(pos), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+        pos += 1;
+    }
+    pos
+}
+
+#[cfg(feature = "simd-json")]
+fn parse_simple_json_string(row: &[u8], start: usize) -> Option<(&[u8], usize)> {
+    if row.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut pos = start + 1;
+    while let Some(byte) = row.get(pos).copied() {
+        match byte {
+            b'"' => return Some((&row[start + 1..pos], pos + 1)),
+            b'\\' | 0x00..=0x1f => return None,
+            _ => pos += 1,
+        }
+    }
+    None
+}
+
+#[cfg(feature = "simd-json")]
+fn skip_json_string(row: &[u8], start: usize) -> Option<usize> {
+    if row.get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut pos = start + 1;
+    while let Some(byte) = row.get(pos).copied() {
+        match byte {
+            b'"' => return Some(pos + 1),
+            b'\\' => {
+                pos += 2;
+            }
+            0x00..=0x1f => return None,
+            _ => pos += 1,
+        }
+    }
+    None
+}
+
+#[cfg(feature = "simd-json")]
+fn skip_json_value(row: &[u8], start: usize) -> Option<usize> {
+    match row.get(start).copied()? {
+        b'"' => skip_json_string(row, start),
+        b'{' => skip_json_compound(row, start, b'{', b'}'),
+        b'[' => skip_json_compound(row, start, b'[', b']'),
+        b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => {
+            let mut pos = start + 1;
+            while let Some(byte) = row.get(pos).copied() {
+                if matches!(byte, b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t') {
+                    break;
+                }
+                pos += 1;
+            }
+            Some(pos)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn skip_json_compound(row: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
+    if row.get(start) != Some(&open) {
+        return None;
+    }
+    let mut pos = start + 1;
+    let mut depth = 1usize;
+    while let Some(byte) = row.get(pos).copied() {
+        match byte {
+            b'"' => pos = skip_json_string(row, pos)?,
+            b if b == open => {
+                depth += 1;
+                pos += 1;
+            }
+            b if b == close => {
+                depth -= 1;
+                pos += 1;
+                if depth == 0 {
+                    return Some(pos);
+                }
+            }
+            _ => pos += 1,
+        }
+    }
+    None
 }
 
 #[cfg(feature = "simd-json")]

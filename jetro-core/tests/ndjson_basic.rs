@@ -79,6 +79,19 @@ fn run_ndjson_writes_scalar_results_directly() {
 }
 
 #[test]
+fn run_ndjson_writes_root_fields_from_byte_path() {
+    let engine = JetroEngine::new();
+    let input = b"{\"id\":1,\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n{\"i\\u0064\":3,\"name\":\"Cat\"}\n";
+    let mut id_out = Vec::new();
+
+    engine
+        .run_ndjson(Cursor::new(input), "$.id", &mut id_out)
+        .expect("root field should write");
+
+    assert_eq!(String::from_utf8(id_out).unwrap(), "1\nnull\n3\n");
+}
+
+#[test]
 fn run_ndjson_writes_array_and_object_results_directly() {
     let engine = JetroEngine::new();
     let input = br#"{"id":7,"attributes":[{"key":"a","value":1},{"key":"b","value":2}]}

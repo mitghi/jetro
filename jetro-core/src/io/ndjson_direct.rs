@@ -10,6 +10,11 @@ use std::sync::Arc;
 pub(super) type NdjsonPhysicalPath = Vec<PhysicalPathStep>;
 
 #[derive(Clone)]
+pub(super) enum NdjsonDirectBytePlan {
+    RootField(Arc<str>),
+}
+
+#[derive(Clone)]
 pub(super) enum NdjsonDirectTapePlan {
     RootPath(NdjsonPhysicalPath),
     ViewScalarCall {
@@ -80,6 +85,22 @@ pub(super) enum NdjsonDirectTapePlan {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
     },
+}
+
+pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
+    use crate::ir::physical::QueryRoot;
+
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let QueryRoot::Node(root) = plan.root() else {
+        return None;
+    };
+    let PlanNode::RootPath(steps) = plan.node(*root) else {
+        return None;
+    };
+    let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+        return None;
+    };
+    Some(NdjsonDirectBytePlan::RootField(key.clone()))
 }
 
 #[derive(Clone)]
