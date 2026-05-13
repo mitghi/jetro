@@ -88,6 +88,12 @@ fn main() {
         "map numeric sum",
         "attributes.map(@.weight).sum()",
     );
+    bench(
+        &engine,
+        &data,
+        "filter numeric sum",
+        r#"attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+    );
     bench_matches(&engine, &data, "match active rows", "active", rows);
     bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
     bench_matches(
