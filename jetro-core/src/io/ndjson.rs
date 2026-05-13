@@ -3669,4 +3669,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("{query} should have a direct NDJSON tape plan"));
         }
     }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_plan_accepts_fast_root_shapes() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.id",
+            "$.name",
+            "$.name.upper()",
+            "$.name.lower()",
+            "$.keys()",
+            "$.values()",
+            "$.entries()",
+            "$.attributes.first().value",
+            "$.attributes.last().value",
+            "$.attributes.nth(1).value",
+        ] {
+            super::direct_byte_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct NDJSON byte plan"));
+        }
+    }
 }
