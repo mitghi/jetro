@@ -90,18 +90,18 @@ pub(super) enum NdjsonDirectStreamSink {
 
 #[cfg(test)]
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
-    direct_byte_plan_inner(engine, query).or_else(|| {
-        rootless_ndjson_query(query).and_then(|query| direct_byte_plan_inner(engine, query))
-    })
+    rootless_ndjson_query(query)
+        .and_then(|query| direct_byte_plan_inner(engine, query))
+        .or_else(|| direct_byte_plan_inner(engine, query))
 }
 
 pub(super) fn direct_writer_plans(
     engine: &JetroEngine,
     query: &str,
 ) -> Option<(Option<NdjsonDirectBytePlan>, NdjsonDirectTapePlan)> {
-    direct_writer_plans_inner(engine, query).or_else(|| {
-        rootless_ndjson_query(query).and_then(|query| direct_writer_plans_inner(engine, query))
-    })
+    rootless_ndjson_query(query)
+        .and_then(|query| direct_writer_plans_inner(engine, query))
+        .or_else(|| direct_writer_plans_inner(engine, query))
 }
 
 fn direct_writer_plans_inner(
@@ -338,9 +338,9 @@ pub(super) enum NdjsonDirectItemPredicate {
 }
 
 pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
-    direct_tape_plan_inner(engine, query).or_else(|| {
-        rootless_ndjson_query(query).and_then(|query| direct_tape_plan_inner(engine, query))
-    })
+    rootless_ndjson_query(query)
+        .and_then(|query| direct_tape_plan_inner(engine, query))
+        .or_else(|| direct_tape_plan_inner(engine, query))
 }
 
 fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
@@ -566,10 +566,9 @@ pub(super) fn direct_tape_predicate(
     engine: &JetroEngine,
     predicate: &str,
 ) -> Option<NdjsonDirectPredicate> {
-    direct_tape_predicate_inner(engine, predicate).or_else(|| {
-        rootless_ndjson_query(predicate)
-            .and_then(|query| direct_tape_predicate_inner(engine, query))
-    })
+    rootless_ndjson_query(predicate)
+        .and_then(|query| direct_tape_predicate_inner(engine, query))
+        .or_else(|| direct_tape_predicate_inner(engine, predicate))
 }
 
 fn direct_tape_predicate_inner(

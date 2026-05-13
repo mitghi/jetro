@@ -3035,6 +3035,7 @@ mod tests {
         let engine = crate::JetroEngine::new();
         for query in [
             "$.id",
+            "$.a.b.c",
             "$.meta.id",
             "$.name",
             "$.attributes.len()",
@@ -3175,8 +3176,44 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_writes_static_projections() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"id":7,"a":{"b":{"c":1}}}"#;
+        for (query, expected) in [
+            ("$.a.b.c", "1"),
+            (r#"{test: $.a.b.c, b: $.a.b}"#, r#"{"test":1,"b":{"c":1}}"#),
+            (r#"[$.a.b.c, $.id]"#, r#"[1,7]"#),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte projection should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_uses_byte_paths_for_nested_object_items() {
         let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1}
+{"id":2}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.id", &mut out)
+            .expect("rooted byte path should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n");
+
         let rows = std::io::Cursor::new(
             br#"{"meta":{"id":1,"kind":"a"}}
 {"meta":{"id":2,"kind":"b"}}
