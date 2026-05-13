@@ -1510,11 +1510,20 @@ where
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    #[cfg(feature = "simd-json")]
+    let direct_predicate = direct_tape_predicate(engine, predicate);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        #[cfg(feature = "simd-json")]
+        if let Some(predicate) = direct_predicate.as_ref() {
+            if let Some(false) = eval_ndjson_byte_predicate_row(&row, predicate)? {
+                continue;
+            }
+        }
+
         let document = executor.parse_owned_row(line_no, row)?;
         let matched = executor.eval_document(line_no, &document)?;
         if !is_truthy(&matched) {
