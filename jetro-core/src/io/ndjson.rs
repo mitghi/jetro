@@ -581,13 +581,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut writer = ndjson_writer_with_options(writer, options);
-    let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        write_val_line(&mut writer, &value)?;
-        Ok(NdjsonControl::Continue)
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
 
 pub fn run_ndjson_limit<R, W>(
@@ -627,19 +621,7 @@ where
         return Ok(0);
     }
 
-    let mut writer = ndjson_writer_with_options(writer, options);
-    let mut emitted = 0usize;
-    let count = drive_ndjson_val(engine, reader, query, options, |value| {
-        write_val_line(&mut writer, &value)?;
-        emitted += 1;
-        Ok(if emitted >= limit {
-            NdjsonControl::Stop
-        } else {
-            NdjsonControl::Continue
-        })
-    })?;
-    writer.flush()?;
-    Ok(count)
+    drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
 }
 
 pub fn run_ndjson_file_limit<P, W>(
@@ -912,29 +894,33 @@ where
     Ok(count)
 }
 
-fn drive_ndjson_val<R, F>(
+fn drive_ndjson_writer<R, W>(
     engine: &JetroEngine,
     reader: R,
     query: &str,
+    limit: Option<usize>,
     options: NdjsonOptions,
-    mut emit: F,
+    writer: W,
 ) -> Result<usize, JetroEngineError>
 where
     R: BufRead,
-    F: FnMut(Val) -> Result<NdjsonControl, JetroEngineError>,
+    W: Write,
 {
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
     let mut executor = NdjsonRowExecutor::new(engine, query);
+    let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
-    let mut count = 0;
+    let mut count = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
         count += 1;
-        if matches!(emit(executor.eval_owned_row(line_no, row)?)?, NdjsonControl::Stop) {
+        executor.write_owned_row(line_no, row, &mut writer)?;
+        if limit.is_some_and(|limit| count >= limit) {
             break;
         }
     }
 
+    writer.flush()?;
     Ok(count)
 }
 
@@ -1042,6 +1028,16 @@ impl<'a> NdjsonRowExecutor<'a> {
         self.eval_document(line_no, &document)
     }
 
+    pub(super) fn write_owned_row<W: Write>(
+        &mut self,
+        line_no: u64,
+        row: Vec<u8>,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        let document = self.parse_owned_row(line_no, row)?;
+        self.write_document_result(line_no, &document, writer)
+    }
+
     pub(super) fn parse_owned_row(
         &self,
         line_no: u64,
@@ -1059,9 +1055,113 @@ impl<'a> NdjsonRowExecutor<'a> {
             .map_err(|err| row_eval_error(line_no, err))
     }
 
+    pub(super) fn write_document_result<W: Write>(
+        &mut self,
+        line_no: u64,
+        document: &Jetro,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        if self.try_write_tape_result(line_no, document, writer)? {
+            return Ok(());
+        }
+        let value = self.eval_document(line_no, document)?;
+        write_val_line(writer, &value)
+    }
+
+    fn try_write_tape_result<W: Write>(
+        &self,
+        line_no: u64,
+        document: &Jetro,
+        writer: &mut W,
+    ) -> Result<bool, JetroEngineError> {
+        #[cfg(feature = "simd-json")]
+        {
+            use crate::ir::physical::{PlanNode, QueryRoot};
+
+            let QueryRoot::Node(root) = self.plan.root() else {
+                return Ok(false);
+            };
+            let PlanNode::RootPath(steps) = self.plan.node(*root) else {
+                return Ok(false);
+            };
+            let Some(tape) = document
+                .lazy_tape()
+                .map_err(|err| row_eval_error(line_no, err))?
+            else {
+                return Ok(false);
+            };
+            if let Some(idx) = tape_path_index(tape, steps) {
+                write_tape_json_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+            writer.write_all(b"\n")?;
+            Ok(true)
+        }
+        #[cfg(not(feature = "simd-json"))]
+        {
+            let _ = (line_no, document, writer);
+            Ok(false)
+        }
+    }
+
     pub(super) fn engine(&self) -> &'a JetroEngine {
         self.engine
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn tape_path_index(
+    tape: &crate::data::tape::TapeData,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
+    use crate::data::tape::TapeNode;
+    use crate::ir::physical::PhysicalPathStep;
+
+    if tape.nodes.is_empty() {
+        return None;
+    }
+
+    let mut idx = 0usize;
+    for step in steps {
+        match step {
+            PhysicalPathStep::Field(key) => {
+                let TapeNode::Object { len, .. } = tape.nodes[idx] else {
+                    return None;
+                };
+                let mut cur = idx + 1;
+                let mut found = None;
+                for _ in 0..len {
+                    if tape.str_at(cur) == key.as_ref() {
+                        found = Some(cur + 1);
+                        break;
+                    }
+                    cur += 1;
+                    cur += tape.span(cur);
+                }
+                idx = found?;
+            }
+            PhysicalPathStep::Index(wanted) => {
+                let TapeNode::Array { len, .. } = tape.nodes[idx] else {
+                    return None;
+                };
+                let wanted = if *wanted < 0 {
+                    len.checked_sub(wanted.unsigned_abs() as usize)?
+                } else {
+                    *wanted as usize
+                };
+                if wanted >= len {
+                    return None;
+                }
+                let mut cur = idx + 1;
+                for _ in 0..wanted {
+                    cur += tape.span(cur);
+                }
+                idx = cur;
+            }
+        }
+    }
+    Some(idx)
 }
 
 pub(super) fn write_val_line<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngineError> {
@@ -1121,6 +1221,78 @@ fn write_val_json<W: Write>(writer: &mut W, value: &Val) -> Result<(), JetroEngi
         Val::ObjVec(data) => write_json_objvec(writer, data)?,
     }
     Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_tape_json_at<W: Write>(
+    writer: &mut W,
+    tape: &crate::data::tape::TapeData,
+    idx: usize,
+) -> Result<usize, JetroEngineError> {
+    use crate::data::tape::TapeNode;
+    use simd_json::StaticNode as SN;
+
+    let Some(node) = tape.nodes.get(idx).copied() else {
+        writer.write_all(b"null")?;
+        return Ok(idx);
+    };
+
+    match node {
+        TapeNode::Static(SN::Null) => {
+            writer.write_all(b"null")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(true)) => {
+            writer.write_all(b"true")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::Bool(false)) => {
+            writer.write_all(b"false")?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::I64(value)) => {
+            write_i64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::U64(value)) => {
+            write_u64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::Static(SN::F64(value)) => {
+            write_f64(writer, value)?;
+            Ok(idx + 1)
+        }
+        TapeNode::String(_) => {
+            write_json_str(writer, tape.str_at(idx))?;
+            Ok(idx + 1)
+        }
+        TapeNode::Array { len, .. } => {
+            writer.write_all(b"[")?;
+            let mut cur = idx + 1;
+            for item_idx in 0..len {
+                if item_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                cur = write_tape_json_at(writer, tape, cur)?;
+            }
+            writer.write_all(b"]")?;
+            Ok(cur)
+        }
+        TapeNode::Object { len, .. } => {
+            writer.write_all(b"{")?;
+            let mut cur = idx + 1;
+            for field_idx in 0..len {
+                if field_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(b":")?;
+                cur = write_tape_json_at(writer, tape, cur + 1)?;
+            }
+            writer.write_all(b"}")?;
+            Ok(cur)
+        }
+    }
 }
 
 fn write_json_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
@@ -1293,6 +1465,13 @@ fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngi
 
 #[inline]
 fn write_i64<W: Write>(writer: &mut W, value: i64) -> Result<(), JetroEngineError> {
+    let mut buf = itoa::Buffer::new();
+    writer.write_all(buf.format(value).as_bytes())?;
+    Ok(())
+}
+
+#[inline]
+fn write_u64<W: Write>(writer: &mut W, value: u64) -> Result<(), JetroEngineError> {
     let mut buf = itoa::Buffer::new();
     writer.write_all(buf.format(value).as_bytes())?;
     Ok(())
