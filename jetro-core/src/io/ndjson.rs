@@ -1024,7 +1024,12 @@ fn write_ndjson_byte_plan_row<W: Write>(
                     let Some(view) = raw_json_view(value) else {
                         return Ok(BytePlanWrite::Fallback);
                     };
-                    if let Some(value) = call.try_apply_json_view(view) {
+                    if call.method == crate::builtins::BuiltinMethod::Len {
+                        let Some(len) = raw_json_view_len(view) else {
+                            return Ok(BytePlanWrite::Fallback);
+                        };
+                        write_i64(writer, len)?;
+                    } else if let Some(value) = call.try_apply_json_view(view) {
                         write_val_json(writer, &value)?;
                     } else {
                         writer.write_all(value)?;
@@ -1036,6 +1041,12 @@ fn write_ndjson_byte_plan_row<W: Write>(
                     Ok(BytePlanWrite::Done)
                 }
                 RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
+            }
+        }
+        NdjsonDirectBytePlan::RootObjectItems { method } => {
+            match write_root_object_items_raw(writer, row, *method)? {
+                BytePlanWrite::Done => Ok(BytePlanWrite::Done),
+                BytePlanWrite::Fallback => Ok(BytePlanWrite::Fallback),
             }
         }
     }
@@ -2254,6 +2265,79 @@ fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
 }
 
 #[cfg(feature = "simd-json")]
+fn write_root_object_items_raw<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    method: crate::builtins::BuiltinMethod,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut pos = skip_json_ws(row, 0);
+    if row.get(pos) != Some(&b'{') {
+        return Ok(BytePlanWrite::Fallback);
+    }
+    pos += 1;
+    writer.write_all(b"[")?;
+    let mut wrote = false;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied() {
+            Some(b'}') => {
+                writer.write_all(b"]")?;
+                return Ok(BytePlanWrite::Done);
+            }
+            Some(b'"') => {}
+            _ => return Ok(BytePlanWrite::Fallback),
+        }
+        let Some((key, next)) = parse_simple_json_string(row, pos) else {
+            return Ok(BytePlanWrite::Fallback);
+        };
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return Ok(BytePlanWrite::Fallback);
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        let Some(value_end) = skip_json_value(row, value_start) else {
+            return Ok(BytePlanWrite::Fallback);
+        };
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        match method {
+            crate::builtins::BuiltinMethod::Keys => write_json_escaped_ascii_slice(writer, key)?,
+            crate::builtins::BuiltinMethod::Values => writer.write_all(&row[value_start..value_end])?,
+            crate::builtins::BuiltinMethod::Entries => {
+                writer.write_all(b"[")?;
+                write_json_escaped_ascii_slice(writer, key)?;
+                writer.write_all(b",")?;
+                writer.write_all(&row[value_start..value_end])?;
+                writer.write_all(b"]")?;
+            }
+            _ => return Ok(BytePlanWrite::Fallback),
+        }
+        wrote = true;
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b'}') => {
+                writer.write_all(b"]")?;
+                return Ok(BytePlanWrite::Done);
+            }
+            _ => return Ok(BytePlanWrite::Fallback),
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_escaped_ascii_slice<W: Write>(
+    writer: &mut W,
+    value: &[u8],
+) -> Result<(), JetroEngineError> {
+    writer.write_all(b"\"")?;
+    writer.write_all(value)?;
+    writer.write_all(b"\"")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
 fn skip_json_ws(row: &[u8], mut pos: usize) -> usize {
     while matches!(row.get(pos), Some(b' ' | b'\n' | b'\r' | b'\t')) {
         pos += 1;
@@ -2337,6 +2421,17 @@ fn raw_json_view(value: &[u8]) -> Option<crate::util::JsonView<'_>> {
         b'[' => raw_json_array_len(value, start, end).map(crate::util::JsonView::ArrayLen),
         b'{' => raw_json_object_len(value, start, end).map(crate::util::JsonView::ObjectLen),
         b'-' | b'0'..=b'9' => raw_json_number_view(&value[start..end]),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_view_len(value: crate::util::JsonView<'_>) -> Option<i64> {
+    match value {
+        crate::util::JsonView::Str(value) => Some(value.chars().count() as i64),
+        crate::util::JsonView::ArrayLen(value) | crate::util::JsonView::ObjectLen(value) => {
+            Some(value as i64)
+        }
         _ => None,
     }
 }

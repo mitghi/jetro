@@ -16,6 +16,9 @@ pub(super) enum NdjsonDirectBytePlan {
         key: Arc<str>,
         call: crate::builtins::BuiltinCall,
     },
+    RootObjectItems {
+        method: crate::builtins::BuiltinMethod,
+    },
 }
 
 #[derive(Clone)]
@@ -92,7 +95,7 @@ pub(super) enum NdjsonDirectTapePlan {
 }
 
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
-    use crate::builtins::BuiltinMethod;
+    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
     let plan = engine.cached_plan(query, PlanningContext::bytes());
@@ -111,7 +114,7 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             call,
             optional,
         } if !*optional
-            && call.spec().view_scalar
+            && (call.spec().view_scalar || call.method == BuiltinMethod::Len)
             && !matches!(
                 call.method,
                 BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
@@ -126,6 +129,47 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             Some(NdjsonDirectBytePlan::RootFieldScalarCall {
                 key: key.clone(),
                 call: call.clone(),
+            })
+        }
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } if !*optional
+            && matches!(
+                call.method,
+                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
+            ) =>
+        {
+            let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+                return None;
+            };
+            steps.is_empty().then_some(NdjsonDirectBytePlan::RootObjectItems {
+                method: call.method,
+            })
+        }
+        PlanNode::Pipeline {
+            source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
+            body,
+        } if is_plain_count_sink(body) && keys.len() == 1 => {
+            Some(NdjsonDirectBytePlan::RootFieldScalarCall {
+                key: keys[0].clone(),
+                call: BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
+            })
+        }
+        PlanNode::Pipeline {
+            source: crate::ir::physical::PipelinePlanSource::Expr(source),
+            body,
+        } if is_plain_count_sink(body) => {
+            let PlanNode::RootPath(steps) = plan.node(*source) else {
+                return None;
+            };
+            let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+                return None;
+            };
+            Some(NdjsonDirectBytePlan::RootFieldScalarCall {
+                key: key.clone(),
+                call: BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
             })
         }
         _ => None,
