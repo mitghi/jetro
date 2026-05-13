@@ -126,6 +126,28 @@ fn run_ndjson_writes_array_and_object_results_directly() {
 }
 
 #[test]
+fn run_ndjson_writes_direct_array_element_projections() {
+    let engine = JetroEngine::new();
+    let input =
+        br#"{"attributes":[{"key":"a","value":1},{"key":"b","value":2},{"key":"c","value":3}]}
+"#;
+
+    let cases = [
+        ("attributes.first().key", "\"a\"\n"),
+        ("attributes.last().key", "\"c\"\n"),
+        ("attributes.nth(1).value", "2\n"),
+    ];
+
+    for (query, expected) in cases {
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(Cursor::new(input), query, &mut out)
+            .expect("array element projection should write");
+        assert_eq!(String::from_utf8(out).unwrap(), expected, "{query}");
+    }
+}
+
+#[test]
 fn run_ndjson_limit_writes_and_stops_without_value_callback() {
     let engine = JetroEngine::new();
     let input = br#"{"n":1}

@@ -2354,11 +2354,17 @@ mod tests {
     #[cfg(feature = "simd-json")]
     fn direct_tape_plan_accepts_first_suffix() {
         let engine = crate::JetroEngine::new();
-        let query = "attributes.first().value";
-        let plan = super::direct_tape_plan(&engine, query).expect("first suffix should be direct");
-        assert!(matches!(
-            plan,
-            super::NdjsonDirectTapePlan::ArrayElementPath { .. }
-        ));
+        for query in [
+            "attributes.first().value",
+            "attributes.last().value",
+            "attributes.nth(1).value",
+        ] {
+            let plan =
+                super::direct_tape_plan(&engine, query).expect("array suffix should be direct");
+            assert!(matches!(
+                plan,
+                super::NdjsonDirectTapePlan::ArrayElementPath { .. }
+            ));
+        }
     }
 }
