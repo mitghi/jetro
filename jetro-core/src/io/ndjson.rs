@@ -959,7 +959,7 @@ enum NdjsonDirectElement {
 
 #[cfg(feature = "simd-json")]
 #[derive(Clone)]
-enum NdjsonDirectPredicate {
+pub(super) enum NdjsonDirectPredicate {
     Path(Vec<crate::ir::physical::PhysicalPathStep>),
     Literal(Val),
     Not(Box<NdjsonDirectPredicate>),
@@ -1460,7 +1460,7 @@ fn pipeline_source_to_steps(
 }
 
 #[cfg(feature = "simd-json")]
-fn direct_tape_predicate(
+pub(super) fn direct_tape_predicate(
     engine: &JetroEngine,
     predicate: &str,
 ) -> Option<NdjsonDirectPredicate> {
@@ -1712,7 +1712,7 @@ fn json_tape_array_element<T: JsonTape>(
 }
 
 #[cfg(feature = "simd-json")]
-fn eval_tape_predicate(
+pub(super) fn eval_tape_predicate(
     tape: &crate::data::tape::TapeScratch,
     predicate: &NdjsonDirectPredicate,
 ) -> bool {
@@ -2157,7 +2157,7 @@ pub(super) fn parse_row(
         .map_err(|err| row_parse_error(line_no, err))
 }
 
-fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
+pub(super) fn row_parse_error(line_no: u64, err: JetroEngineError) -> JetroEngineError {
     match err {
         JetroEngineError::Json(source) => RowError::InvalidJson { line_no, source }.into(),
         JetroEngineError::Eval(eval) => RowError::InvalidJsonMessage {

@@ -431,6 +431,11 @@ where
         return Ok(0);
     }
 
+    #[cfg(feature = "simd-json")]
+    if let Some(predicate) = super::ndjson::direct_tape_predicate(engine, predicate) {
+        return drive_rev_matches_writer_tape(path, &predicate, limit, options, writer);
+    }
+
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
@@ -449,6 +454,46 @@ where
             reverse_row_no,
             executor.engine(),
         )?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
+#[cfg(feature = "simd-json")]
+fn drive_rev_matches_writer_tape<P, W>(
+    path: P,
+    predicate: &super::ndjson::NdjsonDirectPredicate,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
+    let mut scratch =
+        crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        scratch.parse_slice(&row).map_err(|message| {
+            super::ndjson::row_parse_error(
+                reverse_row_no,
+                JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
+            )
+        })?;
+        if !super::ndjson::eval_tape_predicate(&scratch, predicate) {
+            continue;
+        }
+        writer.write_all(&row)?;
+        writer.write_all(b"\n")?;
         emitted += 1;
         if emitted >= limit {
             break;
