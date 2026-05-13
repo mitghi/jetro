@@ -44,6 +44,7 @@ pub(super) enum NdjsonDirectTapePlan {
         op: crate::exec::pipeline::NumOp,
     },
     Object(Vec<NdjsonDirectObjectField>),
+    Array(Vec<NdjsonDirectObjectValue>),
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
@@ -208,6 +209,27 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             })
         }
         PlanNode::Object(fields) => direct_tape_object_plan(&plan, fields),
+        PlanNode::Array(elems) => direct_tape_array_plan(&plan, elems),
+        _ => None,
+    }
+}
+
+fn direct_object_value_from_node(
+    plan: &QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<NdjsonDirectObjectValue> {
+    match plan.node(id) {
+        PlanNode::RootPath(steps) => Some(NdjsonDirectObjectValue::Path(steps.clone())),
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } if call.spec().view_scalar => Some(NdjsonDirectObjectValue::ViewScalarCall {
+            steps: root_path_steps(plan, *receiver)?,
+            call: call.clone(),
+            optional: *optional,
+        }),
+        PlanNode::Literal(value) => Some(NdjsonDirectObjectValue::Literal(value.clone())),
         _ => None,
     }
 }
@@ -229,20 +251,7 @@ fn direct_tape_object_plan(
         else {
             return None;
         };
-        let value = match plan.node(*val) {
-            PlanNode::RootPath(steps) => NdjsonDirectObjectValue::Path(steps.clone()),
-            PlanNode::Call {
-                receiver,
-                call,
-                optional,
-            } if call.spec().view_scalar => NdjsonDirectObjectValue::ViewScalarCall {
-                steps: root_path_steps(plan, *receiver)?,
-                call: call.clone(),
-                optional: *optional,
-            },
-            PlanNode::Literal(value) => NdjsonDirectObjectValue::Literal(value.clone()),
-            _ => return None,
-        };
+        let value = direct_object_value_from_node(plan, *val)?;
         out.push(NdjsonDirectObjectField {
             key: key.clone(),
             value,
@@ -250,6 +259,22 @@ fn direct_tape_object_plan(
         });
     }
     Some(NdjsonDirectTapePlan::Object(out))
+}
+
+fn direct_tape_array_plan(
+    plan: &QueryPlan,
+    elems: &[crate::ir::physical::PhysicalArrayElem],
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::ir::physical::PhysicalArrayElem;
+
+    let mut out = Vec::with_capacity(elems.len());
+    for elem in elems {
+        let PhysicalArrayElem::Expr(id) = elem else {
+            return None;
+        };
+        out.push(direct_object_value_from_node(plan, *id)?);
+    }
+    Some(NdjsonDirectTapePlan::Array(out))
 }
 
 fn pipeline_source_to_steps(

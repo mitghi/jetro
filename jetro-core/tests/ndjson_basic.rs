@@ -169,6 +169,20 @@ fn run_ndjson_writes_static_object_projection_directly() {
 }
 
 #[test]
+fn run_ndjson_writes_static_array_projection_directly() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada","score":42}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(Cursor::new(input), r#"[id, name.upper(), score]"#, &mut out)
+        .expect("static array projection should write");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "[7,\"ADA\",42]\n");
+}
+
+#[test]
 fn run_ndjson_filtered_numeric_reduce_honors_scalar_source_predicate() {
     let engine = JetroEngine::new();
     let input = br#"{"attributes":{"active":false,"value":10}}

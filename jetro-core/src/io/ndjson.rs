@@ -1138,6 +1138,9 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
             NdjsonDirectTapePlan::Object(fields) => {
                 write_json_tape_object_projection(writer, scratch, fields, &mut self.object_paths)?;
             }
+            NdjsonDirectTapePlan::Array(items) => {
+                write_json_tape_array_projection(writer, scratch, items, &mut self.object_paths)?;
+            }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let (Some(vm), Some(env)) = (self.vm.as_deref_mut(), self.env.as_ref()) else {
                     return Err(JetroEngineError::Eval(crate::EvalError(
@@ -2090,32 +2093,70 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
         }
         write_json_str(writer, field.key.as_ref())?;
         writer.write_all(b":")?;
-        match &field.value {
-            NdjsonDirectObjectValue::Path(steps) => {
-                let _ = steps;
-                if let Some(idx) = path_idx {
-                    write_json_tape_at(writer, tape, idx)?;
-                } else {
-                    writer.write_all(b"null")?;
-                }
-            }
-            NdjsonDirectObjectValue::ViewScalarCall { call, .. } => {
-                if let Some(idx) = path_idx {
-                    let value = json_tape_scalar(tape, idx);
-                    if let Some(value) = call.try_apply_json_view(value) {
-                        write_val_json(writer, &value)?;
-                    } else {
-                        write_json_tape_at(writer, tape, idx)?;
-                    }
-                } else {
-                    writer.write_all(b"null")?;
-                }
-            }
-            NdjsonDirectObjectValue::Literal(value) => write_val_json(writer, value)?,
-        }
+        write_json_tape_direct_value(writer, tape, &field.value, path_idx)?;
         wrote = true;
     }
     writer.write_all(b"}")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_projection<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    items: &[NdjsonDirectObjectValue],
+    path_caches: &mut Vec<NdjsonPathCache>,
+) -> Result<(), JetroEngineError> {
+    if path_caches.len() < items.len() {
+        path_caches.resize_with(items.len(), NdjsonPathCache::default);
+    }
+    writer.write_all(b"[")?;
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            writer.write_all(b",")?;
+        }
+        let path_idx = match item {
+            NdjsonDirectObjectValue::Path(steps)
+            | NdjsonDirectObjectValue::ViewScalarCall { steps, .. } => {
+                path_caches[idx].index(tape, 0, steps)
+            }
+            NdjsonDirectObjectValue::Literal(_) => None,
+        };
+        write_json_tape_direct_value(writer, tape, item, path_idx)?;
+    }
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_direct_value<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    value: &NdjsonDirectObjectValue,
+    path_idx: Option<usize>,
+) -> Result<(), JetroEngineError> {
+    match value {
+        NdjsonDirectObjectValue::Path(_) => {
+            if let Some(idx) = path_idx {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectObjectValue::ViewScalarCall { call, .. } => {
+            if let Some(idx) = path_idx {
+                let value = json_tape_scalar(tape, idx);
+                if let Some(value) = call.try_apply_json_view(value) {
+                    write_val_json(writer, &value)?;
+                } else {
+                    write_json_tape_at(writer, tape, idx)?;
+                }
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectObjectValue::Literal(value) => write_val_json(writer, value)?,
+    }
     Ok(())
 }
 
