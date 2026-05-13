@@ -195,7 +195,9 @@ fn run_ndjson_writes_direct_array_element_projections() {
 
     let cases = [
         ("attributes.first().key", "\"a\"\n"),
+        ("attributes.first().key.upper()", "\"A\"\n"),
         ("attributes.last().key", "\"c\"\n"),
+        ("attributes.last().key.upper()", "\"C\"\n"),
         ("attributes.nth(1).value", "2\n"),
     ];
 

@@ -1035,6 +1035,28 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                     writer.write_all(b"null")?;
                 }
             }
+            NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+                source_steps,
+                element,
+                suffix_steps,
+                call,
+            } => {
+                let idx = self
+                    .source_path
+                    .index(scratch, 0, source_steps)
+                    .and_then(|idx| json_tape_array_element(scratch, idx, *element))
+                    .and_then(|idx| self.suffix_path.index(scratch, idx, suffix_steps));
+                if let Some(value) = idx
+                    .map(|idx| json_tape_scalar(scratch, idx))
+                    .and_then(|value| call.try_apply_json_view(value))
+                {
+                    write_val_json(writer, &value)?;
+                } else if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
             NdjsonDirectTapePlan::ObjectItems { steps, method } => {
                 let idx = self.root_path.index(scratch, 0, steps);
                 write_json_tape_object_items(writer, scratch, idx, *method)?;

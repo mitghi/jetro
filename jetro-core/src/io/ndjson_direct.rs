@@ -17,6 +17,12 @@ pub(super) enum NdjsonDirectTapePlan {
         call: crate::builtins::BuiltinCall,
         optional: bool,
     },
+    ArrayElementViewScalarCall {
+        source_steps: NdjsonPhysicalPath,
+        element: NdjsonDirectElement,
+        suffix_steps: NdjsonPhysicalPath,
+        call: crate::builtins::BuiltinCall,
+    },
     ObjectItems {
         steps: NdjsonPhysicalPath,
         method: crate::builtins::BuiltinMethod,
@@ -202,11 +208,28 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             receiver,
             call,
             optional,
-        } if call.spec().view_scalar => {
-            Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: root_path_steps(&plan, *receiver)?,
+        } if call.spec().view_scalar
+            && !matches!(
+                call.method,
+                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
+            ) =>
+        {
+            if let Some(steps) = root_path_steps(&plan, *receiver) {
+                return Some(NdjsonDirectTapePlan::ViewScalarCall {
+                    steps,
+                    call: call.clone(),
+                    optional: *optional,
+                });
+            }
+            let PlanNode::Chain { base, steps } = plan.node(*receiver) else {
+                return None;
+            };
+            let (source_steps, element) = direct_array_element_source(&plan, *base)?;
+            Some(NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+                source_steps,
+                element,
+                suffix_steps: physical_chain_to_path(steps)?,
                 call: call.clone(),
-                optional: *optional,
             })
         }
         PlanNode::Call {

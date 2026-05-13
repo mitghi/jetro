@@ -64,6 +64,12 @@ fn main() {
         "first nested value",
         "attributes.first().value",
     );
+    bench(
+        &engine,
+        &data,
+        "first nested upper",
+        "attributes.first().key.upper()",
+    );
     bench(&engine, &data, "map nested keys", "attributes.map(@.key)");
     bench(
         &engine,
