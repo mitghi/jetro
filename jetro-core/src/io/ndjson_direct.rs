@@ -44,7 +44,7 @@ pub(super) enum NdjsonDirectTapePlan {
         op: crate::exec::pipeline::NumOp,
     },
     Object(Vec<NdjsonDirectObjectField>),
-    Array(Vec<NdjsonDirectObjectValue>),
+    Array(Vec<NdjsonDirectProjectionValue>),
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
@@ -54,12 +54,12 @@ pub(super) enum NdjsonDirectTapePlan {
 #[derive(Clone)]
 pub(super) struct NdjsonDirectObjectField {
     pub(super) key: Arc<str>,
-    pub(super) value: NdjsonDirectObjectValue,
+    pub(super) value: NdjsonDirectProjectionValue,
     pub(super) optional: bool,
 }
 
 #[derive(Clone)]
-pub(super) enum NdjsonDirectObjectValue {
+pub(super) enum NdjsonDirectProjectionValue {
     Path(NdjsonPhysicalPath),
     ViewScalarCall {
         steps: NdjsonPhysicalPath,
@@ -217,19 +217,19 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 fn direct_object_value_from_node(
     plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
-) -> Option<NdjsonDirectObjectValue> {
+) -> Option<NdjsonDirectProjectionValue> {
     match plan.node(id) {
-        PlanNode::RootPath(steps) => Some(NdjsonDirectObjectValue::Path(steps.clone())),
+        PlanNode::RootPath(steps) => Some(NdjsonDirectProjectionValue::Path(steps.clone())),
         PlanNode::Call {
             receiver,
             call,
             optional,
-        } if call.spec().view_scalar => Some(NdjsonDirectObjectValue::ViewScalarCall {
+        } if call.spec().view_scalar => Some(NdjsonDirectProjectionValue::ViewScalarCall {
             steps: root_path_steps(plan, *receiver)?,
             call: call.clone(),
             optional: *optional,
         }),
-        PlanNode::Literal(value) => Some(NdjsonDirectObjectValue::Literal(value.clone())),
+        PlanNode::Literal(value) => Some(NdjsonDirectProjectionValue::Literal(value.clone())),
         _ => None,
     }
 }

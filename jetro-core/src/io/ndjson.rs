@@ -13,7 +13,7 @@ use std::sync::MutexGuard;
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
     direct_tape_plan, direct_tape_predicate, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectObjectValue, NdjsonDirectPredicate, NdjsonDirectTapePlan,
+    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectTapePlan,
 };
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
@@ -2069,7 +2069,7 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
         let path_cache = &mut path_caches[field_idx];
         let mut path_idx = None;
         match &field.value {
-            NdjsonDirectObjectValue::Path(steps) => {
+            NdjsonDirectProjectionValue::Path(steps) => {
                 let idx = path_cache.index(tape, 0, steps);
                 path_idx = idx;
                 if field.optional
@@ -2082,7 +2082,7 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                     continue;
                 }
             }
-            NdjsonDirectObjectValue::ViewScalarCall {
+            NdjsonDirectProjectionValue::ViewScalarCall {
                 steps, optional, ..
             } => {
                 let idx = path_cache.index(tape, 0, steps);
@@ -2097,10 +2097,10 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                     continue;
                 }
             }
-            NdjsonDirectObjectValue::Literal(Val::Null) if field.optional => {
+            NdjsonDirectProjectionValue::Literal(Val::Null) if field.optional => {
                 continue;
             }
-            NdjsonDirectObjectValue::Literal(_) => {}
+            NdjsonDirectProjectionValue::Literal(_) => {}
         }
         if wrote {
             writer.write_all(b",")?;
@@ -2118,7 +2118,7 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
 fn write_json_tape_array_projection<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
-    items: &[NdjsonDirectObjectValue],
+    items: &[NdjsonDirectProjectionValue],
     path_caches: &mut Vec<NdjsonPathCache>,
 ) -> Result<(), JetroEngineError> {
     if path_caches.len() < items.len() {
@@ -2130,11 +2130,11 @@ fn write_json_tape_array_projection<W: Write, T: JsonTape>(
             writer.write_all(b",")?;
         }
         let path_idx = match item {
-            NdjsonDirectObjectValue::Path(steps)
-            | NdjsonDirectObjectValue::ViewScalarCall { steps, .. } => {
+            NdjsonDirectProjectionValue::Path(steps)
+            | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                 path_caches[idx].index(tape, 0, steps)
             }
-            NdjsonDirectObjectValue::Literal(_) => None,
+            NdjsonDirectProjectionValue::Literal(_) => None,
         };
         write_json_tape_direct_value(writer, tape, item, path_idx)?;
     }
@@ -2146,18 +2146,18 @@ fn write_json_tape_array_projection<W: Write, T: JsonTape>(
 fn write_json_tape_direct_value<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
-    value: &NdjsonDirectObjectValue,
+    value: &NdjsonDirectProjectionValue,
     path_idx: Option<usize>,
 ) -> Result<(), JetroEngineError> {
     match value {
-        NdjsonDirectObjectValue::Path(_) => {
+        NdjsonDirectProjectionValue::Path(_) => {
             if let Some(idx) = path_idx {
                 write_json_tape_at(writer, tape, idx)?;
             } else {
                 writer.write_all(b"null")?;
             }
         }
-        NdjsonDirectObjectValue::ViewScalarCall { call, .. } => {
+        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => {
             if let Some(idx) = path_idx {
                 let value = json_tape_scalar(tape, idx);
                 if let Some(value) = call.try_apply_json_view(value) {
@@ -2169,7 +2169,7 @@ fn write_json_tape_direct_value<W: Write, T: JsonTape>(
                 writer.write_all(b"null")?;
             }
         }
-        NdjsonDirectObjectValue::Literal(value) => write_val_json(writer, value)?,
+        NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
     }
     Ok(())
 }
