@@ -1157,7 +1157,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
 
 #[cfg(feature = "simd-json")]
 #[derive(Default)]
-struct NdjsonPathCache {
+pub(super) struct NdjsonPathCache {
     first_field_slot: Option<usize>,
 }
 
@@ -1216,6 +1216,7 @@ where
     let needs_vm = predicate_needs_vm(predicate);
     let mut vm = needs_vm.then(|| engine.lock_vm());
     let env = needs_vm.then(|| crate::data::context::Env::new(Val::Null));
+    let mut predicate_path = NdjsonPathCache::default();
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
         scratch.parse_slice(&row).map_err(|message| {
@@ -1224,8 +1225,14 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        if !eval_tape_predicate(&scratch, predicate, env.as_ref(), &mut vm)
-            .map_err(JetroEngineError::Eval)?
+        if !eval_tape_predicate(
+            &scratch,
+            predicate,
+            env.as_ref(),
+            &mut vm,
+            &mut predicate_path,
+        )
+        .map_err(JetroEngineError::Eval)?
         {
             continue;
         }
@@ -1659,31 +1666,36 @@ pub(super) fn eval_tape_predicate(
     predicate: &NdjsonDirectPredicate,
     env: Option<&crate::data::context::Env>,
     vm: &mut Option<std::sync::MutexGuard<'_, crate::vm::exec::VM>>,
+    cache: &mut NdjsonPathCache,
 ) -> Result<bool, crate::EvalError> {
     use crate::parse::ast::BinOp;
 
     Ok(match predicate {
-        NdjsonDirectPredicate::Path(steps) => json_tape_path_index(tape, steps)
+        NdjsonDirectPredicate::Path(steps) => cache
+            .index(tape, 0, steps)
             .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
             .unwrap_or(false),
         NdjsonDirectPredicate::Literal(value) => crate::util::is_truthy(value),
-        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner, env, vm)?,
+        NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner, env, vm, cache)?,
         NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
-            eval_tape_predicate(tape, lhs, env, vm)? && eval_tape_predicate(tape, rhs, env, vm)?
+            eval_tape_predicate(tape, lhs, env, vm, cache)?
+                && eval_tape_predicate(tape, rhs, env, vm, cache)?
         }
         NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
-            eval_tape_predicate(tape, lhs, env, vm)? || eval_tape_predicate(tape, rhs, env, vm)?
+            eval_tape_predicate(tape, lhs, env, vm, cache)?
+                || eval_tape_predicate(tape, rhs, env, vm, cache)?
         }
         NdjsonDirectPredicate::Binary { lhs, op, rhs } => {
-            let Some(lhs) = eval_tape_scalar(tape, lhs) else {
+            let Some(lhs) = eval_tape_scalar(tape, lhs, cache) else {
                 return Ok(false);
             };
-            let Some(rhs) = eval_tape_scalar(tape, rhs) else {
+            let Some(rhs) = eval_tape_scalar(tape, rhs, cache) else {
                 return Ok(false);
             };
             crate::util::json_cmp_binop(lhs, *op, rhs)
         }
-        NdjsonDirectPredicate::ViewScalarCall { steps, call } => json_tape_path_index(tape, steps)
+        NdjsonDirectPredicate::ViewScalarCall { steps, call } => cache
+            .index(tape, 0, steps)
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| call.try_apply_json_view(value))
             .is_some_and(|value| crate::util::is_truthy(&value)),
@@ -1733,11 +1745,12 @@ pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
 fn eval_tape_scalar<'a>(
     tape: &'a crate::data::tape::TapeScratch,
     predicate: &'a NdjsonDirectPredicate,
+    cache: &mut NdjsonPathCache,
 ) -> Option<crate::util::JsonView<'a>> {
     match predicate {
-        NdjsonDirectPredicate::Path(steps) => {
-            json_tape_path_index(tape, steps).map(|idx| json_tape_scalar(tape, idx))
-        }
+        NdjsonDirectPredicate::Path(steps) => cache
+            .index(tape, 0, steps)
+            .map(|idx| json_tape_scalar(tape, idx)),
         NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
         _ => None,
     }
