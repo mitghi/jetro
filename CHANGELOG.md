@@ -76,6 +76,12 @@
 - **Core NDJSON benchmark**. Added `bench_ndjson` as a core-only cold-path
   benchmark for simple field extraction, array length, nested first access,
   nested mapping, and filter/count-style row queries.
+- **Planner-derived NDJSON tape plans**. Common row-local shapes now execute
+  directly on reusable simd-json tape scratch: root paths, scalar path calls,
+  first/last/nth child access, path maps, filtered maps, filtered counts,
+  numeric reducers, and match-limited predicates. These optimizations are
+  selected from the physical plan and pipeline kernels rather than handwritten
+  query strings, preserving the same fallback semantics for unsupported chains.
 
 ### Demand/tape architecture cleanup
 

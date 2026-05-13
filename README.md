@@ -181,6 +181,12 @@ reusing one prepared query plan for the stream. Use `collect_*` helpers when
 you want `serde_json::Value`s back, and `run_*` helpers when you want results
 written directly to an output stream.
 
+The cold path stays byte-first for common row-local shapes: root paths,
+scalar path calls, first/last/nth child access, path maps, filtered maps,
+filtered counts, numeric reducers, and match-limited predicates can execute
+directly on reusable simd-json tape scratch without building a per-row
+`serde_json::Value` tree.
+
 ```rust
 use jetro::JetroEngine;
 use std::io::Cursor;
