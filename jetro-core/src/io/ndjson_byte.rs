@@ -1,7 +1,8 @@
 use super::ndjson::{write_i64, write_val_json};
 use super::ndjson_direct::{
     NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPredicate, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
+    NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
@@ -46,21 +47,8 @@ fn write_ndjson_byte_expr<W: Write>(
         NdjsonDirectByteExpr::ScalarCall { value, call } => {
             match raw_json_byte_expr_value(row, value) {
                 RawFieldValue::Found(value) => {
-                    if write_raw_string_case_call(writer, value, call.method)? {
-                        return Ok(BytePlanWrite::Done);
-                    }
-                    let Some(view) = raw_json_view(value) else {
+                    if write_raw_scalar_call(writer, value, call.method).is_err() {
                         return Ok(BytePlanWrite::Fallback);
-                    };
-                    if call.method == BuiltinMethod::Len {
-                        let Some(len) = raw_json_view_len(view) else {
-                            return Ok(BytePlanWrite::Fallback);
-                        };
-                        write_i64(writer, len)?;
-                    } else if let Some(value) = call.try_apply_json_view(view) {
-                        write_val_json(writer, &value)?;
-                    } else {
-                        writer.write_all(value)?;
                     }
                     Ok(BytePlanWrite::Done)
                 }
@@ -162,12 +150,14 @@ pub(super) fn eval_ndjson_byte_predicate_row(
 }
 
 pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool {
-    matches!(
-        plan,
-        NdjsonDirectTapePlan::Stream(stream)
-            if matches!(stream.sink, NdjsonDirectStreamSink::Count)
-                && stream.predicate.is_some()
-    )
+    let NdjsonDirectTapePlan::Stream(stream) = plan else {
+        return false;
+    };
+    match &stream.sink {
+        NdjsonDirectStreamSink::Count => stream.predicate.is_some(),
+        NdjsonDirectStreamSink::Collect(map) => byte_stream_map_supported(map),
+        NdjsonDirectStreamSink::Numeric { .. } => false,
+    }
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -188,7 +178,42 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
             write_i64(writer, count as i64)?;
             Ok(BytePlanWrite::Done)
         }
+        NdjsonDirectTapePlan::Stream(stream) => {
+            let NdjsonDirectStreamSink::Collect(map) = &stream.sink else {
+                return Ok(BytePlanWrite::Fallback);
+            };
+            if !byte_stream_map_supported(map) {
+                return Ok(BytePlanWrite::Fallback);
+            }
+            let mut out = Vec::new();
+            match write_raw_json_stream_collect(&mut out, row, stream, map)? {
+                BytePlanWrite::Done => {
+                    writer.write_all(&out)?;
+                    Ok(BytePlanWrite::Done)
+                }
+                BytePlanWrite::Fallback => Ok(BytePlanWrite::Fallback),
+            }
+        }
         _ => Ok(BytePlanWrite::Fallback),
+    }
+}
+
+fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
+    match map {
+        NdjsonDirectStreamMap::Value(value) => byte_projection_value_supported(value),
+        NdjsonDirectStreamMap::Array(items) => items.iter().all(byte_projection_value_supported),
+        NdjsonDirectStreamMap::Object(_) => false,
+    }
+}
+
+fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool {
+    match value {
+        NdjsonDirectProjectionValue::Path(_) | NdjsonDirectProjectionValue::Literal(_) => true,
+        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => {
+            call.method == BuiltinMethod::Len
+                || call.method == BuiltinMethod::Upper
+                || call.method == BuiltinMethod::Lower
+        }
     }
 }
 
@@ -412,6 +437,40 @@ fn write_json_escaped_ascii_slice<W: Write>(
     writer.write_all(b"\"")?;
     writer.write_all(value)?;
     writer.write_all(b"\"")?;
+    Ok(())
+}
+
+fn write_raw_scalar_call<W: Write>(
+    writer: &mut W,
+    value: &[u8],
+    method: BuiltinMethod,
+) -> Result<(), JetroEngineError> {
+    if write_raw_string_case_call(writer, value, method)? {
+        return Ok(());
+    }
+    let Some(view) = raw_json_view(value) else {
+        return Err(JetroEngineError::Eval(crate::EvalError(
+            "unsupported raw scalar call".to_string(),
+        )));
+    };
+    if method == BuiltinMethod::Len {
+        let Some(len) = raw_json_view_len(view) else {
+            return Err(JetroEngineError::Eval(crate::EvalError(
+                "unsupported raw len call".to_string(),
+            )));
+        };
+        write_i64(writer, len)?;
+    } else {
+        let Some(value) =
+            crate::builtins::BuiltinCall::new(method, crate::builtins::BuiltinArgs::None)
+                .try_apply_json_view(view)
+        else {
+            return Err(JetroEngineError::Eval(crate::EvalError(
+                "unsupported raw scalar call".to_string(),
+            )));
+        };
+        write_val_json(writer, &value)?;
+    }
     Ok(())
 }
 
@@ -744,6 +803,109 @@ fn raw_json_count_filtered(
         Some(())
     })?;
     Some(count)
+}
+
+fn write_raw_json_stream_collect<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    stream: &NdjsonDirectStreamPlan,
+    map: &NdjsonDirectStreamMap,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let source = match raw_json_byte_path_value(row, &stream.source_steps) {
+        RawFieldValue::Found(source) => source,
+        RawFieldValue::Missing => {
+            writer.write_all(b"[]")?;
+            return Ok(BytePlanWrite::Done);
+        }
+        RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+    };
+
+    writer.write_all(b"[")?;
+    let mut wrote = false;
+    let mut failed = false;
+    let visited = raw_json_source_items(source, |item| {
+        let Some(matches) = stream.predicate.as_ref().map_or(Some(true), |predicate| {
+            eval_raw_item_predicate(item, predicate)
+        }) else {
+            failed = true;
+            return None;
+        };
+        if !matches {
+            return Some(());
+        }
+        if wrote && writer.write_all(b",").is_err() {
+            failed = true;
+            return None;
+        }
+        if write_raw_json_stream_map(writer, item, map).is_err() {
+            failed = true;
+            return None;
+        }
+        wrote = true;
+        Some(())
+    });
+    if failed || visited.is_none() {
+        return Ok(BytePlanWrite::Fallback);
+    }
+    writer.write_all(b"]")?;
+    Ok(BytePlanWrite::Done)
+}
+
+fn write_raw_json_stream_map<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    map: &NdjsonDirectStreamMap,
+) -> Result<(), JetroEngineError> {
+    match map {
+        NdjsonDirectStreamMap::Value(value) => write_raw_json_projection_value(writer, item, value),
+        NdjsonDirectStreamMap::Array(items) => {
+            writer.write_all(b"[")?;
+            for (idx, value) in items.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_raw_json_projection_value(writer, item, value)?;
+            }
+            writer.write_all(b"]")?;
+            Ok(())
+        }
+        NdjsonDirectStreamMap::Object(_) => Err(JetroEngineError::Eval(crate::EvalError(
+            "unsupported byte stream object map".to_string(),
+        ))),
+    }
+}
+
+fn write_raw_json_projection_value<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    value: &NdjsonDirectProjectionValue,
+) -> Result<(), JetroEngineError> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            match raw_json_path_value_demand(item, steps, None) {
+                RawFieldValue::Found(value) => writer.write_all(value)?,
+                RawFieldValue::Missing => writer.write_all(b"null")?,
+                RawFieldValue::Fallback => {
+                    return Err(JetroEngineError::Eval(crate::EvalError(
+                        "unsupported byte stream path".to_string(),
+                    )));
+                }
+            }
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall { steps, call, .. } => {
+            match raw_json_path_value_demand(item, steps, None) {
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Missing => writer.write_all(b"null")?,
+                RawFieldValue::Fallback => {
+                    return Err(JetroEngineError::Eval(crate::EvalError(
+                        "unsupported byte stream scalar".to_string(),
+                    )));
+                }
+            }
+        }
+        NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+    }
+    Ok(())
 }
 
 fn raw_json_source_items<F>(value: &[u8], mut visit: F) -> Option<()>

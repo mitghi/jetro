@@ -3068,6 +3068,33 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_collects_stream_maps() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"attributes":[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]}"#;
+        for (query, expected) in [
+            ("attributes.map(@.key)", r#"["k1","k2"]"#),
+            (
+                "attributes.map([@.key, @.value])",
+                r#"[["k1","v1"],["k2","v2"]]"#,
+            ),
+            ("attributes.map(@.key.upper())", r#"["K1","K2"]"#),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan)
+                .expect("byte stream should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_uses_byte_paths_for_nested_object_items() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
