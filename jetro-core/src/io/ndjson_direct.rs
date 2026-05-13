@@ -135,13 +135,10 @@ fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
                 BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
             ) =>
         {
-            let steps = root_path_steps(&plan, *receiver)?;
-            if !byte_path_has_root_field(&steps) {
-                return None;
-            }
+            let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ScalarCall {
-                    value: Box::new(NdjsonDirectByteExpr::Path(steps)),
+                    value: Box::new(value),
                     call: call.clone(),
                 },
             ))
@@ -214,6 +211,25 @@ fn byte_path_has_root_field(steps: &[PhysicalPathStep]) -> bool {
 
 fn byte_path_is_root(steps: &[PhysicalPathStep]) -> bool {
     steps.is_empty()
+}
+
+fn direct_byte_expr_from_receiver(
+    plan: &QueryPlan,
+    receiver: crate::ir::physical::NodeId,
+) -> Option<NdjsonDirectByteExpr> {
+    if let Some(steps) = root_path_steps(plan, receiver) {
+        return byte_path_has_root_field(&steps).then_some(NdjsonDirectByteExpr::Path(steps));
+    }
+
+    let PlanNode::Chain { base, steps } = plan.node(receiver) else {
+        return None;
+    };
+    let (source_steps, element) = direct_array_element_source(plan, *base)?;
+    byte_path_has_root_field(&source_steps).then_some(NdjsonDirectByteExpr::ArrayElementPath {
+        source_steps,
+        element,
+        suffix_steps: physical_chain_to_path(steps)?,
+    })
 }
 
 #[derive(Clone)]

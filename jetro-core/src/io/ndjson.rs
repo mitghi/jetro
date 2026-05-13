@@ -3013,6 +3013,7 @@ mod tests {
             "$.values()",
             "$.entries()",
             "$.attributes.first().value",
+            "$.attributes.first().key.upper()",
             "$.attributes.last().value",
             "$.attributes.nth(1).value",
         ] {
