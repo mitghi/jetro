@@ -387,7 +387,7 @@ fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> 
             body,
         } if body.stages.is_empty() && is_plain_count_sink(body) => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: root_path_steps(plan, *source)?,
+                steps: node_path_steps(plan, *source)?,
                 call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
                 optional: false,
             })
@@ -402,7 +402,7 @@ fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> 
                 BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
             ) =>
         {
-            if let Some(steps) = root_path_steps(plan, *receiver) {
+            if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
                     steps,
                     call: call.clone(),
@@ -431,7 +431,7 @@ fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> 
             && !*optional =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
-                steps: root_path_steps(plan, *receiver)?,
+                steps: node_path_steps(plan, *receiver)?,
                 method: call.method,
             })
         }
@@ -476,7 +476,7 @@ fn direct_object_value_from_node(
             call,
             optional,
         } if call.spec().view_scalar => Some(NdjsonDirectProjectionValue::ViewScalarCall {
-            steps: root_path_steps(plan, *receiver)?,
+            steps: node_path_steps(plan, *receiver)?,
             call: call.clone(),
             optional: *optional,
         }),
@@ -534,7 +534,7 @@ fn pipeline_source_to_steps(
 ) -> Option<NdjsonPhysicalPath> {
     match source {
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(keys_to_path(keys)),
-        crate::ir::physical::PipelinePlanSource::Expr(source) => root_path_steps(plan, *source),
+        crate::ir::physical::PipelinePlanSource::Expr(source) => node_path_steps(plan, *source),
     }
 }
 
@@ -977,11 +977,8 @@ fn direct_tape_predicate_scalar_call(
     receiver: crate::ir::physical::NodeId,
     call: crate::builtins::BuiltinCall,
 ) -> Option<NdjsonDirectPredicate> {
-    if let PlanNode::RootPath(steps) = plan.node(receiver) {
-        return Some(NdjsonDirectPredicate::ViewScalarCall {
-            steps: steps.clone(),
-            call,
-        });
+    if let Some(steps) = node_path_steps(plan, receiver) {
+        return Some(NdjsonDirectPredicate::ViewScalarCall { steps, call });
     }
 
     let PlanNode::Chain { base, steps } = plan.node(receiver) else {
