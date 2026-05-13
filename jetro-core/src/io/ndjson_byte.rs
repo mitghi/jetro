@@ -1,7 +1,7 @@
 use super::ndjson::{write_i64, write_val_json};
 use super::ndjson_direct::{
-    NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
-    NdjsonDirectTapePlan,
+    NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
+    NdjsonDirectPredicate, NdjsonDirectTapePlan,
 };
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
@@ -21,7 +21,17 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
     plan: &NdjsonDirectBytePlan,
 ) -> Result<BytePlanWrite, JetroEngineError> {
     match plan {
-        NdjsonDirectBytePlan::RootField(key) => match root_field_raw_value(row, key.as_ref()) {
+        NdjsonDirectBytePlan::Expr(expr) => write_ndjson_byte_expr(writer, row, expr),
+    }
+}
+
+fn write_ndjson_byte_expr<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    expr: &NdjsonDirectByteExpr,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    match expr {
+        NdjsonDirectByteExpr::Path(steps) => match raw_json_byte_path_value(row, steps) {
             RawFieldValue::Found(value) => {
                 writer.write_all(value)?;
                 Ok(BytePlanWrite::Done)
@@ -32,8 +42,8 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
             }
             RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
         },
-        NdjsonDirectBytePlan::RootFieldScalarCall { key, call } => {
-            match root_field_raw_value(row, key.as_ref()) {
+        NdjsonDirectByteExpr::ScalarCall { value, call } => {
+            match raw_json_byte_expr_value(row, value) {
                 RawFieldValue::Found(value) => {
                     if write_raw_string_case_call(writer, value, call.method)? {
                         return Ok(BytePlanWrite::Done);
@@ -60,40 +70,81 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
                 RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
             }
         }
-        NdjsonDirectBytePlan::RootObjectItems { method } => {
-            match write_root_object_items_raw(writer, row, *method)? {
-                BytePlanWrite::Done => Ok(BytePlanWrite::Done),
-                BytePlanWrite::Fallback => Ok(BytePlanWrite::Fallback),
+        NdjsonDirectByteExpr::ObjectItems { path, method } => {
+            if !path.is_empty() {
+                return Ok(BytePlanWrite::Fallback);
             }
+            write_root_object_items_raw(writer, row, *method)
         }
-        NdjsonDirectBytePlan::RootArrayElementPath {
-            key,
+        NdjsonDirectByteExpr::ArrayElementPath {
+            source_steps,
             element,
             suffix_steps,
-        } => match root_field_raw_value_for_element(row, key.as_ref(), *element) {
-            RawFieldValue::Found(value) => {
-                let Some(element) = raw_json_array_element(value, *element) else {
-                    writer.write_all(b"null")?;
-                    return Ok(BytePlanWrite::Done);
-                };
-                if suffix_steps.is_empty() {
-                    writer.write_all(element)?;
-                    return Ok(BytePlanWrite::Done);
+        } => {
+            let demand = Some(BytePathDemand::ArrayElement(*element));
+            match raw_json_path_value_demand(row, source_steps, demand) {
+                RawFieldValue::Found(value) => {
+                    let Some(element) = raw_json_array_element(value, *element) else {
+                        writer.write_all(b"null")?;
+                        return Ok(BytePlanWrite::Done);
+                    };
+                    if suffix_steps.is_empty() {
+                        writer.write_all(element)?;
+                        return Ok(BytePlanWrite::Done);
+                    }
+                    let Some(value) = raw_json_path_value(element, suffix_steps) else {
+                        writer.write_all(b"null")?;
+                        return Ok(BytePlanWrite::Done);
+                    };
+                    writer.write_all(value)?;
+                    Ok(BytePlanWrite::Done)
                 }
-                let Some(value) = raw_json_path_value(element, suffix_steps) else {
+                RawFieldValue::Missing => {
                     writer.write_all(b"null")?;
-                    return Ok(BytePlanWrite::Done);
-                };
-                writer.write_all(value)?;
-                Ok(BytePlanWrite::Done)
+                    Ok(BytePlanWrite::Done)
+                }
+                RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
             }
-            RawFieldValue::Missing => {
-                writer.write_all(b"null")?;
-                Ok(BytePlanWrite::Done)
-            }
-            RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
-        },
+        }
     }
+}
+
+fn raw_json_byte_expr_value<'a>(row: &'a [u8], expr: &NdjsonDirectByteExpr) -> RawFieldValue<'a> {
+    match expr {
+        NdjsonDirectByteExpr::Path(steps) => raw_json_byte_path_value(row, steps),
+        NdjsonDirectByteExpr::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => {
+            let demand = Some(BytePathDemand::ArrayElement(*element));
+            let source = match raw_json_path_value_demand(row, source_steps, demand) {
+                RawFieldValue::Found(value) => value,
+                RawFieldValue::Missing => return RawFieldValue::Missing,
+                RawFieldValue::Fallback => return RawFieldValue::Fallback,
+            };
+            let Some(element) = raw_json_array_element(source, *element) else {
+                return RawFieldValue::Missing;
+            };
+            if suffix_steps.is_empty() {
+                RawFieldValue::Found(element)
+            } else {
+                raw_json_path_value(element, suffix_steps)
+                    .map(RawFieldValue::Found)
+                    .unwrap_or(RawFieldValue::Missing)
+            }
+        }
+        NdjsonDirectByteExpr::ScalarCall { .. } | NdjsonDirectByteExpr::ObjectItems { .. } => {
+            RawFieldValue::Fallback
+        }
+    }
+}
+
+fn raw_json_byte_path_value<'a>(row: &'a [u8], steps: &[PhysicalPathStep]) -> RawFieldValue<'a> {
+    if let [PhysicalPathStep::Field(key)] = steps {
+        return root_field_raw_value(row, key.as_ref());
+    }
+    raw_json_path_value_demand(row, steps, None)
 }
 
 pub(super) fn eval_ndjson_byte_predicate_row(
@@ -131,6 +182,57 @@ enum RawFieldValue<'a> {
     Found(&'a [u8]),
     Missing,
     Fallback,
+}
+
+#[derive(Clone, Copy)]
+enum BytePathDemand {
+    ArrayElement(NdjsonDirectElement),
+}
+
+fn raw_json_path_value_demand<'a>(
+    row: &'a [u8],
+    steps: &[PhysicalPathStep],
+    demand: Option<BytePathDemand>,
+) -> RawFieldValue<'a> {
+    let Some((PhysicalPathStep::Field(key), rest)) = steps.split_first() else {
+        return if steps.is_empty() {
+            RawFieldValue::Found(row)
+        } else {
+            RawFieldValue::Fallback
+        };
+    };
+    let value = match demand {
+        Some(BytePathDemand::ArrayElement(element)) if rest.is_empty() => {
+            root_field_raw_value_for_element(row, key.as_ref(), element)
+        }
+        _ => root_field_raw_value(row, key.as_ref()),
+    };
+    let RawFieldValue::Found(mut value) = value else {
+        return value;
+    };
+    if rest.is_empty() {
+        return RawFieldValue::Found(value);
+    }
+    for step in rest {
+        value = match step {
+            PhysicalPathStep::Field(key) => match root_field_raw_value(value, key.as_ref()) {
+                RawFieldValue::Found(value) => value,
+                RawFieldValue::Missing => return RawFieldValue::Missing,
+                RawFieldValue::Fallback => return RawFieldValue::Fallback,
+            },
+            PhysicalPathStep::Index(index) => {
+                let Ok(index) = usize::try_from(*index) else {
+                    return RawFieldValue::Missing;
+                };
+                let Some(value) = raw_json_array_element(value, NdjsonDirectElement::Nth(index))
+                else {
+                    return RawFieldValue::Missing;
+                };
+                value
+            }
+        };
+    }
+    RawFieldValue::Found(value)
 }
 
 fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
