@@ -932,35 +932,38 @@ where
 #[cfg(feature = "simd-json")]
 #[derive(Clone)]
 enum NdjsonDirectTapePlan {
-    RootPath(Vec<crate::ir::physical::PhysicalPathStep>),
+    RootPath(NdjsonPhysicalPath),
     ViewScalarCall {
-        steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
         optional: bool,
     },
     ArrayElementPath {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         element: NdjsonDirectElement,
-        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        suffix_steps: NdjsonPhysicalPath,
     },
     MapPath {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
-        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
+        suffix_steps: NdjsonPhysicalPath,
     },
     FilterMapPath {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         predicate: NdjsonDirectItemPredicate,
-        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        suffix_steps: NdjsonPhysicalPath,
     },
     CountFiltered {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         predicate: NdjsonDirectItemPredicate,
     },
     ViewPipeline {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
     },
 }
+
+#[cfg(feature = "simd-json")]
+type NdjsonPhysicalPath = Vec<crate::ir::physical::PhysicalPathStep>;
 
 #[cfg(feature = "simd-json")]
 #[derive(Clone, Copy)]
@@ -973,7 +976,7 @@ pub(super) enum NdjsonDirectElement {
 #[cfg(feature = "simd-json")]
 #[derive(Clone)]
 pub(super) enum NdjsonDirectPredicate {
-    Path(Vec<crate::ir::physical::PhysicalPathStep>),
+    Path(NdjsonPhysicalPath),
     Literal(Val),
     Not(Box<NdjsonDirectPredicate>),
     Binary {
@@ -982,17 +985,17 @@ pub(super) enum NdjsonDirectPredicate {
         rhs: Box<NdjsonDirectPredicate>,
     },
     ViewScalarCall {
-        steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
     },
     ArrayElementViewScalarCall {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         element: NdjsonDirectElement,
-        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        suffix_steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
     },
     ViewPipeline {
-        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
     },
 }
@@ -1000,7 +1003,7 @@ pub(super) enum NdjsonDirectPredicate {
 #[cfg(feature = "simd-json")]
 #[derive(Clone)]
 enum NdjsonDirectItemPredicate {
-    Path(Vec<crate::ir::physical::PhysicalPathStep>),
+    Path(NdjsonPhysicalPath),
     Literal(Val),
     Binary {
         lhs: Box<NdjsonDirectItemPredicate>,
@@ -1008,12 +1011,12 @@ enum NdjsonDirectItemPredicate {
         rhs: Box<NdjsonDirectItemPredicate>,
     },
     CmpLit {
-        lhs: Vec<crate::ir::physical::PhysicalPathStep>,
+        lhs: NdjsonPhysicalPath,
         op: crate::parse::ast::BinOp,
         lit: Val,
     },
     ViewScalarCall {
-        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        suffix_steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
     },
 }
@@ -1519,7 +1522,7 @@ impl<'a> NdjsonRowExecutor<'a> {
 fn pipeline_source_to_steps(
     plan: &crate::ir::physical::QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
-) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+) -> Option<NdjsonPhysicalPath> {
     match source {
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(
             keys.iter()
@@ -1743,7 +1746,7 @@ fn direct_item_predicate_from_kernel(
 #[cfg(feature = "simd-json")]
 fn kernel_to_physical_path(
     kernel: &crate::exec::pipeline::BodyKernel,
-) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+) -> Option<NdjsonPhysicalPath> {
     match kernel {
         crate::exec::pipeline::BodyKernel::FieldRead(key) => {
             Some(vec![crate::ir::physical::PhysicalPathStep::Field(
@@ -1838,10 +1841,7 @@ fn direct_tape_predicate_scalar_call(
 fn direct_array_element_source(
     plan: &crate::ir::physical::QueryPlan,
     id: crate::ir::physical::NodeId,
-) -> Option<(
-    Vec<crate::ir::physical::PhysicalPathStep>,
-    NdjsonDirectElement,
-)> {
+) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
     use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::Sink;
     use crate::ir::physical::{PipelinePlanSource, PlanNode};
@@ -1904,7 +1904,7 @@ fn direct_array_element_source(
 #[cfg(feature = "simd-json")]
 fn physical_chain_to_path(
     steps: &[crate::ir::physical::PhysicalChainStep],
-) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+) -> Option<NdjsonPhysicalPath> {
     steps
         .iter()
         .map(|step| match step {
