@@ -101,6 +101,16 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         .expect("filtered count should write");
     assert_eq!(String::from_utf8(filtered_count_out).unwrap(), "1\n");
 
+    let mut numeric_reduce_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map(@.value).sum()",
+            &mut numeric_reduce_out,
+        )
+        .expect("numeric reducer should write");
+    assert_eq!(String::from_utf8(numeric_reduce_out).unwrap(), "3\n");
+
     let mut object_out = Vec::new();
     engine
         .run_ndjson(

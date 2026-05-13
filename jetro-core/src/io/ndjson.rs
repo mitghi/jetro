@@ -956,6 +956,11 @@ enum NdjsonDirectTapePlan {
         source_steps: NdjsonPhysicalPath,
         predicate: NdjsonDirectItemPredicate,
     },
+    NumericReducePath {
+        source_steps: NdjsonPhysicalPath,
+        suffix_steps: NdjsonPhysicalPath,
+        op: crate::exec::pipeline::NumOp,
+    },
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
@@ -1117,6 +1122,15 @@ where
             } => {
                 let count = count_json_tape_filtered(&scratch, source_steps, predicate);
                 write_i64(&mut writer, count as i64)?;
+            }
+            NdjsonDirectTapePlan::NumericReducePath {
+                source_steps,
+                suffix_steps,
+                op,
+            } => {
+                let value =
+                    reduce_json_tape_numeric_path(&scratch, source_steps, suffix_steps, *op);
+                write_val_json(&mut writer, &value)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let source = json_tape_path_index(&scratch, source_steps)
@@ -1382,6 +1396,9 @@ impl<'a> NdjsonRowExecutor<'a> {
                 })
             }
             PlanNode::Pipeline { source, body } => {
+                if let Some(plan) = direct_tape_numeric_reduce_path_plan(&plan, source, body) {
+                    return Some(plan);
+                }
                 if let Some(plan) = direct_tape_count_filtered_plan(&plan, source, body) {
                     return Some(plan);
                 }
@@ -1634,6 +1651,36 @@ fn direct_tape_count_filtered_plan(
     Some(NdjsonDirectTapePlan::CountFiltered {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate: direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_numeric_reduce_path_plan(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
+
+    if body.stages.len() != 1 {
+        return None;
+    }
+    let Stage::Map(_, _) = body.stages.first()? else {
+        return None;
+    };
+    let Sink::Reducer(spec) = &body.sink else {
+        return None;
+    };
+    if spec.predicate.is_some() || spec.projection.is_some() {
+        return None;
+    }
+    let ReducerOp::Numeric(op) = spec.op else {
+        return None;
+    };
+    Some(NdjsonDirectTapePlan::NumericReducePath {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        suffix_steps: kernel_to_physical_path(body.stage_kernels.first()?)?,
+        op,
     })
 }
 
@@ -2425,6 +2472,110 @@ fn count_json_tape_filtered<T: JsonTape>(
         }
         Some(_) => usize::from(eval_json_tape_item_predicate(tape, source_idx, predicate)),
         None => 0,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn reduce_json_tape_numeric_path<T: JsonTape>(
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    op: crate::exec::pipeline::NumOp,
+) -> Val {
+    use crate::data::tape::TapeNode;
+
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+
+    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+        return crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
+    };
+
+    match tape.nodes().get(source_idx).copied() {
+        Some(TapeNode::Array { len, .. }) => {
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                if let Some(idx) = json_tape_path_index_from(tape, cur, suffix_steps) {
+                    fold_json_tape_numeric(
+                        json_tape_scalar(tape, idx),
+                        op,
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                    );
+                }
+                cur += tape.span(cur);
+            }
+        }
+        Some(_) => {
+            if let Some(idx) = json_tape_path_index_from(tape, source_idx, suffix_steps) {
+                fold_json_tape_numeric(
+                    json_tape_scalar(tape, idx),
+                    op,
+                    &mut acc_i,
+                    &mut acc_f,
+                    &mut floated,
+                    &mut min_f,
+                    &mut max_f,
+                    &mut n_obs,
+                );
+            }
+        }
+        None => {}
+    }
+
+    crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
+}
+
+#[cfg(feature = "simd-json")]
+#[allow(clippy::too_many_arguments)]
+fn fold_json_tape_numeric(
+    value: crate::util::JsonView<'_>,
+    op: crate::exec::pipeline::NumOp,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+) {
+    match value {
+        crate::util::JsonView::Int(value) => crate::exec::pipeline::num_fold_i64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
+        crate::util::JsonView::UInt(value) if value <= i64::MAX as u64 => {
+            crate::exec::pipeline::num_fold_i64(
+                acc_i,
+                acc_f,
+                floated,
+                min_f,
+                max_f,
+                n_obs,
+                op,
+                value as i64,
+            )
+        }
+        crate::util::JsonView::UInt(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as f64,
+        ),
+        crate::util::JsonView::Float(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
+        _ => {}
     }
 }
 
