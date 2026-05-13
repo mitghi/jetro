@@ -1166,7 +1166,14 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
 #[cfg(feature = "simd-json")]
 #[derive(Default)]
 pub(super) struct NdjsonPathCache {
-    first_field_slot: Option<usize>,
+    first_field: Option<NdjsonFieldCache>,
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+struct NdjsonFieldCache {
+    key_delta: usize,
+    value_delta: usize,
 }
 
 #[cfg(feature = "simd-json")]
@@ -1190,14 +1197,14 @@ impl NdjsonPathCache {
             return json_tape_path_index_from(tape, start, steps);
         };
 
-        if let Some(slot) = self.first_field_slot {
-            if let Some(idx) = json_tape_object_field_slot(tape, start, slot, key.as_ref()) {
+        if let Some(field) = self.first_field {
+            if let Some(idx) = json_tape_object_cached_field(tape, start, field, key.as_ref()) {
                 return json_tape_path_index_from(tape, idx, rest);
             }
         }
 
-        let (idx, slot) = json_tape_object_field_index_and_slot(tape, start, key.as_ref())?;
-        self.first_field_slot = Some(slot);
+        let (idx, field) = json_tape_object_field_index_and_cache(tape, start, key.as_ref())?;
+        self.first_field = Some(field);
         json_tape_path_index_from(tape, idx, rest)
     }
 }
@@ -1602,41 +1609,48 @@ fn json_tape_step_index<T: JsonTape>(
 }
 
 #[cfg(feature = "simd-json")]
-fn json_tape_object_field_slot<T: JsonTape>(
+fn json_tape_object_cached_field<T: JsonTape>(
     tape: &T,
     obj_idx: usize,
-    wanted_slot: usize,
+    cache: NdjsonFieldCache,
     key: &str,
 ) -> Option<usize> {
-    let crate::data::tape::TapeNode::Object { len, .. } = tape.nodes()[obj_idx] else {
+    let crate::data::tape::TapeNode::Object { .. } = tape.nodes().get(obj_idx).copied()? else {
         return None;
     };
-    if wanted_slot >= len {
+    let key_idx = obj_idx.checked_add(cache.key_delta)?;
+    let value_idx = obj_idx.checked_add(cache.value_delta)?;
+    if value_idx >= tape.nodes().len() {
         return None;
     }
-    let mut cur = obj_idx + 1;
-    for slot in 0..wanted_slot {
-        debug_assert!(slot < len);
-        let _ = slot;
-        cur += 1;
-        cur += tape.span(cur);
+    if !matches!(
+        tape.nodes().get(key_idx),
+        Some(crate::data::tape::TapeNode::String(_))
+    ) {
+        return None;
     }
-    (tape.str_at(cur) == key).then_some(cur + 1)
+    (tape.str_at(key_idx) == key).then_some(value_idx)
 }
 
 #[cfg(feature = "simd-json")]
-fn json_tape_object_field_index_and_slot<T: JsonTape>(
+fn json_tape_object_field_index_and_cache<T: JsonTape>(
     tape: &T,
     obj_idx: usize,
     key: &str,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, NdjsonFieldCache)> {
     let crate::data::tape::TapeNode::Object { len, .. } = tape.nodes()[obj_idx] else {
         return None;
     };
     let mut cur = obj_idx + 1;
-    for slot in 0..len {
+    for _ in 0..len {
         if tape.str_at(cur) == key {
-            return Some((cur + 1, slot));
+            return Some((
+                cur + 1,
+                NdjsonFieldCache {
+                    key_delta: cur - obj_idx,
+                    value_delta: cur + 1 - obj_idx,
+                },
+            ));
         }
         cur += 1;
         cur += tape.span(cur);
