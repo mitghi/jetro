@@ -976,7 +976,7 @@ where
 }
 
 #[cfg(feature = "simd-json")]
-struct NdjsonTapeWriterRunner<'a, 'p> {
+pub(super) struct NdjsonTapeWriterRunner<'a, 'p> {
     plan: &'p NdjsonDirectTapePlan,
     vm: Option<MutexGuard<'a, VM>>,
     env: Option<crate::data::context::Env>,
@@ -989,7 +989,7 @@ struct NdjsonTapeWriterRunner<'a, 'p> {
 
 #[cfg(feature = "simd-json")]
 impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
-    fn new(engine: &'a JetroEngine, plan: &'p NdjsonDirectTapePlan) -> Self {
+    pub(super) fn new(engine: &'a JetroEngine, plan: &'p NdjsonDirectTapePlan) -> Self {
         let needs_vm = plan.needs_vm();
         Self {
             plan,
@@ -1003,7 +1003,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
         }
     }
 
-    fn write_row<W: Write>(
+    pub(super) fn write_row<W: Write>(
         &mut self,
         scratch: &crate::data::tape::TapeScratch,
         writer: &mut W,
