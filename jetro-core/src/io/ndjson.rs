@@ -2996,6 +2996,26 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_lowers_stream_shapes_generically() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.attributes.map(@.key)",
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
+            r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+            "$.attributes.map(@.weight).sum()",
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+        ] {
+            let plan =
+                super::direct_tape_plan(&engine, query).expect("query should be direct NDJSON");
+            assert!(
+                matches!(plan, super::NdjsonDirectTapePlan::Stream(_)),
+                "{query} should lower to a generic NDJSON stream plan"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn direct_byte_plan_accepts_fast_root_shapes() {
         let engine = crate::JetroEngine::new();
         for query in [
