@@ -4,6 +4,9 @@ use crate::plan::physical::PlanningContext;
 use crate::JetroEngine;
 use std::sync::Arc;
 
+/// Planner-side description of NDJSON row work that can run directly on
+/// simd-json tape scratch. Execution stays in `ndjson.rs`; this module owns
+/// only physical-plan recognition and compact metadata for the row runner.
 pub(super) type NdjsonPhysicalPath = Vec<PhysicalPathStep>;
 
 #[derive(Clone)]
