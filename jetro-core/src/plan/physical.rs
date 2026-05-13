@@ -317,6 +317,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .map(|node| builder.push(node))
         .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
@@ -680,6 +681,46 @@ fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
     }
 }
 
+/// Lowers bare field identifiers in byte-backed root expressions to `RootPath` nodes.
+///
+/// Jetro's expression environment resolves an unbound identifier as a field on the
+/// current value. At the top level the current value is the document root, so
+/// `id`, `user.name`, and `score > 9` can read directly from the tape instead of
+/// materialising the whole row into `Val` just to build an `Env`.
+fn try_lower_implicit_root_path(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
+    if builder.context.input != InputMode::Bytes {
+        return None;
+    }
+
+    match expr {
+        Expr::Ident(name) if !builder.is_local(name) => Some(PlanNode::RootPath(vec![
+            PhysicalPathStep::Field(Arc::from(name.as_str())),
+        ])),
+        Expr::Chain(base, steps) => {
+            let Expr::Ident(name) = base.as_ref() else {
+                return None;
+            };
+            if builder.is_local(name) {
+                return None;
+            }
+
+            let mut out = Vec::with_capacity(steps.len() + 1);
+            out.push(PhysicalPathStep::Field(Arc::from(name.as_str())));
+            for step in steps {
+                match step {
+                    Step::Field(key) | Step::OptField(key) => {
+                        out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
+                    }
+                    Step::Index(idx) => out.push(PhysicalPathStep::Index(*idx)),
+                    _ => return None,
+                }
+            }
+            Some(PlanNode::RootPath(out))
+        }
+        _ => None,
+    }
+}
+
 /// Lowers a general `Expr::Chain` into a sequence of `PhysicalChainStep`s, flushing accumulated
 /// steps into `Chain` nodes whenever a method call interrupts the sequence.
 fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
@@ -968,6 +1009,38 @@ mod tests {
                 BackendPreference::ValView,
             ]
         );
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_ident_to_root_path() {
+        let plan = plan_query_with_context("name", PlanningContext::bytes());
+        assert!(matches!(
+            root_node(&plan),
+            PlanNode::RootPath(steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "name")
+        ));
+        assert!(plan.root_execution_facts().is_byte_native());
+    }
+
+    #[test]
+    fn byte_context_lowers_bare_ident_chain_to_root_path() {
+        let plan = plan_query_with_context("user.name", PlanningContext::bytes());
+        assert!(matches!(
+            root_node(&plan),
+            PlanNode::RootPath(steps)
+                if matches!(
+                    steps.as_slice(),
+                    [PhysicalPathStep::Field(user), PhysicalPathStep::Field(name)]
+                        if user.as_ref() == "user" && name.as_ref() == "name"
+                )
+        ));
+        assert!(plan.root_execution_facts().is_byte_native());
+    }
+
+    #[test]
+    fn val_context_keeps_bare_ident_semantics() {
+        let plan = plan_query_with_context("name", PlanningContext::val());
+        assert!(matches!(root_node(&plan), PlanNode::Ident(name) if name.as_ref() == "name"));
     }
 
     #[test]
