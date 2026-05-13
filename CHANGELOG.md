@@ -86,6 +86,10 @@
   dedicated internal module, with planner construction separated from row
   driving and tape writing. Focused coverage was added for direct
   first/last/nth element projections.
+- **NDJSON direct executor cleanup**. Pure direct tape plans no longer lock the
+  engine VM, scalar-call fallback avoids redundant path lookup, and map,
+  filtered-map, filtered-count, and numeric reducer paths share one
+  array-or-single source traversal helper.
 
 ### Demand/tape architecture cleanup
 
