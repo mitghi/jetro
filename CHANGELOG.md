@@ -82,6 +82,10 @@
   numeric reducers, and match-limited predicates. These optimizations are
   selected from the physical plan and pipeline kernels rather than handwritten
   query strings, preserving the same fallback semantics for unsupported chains.
+- **NDJSON direct-plan cleanup**. Direct tape plan metadata now lives in a
+  dedicated internal module, with planner construction separated from row
+  driving and tape writing. Focused coverage was added for direct
+  first/last/nth element projections.
 
 ### Demand/tape architecture cleanup
 
