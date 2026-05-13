@@ -5,6 +5,8 @@
 
 mod ndjson;
 #[cfg(feature = "simd-json")]
+mod ndjson_byte;
+#[cfg(feature = "simd-json")]
 mod ndjson_direct;
 mod ndjson_rev;
 mod source;
