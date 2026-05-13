@@ -3063,4 +3063,25 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_tape_plan_accepts_rooted_bench_shapes() {
+        let engine = crate::JetroEngine::new();
+        for query in [
+            "$.id",
+            "$.name",
+            "$.attributes.len()",
+            "$.attributes.map(@.key)",
+            "$.attributes.first().value",
+            "$.attributes.last().value",
+            "$.name.upper()",
+            "$.attributes.map([@.key, @.value])",
+            r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+            "$.keys()",
+        ] {
+            super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct NDJSON tape plan"));
+        }
+    }
 }
