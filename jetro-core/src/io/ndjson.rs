@@ -908,7 +908,7 @@ where
 {
     #[cfg(feature = "simd-json")]
     if let Some(plan) = NdjsonRowExecutor::direct_tape_plan(engine, query) {
-        return drive_ndjson_tape_writer(reader, &plan, limit, options, writer);
+        return drive_ndjson_tape_writer(engine, reader, &plan, limit, options, writer);
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
@@ -943,6 +943,10 @@ enum NdjsonDirectTapePlan {
         element: NdjsonDirectElement,
         suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
     },
+    ViewPipeline {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        body: crate::exec::pipeline::PipelineBody,
+    },
 }
 
 #[cfg(feature = "simd-json")]
@@ -955,6 +959,7 @@ enum NdjsonDirectElement {
 
 #[cfg(feature = "simd-json")]
 fn drive_ndjson_tape_writer<R, W>(
+    engine: &JetroEngine,
     reader: R,
     plan: &NdjsonDirectTapePlan,
     limit: Option<usize>,
@@ -971,6 +976,8 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
+    let mut vm = engine.lock_vm();
+    let env = crate::data::context::Env::new(Val::Null);
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
         scratch.parse_slice(row).map_err(|message| {
@@ -1020,6 +1027,30 @@ where
                 } else {
                     writer.write_all(b"null")?;
                 }
+            }
+            NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
+                let source = json_tape_path_index(&scratch, source_steps)
+                    .map(|idx| crate::data::view::TapeScratchView::Node {
+                        tape: &scratch,
+                        idx,
+                    })
+                    .unwrap_or(crate::data::view::TapeScratchView::Missing);
+                let Some(result) = crate::exec::view::run_with_env_and_vm(
+                    source,
+                    body,
+                    None,
+                    &env,
+                    &mut vm,
+                ) else {
+                    writer.write_all(b"null")?;
+                    writer.write_all(b"\n")?;
+                    count += 1;
+                    if limit.is_some_and(|limit| count >= limit) {
+                        break;
+                    }
+                    continue;
+                };
+                write_val_json(&mut writer, &result.map_err(|err| JetroEngineError::Eval(err))?)?;
             }
         }
         writer.write_all(b"\n")?;
@@ -1220,6 +1251,12 @@ impl<'a> NdjsonRowExecutor<'a> {
                     optional: *optional,
                 })
             }
+            PlanNode::Pipeline { source, body } if body.can_run_with_view() => {
+                Some(NdjsonDirectTapePlan::ViewPipeline {
+                    source_steps: pipeline_source_to_steps(&plan, source)?,
+                    body: body.clone(),
+                })
+            }
             _ => None,
         }
     }
@@ -1336,6 +1373,26 @@ impl<'a> NdjsonRowExecutor<'a> {
 
     pub(super) fn engine(&self) -> &'a JetroEngine {
         self.engine
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn pipeline_source_to_steps(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+    match source {
+        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(
+            keys.iter()
+                .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+                .collect(),
+        ),
+        crate::ir::physical::PipelinePlanSource::Expr(source) => {
+            let crate::ir::physical::PlanNode::RootPath(steps) = plan.node(*source) else {
+                return None;
+            };
+            Some(steps.clone())
+        }
     }
 }
 
