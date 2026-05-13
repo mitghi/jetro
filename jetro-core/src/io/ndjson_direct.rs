@@ -202,7 +202,7 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             receiver,
             call,
             optional,
-        } if call.method == BuiltinMethod::Len && matches!(call.args, BuiltinArgs::None) => {
+        } if call.spec().view_scalar => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
                 steps: root_path_steps(&plan, *receiver)?,
                 call: call.clone(),

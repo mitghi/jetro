@@ -67,6 +67,15 @@ fn run_ndjson_writes_scalar_results_directly() {
         .run_ndjson(Cursor::new(input), "f", &mut float_out)
         .expect("float scalar should write");
     assert_eq!(String::from_utf8(float_out).unwrap(), "1.25\n");
+
+    let mut upper_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "s.upper()", &mut upper_out)
+        .expect("view-scalar call should write");
+    assert_eq!(
+        String::from_utf8(upper_out).unwrap(),
+        "\"A\\\"B\\\\C\\n\"\n"
+    );
 }
 
 #[test]

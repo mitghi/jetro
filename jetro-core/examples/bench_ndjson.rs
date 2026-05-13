@@ -56,6 +56,7 @@ fn main() {
     );
     bench(&engine, &data, "root int field", "id");
     bench(&engine, &data, "root string field", "name");
+    bench(&engine, &data, "root string upper", "name.upper()");
     bench(&engine, &data, "array len", "attributes.len()");
     bench(
         &engine,
