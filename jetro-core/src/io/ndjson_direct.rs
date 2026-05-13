@@ -49,6 +49,12 @@ pub(super) enum NdjsonDirectTapePlan {
     },
 }
 
+impl NdjsonDirectTapePlan {
+    pub(super) fn needs_vm(&self) -> bool {
+        matches!(self, Self::ViewPipeline { .. })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum NdjsonDirectElement {
     First,
