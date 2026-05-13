@@ -1847,26 +1847,18 @@ fn count_json_tape_filtered<T: JsonTape>(
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     predicate: &NdjsonDirectItemPredicate,
 ) -> usize {
-    use crate::data::tape::TapeNode;
-
     let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
         return 0;
     };
-    match tape.nodes().get(source_idx).copied() {
-        Some(TapeNode::Array { len, .. }) => {
-            let mut count = 0usize;
-            let mut cur = source_idx + 1;
-            for _ in 0..len {
-                if eval_json_tape_item_predicate(tape, cur, predicate) {
-                    count += 1;
-                }
-                cur += tape.span(cur);
-            }
-            count
+
+    let mut count = 0usize;
+    let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
+        if eval_json_tape_item_predicate(tape, item_idx, predicate) {
+            count += 1;
         }
-        Some(_) => usize::from(eval_json_tape_item_predicate(tape, source_idx, predicate)),
-        None => 0,
-    }
+        Ok(())
+    });
+    count
 }
 
 #[cfg(feature = "simd-json")]
@@ -1877,8 +1869,6 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
     op: crate::exec::pipeline::NumOp,
 ) -> Val {
-    use crate::data::tape::TapeNode;
-
     let mut acc_i = 0i64;
     let mut acc_f = 0.0f64;
     let mut floated = false;
@@ -1890,51 +1880,26 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
         return crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs);
     };
 
-    match tape.nodes().get(source_idx).copied() {
-        Some(TapeNode::Array { len, .. }) => {
-            let mut cur = source_idx + 1;
-            for _ in 0..len {
-                if !predicate
-                    .is_none_or(|predicate| eval_json_tape_item_predicate(tape, cur, predicate))
-                {
-                    cur += tape.span(cur);
-                    continue;
-                }
-                if let Some(idx) = json_tape_path_index_from(tape, cur, suffix_steps) {
-                    fold_json_tape_numeric(
-                        json_tape_scalar(tape, idx),
-                        op,
-                        &mut acc_i,
-                        &mut acc_f,
-                        &mut floated,
-                        &mut min_f,
-                        &mut max_f,
-                        &mut n_obs,
-                    );
-                }
-                cur += tape.span(cur);
-            }
+    let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
+        if !predicate
+            .is_none_or(|predicate| eval_json_tape_item_predicate(tape, item_idx, predicate))
+        {
+            return Ok(());
         }
-        Some(_) => {
-            if predicate
-                .is_none_or(|predicate| eval_json_tape_item_predicate(tape, source_idx, predicate))
-            {
-                if let Some(idx) = json_tape_path_index_from(tape, source_idx, suffix_steps) {
-                    fold_json_tape_numeric(
-                        json_tape_scalar(tape, idx),
-                        op,
-                        &mut acc_i,
-                        &mut acc_f,
-                        &mut floated,
-                        &mut min_f,
-                        &mut max_f,
-                        &mut n_obs,
-                    );
-                }
-            }
+        if let Some(idx) = json_tape_path_index_from(tape, item_idx, suffix_steps) {
+            fold_json_tape_numeric(
+                json_tape_scalar(tape, idx),
+                op,
+                &mut acc_i,
+                &mut acc_f,
+                &mut floated,
+                &mut min_f,
+                &mut max_f,
+                &mut n_obs,
+            );
         }
-        None => {}
-    }
+        Ok(())
+    });
 
     crate::exec::pipeline::num_finalise(op, acc_i, acc_f, floated, min_f, max_f, n_obs)
 }
