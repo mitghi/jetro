@@ -18,7 +18,7 @@ pub(super) use super::ndjson_direct::{
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
-const DEFAULT_READER_BUFFER_CAPACITY: usize = 64 * 1024;
+const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Configuration for per-row NDJSON execution.
