@@ -55,33 +55,7 @@ pub(super) enum NdjsonDirectTapePlan {
         element: NdjsonDirectElement,
         suffix_steps: NdjsonPhysicalPath,
     },
-    MapPath {
-        source_steps: NdjsonPhysicalPath,
-        suffix_steps: NdjsonPhysicalPath,
-    },
-    MapArray {
-        source_steps: NdjsonPhysicalPath,
-        items: Vec<NdjsonDirectProjectionValue>,
-    },
-    MapObject {
-        source_steps: NdjsonPhysicalPath,
-        fields: Vec<NdjsonDirectObjectField>,
-    },
-    FilterMapPath {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        suffix_steps: NdjsonPhysicalPath,
-    },
-    FilterMapArray {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        items: Vec<NdjsonDirectProjectionValue>,
-    },
-    FilterMapObject {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        fields: Vec<NdjsonDirectObjectField>,
-    },
+    Stream(NdjsonDirectStreamPlan),
     CountFiltered {
         source_steps: NdjsonPhysicalPath,
         predicate: NdjsonDirectItemPredicate,
@@ -103,6 +77,20 @@ pub(super) enum NdjsonDirectTapePlan {
         source_steps: NdjsonPhysicalPath,
         body: crate::exec::pipeline::PipelineBody,
     },
+}
+
+#[derive(Clone)]
+pub(super) struct NdjsonDirectStreamPlan {
+    pub(super) source_steps: NdjsonPhysicalPath,
+    pub(super) predicate: Option<NdjsonDirectItemPredicate>,
+    pub(super) map: NdjsonDirectStreamMap,
+}
+
+#[derive(Clone)]
+pub(super) enum NdjsonDirectStreamMap {
+    Path(NdjsonPhysicalPath),
+    Array(Vec<NdjsonDirectProjectionValue>),
+    Object(Vec<NdjsonDirectObjectField>),
 }
 
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
@@ -614,29 +602,11 @@ fn direct_tape_map_path_plan(
     };
     let source_steps = pipeline_source_to_steps(plan, source)?;
     let kernel = body.stage_kernels.first()?;
-    if let Some(suffix_steps) = kernel_to_physical_path(kernel) {
-        return Some(NdjsonDirectTapePlan::MapPath {
-            source_steps,
-            suffix_steps,
-        });
-    }
-    if let crate::exec::pipeline::BodyKernel::Array(items) = kernel {
-        let items = items
-            .iter()
-            .map(direct_projection_value_from_kernel)
-            .collect::<Option<Vec<_>>>()?;
-        return Some(NdjsonDirectTapePlan::MapArray {
-            source_steps,
-            items,
-        });
-    }
-    if let crate::exec::pipeline::BodyKernel::Object(object) = kernel {
-        return Some(NdjsonDirectTapePlan::MapObject {
-            source_steps,
-            fields: direct_object_fields_from_kernel(object)?,
-        });
-    }
-    None
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+        source_steps,
+        predicate: None,
+        map: direct_stream_map_from_kernel(kernel)?,
+    }))
 }
 
 fn direct_tape_count_filtered_plan(
@@ -745,30 +715,30 @@ fn direct_tape_filter_map_path_plan(
     let source_steps = pipeline_source_to_steps(plan, source)?;
     let predicate = direct_item_predicate_from_kernel(body.stage_kernels.first()?)?;
     let kernel = body.stage_kernels.get(1)?;
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+        source_steps,
+        predicate: Some(predicate),
+        map: direct_stream_map_from_kernel(kernel)?,
+    }))
+}
+
+fn direct_stream_map_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectStreamMap> {
     if let Some(suffix_steps) = kernel_to_physical_path(kernel) {
-        return Some(NdjsonDirectTapePlan::FilterMapPath {
-            source_steps,
-            predicate,
-            suffix_steps,
-        });
+        return Some(NdjsonDirectStreamMap::Path(suffix_steps));
     }
     if let crate::exec::pipeline::BodyKernel::Array(items) = kernel {
         let items = items
             .iter()
             .map(direct_projection_value_from_kernel)
             .collect::<Option<Vec<_>>>()?;
-        return Some(NdjsonDirectTapePlan::FilterMapArray {
-            source_steps,
-            predicate,
-            items,
-        });
+        return Some(NdjsonDirectStreamMap::Array(items));
     }
     if let crate::exec::pipeline::BodyKernel::Object(object) = kernel {
-        return Some(NdjsonDirectTapePlan::FilterMapObject {
-            source_steps,
-            predicate,
-            fields: direct_object_fields_from_kernel(object)?,
-        });
+        return Some(NdjsonDirectStreamMap::Object(
+            direct_object_fields_from_kernel(object)?,
+        ));
     }
     None
 }

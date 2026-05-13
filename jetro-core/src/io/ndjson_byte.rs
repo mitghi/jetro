@@ -25,6 +25,7 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
     }
 }
 
+#[inline(always)]
 fn write_ndjson_byte_expr<W: Write>(
     writer: &mut W,
     row: &[u8],
@@ -109,6 +110,7 @@ fn write_ndjson_byte_expr<W: Write>(
     }
 }
 
+#[inline(always)]
 fn raw_json_byte_expr_value<'a>(row: &'a [u8], expr: &NdjsonDirectByteExpr) -> RawFieldValue<'a> {
     match expr {
         NdjsonDirectByteExpr::Path(steps) => raw_json_byte_path_value(row, steps),
@@ -140,6 +142,7 @@ fn raw_json_byte_expr_value<'a>(row: &'a [u8], expr: &NdjsonDirectByteExpr) -> R
     }
 }
 
+#[inline(always)]
 fn raw_json_byte_path_value<'a>(row: &'a [u8], steps: &[PhysicalPathStep]) -> RawFieldValue<'a> {
     if let [PhysicalPathStep::Field(key)] = steps {
         return root_field_raw_value(row, key.as_ref());
@@ -189,6 +192,7 @@ enum BytePathDemand {
     ArrayElement(NdjsonDirectElement),
 }
 
+#[inline(always)]
 fn raw_json_path_value_demand<'a>(
     row: &'a [u8],
     steps: &[PhysicalPathStep],
@@ -235,6 +239,7 @@ fn raw_json_path_value_demand<'a>(
     RawFieldValue::Found(value)
 }
 
+#[inline(always)]
 fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
     let mut pos = skip_json_ws(row, 0);
     if row.get(pos) != Some(&b'{') {
