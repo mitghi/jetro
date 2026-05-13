@@ -11,7 +11,9 @@ use std::path::Path;
 use std::sync::MutexGuard;
 
 #[cfg(feature = "simd-json")]
-use super::ndjson_byte::{write_ndjson_byte_plan_row, BytePlanWrite};
+use super::ndjson_byte::{
+    eval_ndjson_byte_predicate_row, write_ndjson_byte_plan_row, BytePlanWrite,
+};
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
     direct_byte_plan, direct_tape_plan, direct_tape_predicate, NdjsonDirectBytePlan,
@@ -1449,6 +1451,19 @@ where
     let mut predicate_path = NdjsonPathCache::default();
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
+        if let Some(matched) = eval_ndjson_byte_predicate_row(&row, predicate)? {
+            if !matched {
+                continue;
+            }
+            writer.write_all(&row)?;
+            writer.write_all(b"\n")?;
+            emitted += 1;
+            if emitted >= limit {
+                break;
+            }
+            continue;
+        }
+
         scratch.parse_slice(&row).map_err(|message| {
             row_parse_error(
                 line_no,
@@ -3165,6 +3180,26 @@ mod tests {
         ] {
             super::direct_byte_plan(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have a direct NDJSON byte plan"));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_predicates_cover_match_shapes() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"active":true,"score":9910,"attributes":[{"key":"k1","value":"v_1"}]}"#;
+        for predicate in [
+            ("active", true),
+            ("score > 9900", true),
+            ("score < 100", false),
+            (r#"attributes.first().value.contains("_1")"#, true),
+        ] {
+            let plan = super::direct_tape_predicate(&engine, predicate.0)
+                .unwrap_or_else(|| panic!("{} should have a direct predicate", predicate.0));
+            let matched = super::eval_ndjson_byte_predicate_row(row, &plan)
+                .expect("byte predicate should evaluate")
+                .unwrap_or_else(|| panic!("{} should not need tape fallback", predicate.0));
+            assert_eq!(matched, predicate.1, "{}", predicate.0);
         }
     }
 }

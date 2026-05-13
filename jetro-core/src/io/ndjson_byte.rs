@@ -1,5 +1,5 @@
 use super::ndjson::{write_i64, write_val_json};
-use super::ndjson_direct::{NdjsonDirectBytePlan, NdjsonDirectElement};
+use super::ndjson_direct::{NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectPredicate};
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
@@ -91,6 +91,13 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
             RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
         },
     }
+}
+
+pub(super) fn eval_ndjson_byte_predicate_row(
+    row: &[u8],
+    predicate: &NdjsonDirectPredicate,
+) -> Result<Option<bool>, JetroEngineError> {
+    Ok(eval_raw_predicate(row, predicate))
 }
 
 enum RawFieldValue<'a> {
@@ -473,6 +480,80 @@ fn raw_json_path_value<'a>(mut value: &'a [u8], steps: &[PhysicalPathStep]) -> O
         }
     }
     Some(value)
+}
+
+fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<bool> {
+    use crate::parse::ast::BinOp;
+
+    match predicate {
+        NdjsonDirectPredicate::Path(steps) => raw_json_path_view(row, steps).map(json_view_truthy),
+        NdjsonDirectPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
+        NdjsonDirectPredicate::Not(inner) => eval_raw_predicate(row, inner).map(|value| !value),
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            let lhs = eval_raw_predicate(row, lhs)?;
+            if !lhs {
+                return Some(false);
+            }
+            eval_raw_predicate(row, rhs)
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            let lhs = eval_raw_predicate(row, lhs)?;
+            if lhs {
+                return Some(true);
+            }
+            eval_raw_predicate(row, rhs)
+        }
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } => {
+            let lhs = eval_raw_predicate_scalar(row, lhs)?;
+            let rhs = eval_raw_predicate_scalar(row, rhs)?;
+            Some(crate::util::json_cmp_binop(lhs, *op, rhs))
+        }
+        NdjsonDirectPredicate::ViewScalarCall { steps, call } => {
+            let value = raw_json_path_view(row, steps)?;
+            call.try_apply_json_view(value)
+                .map(|value| crate::util::is_truthy(&value))
+        }
+        NdjsonDirectPredicate::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            let source = raw_json_path_value(row, source_steps)?;
+            let element = raw_json_array_element(source, *element)?;
+            let value = raw_json_path_view(element, suffix_steps)?;
+            call.try_apply_json_view(value)
+                .map(|value| crate::util::is_truthy(&value))
+        }
+        NdjsonDirectPredicate::ViewPipeline { .. } => None,
+    }
+}
+
+fn eval_raw_predicate_scalar<'a>(
+    row: &'a [u8],
+    predicate: &'a NdjsonDirectPredicate,
+) -> Option<JsonView<'a>> {
+    match predicate {
+        NdjsonDirectPredicate::Path(steps) => raw_json_path_view(row, steps),
+        NdjsonDirectPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        _ => None,
+    }
+}
+
+fn raw_json_path_view<'a>(row: &'a [u8], steps: &[PhysicalPathStep]) -> Option<JsonView<'a>> {
+    raw_json_path_value(row, steps).and_then(raw_json_view)
+}
+
+fn json_view_truthy(value: JsonView<'_>) -> bool {
+    match value {
+        JsonView::Null => false,
+        JsonView::Bool(value) => value,
+        JsonView::Int(value) => value != 0,
+        JsonView::UInt(value) => value != 0,
+        JsonView::Float(value) => value != 0.0 && !value.is_nan(),
+        JsonView::Str(value) => !value.is_empty(),
+        JsonView::ArrayLen(value) | JsonView::ObjectLen(value) => value > 0,
+    }
 }
 
 fn skip_json_compound(row: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
