@@ -1194,6 +1194,52 @@ impl NdjsonPathCache {
         start: usize,
         steps: &[crate::ir::physical::PhysicalPathStep],
     ) -> Option<usize> {
+        if let Some(idx) = self.index_cached(tape, start, steps) {
+            return Some(idx);
+        }
+        self.index_uncached(tape, start, steps)
+    }
+
+    fn index_cached<T: JsonTape>(
+        &self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+    ) -> Option<usize> {
+        use crate::ir::physical::PhysicalPathStep;
+
+        let [PhysicalPathStep::Field(key), rest @ ..] = steps else {
+            return None;
+        };
+        if rest
+            .iter()
+            .any(|step| matches!(step, PhysicalPathStep::Field(_)))
+        {
+            return None;
+        }
+        let Some(field) = self
+            .fields
+            .first()
+            .copied()
+            .flatten()
+            .filter(|field| field.key_delta > 1)
+        else {
+            return None;
+        };
+        let idx = json_tape_object_cached_field(tape, start, field, key.as_ref())?;
+        let mut cur = idx;
+        for step in rest {
+            cur = json_tape_step_index(tape, cur, step)?;
+        }
+        Some(cur)
+    }
+
+    fn index_uncached<T: JsonTape>(
+        &mut self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+    ) -> Option<usize> {
         self.index_from_depth(tape, start, steps, 0)
     }
 
