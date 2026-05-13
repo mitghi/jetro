@@ -983,6 +983,7 @@ struct NdjsonTapeWriterRunner<'a, 'p> {
     root_path: NdjsonPathCache,
     source_path: NdjsonPathCache,
     suffix_path: NdjsonPathCache,
+    predicate_path: NdjsonPathCache,
 }
 
 #[cfg(feature = "simd-json")]
@@ -996,6 +997,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
             root_path: NdjsonPathCache::default(),
             source_path: NdjsonPathCache::default(),
             suffix_path: NdjsonPathCache::default(),
+            predicate_path: NdjsonPathCache::default(),
         }
     }
 
@@ -1054,6 +1056,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 let caches = NdjsonPathCaches {
                     source: &mut self.source_path,
                     suffix: &mut self.suffix_path,
+                    predicate: &mut self.predicate_path,
                 };
                 write_json_tape_map_path(writer, scratch, source_steps, suffix_steps, caches)?;
             }
@@ -1065,6 +1068,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 let caches = NdjsonPathCaches {
                     source: &mut self.source_path,
                     suffix: &mut self.suffix_path,
+                    predicate: &mut self.predicate_path,
                 };
                 write_json_tape_filter_map_path(
                     writer,
@@ -1084,6 +1088,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                     source_steps,
                     predicate,
                     &mut self.source_path,
+                    &mut self.predicate_path,
                 );
                 write_i64(writer, count as i64)?;
             }
@@ -1095,6 +1100,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 let caches = NdjsonPathCaches {
                     source: &mut self.source_path,
                     suffix: &mut self.suffix_path,
+                    predicate: &mut self.predicate_path,
                 };
                 let value = reduce_json_tape_numeric_path(
                     scratch,
@@ -1115,6 +1121,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 let caches = NdjsonPathCaches {
                     source: &mut self.source_path,
                     suffix: &mut self.suffix_path,
+                    predicate: &mut self.predicate_path,
                 };
                 let value = reduce_json_tape_numeric_path(
                     scratch,
@@ -1158,6 +1165,7 @@ struct NdjsonPathCache {
 struct NdjsonPathCaches<'a> {
     source: &'a mut NdjsonPathCache,
     suffix: &'a mut NdjsonPathCache,
+    predicate: &'a mut NdjsonPathCache,
 }
 
 #[cfg(feature = "simd-json")]
@@ -1972,8 +1980,9 @@ fn write_json_tape_filter_map_path<W: Write, T: JsonTape>(
 
     let mut wrote = false;
     let suffix_cache = caches.suffix;
+    let predicate_cache = caches.predicate;
     visit_json_tape_source_items(tape, source_idx, |item_idx| {
-        if eval_json_tape_item_predicate(tape, item_idx, predicate) {
+        if eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache) {
             if wrote {
                 writer.write_all(b",")?;
             }
@@ -2015,6 +2024,7 @@ fn count_json_tape_filtered<T: JsonTape>(
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     predicate: &NdjsonDirectItemPredicate,
     source_cache: &mut NdjsonPathCache,
+    predicate_cache: &mut NdjsonPathCache,
 ) -> usize {
     let Some(source_idx) = source_cache.index(tape, 0, source_steps) else {
         return 0;
@@ -2022,7 +2032,7 @@ fn count_json_tape_filtered<T: JsonTape>(
 
     let mut count = 0usize;
     let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
-        if eval_json_tape_item_predicate(tape, item_idx, predicate) {
+        if eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache) {
             count += 1;
         }
         Ok(())
@@ -2051,10 +2061,11 @@ fn reduce_json_tape_numeric_path<T: JsonTape>(
     };
 
     let suffix_cache = caches.suffix;
+    let predicate_cache = caches.predicate;
     let _: Result<(), ()> = visit_json_tape_source_items(tape, source_idx, |item_idx| {
-        if !predicate
-            .is_none_or(|predicate| eval_json_tape_item_predicate(tape, item_idx, predicate))
-        {
+        if !predicate.is_none_or(|predicate| {
+            eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+        }) {
             return Ok(());
         }
         if let Some(idx) = suffix_cache.index(tape, item_idx, suffix_steps) {
@@ -2121,61 +2132,62 @@ fn fold_json_tape_numeric(
 }
 
 #[cfg(feature = "simd-json")]
-fn eval_json_tape_item_predicate<T: JsonTape>(
+fn eval_json_tape_item_predicate_cached<T: JsonTape>(
     tape: &T,
     item_idx: usize,
     predicate: &NdjsonDirectItemPredicate,
+    cache: &mut NdjsonPathCache,
 ) -> bool {
     use crate::parse::ast::BinOp;
 
     match predicate {
-        NdjsonDirectItemPredicate::Path(steps) => json_tape_path_index_from(tape, item_idx, steps)
+        NdjsonDirectItemPredicate::Path(steps) => cache
+            .index(tape, item_idx, steps)
             .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
             .unwrap_or(false),
         NdjsonDirectItemPredicate::Literal(value) => crate::util::is_truthy(value),
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
-            eval_json_tape_item_predicate(tape, item_idx, lhs)
-                && eval_json_tape_item_predicate(tape, item_idx, rhs)
+            eval_json_tape_item_predicate_cached(tape, item_idx, lhs, cache)
+                && eval_json_tape_item_predicate_cached(tape, item_idx, rhs, cache)
         }
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
-            eval_json_tape_item_predicate(tape, item_idx, lhs)
-                || eval_json_tape_item_predicate(tape, item_idx, rhs)
+            eval_json_tape_item_predicate_cached(tape, item_idx, lhs, cache)
+                || eval_json_tape_item_predicate_cached(tape, item_idx, rhs, cache)
         }
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } => {
-            let Some(lhs) = eval_json_tape_item_scalar(tape, item_idx, lhs) else {
+            let Some(lhs) = eval_json_tape_item_scalar_cached(tape, item_idx, lhs, cache) else {
                 return false;
             };
-            let Some(rhs) = eval_json_tape_item_scalar(tape, item_idx, rhs) else {
+            let Some(rhs) = eval_json_tape_item_scalar_cached(tape, item_idx, rhs, cache) else {
                 return false;
             };
             crate::util::json_cmp_binop(lhs, *op, rhs)
         }
-        NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => {
-            json_tape_path_index_from(tape, item_idx, lhs)
-                .map(|idx| json_tape_scalar(tape, idx))
-                .is_some_and(|value| {
-                    crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
-                })
-        }
-        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
-            json_tape_path_index_from(tape, item_idx, suffix_steps)
-                .map(|idx| json_tape_scalar(tape, idx))
-                .and_then(|value| call.try_apply_json_view(value))
-                .is_some_and(|value| crate::util::is_truthy(&value))
-        }
+        NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => cache
+            .index(tape, item_idx, lhs)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .is_some_and(|value| {
+                crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
+            }),
+        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => cache
+            .index(tape, item_idx, suffix_steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| crate::util::is_truthy(&value)),
     }
 }
 
 #[cfg(feature = "simd-json")]
-fn eval_json_tape_item_scalar<'a, T: JsonTape>(
+fn eval_json_tape_item_scalar_cached<'a, T: JsonTape>(
     tape: &'a T,
     item_idx: usize,
     predicate: &'a NdjsonDirectItemPredicate,
+    cache: &mut NdjsonPathCache,
 ) -> Option<crate::util::JsonView<'a>> {
     match predicate {
-        NdjsonDirectItemPredicate::Path(steps) => {
-            json_tape_path_index_from(tape, item_idx, steps).map(|idx| json_tape_scalar(tape, idx))
-        }
+        NdjsonDirectItemPredicate::Path(steps) => cache
+            .index(tape, item_idx, steps)
+            .map(|idx| json_tape_scalar(tape, idx)),
         NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
         _ => None,
     }
