@@ -26,6 +26,10 @@ pub(super) enum NdjsonDirectTapePlan {
         source_steps: NdjsonPhysicalPath,
         suffix_steps: NdjsonPhysicalPath,
     },
+    MapArray {
+        source_steps: NdjsonPhysicalPath,
+        items: Vec<NdjsonDirectProjectionValue>,
+    },
     FilterMapPath {
         source_steps: NdjsonPhysicalPath,
         predicate: NdjsonDirectItemPredicate,
@@ -376,10 +380,25 @@ fn direct_tape_map_path_plan(
     let Stage::Map(_, _) = body.stages.first()? else {
         return None;
     };
-    Some(NdjsonDirectTapePlan::MapPath {
-        source_steps: pipeline_source_to_steps(plan, source)?,
-        suffix_steps: kernel_to_physical_path(body.stage_kernels.first()?)?,
-    })
+    let source_steps = pipeline_source_to_steps(plan, source)?;
+    let kernel = body.stage_kernels.first()?;
+    if let Some(suffix_steps) = kernel_to_physical_path(kernel) {
+        return Some(NdjsonDirectTapePlan::MapPath {
+            source_steps,
+            suffix_steps,
+        });
+    }
+    if let crate::exec::pipeline::BodyKernel::Array(items) = kernel {
+        let items = items
+            .iter()
+            .map(direct_projection_value_from_kernel)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(NdjsonDirectTapePlan::MapArray {
+            source_steps,
+            items,
+        });
+    }
+    None
 }
 
 fn direct_tape_count_filtered_plan(
@@ -582,6 +601,34 @@ fn kernel_to_physical_path(
         }
         crate::exec::pipeline::BodyKernel::FieldChain(keys) => Some(keys_to_path(keys)),
         crate::exec::pipeline::BodyKernel::Current => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn direct_projection_value_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectProjectionValue> {
+    match kernel {
+        crate::exec::pipeline::BodyKernel::Current
+        | crate::exec::pipeline::BodyKernel::FieldRead(_)
+        | crate::exec::pipeline::BodyKernel::FieldChain(_) => {
+            Some(NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?))
+        }
+        crate::exec::pipeline::BodyKernel::Const(value) => {
+            Some(NdjsonDirectProjectionValue::Literal(value.clone()))
+        }
+        crate::exec::pipeline::BodyKernel::ConstBool(value) => {
+            Some(NdjsonDirectProjectionValue::Literal(Val::Bool(*value)))
+        }
+        crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
+            if call.spec().view_scalar =>
+        {
+            Some(NdjsonDirectProjectionValue::ViewScalarCall {
+                steps: kernel_to_physical_path(receiver)?,
+                call: call.clone(),
+                optional: false,
+            })
+        }
         _ => None,
     }
 }

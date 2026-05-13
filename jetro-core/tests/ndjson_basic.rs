@@ -81,6 +81,19 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         .expect("array projection should write");
     assert_eq!(String::from_utf8(array_out).unwrap(), "[\"a\",\"b\"]\n");
 
+    let mut array_pair_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map([@.key, @.value])",
+            &mut array_pair_out,
+        )
+        .expect("array pair projection should write");
+    assert_eq!(
+        String::from_utf8(array_pair_out).unwrap(),
+        "[[\"a\",1],[\"b\",2]]\n"
+    );
+
     let mut filtered_map_out = Vec::new();
     engine
         .run_ndjson(

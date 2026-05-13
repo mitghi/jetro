@@ -67,6 +67,12 @@ fn main() {
     bench(
         &engine,
         &data,
+        "map nested pairs",
+        "attributes.map([@.key, @.value])",
+    );
+    bench(
+        &engine,
+        &data,
         "filter nested count",
         r#"attributes.filter(@.value.contains("_3")).len()"#,
     );
