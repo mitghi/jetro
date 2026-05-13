@@ -977,7 +977,7 @@ where
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
     let mut count = 0usize;
 
-    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+    visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
         match write_ndjson_byte_plan_row(&mut writer, row, byte_plan)? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
@@ -994,10 +994,8 @@ where
         }
         writer.write_all(b"\n")?;
         count += 1;
-        if limit.is_some_and(|limit| count >= limit) {
-            break;
-        }
-    }
+        Ok(!limit.is_some_and(|limit| count >= limit))
+    })?;
 
     writer.flush()?;
     Ok(count)
@@ -1025,7 +1023,7 @@ where
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
     let mut count = 0usize;
 
-    while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+    visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
         match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan, &mut byte_scratch)? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
@@ -1042,13 +1040,84 @@ where
         }
         writer.write_all(b"\n")?;
         count += 1;
-        if limit.is_some_and(|limit| count >= limit) {
-            break;
-        }
-    }
+        Ok(!limit.is_some_and(|limit| count >= limit))
+    })?;
 
     writer.flush()?;
     Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+fn visit_ndjson_borrowed_rows<R, F>(
+    driver: &mut NdjsonPerRowDriver<R>,
+    spill: &mut Vec<u8>,
+    mut visit: F,
+) -> Result<(), JetroEngineError>
+where
+    R: BufRead,
+    F: FnMut(u64, &[u8]) -> Result<bool, JetroEngineError>,
+{
+    loop {
+        spill.clear();
+        let available = driver.reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = memchr(b'\n', available) {
+            driver.line_no += 1;
+            let line_no = driver.line_no;
+            let mut row = &available[..pos];
+            if row.last() == Some(&b'\r') {
+                row = &row[..row.len() - 1];
+            }
+            if line_no == 1 && row.starts_with(&[0xef, 0xbb, 0xbf]) {
+                row = &row[3..];
+            }
+            let (start, end) = non_ws_range(row);
+            let keep_going = if start == end {
+                true
+            } else {
+                let row = &row[start..end];
+                if row.len() > driver.max_line_len {
+                    return Err(RowError::LineTooLarge {
+                        line_no,
+                        len: row.len(),
+                        max: driver.max_line_len,
+                    }
+                    .into());
+                }
+                visit(line_no, row)?
+            };
+            driver.reader.consume(pos + 1);
+            if !keep_going {
+                return Ok(());
+            }
+        } else {
+            let read = driver.read_physical_line(spill)?;
+            if read == 0 {
+                return Ok(());
+            }
+            driver.line_no += 1;
+            strip_initial_bom(driver.line_no, spill);
+            trim_line_ending(spill);
+            let (start, end) = non_ws_range(spill);
+            if start == end {
+                continue;
+            }
+            let len = end - start;
+            if len > driver.max_line_len {
+                return Err(RowError::LineTooLarge {
+                    line_no: driver.line_no,
+                    len,
+                    max: driver.max_line_len,
+                }
+                .into());
+            }
+            if !visit(driver.line_no, &spill[start..end])? {
+                return Ok(());
+            }
+        }
+    }
 }
 
 #[cfg(feature = "simd-json")]
