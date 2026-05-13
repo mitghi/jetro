@@ -947,6 +947,10 @@ enum NdjsonDirectTapePlan {
         source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
         suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
     },
+    CountFiltered {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        predicate: NdjsonDirectItemPredicate,
+    },
     ViewPipeline {
         source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
         body: crate::exec::pipeline::PipelineBody,
@@ -985,6 +989,15 @@ pub(super) enum NdjsonDirectPredicate {
     ViewPipeline {
         source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
         body: crate::exec::pipeline::PipelineBody,
+    },
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone)]
+enum NdjsonDirectItemPredicate {
+    ViewScalarCall {
+        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        call: crate::builtins::BuiltinCall,
     },
 }
 
@@ -1064,6 +1077,13 @@ where
                 suffix_steps,
             } => {
                 write_json_tape_map_path(&mut writer, &scratch, source_steps, suffix_steps)?;
+            }
+            NdjsonDirectTapePlan::CountFiltered {
+                source_steps,
+                predicate,
+            } => {
+                let count = count_json_tape_filtered(&scratch, source_steps, predicate);
+                write_i64(&mut writer, count as i64)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let source = json_tape_path_index(&scratch, source_steps)
@@ -1329,6 +1349,9 @@ impl<'a> NdjsonRowExecutor<'a> {
                 })
             }
             PlanNode::Pipeline { source, body } => {
+                if let Some(plan) = direct_tape_count_filtered_plan(&plan, source, body) {
+                    return Some(plan);
+                }
                 if let Some(plan) = direct_tape_map_path_plan(&plan, source, body) {
                     return Some(plan);
                 }
@@ -1550,6 +1573,49 @@ fn direct_tape_map_path_plan(
         source_steps: pipeline_source_to_steps(plan, source)?,
         suffix_steps: kernel_to_physical_path(body.stage_kernels.first()?)?,
     })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_count_filtered_plan(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
+
+    if body.stages.len() != 1 {
+        return None;
+    }
+    let Stage::Filter(_, _) = body.stages.first()? else {
+        return None;
+    };
+    let Sink::Reducer(spec) = &body.sink else {
+        return None;
+    };
+    if spec.op != ReducerOp::Count || spec.predicate.is_some() {
+        return None;
+    }
+    Some(NdjsonDirectTapePlan::CountFiltered {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        predicate: direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_item_predicate_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectItemPredicate> {
+    match kernel {
+        crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
+            if call.spec().view_scalar =>
+        {
+            Some(NdjsonDirectItemPredicate::ViewScalarCall {
+                suffix_steps: kernel_to_physical_path(receiver)?,
+                call: call.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(feature = "simd-json")]
@@ -2169,6 +2235,50 @@ fn write_json_tape_path_or_null<W: Write, T: JsonTape>(
         writer.write_all(b"null")?;
     }
     Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn count_json_tape_filtered<T: JsonTape>(
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    predicate: &NdjsonDirectItemPredicate,
+) -> usize {
+    use crate::data::tape::TapeNode;
+
+    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+        return 0;
+    };
+    match tape.nodes().get(source_idx).copied() {
+        Some(TapeNode::Array { len, .. }) => {
+            let mut count = 0usize;
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                if eval_json_tape_item_predicate(tape, cur, predicate) {
+                    count += 1;
+                }
+                cur += tape.span(cur);
+            }
+            count
+        }
+        Some(_) => usize::from(eval_json_tape_item_predicate(tape, source_idx, predicate)),
+        None => 0,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn eval_json_tape_item_predicate<T: JsonTape>(
+    tape: &T,
+    item_idx: usize,
+    predicate: &NdjsonDirectItemPredicate,
+) -> bool {
+    match predicate {
+        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
+            json_tape_path_index_from(tape, item_idx, suffix_steps)
+                .map(|idx| json_tape_scalar(tape, idx))
+                .and_then(|value| call.try_apply_json_view(value))
+                .is_some_and(|value| crate::util::is_truthy(&value))
+        }
+    }
 }
 
 fn write_json_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
