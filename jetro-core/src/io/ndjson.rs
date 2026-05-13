@@ -1662,24 +1662,25 @@ fn direct_tape_numeric_reduce_path_plan(
 ) -> Option<NdjsonDirectTapePlan> {
     use crate::exec::pipeline::{ReducerOp, Sink, Stage};
 
-    if body.stages.len() != 1 {
-        return None;
-    }
-    let Stage::Map(_, _) = body.stages.first()? else {
-        return None;
-    };
     let Sink::Reducer(spec) = &body.sink else {
         return None;
     };
-    if spec.predicate.is_some() || spec.projection.is_some() {
+    if spec.predicate.is_some() {
         return None;
     }
     let ReducerOp::Numeric(op) = spec.op else {
         return None;
     };
+    let suffix_steps = match body.stages.as_slice() {
+        [Stage::Map(_, _)] if spec.projection.is_none() => {
+            kernel_to_physical_path(body.stage_kernels.first()?)?
+        }
+        [] if spec.projection.is_some() => kernel_to_physical_path(body.sink_kernels.first()?)?,
+        _ => return None,
+    };
     Some(NdjsonDirectTapePlan::NumericReducePath {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        suffix_steps: kernel_to_physical_path(body.stage_kernels.first()?)?,
+        suffix_steps,
         op,
     })
 }

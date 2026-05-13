@@ -10,7 +10,7 @@ fn build_ndjson(rows: usize) -> Vec<u8> {
         let score = 10_000usize.saturating_sub(i % 10_000);
         out.extend_from_slice(
             format!(
-                r#"{{"id":{i},"name":"user_{i}","active":{active},"score":{score},"attributes":[{{"key":"k1","value":"v_{i}_1"}},{{"key":"k2","value":"v_{i}_2"}},{{"key":"k3","value":"v_{i}_3"}}]}}"#
+                r#"{{"id":{i},"name":"user_{i}","active":{active},"score":{score},"attributes":[{{"key":"k1","value":"v_{i}_1","weight":1}},{{"key":"k2","value":"v_{i}_2","weight":2}},{{"key":"k3","value":"v_{i}_3","weight":3}}]}}"#
             )
             .as_bytes(),
         );
@@ -81,6 +81,12 @@ fn main() {
         &data,
         "filter nested map keys",
         r#"attributes.filter(@.value.contains("_3")).map(@.key)"#,
+    );
+    bench(
+        &engine,
+        &data,
+        "map numeric sum",
+        "attributes.map(@.weight).sum()",
     );
     bench_matches(&engine, &data, "match active rows", "active", rows);
     bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
