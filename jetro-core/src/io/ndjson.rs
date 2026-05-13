@@ -3082,6 +3082,10 @@ mod tests {
                 r#"[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]"#,
             ),
             ("attributes.map(@.key.upper())", r#"["K1","K2"]"#),
+            (
+                r#"attributes.filter(@.value.contains("2")).map(@.key)"#,
+                r#"["k2"]"#,
+            ),
         ] {
             let plan = super::direct_tape_plan(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should be direct"));
