@@ -76,6 +76,12 @@ fn run_ndjson_writes_scalar_results_directly() {
         String::from_utf8(upper_out).unwrap(),
         "\"A\\\"B\\\\C\\n\"\n"
     );
+
+    let mut lower_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(b"{\"s\":\"ADA\"}\n"), "$.s.lower()", &mut lower_out)
+        .expect("byte scalar lower call should write");
+    assert_eq!(String::from_utf8(lower_out).unwrap(), "\"ada\"\n");
 }
 
 #[test]
