@@ -100,6 +100,18 @@ fn main() {
         "object projection",
         r#"{id: id, name: name, score: score, active: active}"#,
     );
+    bench(
+        &engine,
+        &data,
+        "object scalar projection",
+        r#"{id: id, name: name.upper(), score: score, active: active}"#,
+    );
+    bench(
+        &engine,
+        &data,
+        "array projection",
+        r#"[id, name, score, active]"#,
+    );
     bench_matches(&engine, &data, "match active rows", "active", rows);
     bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
     bench_matches(
