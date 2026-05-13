@@ -164,6 +164,7 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
     writer: &mut W,
     row: &[u8],
     plan: &NdjsonDirectTapePlan,
+    scratch: &mut Vec<u8>,
 ) -> Result<BytePlanWrite, JetroEngineError> {
     match plan {
         NdjsonDirectTapePlan::Stream(stream)
@@ -185,10 +186,10 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
             if !byte_stream_map_supported(map) {
                 return Ok(BytePlanWrite::Fallback);
             }
-            let mut out = Vec::new();
-            match write_raw_json_stream_collect(&mut out, row, stream, map)? {
+            scratch.clear();
+            match write_raw_json_stream_collect(scratch, row, stream, map)? {
                 BytePlanWrite::Done => {
-                    writer.write_all(&out)?;
+                    writer.write_all(scratch)?;
                     Ok(BytePlanWrite::Done)
                 }
                 BytePlanWrite::Fallback => Ok(BytePlanWrite::Fallback),

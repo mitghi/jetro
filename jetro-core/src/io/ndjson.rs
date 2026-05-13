@@ -1021,11 +1021,12 @@ where
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
     let mut count = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
-        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan)? {
+        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan, &mut byte_scratch)? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
                 scratch.parse_slice(row).map_err(|message| {
@@ -3060,7 +3061,8 @@ mod tests {
 
         let row = br#"{"attributes":[{"value":"a_3"},{"value":"b"},{"value":"c_3"}]}"#;
         let mut out = Vec::new();
-        let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan)
+        let mut scratch = Vec::new();
+        let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
             .expect("byte count should write");
         assert!(matches!(wrote, super::BytePlanWrite::Done));
         assert_eq!(out, b"2");
@@ -3094,7 +3096,8 @@ mod tests {
                 "{query} should be byte-writable"
             );
             let mut out = Vec::new();
-            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan)
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
                 .expect("byte stream should write");
             assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
             assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
