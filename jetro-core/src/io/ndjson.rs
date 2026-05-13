@@ -1166,6 +1166,9 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
 #[cfg(feature = "simd-json")]
 #[derive(Default)]
 pub(super) struct NdjsonPathCache {
+    // Per-depth verified field deltas for stable object layouts. Every use
+    // checks the cached key before returning the value node, so mixed-schema
+    // rows safely fall back to a normal object scan.
     fields: Vec<Option<NdjsonFieldCache>>,
 }
 
