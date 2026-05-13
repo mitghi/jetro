@@ -938,6 +938,19 @@ enum NdjsonDirectTapePlan {
         call: crate::builtins::BuiltinCall,
         optional: bool,
     },
+    ArrayElementPath {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        element: NdjsonDirectElement,
+        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+    },
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy)]
+enum NdjsonDirectElement {
+    First,
+    Last,
+    Nth(usize),
 }
 
 #[cfg(feature = "simd-json")]
@@ -992,6 +1005,20 @@ where
                         &scratch,
                         json_tape_path_index(&scratch, steps).unwrap_or(usize::MAX),
                     )?;
+                }
+            }
+            NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps,
+            } => {
+                let idx = json_tape_path_index(&scratch, source_steps)
+                    .and_then(|idx| json_tape_array_element(&scratch, idx, *element))
+                    .and_then(|idx| json_tape_path_index_from(&scratch, idx, suffix_steps));
+                if let Some(idx) = idx {
+                    write_json_tape_at(&mut writer, &scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
                 }
             }
         }
@@ -1113,6 +1140,21 @@ impl<'a> NdjsonRowExecutor<'a> {
         let QueryRoot::Node(root) = plan.root() else {
             return None;
         };
+        if let PlanNode::Chain { base, steps } = plan.node(*root) {
+            let (source_steps, element) = direct_array_element_source(&plan, *base)?;
+            return Some(NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps: physical_chain_to_path(steps)?,
+            });
+        }
+        if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
+            return Some(NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps: Vec::new(),
+            });
+        }
         match plan.node(*root) {
             PlanNode::RootPath(steps) => Some(NdjsonDirectTapePlan::RootPath(steps.clone())),
             PlanNode::Pipeline {
@@ -1298,6 +1340,84 @@ impl<'a> NdjsonRowExecutor<'a> {
 }
 
 #[cfg(feature = "simd-json")]
+fn direct_array_element_source(
+    plan: &crate::ir::physical::QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<(
+    Vec<crate::ir::physical::PhysicalPathStep>,
+    NdjsonDirectElement,
+)> {
+    use crate::builtins::BuiltinMethod;
+    use crate::builtins::BuiltinArgs;
+    use crate::exec::pipeline::Sink;
+    use crate::ir::physical::{PipelinePlanSource, PlanNode};
+
+    if let PlanNode::Call {
+        receiver,
+        call,
+        optional,
+    } = plan.node(id)
+    {
+        if *optional || !matches!(call.args, BuiltinArgs::None) {
+            return None;
+        }
+        let element = match call.method {
+            BuiltinMethod::First => NdjsonDirectElement::First,
+            BuiltinMethod::Last => NdjsonDirectElement::Last,
+            _ => return None,
+        };
+        let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+            return None;
+        };
+        return Some((steps.clone(), element));
+    }
+
+    let PlanNode::Pipeline { source, body } = plan.node(id) else {
+        return None;
+    };
+    if !body.stages.is_empty() {
+        return None;
+    }
+    let element = match body.sink {
+        Sink::Terminal(BuiltinMethod::First) => NdjsonDirectElement::First,
+        Sink::Terminal(BuiltinMethod::Last) => NdjsonDirectElement::Last,
+        Sink::Nth(n) => NdjsonDirectElement::Nth(n),
+        _ => return None,
+    };
+    let source_steps = match source {
+        PipelinePlanSource::FieldChain { keys } => keys
+            .iter()
+            .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+            .collect(),
+        PipelinePlanSource::Expr(source) => {
+            let PlanNode::RootPath(steps) = plan.node(*source) else {
+                return None;
+            };
+            steps.clone()
+        }
+    };
+    Some((source_steps, element))
+}
+
+#[cfg(feature = "simd-json")]
+fn physical_chain_to_path(
+    steps: &[crate::ir::physical::PhysicalChainStep],
+) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+    steps
+        .iter()
+        .map(|step| match step {
+            crate::ir::physical::PhysicalChainStep::Field(key) => {
+                Some(crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+            }
+            crate::ir::physical::PhysicalChainStep::Index(idx) => {
+                Some(crate::ir::physical::PhysicalPathStep::Index(*idx))
+            }
+            crate::ir::physical::PhysicalChainStep::DynIndex(_) => None,
+        })
+        .collect()
+}
+
+#[cfg(feature = "simd-json")]
 trait JsonTape {
     fn nodes(&self) -> &[crate::data::tape::TapeNode];
     fn str_at(&self, idx: usize) -> &str;
@@ -1345,6 +1465,15 @@ fn json_tape_path_index<T: JsonTape>(
     tape: &T,
     steps: &[crate::ir::physical::PhysicalPathStep],
 ) -> Option<usize> {
+    json_tape_path_index_from(tape, 0, steps)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index_from<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
     use crate::data::tape::TapeNode;
     use crate::ir::physical::PhysicalPathStep;
 
@@ -1352,7 +1481,7 @@ fn json_tape_path_index<T: JsonTape>(
         return None;
     }
 
-    let mut idx = 0usize;
+    let mut idx = start;
     for step in steps {
         match step {
             PhysicalPathStep::Field(key) => {
@@ -1392,6 +1521,30 @@ fn json_tape_path_index<T: JsonTape>(
         }
     }
     Some(idx)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_array_element<T: JsonTape>(
+    tape: &T,
+    idx: usize,
+    element: NdjsonDirectElement,
+) -> Option<usize> {
+    let crate::data::tape::TapeNode::Array { len, .. } = tape.nodes().get(idx).copied()? else {
+        return None;
+    };
+    let wanted = match element {
+        NdjsonDirectElement::First => 0,
+        NdjsonDirectElement::Last => len.checked_sub(1)?,
+        NdjsonDirectElement::Nth(n) => n,
+    };
+    if wanted >= len {
+        return None;
+    }
+    let mut cur = idx + 1;
+    for _ in 0..wanted {
+        cur += tape.span(cur);
+    }
+    Some(cur)
 }
 
 #[cfg(feature = "simd-json")]
