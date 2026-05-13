@@ -15,9 +15,12 @@ use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
     write_ndjson_byte_tape_plan_row, BytePlanWrite,
 };
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+pub(super) use super::ndjson_direct::direct_byte_plan;
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
-    direct_byte_plan, direct_tape_plan, direct_tape_predicate, NdjsonDirectBytePlan,
+    direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
     NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
     NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
     NdjsonDirectStreamSink, NdjsonDirectTapePlan,
@@ -920,20 +923,18 @@ where
     W: Write,
 {
     #[cfg(feature = "simd-json")]
-    if let Some(byte_plan) = direct_byte_plan(engine, query) {
-        if let Some(tape_plan) = direct_tape_plan(engine, query) {
+    if let Some((byte_plan, tape_plan)) = direct_writer_plans(engine, query) {
+        if let Some(byte_plan) = byte_plan {
             return drive_ndjson_byte_writer(
                 engine, reader, &byte_plan, &tape_plan, limit, options, writer,
             );
         }
-    }
-
-    #[cfg(feature = "simd-json")]
-    if let Some(plan) = direct_tape_plan(engine, query) {
-        if tape_plan_can_write_byte_row(&plan) {
-            return drive_ndjson_tape_byte_writer(engine, reader, &plan, limit, options, writer);
+        if tape_plan_can_write_byte_row(&tape_plan) {
+            return drive_ndjson_tape_byte_writer(
+                engine, reader, &tape_plan, limit, options, writer,
+            );
         }
-        return drive_ndjson_tape_writer(engine, reader, &plan, limit, options, writer);
+        return drive_ndjson_tape_writer(engine, reader, &tape_plan, limit, options, writer);
     }
 
     let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);

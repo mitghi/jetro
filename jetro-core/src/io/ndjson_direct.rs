@@ -88,12 +88,33 @@ pub(super) enum NdjsonDirectStreamSink {
     },
 }
 
+#[cfg(test)]
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
     direct_byte_plan_inner(engine, query).or_else(|| {
         rootless_ndjson_query(query).and_then(|query| direct_byte_plan_inner(engine, query))
     })
 }
 
+pub(super) fn direct_writer_plans(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<(Option<NdjsonDirectBytePlan>, NdjsonDirectTapePlan)> {
+    direct_writer_plans_inner(engine, query).or_else(|| {
+        rootless_ndjson_query(query).and_then(|query| direct_writer_plans_inner(engine, query))
+    })
+}
+
+fn direct_writer_plans_inner(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<(Option<NdjsonDirectBytePlan>, NdjsonDirectTapePlan)> {
+    let plan = engine.cached_plan(query, PlanningContext::bytes());
+    let tape = direct_tape_plan_from_plan(&plan)?;
+    let byte = direct_byte_plan_from_plan(&plan);
+    Some((byte, tape))
+}
+
+#[cfg(test)]
 fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     direct_byte_plan_from_plan(&plan)
