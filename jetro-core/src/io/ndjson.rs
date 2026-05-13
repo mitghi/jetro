@@ -984,6 +984,7 @@ struct NdjsonTapeWriterRunner<'a, 'p> {
     source_path: NdjsonPathCache,
     suffix_path: NdjsonPathCache,
     predicate_path: NdjsonPathCache,
+    object_paths: Vec<NdjsonPathCache>,
 }
 
 #[cfg(feature = "simd-json")]
@@ -998,6 +999,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
             source_path: NdjsonPathCache::default(),
             suffix_path: NdjsonPathCache::default(),
             predicate_path: NdjsonPathCache::default(),
+            object_paths: Vec::new(),
         }
     }
 
@@ -1134,7 +1136,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                 write_val_json(writer, &value)?;
             }
             NdjsonDirectTapePlan::Object(fields) => {
-                write_json_tape_object_projection(writer, scratch, fields, &mut self.root_path)?;
+                write_json_tape_object_projection(writer, scratch, fields, &mut self.object_paths)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let (Some(vm), Some(env)) = (self.vm.as_deref_mut(), self.env.as_ref()) else {
@@ -2039,15 +2041,20 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
     fields: &[super::ndjson_direct::NdjsonDirectObjectField],
-    path_cache: &mut NdjsonPathCache,
+    path_caches: &mut Vec<NdjsonPathCache>,
 ) -> Result<(), JetroEngineError> {
+    if path_caches.len() < fields.len() {
+        path_caches.resize_with(fields.len(), NdjsonPathCache::default);
+    }
     writer.write_all(b"{")?;
     let mut wrote = false;
-    for field in fields {
-        let mut missing_or_null = false;
+    for (field_idx, field) in fields.iter().enumerate() {
+        let path_cache = &mut path_caches[field_idx];
+        let mut path_idx = None;
         match &field.value {
             NdjsonDirectObjectValue::Path(steps) => {
                 let idx = path_cache.index(tape, 0, steps);
+                path_idx = idx;
                 if field.optional
                     && idx
                         .map(|idx| {
@@ -2055,16 +2062,13 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                         })
                         .unwrap_or(true)
                 {
-                    missing_or_null = true;
+                    continue;
                 }
             }
             NdjsonDirectObjectValue::Literal(Val::Null) if field.optional => {
-                missing_or_null = true;
+                continue;
             }
             NdjsonDirectObjectValue::Literal(_) => {}
-        }
-        if missing_or_null {
-            continue;
         }
         if wrote {
             writer.write_all(b",")?;
@@ -2073,7 +2077,8 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
         writer.write_all(b":")?;
         match &field.value {
             NdjsonDirectObjectValue::Path(steps) => {
-                if let Some(idx) = path_cache.index(tape, 0, steps) {
+                let _ = steps;
+                if let Some(idx) = path_idx {
                     write_json_tape_at(writer, tape, idx)?;
                 } else {
                     writer.write_all(b"null")?;
