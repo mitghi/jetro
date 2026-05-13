@@ -1018,6 +1018,26 @@ fn write_ndjson_byte_plan_row<W: Write>(
             }
             RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
         },
+        NdjsonDirectBytePlan::RootFieldScalarCall { key, call } => {
+            match root_field_raw_value(row, key.as_ref()) {
+                RawFieldValue::Found(value) => {
+                    let Some(view) = raw_json_view(value) else {
+                        return Ok(BytePlanWrite::Fallback);
+                    };
+                    if let Some(value) = call.try_apply_json_view(view) {
+                        write_val_json(writer, &value)?;
+                    } else {
+                        writer.write_all(value)?;
+                    }
+                    Ok(BytePlanWrite::Done)
+                }
+                RawFieldValue::Missing => {
+                    writer.write_all(b"null")?;
+                    Ok(BytePlanWrite::Done)
+                }
+                RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
+            }
+        }
     }
 }
 
@@ -2293,6 +2313,99 @@ fn skip_json_value(row: &[u8], start: usize) -> Option<usize> {
             Some(pos)
         }
         _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_view(value: &[u8]) -> Option<crate::util::JsonView<'_>> {
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    if start >= end {
+        return None;
+    }
+    match value[start] {
+        b'n' if &value[start..end] == b"null" => Some(crate::util::JsonView::Null),
+        b't' if &value[start..end] == b"true" => Some(crate::util::JsonView::Bool(true)),
+        b'f' if &value[start..end] == b"false" => Some(crate::util::JsonView::Bool(false)),
+        b'"' => {
+            let (s, next) = parse_simple_json_string(value, start)?;
+            (skip_json_ws(value, next) == end)
+                .then(|| std::str::from_utf8(s).ok())
+                .flatten()
+                .map(crate::util::JsonView::Str)
+        }
+        b'[' => raw_json_array_len(value, start, end).map(crate::util::JsonView::ArrayLen),
+        b'{' => raw_json_object_len(value, start, end).map(crate::util::JsonView::ObjectLen),
+        b'-' | b'0'..=b'9' => raw_json_number_view(&value[start..end]),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn trim_json_ws_end(value: &[u8]) -> usize {
+    let mut end = value.len();
+    while end > 0 && matches!(value[end - 1], b' ' | b'\n' | b'\r' | b'\t') {
+        end -= 1;
+    }
+    end
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_number_view(value: &[u8]) -> Option<crate::util::JsonView<'_>> {
+    let s = std::str::from_utf8(value).ok()?;
+    if s.as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'.' | b'e' | b'E'))
+    {
+        return s.parse::<f64>().ok().map(crate::util::JsonView::Float);
+    }
+    if let Ok(value) = s.parse::<i64>() {
+        return Some(crate::util::JsonView::Int(value));
+    }
+    s.parse::<u64>().ok().map(crate::util::JsonView::UInt)
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_array_len(value: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut pos = skip_json_ws(value, start + 1);
+    if pos < end && value[pos] == b']' {
+        return (skip_json_ws(value, pos + 1) == end).then_some(0);
+    }
+    let mut len = 0usize;
+    loop {
+        pos = skip_json_ws(value, pos);
+        pos = skip_json_value(value, pos)?;
+        len += 1;
+        pos = skip_json_ws(value, pos);
+        match value.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => return (skip_json_ws(value, pos + 1) == end).then_some(len),
+            _ => return None,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_object_len(value: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut pos = skip_json_ws(value, start + 1);
+    if pos < end && value[pos] == b'}' {
+        return (skip_json_ws(value, pos + 1) == end).then_some(0);
+    }
+    let mut len = 0usize;
+    loop {
+        let (_, next) = parse_simple_json_string(value, pos)?;
+        pos = skip_json_ws(value, next);
+        if value.get(pos) != Some(&b':') {
+            return None;
+        }
+        pos = skip_json_value(value, skip_json_ws(value, pos + 1))?;
+        len += 1;
+        pos = skip_json_ws(value, pos);
+        match value.get(pos).copied() {
+            Some(b',') => pos = skip_json_ws(value, pos + 1),
+            Some(b'}') => return (skip_json_ws(value, pos + 1) == end).then_some(len),
+            _ => return None,
+        }
     }
 }
 

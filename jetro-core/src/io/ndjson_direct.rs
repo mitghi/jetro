@@ -12,6 +12,10 @@ pub(super) type NdjsonPhysicalPath = Vec<PhysicalPathStep>;
 #[derive(Clone)]
 pub(super) enum NdjsonDirectBytePlan {
     RootField(Arc<str>),
+    RootFieldScalarCall {
+        key: Arc<str>,
+        call: crate::builtins::BuiltinCall,
+    },
 }
 
 #[derive(Clone)]
@@ -88,19 +92,44 @@ pub(super) enum NdjsonDirectTapePlan {
 }
 
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
+    use crate::builtins::BuiltinMethod;
     use crate::ir::physical::QueryRoot;
 
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let QueryRoot::Node(root) = plan.root() else {
         return None;
     };
-    let PlanNode::RootPath(steps) = plan.node(*root) else {
-        return None;
-    };
-    let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
-        return None;
-    };
-    Some(NdjsonDirectBytePlan::RootField(key.clone()))
+    match plan.node(*root) {
+        PlanNode::RootPath(steps) => {
+            let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+                return None;
+            };
+            Some(NdjsonDirectBytePlan::RootField(key.clone()))
+        }
+        PlanNode::Call {
+            receiver,
+            call,
+            optional,
+        } if !*optional
+            && call.spec().view_scalar
+            && !matches!(
+                call.method,
+                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
+            ) =>
+        {
+            let PlanNode::RootPath(steps) = plan.node(*receiver) else {
+                return None;
+            };
+            let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+                return None;
+            };
+            Some(NdjsonDirectBytePlan::RootFieldScalarCall {
+                key: key.clone(),
+                call: call.clone(),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
