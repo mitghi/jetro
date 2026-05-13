@@ -183,10 +183,11 @@ written directly to an output stream.
 
 The cold path stays byte-first for common row-local shapes: root paths,
 scalar path calls, first/last/nth child access, path maps, filtered maps,
-filtered counts, numeric reducers, static projections, and match-limited
-predicates can execute directly on reusable simd-json tape scratch without
-building a per-row `serde_json::Value` tree. Stable row layouts also reuse
-verified field-position caches, with fallback when a row changes shape.
+array/object map projections, filtered counts, numeric reducers, static
+projections, object item methods such as `keys()`, and match-limited predicates
+can execute directly on reusable simd-json tape scratch without building a
+per-row `serde_json::Value` tree. Stable row layouts also reuse verified
+field-position caches, with fallback when a row changes shape.
 
 ```rust
 use jetro::JetroEngine;
@@ -262,9 +263,10 @@ For predicate matches, use
 `collect_ndjson_matches_source`, `run_ndjson_matches_source`,
 `collect_ndjson_rev_matches`, and `run_ndjson_rev_matches`.
 
-Reverse limit and reverse match APIs use the same byte/tape row execution path
-as forward NDJSON. For arbitrary reverse queries with caller-controlled early
-stop, use `for_each_ndjson_rev_until`.
+Reverse query writers, reverse limit writers, and reverse match APIs use the
+same byte/tape row execution path as forward NDJSON when a direct plan is
+available. For arbitrary reverse queries with caller-controlled early stop, use
+`for_each_ndjson_rev_until`.
 
 ## Quick Language Preview
 

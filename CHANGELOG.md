@@ -98,6 +98,15 @@
 - **NDJSON projection benchmark coverage**. The core NDJSON benchmark now
   includes object, scalar-call object, and array projection cases alongside
   path, filter, reducer, and match workloads.
+- **Wider NDJSON direct projection coverage**. Direct tape execution now covers
+  rooted scalar calls, object item methods (`keys`, `values`, `entries`),
+  array/object literals inside `map` and `filter(...).map`, and scalar calls on
+  first/last/nth array-element receivers. Rooted benchmark query shapes are
+  covered by direct-plan tests.
+- **Reverse NDJSON direct query writers**. `run_ndjson_rev*` now uses the same
+  direct tape row writer as forward NDJSON for eligible queries, including
+  reverse limit execution, instead of materializing each row through the
+  generic executor.
 
 ### Demand/tape architecture cleanup
 
