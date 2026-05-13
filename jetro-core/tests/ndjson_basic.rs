@@ -45,7 +45,10 @@ fn run_ndjson_writes_scalar_results_directly() {
     engine
         .run_ndjson(Cursor::new(input), "s", &mut string_out)
         .expect("string scalar should write");
-    assert_eq!(String::from_utf8(string_out).unwrap(), "\"a\\\"b\\\\c\\n\"\n");
+    assert_eq!(
+        String::from_utf8(string_out).unwrap(),
+        "\"a\\\"b\\\\c\\n\"\n"
+    );
 
     let mut bool_out = Vec::new();
     engine
@@ -77,6 +80,26 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         .run_ndjson(Cursor::new(input), "attributes.map(@.key)", &mut array_out)
         .expect("array projection should write");
     assert_eq!(String::from_utf8(array_out).unwrap(), "[\"a\",\"b\"]\n");
+
+    let mut filtered_map_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map(@.key)",
+            &mut filtered_map_out,
+        )
+        .expect("filtered array projection should write");
+    assert_eq!(String::from_utf8(filtered_map_out).unwrap(), "[\"b\"]\n");
+
+    let mut filtered_count_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).len()",
+            &mut filtered_count_out,
+        )
+        .expect("filtered count should write");
+    assert_eq!(String::from_utf8(filtered_count_out).unwrap(), "1\n");
 
     let mut object_out = Vec::new();
     engine
