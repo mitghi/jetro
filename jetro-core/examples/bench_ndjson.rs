@@ -30,6 +30,17 @@ fn bench(engine: &JetroEngine, data: &[u8], label: &str, query: &str) {
     println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
 }
 
+fn bench_matches(engine: &JetroEngine, data: &[u8], label: &str, predicate: &str, limit: usize) {
+    let start = Instant::now();
+    let rows = engine
+        .run_ndjson_matches(Cursor::new(data), predicate, limit, std::io::sink())
+        .expect("NDJSON match query should run");
+    let elapsed = start.elapsed();
+    let mb = data.len() as f64 / (1024.0 * 1024.0);
+    let mb_s = mb / elapsed.as_secs_f64();
+    println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
+}
+
 fn main() {
     let rows = std::env::args()
         .nth(1)
@@ -53,5 +64,14 @@ fn main() {
         &data,
         "filter nested count",
         r#"attributes.filter(@.value.contains("_3")).len()"#,
+    );
+    bench_matches(&engine, &data, "match active rows", "active", rows);
+    bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
+    bench_matches(
+        &engine,
+        &data,
+        "match nested contains",
+        r#"attributes.first().value.contains("_1")"#,
+        rows,
     );
 }
