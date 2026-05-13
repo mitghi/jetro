@@ -183,6 +183,28 @@ fn run_ndjson_writes_static_array_projection_directly() {
 }
 
 #[test]
+fn run_ndjson_direct_path_cache_handles_field_order_changes() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"Ada","score":10}
+{"score":20,"name":"Bob","id":2}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            r#"{id: id, name: name, score: score}"#,
+            &mut out,
+        )
+        .expect("direct projection should handle field order changes");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"name\":\"Ada\",\"score\":10}\n{\"id\":2,\"name\":\"Bob\",\"score\":20}\n"
+    );
+}
+
+#[test]
 fn run_ndjson_filtered_numeric_reduce_honors_scalar_source_predicate() {
     let engine = JetroEngine::new();
     let input = br#"{"attributes":{"active":false,"value":10}}
