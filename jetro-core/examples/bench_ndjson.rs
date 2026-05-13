@@ -57,13 +57,30 @@ fn main() {
     bench(&engine, &data, "root int field", "id");
     bench(&engine, &data, "root string field", "name");
     bench(&engine, &data, "array len", "attributes.len()");
-    bench(&engine, &data, "first nested value", "attributes.first().value");
+    bench(
+        &engine,
+        &data,
+        "first nested value",
+        "attributes.first().value",
+    );
     bench(&engine, &data, "map nested keys", "attributes.map(@.key)");
     bench(
         &engine,
         &data,
         "filter nested count",
         r#"attributes.filter(@.value.contains("_3")).len()"#,
+    );
+    bench(
+        &engine,
+        &data,
+        "filter numeric count",
+        "attributes.filter(@.value > \"v_100_1\").len()",
+    );
+    bench(
+        &engine,
+        &data,
+        "filter nested map keys",
+        r#"attributes.filter(@.value.contains("_3")).map(@.key)"#,
     );
     bench_matches(&engine, &data, "match active rows", "active", rows);
     bench_matches(&engine, &data, "match score > 9900", "score > 9900", rows);
