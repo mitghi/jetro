@@ -204,6 +204,16 @@ assert_eq!(ids, vec![
     serde_json::json!(2),
     serde_json::json!(3),
 ]);
+
+let rows = Cursor::new(br#"{"id":1,"name":"ada","score":10}
+{"id":2,"name":"bob","score":20}
+"#);
+let mut out = Vec::new();
+engine.run_ndjson(rows, r#"{id: id, name: name.upper(), score: score}"#, &mut out)?;
+assert_eq!(
+    std::str::from_utf8(&out)?,
+    "{\"id\":1,\"name\":\"ADA\",\"score\":10}\n{\"id\":2,\"name\":\"BOB\",\"score\":20}\n",
+);
 ```
 
 For first-N result queries, use the limit writers. They stop reading as soon as
