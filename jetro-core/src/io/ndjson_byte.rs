@@ -228,13 +228,22 @@ fn raw_json_path_value_demand<'a>(
     if rest.is_empty() {
         return RawFieldValue::Found(value);
     }
-    for step in rest {
+    for (idx, step) in rest.iter().enumerate() {
+        let is_last = idx + 1 == rest.len();
         value = match step {
-            PhysicalPathStep::Field(key) => match root_field_raw_value(value, key.as_ref()) {
-                RawFieldValue::Found(value) => value,
-                RawFieldValue::Missing => return RawFieldValue::Missing,
-                RawFieldValue::Fallback => return RawFieldValue::Fallback,
-            },
+            PhysicalPathStep::Field(key) => {
+                let found = match demand {
+                    Some(BytePathDemand::ArrayElement(element)) if is_last => {
+                        root_field_raw_value_for_element(value, key.as_ref(), element)
+                    }
+                    _ => root_field_raw_value(value, key.as_ref()),
+                };
+                match found {
+                    RawFieldValue::Found(value) => value,
+                    RawFieldValue::Missing => return RawFieldValue::Missing,
+                    RawFieldValue::Fallback => return RawFieldValue::Fallback,
+                }
+            }
             PhysicalPathStep::Index(index) => {
                 let Ok(index) = usize::try_from(*index) else {
                     return RawFieldValue::Missing;

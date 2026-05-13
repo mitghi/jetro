@@ -130,12 +130,12 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
     match plan.node(*root) {
         PlanNode::Chain { base, steps } => {
             let (source_steps, element) = direct_array_element_source(&plan, *base)?;
-            let [PhysicalPathStep::Field(key)] = source_steps.as_slice() else {
+            if !byte_path_has_root_field(&source_steps) {
                 return None;
-            };
+            }
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ArrayElementPath {
-                    source_steps: vec![PhysicalPathStep::Field(key.clone())],
+                    source_steps,
                     element,
                     suffix_steps: physical_chain_to_path(steps)?,
                 },
@@ -217,12 +217,12 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
         }
         _ => {
             if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
-                let [PhysicalPathStep::Field(key)] = source_steps.as_slice() else {
+                if !byte_path_has_root_field(&source_steps) {
                     return None;
-                };
+                }
                 return Some(NdjsonDirectBytePlan::Expr(
                     NdjsonDirectByteExpr::ArrayElementPath {
-                        source_steps: vec![PhysicalPathStep::Field(key.clone())],
+                        source_steps,
                         element,
                         suffix_steps: Vec::new(),
                     },
@@ -1024,10 +1024,7 @@ fn direct_array_element_source(
             }
             _ => return None,
         };
-        let PlanNode::RootPath(steps) = plan.node(*receiver) else {
-            return None;
-        };
-        return Some((steps.clone(), element));
+        return Some((node_path_steps(plan, *receiver)?, element));
     }
 
     let PlanNode::Pipeline { source, body } = plan.node(id) else {
@@ -1052,9 +1049,24 @@ fn direct_array_element_source(
     };
     let source_steps = match source {
         PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),
-        PipelinePlanSource::Expr(source) => root_path_steps(plan, *source)?,
+        PipelinePlanSource::Expr(source) => node_path_steps(plan, *source)?,
     };
     Some((source_steps, element))
+}
+
+fn node_path_steps(
+    plan: &QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<NdjsonPhysicalPath> {
+    match plan.node(id) {
+        PlanNode::RootPath(steps) => Some(steps.clone()),
+        PlanNode::Chain { base, steps } => {
+            let mut out = node_path_steps(plan, *base)?;
+            out.extend(physical_chain_to_path(steps)?);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 fn physical_chain_to_path(

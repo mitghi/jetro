@@ -3017,6 +3017,7 @@ mod tests {
             "$.values()",
             "$.entries()",
             "$.attributes.first().value",
+            "$.store.attributes.first().value",
             "$.attributes.first().key.upper()",
             "$.attributes.last().value",
             "$.attributes.nth(1).value",
@@ -3084,5 +3085,22 @@ mod tests {
             .run_ndjson(rows, "$.meta.keys()", &mut out)
             .expect("nested byte object items should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "[\"id\",\"kind\"]\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_uses_byte_paths_for_nested_array_demands() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}]}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}]}}
+"#,
+        );
+
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.store.attributes.first().value", &mut out)
+            .expect("nested byte array demand should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"c\"\n");
     }
 }
