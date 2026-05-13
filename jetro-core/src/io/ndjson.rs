@@ -955,7 +955,9 @@ where
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
     let mut vm = plan.needs_vm().then(|| engine.lock_vm());
-    let env = crate::data::context::Env::new(Val::Null);
+    let env = plan
+        .needs_vm()
+        .then(|| crate::data::context::Env::new(Val::Null));
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
         scratch.parse_slice(row).map_err(|message| {
@@ -1056,7 +1058,7 @@ where
                 write_val_json(&mut writer, &value)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
-                let Some(vm) = vm.as_deref_mut() else {
+                let (Some(vm), Some(env)) = (vm.as_deref_mut(), env.as_ref()) else {
                     return Err(JetroEngineError::Eval(crate::EvalError(
                         "NDJSON view pipeline requires VM state".to_string(),
                     )));
