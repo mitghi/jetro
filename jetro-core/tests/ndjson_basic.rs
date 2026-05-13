@@ -205,6 +205,28 @@ fn run_ndjson_direct_path_cache_handles_field_order_changes() {
 }
 
 #[test]
+fn run_ndjson_direct_path_cache_handles_nested_field_order_changes() {
+    let engine = JetroEngine::new();
+    let input = br#"{"user":{"name":"Ada","profile":{"score":10,"city":"Berlin"}}}
+{"user":{"profile":{"city":"Paris","score":20},"name":"Bob"}}
+"#;
+    let mut out = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            r#"{name: user.name, city: user.profile.city, score: user.profile.score}"#,
+            &mut out,
+        )
+        .expect("direct projection should handle nested field order changes");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"name\":\"Ada\",\"city\":\"Berlin\",\"score\":10}\n{\"name\":\"Bob\",\"city\":\"Paris\",\"score\":20}\n"
+    );
+}
+
+#[test]
 fn run_ndjson_filtered_numeric_reduce_honors_scalar_source_predicate() {
     let engine = JetroEngine::new();
     let input = br#"{"attributes":{"active":false,"value":10}}

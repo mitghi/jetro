@@ -1166,7 +1166,7 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
 #[cfg(feature = "simd-json")]
 #[derive(Default)]
 pub(super) struct NdjsonPathCache {
-    first_field: Option<NdjsonFieldCache>,
+    fields: Vec<Option<NdjsonFieldCache>>,
 }
 
 #[cfg(feature = "simd-json")]
@@ -1191,21 +1191,43 @@ impl NdjsonPathCache {
         start: usize,
         steps: &[crate::ir::physical::PhysicalPathStep],
     ) -> Option<usize> {
+        self.index_from_depth(tape, start, steps, 0)
+    }
+
+    fn index_from_depth<T: JsonTape>(
+        &mut self,
+        tape: &T,
+        start: usize,
+        steps: &[crate::ir::physical::PhysicalPathStep],
+        depth: usize,
+    ) -> Option<usize> {
         use crate::ir::physical::PhysicalPathStep;
 
-        let [PhysicalPathStep::Field(key), rest @ ..] = steps else {
-            return json_tape_path_index_from(tape, start, steps);
-        };
+        match steps {
+            [] => Some(start),
+            [PhysicalPathStep::Field(key), rest @ ..] => {
+                if self.fields.len() <= depth {
+                    self.fields.resize(depth + 1, None);
+                }
 
-        if let Some(field) = self.first_field.filter(|field| field.key_delta > 1) {
-            if let Some(idx) = json_tape_object_cached_field(tape, start, field, key.as_ref()) {
-                return json_tape_path_index_from(tape, idx, rest);
+                if let Some(field) = self.fields[depth].filter(|field| field.key_delta > 1) {
+                    if let Some(idx) =
+                        json_tape_object_cached_field(tape, start, field, key.as_ref())
+                    {
+                        return self.index_from_depth(tape, idx, rest, depth + 1);
+                    }
+                }
+
+                let (idx, field) =
+                    json_tape_object_field_index_and_cache(tape, start, key.as_ref())?;
+                self.fields[depth] = Some(field);
+                self.index_from_depth(tape, idx, rest, depth + 1)
+            }
+            [step, rest @ ..] => {
+                let idx = json_tape_step_index(tape, start, step)?;
+                self.index_from_depth(tape, idx, rest, depth + 1)
             }
         }
-
-        let (idx, field) = json_tape_object_field_index_and_cache(tape, start, key.as_ref())?;
-        self.first_field = Some(field);
-        json_tape_path_index_from(tape, idx, rest)
     }
 }
 
