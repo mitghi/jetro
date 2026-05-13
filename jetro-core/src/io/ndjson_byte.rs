@@ -70,7 +70,7 @@ pub(super) fn write_ndjson_byte_plan_row<W: Write>(
             key,
             element,
             suffix_steps,
-        } => match root_field_raw_value(row, key.as_ref()) {
+        } => match root_field_raw_value_for_element(row, key.as_ref(), *element) {
             RawFieldValue::Found(value) => {
                 let Some(element) = raw_json_array_element(value, *element) else {
                     writer.write_all(b"null")?;
@@ -161,6 +161,53 @@ fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
         if field_key == key.as_bytes() {
             return RawFieldValue::Found(&row[value_start..value_end]);
         }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b'}') => return RawFieldValue::Missing,
+            _ => return RawFieldValue::Fallback,
+        }
+    }
+}
+
+fn root_field_raw_value_for_element<'a>(
+    row: &'a [u8],
+    key: &str,
+    element: NdjsonDirectElement,
+) -> RawFieldValue<'a> {
+    if matches!(element, NdjsonDirectElement::Last) {
+        return root_field_raw_value(row, key);
+    }
+    root_field_raw_value_prefix(row, key)
+}
+
+fn root_field_raw_value_prefix<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
+    let mut pos = skip_json_ws(row, 0);
+    if row.get(pos) != Some(&b'{') {
+        return RawFieldValue::Fallback;
+    }
+    pos += 1;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied() {
+            Some(b'}') => return RawFieldValue::Missing,
+            Some(b'"') => {}
+            _ => return RawFieldValue::Fallback,
+        }
+        let Some((field_key, next)) = parse_simple_json_string(row, pos) else {
+            return RawFieldValue::Fallback;
+        };
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return RawFieldValue::Fallback;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        if field_key == key.as_bytes() {
+            return RawFieldValue::Found(&row[value_start..]);
+        }
+        let Some(value_end) = skip_json_value(row, value_start) else {
+            return RawFieldValue::Fallback;
+        };
         pos = skip_json_ws(row, value_end);
         match row.get(pos).copied() {
             Some(b',') => pos += 1,

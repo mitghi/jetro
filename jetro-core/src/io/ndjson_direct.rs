@@ -100,6 +100,12 @@ pub(super) enum NdjsonDirectTapePlan {
 }
 
 pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
+    direct_byte_plan_inner(engine, query).or_else(|| {
+        rootless_ndjson_query(query).and_then(|query| direct_byte_plan_inner(engine, query))
+    })
+}
+
+fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectBytePlan> {
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
@@ -160,9 +166,11 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
             let PlanNode::RootPath(steps) = plan.node(*receiver) else {
                 return None;
             };
-            steps.is_empty().then_some(NdjsonDirectBytePlan::RootObjectItems {
-                method: call.method,
-            })
+            steps
+                .is_empty()
+                .then_some(NdjsonDirectBytePlan::RootObjectItems {
+                    method: call.method,
+                })
         }
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
@@ -282,6 +290,12 @@ pub(super) enum NdjsonDirectItemPredicate {
 }
 
 pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
+    direct_tape_plan_inner(engine, query).or_else(|| {
+        rootless_ndjson_query(query).and_then(|query| direct_tape_plan_inner(engine, query))
+    })
+}
+
+fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
     use crate::builtins::{BuiltinArgs, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
@@ -361,7 +375,8 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
         } if matches!(
             call.method,
             BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
-        ) && matches!(call.args, BuiltinArgs::None) && !*optional =>
+        ) && matches!(call.args, BuiltinArgs::None)
+            && !*optional =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
                 steps: root_path_steps(&plan, *receiver)?,
@@ -499,11 +514,30 @@ pub(super) fn direct_tape_predicate(
     engine: &JetroEngine,
     predicate: &str,
 ) -> Option<NdjsonDirectPredicate> {
+    direct_tape_predicate_inner(engine, predicate).or_else(|| {
+        rootless_ndjson_query(predicate)
+            .and_then(|query| direct_tape_predicate_inner(engine, query))
+    })
+}
+
+fn direct_tape_predicate_inner(
+    engine: &JetroEngine,
+    predicate: &str,
+) -> Option<NdjsonDirectPredicate> {
     let plan = engine.cached_plan(predicate, PlanningContext::bytes());
     let crate::ir::physical::QueryRoot::Node(root) = plan.root() else {
         return None;
     };
     direct_tape_predicate_node(&plan, *root)
+}
+
+fn rootless_ndjson_query(query: &str) -> Option<&str> {
+    query.strip_prefix("$.").filter(|query| {
+        query
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+    })
 }
 
 fn direct_tape_predicate_node(
@@ -818,9 +852,9 @@ fn direct_projection_value_from_kernel(
     match kernel {
         crate::exec::pipeline::BodyKernel::Current
         | crate::exec::pipeline::BodyKernel::FieldRead(_)
-        | crate::exec::pipeline::BodyKernel::FieldChain(_) => {
-            Some(NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?))
-        }
+        | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
+            NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?),
+        ),
         crate::exec::pipeline::BodyKernel::Const(value) => {
             Some(NdjsonDirectProjectionValue::Literal(value.clone()))
         }
@@ -942,6 +976,12 @@ fn direct_array_element_source(
         let element = match call.method {
             BuiltinMethod::First => NdjsonDirectElement::First,
             BuiltinMethod::Last => NdjsonDirectElement::Last,
+            BuiltinMethod::Nth => {
+                let crate::builtins::BuiltinArgs::I64(n) = &call.args else {
+                    return None;
+                };
+                NdjsonDirectElement::Nth(usize::try_from(*n).ok()?)
+            }
             _ => return None,
         };
         let PlanNode::RootPath(steps) = plan.node(*receiver) else {
