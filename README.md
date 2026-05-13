@@ -183,9 +183,10 @@ written directly to an output stream.
 
 The cold path stays byte-first for common row-local shapes: root paths,
 scalar path calls, first/last/nth child access, path maps, filtered maps,
-filtered counts, numeric reducers, and match-limited predicates can execute
-directly on reusable simd-json tape scratch without building a per-row
-`serde_json::Value` tree.
+filtered counts, numeric reducers, static projections, and match-limited
+predicates can execute directly on reusable simd-json tape scratch without
+building a per-row `serde_json::Value` tree. Stable row layouts also reuse
+verified field-position caches, with fallback when a row changes shape.
 
 ```rust
 use jetro::JetroEngine;
