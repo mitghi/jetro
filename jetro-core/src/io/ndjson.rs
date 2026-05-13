@@ -1021,6 +1021,9 @@ fn write_ndjson_byte_plan_row<W: Write>(
         NdjsonDirectBytePlan::RootFieldScalarCall { key, call } => {
             match root_field_raw_value(row, key.as_ref()) {
                 RawFieldValue::Found(value) => {
+                    if write_raw_string_case_call(writer, value, call.method)? {
+                        return Ok(BytePlanWrite::Done);
+                    }
                     let Some(view) = raw_json_view(value) else {
                         return Ok(BytePlanWrite::Fallback);
                     };
@@ -2453,6 +2456,43 @@ fn raw_json_view(value: &[u8]) -> Option<crate::util::JsonView<'_>> {
 }
 
 #[cfg(feature = "simd-json")]
+fn write_raw_string_case_call<W: Write>(
+    writer: &mut W,
+    value: &[u8],
+    method: crate::builtins::BuiltinMethod,
+) -> Result<bool, JetroEngineError> {
+    if !matches!(
+        method,
+        crate::builtins::BuiltinMethod::Upper | crate::builtins::BuiltinMethod::Lower
+    ) {
+        return Ok(false);
+    }
+    let start = skip_json_ws(value, 0);
+    let Some((s, next)) = parse_simple_json_string(value, start) else {
+        return Ok(false);
+    };
+    if skip_json_ws(value, next) != trim_json_ws_end(value) || !s.is_ascii() {
+        return Ok(false);
+    }
+    writer.write_all(b"\"")?;
+    match method {
+        crate::builtins::BuiltinMethod::Upper => {
+            for &byte in s {
+                writer.write_all(&[byte.to_ascii_uppercase()])?;
+            }
+        }
+        crate::builtins::BuiltinMethod::Lower => {
+            for &byte in s {
+                writer.write_all(&[byte.to_ascii_lowercase()])?;
+            }
+        }
+        _ => unreachable!("case method checked"),
+    }
+    writer.write_all(b"\"")?;
+    Ok(true)
+}
+
+#[cfg(feature = "simd-json")]
 fn raw_json_view_len(value: crate::util::JsonView<'_>) -> Option<i64> {
     match value {
         crate::util::JsonView::Str(value) => Some(value.chars().count() as i64),
@@ -2546,30 +2586,50 @@ fn raw_json_array_element(
         return None;
     }
     let wanted = match element {
-        NdjsonDirectElement::First => Some(0usize),
-        NdjsonDirectElement::Nth(n) => Some(n),
-        NdjsonDirectElement::Last => None,
+        NdjsonDirectElement::First => 0usize,
+        NdjsonDirectElement::Nth(n) => n,
+        NdjsonDirectElement::Last => return raw_json_last_array_element(value, pos),
     };
     let mut idx = 0usize;
-    let mut last: Option<&[u8]> = None;
     loop {
         let value_start = skip_json_ws(value, pos);
         let value_end = skip_json_value(value, value_start)?;
-        if wanted == Some(idx) {
+        if wanted == idx {
             return Some(&value[value_start..value_end]);
         }
-        last = Some(&value[value_start..value_end]);
         idx += 1;
         pos = skip_json_ws(value, value_end);
         match value.get(pos).copied() {
             Some(b',') => pos += 1,
-            Some(b']') => {
-                return if matches!(element, NdjsonDirectElement::Last) {
-                    last
-                } else {
-                    None
-                };
-            }
+            Some(b']') => return None,
+            _ => return None,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_last_array_element(value: &[u8], mut pos: usize) -> Option<&[u8]> {
+    let first_start = skip_json_ws(value, pos);
+    let first_end = skip_json_value(value, first_start)?;
+    let mut last_start = first_start;
+    let mut last_end = first_end;
+    pos = skip_json_ws(value, first_end);
+    if value.get(pos) == Some(&b']') {
+        return Some(&value[last_start..last_end]);
+    }
+    loop {
+        match value.get(pos).copied() {
+            Some(b',') => pos += 1,
+            _ => return None,
+        }
+        let value_start = skip_json_ws(value, pos);
+        let value_end = skip_json_value(value, value_start)?;
+        last_start = value_start;
+        last_end = value_end;
+        pos = skip_json_ws(value, value_end);
+        match value.get(pos).copied() {
+            Some(b']') => return Some(&value[last_start..last_end]),
+            Some(b',') => {}
             _ => return None,
         }
     }
