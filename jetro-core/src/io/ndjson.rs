@@ -1197,7 +1197,7 @@ impl NdjsonPathCache {
             return json_tape_path_index_from(tape, start, steps);
         };
 
-        if let Some(field) = self.first_field {
+        if let Some(field) = self.first_field.filter(|field| field.key_delta > 1) {
             if let Some(idx) = json_tape_object_cached_field(tape, start, field, key.as_ref()) {
                 return json_tape_path_index_from(tape, idx, rest);
             }
