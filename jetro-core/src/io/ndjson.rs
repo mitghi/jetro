@@ -10,6 +10,12 @@ use std::io::{BufRead, BufWriter, Write};
 use std::path::Path;
 use std::sync::MutexGuard;
 
+#[cfg(feature = "simd-json")]
+pub(super) use super::ndjson_direct::{
+    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate, NdjsonDirectTapePlan,
+    NdjsonPhysicalPath,
+};
+
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 const DEFAULT_READER_BUFFER_CAPACITY: usize = 64 * 1024;
@@ -927,109 +933,6 @@ where
 
     writer.flush()?;
     Ok(count)
-}
-
-#[cfg(feature = "simd-json")]
-#[derive(Clone)]
-enum NdjsonDirectTapePlan {
-    RootPath(NdjsonPhysicalPath),
-    ViewScalarCall {
-        steps: NdjsonPhysicalPath,
-        call: crate::builtins::BuiltinCall,
-        optional: bool,
-    },
-    ArrayElementPath {
-        source_steps: NdjsonPhysicalPath,
-        element: NdjsonDirectElement,
-        suffix_steps: NdjsonPhysicalPath,
-    },
-    MapPath {
-        source_steps: NdjsonPhysicalPath,
-        suffix_steps: NdjsonPhysicalPath,
-    },
-    FilterMapPath {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        suffix_steps: NdjsonPhysicalPath,
-    },
-    CountFiltered {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-    },
-    NumericReducePath {
-        source_steps: NdjsonPhysicalPath,
-        suffix_steps: NdjsonPhysicalPath,
-        op: crate::exec::pipeline::NumOp,
-    },
-    FilterNumericReducePath {
-        source_steps: NdjsonPhysicalPath,
-        predicate: NdjsonDirectItemPredicate,
-        suffix_steps: NdjsonPhysicalPath,
-        op: crate::exec::pipeline::NumOp,
-    },
-    ViewPipeline {
-        source_steps: NdjsonPhysicalPath,
-        body: crate::exec::pipeline::PipelineBody,
-    },
-}
-
-#[cfg(feature = "simd-json")]
-type NdjsonPhysicalPath = Vec<crate::ir::physical::PhysicalPathStep>;
-
-#[cfg(feature = "simd-json")]
-#[derive(Clone, Copy)]
-pub(super) enum NdjsonDirectElement {
-    First,
-    Last,
-    Nth(usize),
-}
-
-#[cfg(feature = "simd-json")]
-#[derive(Clone)]
-pub(super) enum NdjsonDirectPredicate {
-    Path(NdjsonPhysicalPath),
-    Literal(Val),
-    Not(Box<NdjsonDirectPredicate>),
-    Binary {
-        lhs: Box<NdjsonDirectPredicate>,
-        op: crate::parse::ast::BinOp,
-        rhs: Box<NdjsonDirectPredicate>,
-    },
-    ViewScalarCall {
-        steps: NdjsonPhysicalPath,
-        call: crate::builtins::BuiltinCall,
-    },
-    ArrayElementViewScalarCall {
-        source_steps: NdjsonPhysicalPath,
-        element: NdjsonDirectElement,
-        suffix_steps: NdjsonPhysicalPath,
-        call: crate::builtins::BuiltinCall,
-    },
-    ViewPipeline {
-        source_steps: NdjsonPhysicalPath,
-        body: crate::exec::pipeline::PipelineBody,
-    },
-}
-
-#[cfg(feature = "simd-json")]
-#[derive(Clone)]
-enum NdjsonDirectItemPredicate {
-    Path(NdjsonPhysicalPath),
-    Literal(Val),
-    Binary {
-        lhs: Box<NdjsonDirectItemPredicate>,
-        op: crate::parse::ast::BinOp,
-        rhs: Box<NdjsonDirectItemPredicate>,
-    },
-    CmpLit {
-        lhs: NdjsonPhysicalPath,
-        op: crate::parse::ast::BinOp,
-        lit: Val,
-    },
-    ViewScalarCall {
-        suffix_steps: NdjsonPhysicalPath,
-        call: crate::builtins::BuiltinCall,
-    },
 }
 
 #[cfg(feature = "simd-json")]

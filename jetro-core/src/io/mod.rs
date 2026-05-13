@@ -4,6 +4,8 @@
 //! reusing the caller's [`crate::JetroEngine`] plan and VM caches.
 
 mod ndjson;
+#[cfg(feature = "simd-json")]
+mod ndjson_direct;
 mod ndjson_rev;
 mod source;
 
