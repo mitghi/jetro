@@ -73,6 +73,12 @@ fn main() {
     bench(
         &engine,
         &data,
+        "map nested objects",
+        "attributes.map({key: @.key, value: @.value})",
+    );
+    bench(
+        &engine,
+        &data,
         "filter nested count",
         r#"attributes.filter(@.value.contains("_3")).len()"#,
     );
@@ -87,6 +93,12 @@ fn main() {
         &data,
         "filter nested map keys",
         r#"attributes.filter(@.value.contains("_3")).map(@.key)"#,
+    );
+    bench(
+        &engine,
+        &data,
+        "filter nested map pairs",
+        r#"attributes.filter(@.value.contains("_3")).map([@.key, @.value])"#,
     );
     bench(
         &engine,

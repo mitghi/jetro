@@ -94,6 +94,19 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         "[[\"a\",1],[\"b\",2]]\n"
     );
 
+    let mut object_map_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.map({k: @.key, v: @.value})",
+            &mut object_map_out,
+        )
+        .expect("object map projection should write");
+    assert_eq!(
+        String::from_utf8(object_map_out).unwrap(),
+        "[{\"k\":\"a\",\"v\":1},{\"k\":\"b\",\"v\":2}]\n"
+    );
+
     let mut filtered_map_out = Vec::new();
     engine
         .run_ndjson(
@@ -103,6 +116,32 @@ fn run_ndjson_writes_array_and_object_results_directly() {
         )
         .expect("filtered array projection should write");
     assert_eq!(String::from_utf8(filtered_map_out).unwrap(), "[\"b\"]\n");
+
+    let mut filtered_pair_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map([@.key, @.value])",
+            &mut filtered_pair_out,
+        )
+        .expect("filtered array pair projection should write");
+    assert_eq!(
+        String::from_utf8(filtered_pair_out).unwrap(),
+        "[[\"b\",2]]\n"
+    );
+
+    let mut filtered_object_out = Vec::new();
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "attributes.filter(@.value > 1).map({k: @.key, v: @.value})",
+            &mut filtered_object_out,
+        )
+        .expect("filtered object projection should write");
+    assert_eq!(
+        String::from_utf8(filtered_object_out).unwrap(),
+        "[{\"k\":\"b\",\"v\":2}]\n"
+    );
 
     let mut filtered_count_out = Vec::new();
     engine

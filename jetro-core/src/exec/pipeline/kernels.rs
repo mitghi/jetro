@@ -182,6 +182,10 @@ impl ObjectKernel {
             .into()
     }
 
+    pub(crate) fn entries(&self) -> &[ObjectKernelEntry] {
+        &self.entries
+    }
+
     /// Evaluates each entry against `item`, appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
     pub(crate) fn eval_view_row_cells<'a, V>(&self, item: &V, cells: &mut Vec<Val>) -> Option<bool>
     where
@@ -229,6 +233,24 @@ impl ObjectKernel {
         self.entries.iter().fold(FieldDemand::None, |need, entry| {
             need.merge(entry.value.field_demand())
         })
+    }
+}
+
+impl ObjectKernelEntry {
+    pub(crate) fn key(&self) -> &Arc<str> {
+        &self.key
+    }
+
+    pub(crate) fn value(&self) -> &BodyKernel {
+        &self.value
+    }
+
+    pub(crate) fn optional(&self) -> bool {
+        self.optional
+    }
+
+    pub(crate) fn omit_null(&self) -> bool {
+        self.omit_null
     }
 }
 
