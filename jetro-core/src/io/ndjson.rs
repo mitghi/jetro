@@ -2065,6 +2065,21 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                     continue;
                 }
             }
+            NdjsonDirectObjectValue::ViewScalarCall {
+                steps, optional, ..
+            } => {
+                let idx = path_cache.index(tape, 0, steps);
+                path_idx = idx;
+                if (*optional || field.optional)
+                    && idx
+                        .map(|idx| {
+                            matches!(json_tape_scalar(tape, idx), crate::util::JsonView::Null)
+                        })
+                        .unwrap_or(true)
+                {
+                    continue;
+                }
+            }
             NdjsonDirectObjectValue::Literal(Val::Null) if field.optional => {
                 continue;
             }
@@ -2080,6 +2095,18 @@ fn write_json_tape_object_projection<W: Write, T: JsonTape>(
                 let _ = steps;
                 if let Some(idx) = path_idx {
                     write_json_tape_at(writer, tape, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectObjectValue::ViewScalarCall { call, .. } => {
+                if let Some(idx) = path_idx {
+                    let value = json_tape_scalar(tape, idx);
+                    if let Some(value) = call.try_apply_json_view(value) {
+                        write_val_json(writer, &value)?;
+                    } else {
+                        write_json_tape_at(writer, tape, idx)?;
+                    }
                 } else {
                     writer.write_all(b"null")?;
                 }

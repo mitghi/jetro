@@ -60,6 +60,11 @@ pub(super) struct NdjsonDirectObjectField {
 #[derive(Clone)]
 pub(super) enum NdjsonDirectObjectValue {
     Path(NdjsonPhysicalPath),
+    ViewScalarCall {
+        steps: NdjsonPhysicalPath,
+        call: crate::builtins::BuiltinCall,
+        optional: bool,
+    },
     Literal(Val),
 }
 
@@ -226,6 +231,15 @@ fn direct_tape_object_plan(
         };
         let value = match plan.node(*val) {
             PlanNode::RootPath(steps) => NdjsonDirectObjectValue::Path(steps.clone()),
+            PlanNode::Call {
+                receiver,
+                call,
+                optional,
+            } if call.spec().view_scalar => NdjsonDirectObjectValue::ViewScalarCall {
+                steps: root_path_steps(plan, *receiver)?,
+                call: call.clone(),
+                optional: *optional,
+            },
             PlanNode::Literal(value) => NdjsonDirectObjectValue::Literal(value.clone()),
             _ => return None,
         };
