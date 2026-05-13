@@ -1418,53 +1418,75 @@ fn json_tape_path_index_from<T: JsonTape>(
     start: usize,
     steps: &[crate::ir::physical::PhysicalPathStep],
 ) -> Option<usize> {
-    use crate::data::tape::TapeNode;
-    use crate::ir::physical::PhysicalPathStep;
-
     if tape.nodes().is_empty() {
         return None;
     }
 
+    return match steps {
+        [] => Some(start),
+        [step] => json_tape_step_index(tape, start, step),
+        [first, second] => json_tape_step_index(tape, start, first)
+            .and_then(|idx| json_tape_step_index(tape, idx, second)),
+        _ => json_tape_path_index_slow(tape, start, steps),
+    };
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_path_index_slow<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<usize> {
     let mut idx = start;
     for step in steps {
-        match step {
-            PhysicalPathStep::Field(key) => {
-                let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
-                    return None;
-                };
-                let mut cur = idx + 1;
-                let mut found = None;
-                for _ in 0..len {
-                    if tape.str_at(cur) == key.as_ref() {
-                        found = Some(cur + 1);
-                        break;
-                    }
-                    cur += 1;
-                    cur += tape.span(cur);
-                }
-                idx = found?;
-            }
-            PhysicalPathStep::Index(wanted) => {
-                let TapeNode::Array { len, .. } = tape.nodes()[idx] else {
-                    return None;
-                };
-                let wanted = if *wanted < 0 {
-                    len.checked_sub(wanted.unsigned_abs() as usize)?
-                } else {
-                    *wanted as usize
-                };
-                if wanted >= len {
-                    return None;
-                }
-                let mut cur = idx + 1;
-                for _ in 0..wanted {
-                    cur += tape.span(cur);
-                }
-                idx = cur;
-            }
-        }
+        idx = json_tape_step_index(tape, idx, step)?;
     }
     Some(idx)
+}
+
+#[cfg(feature = "simd-json")]
+fn json_tape_step_index<T: JsonTape>(
+    tape: &T,
+    start: usize,
+    step: &crate::ir::physical::PhysicalPathStep,
+) -> Option<usize> {
+    use crate::data::tape::TapeNode;
+    use crate::ir::physical::PhysicalPathStep;
+
+    match step {
+        PhysicalPathStep::Field(key) => {
+            let TapeNode::Object { len, .. } = tape.nodes()[start] else {
+                return None;
+            };
+            let mut cur = start + 1;
+            for _ in 0..len {
+                if tape.str_at(cur) == key.as_ref() {
+                    return Some(cur + 1);
+                }
+                cur += 1;
+                cur += tape.span(cur);
+            }
+            None
+        }
+        PhysicalPathStep::Index(wanted) => {
+            let TapeNode::Array { len, .. } = tape.nodes()[start] else {
+                return None;
+            };
+            let wanted = if *wanted < 0 {
+                len.checked_sub(wanted.unsigned_abs() as usize)?
+            } else {
+                *wanted as usize
+            };
+            if wanted >= len {
+                return None;
+            }
+            let mut cur = start + 1;
+            for _ in 0..wanted {
+                cur += tape.span(cur);
+            }
+            Some(cur)
+        }
+    }
 }
 
 #[cfg(feature = "simd-json")]
