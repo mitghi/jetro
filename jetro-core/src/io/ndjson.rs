@@ -2213,7 +2213,6 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
     predicate_cache: &mut NdjsonPathCache,
     projection_caches: &mut Vec<NdjsonPathCache>,
 ) -> Result<(), JetroEngineError> {
-    writer.write_all(b"[")?;
     let Some(source_idx) = source_cache.index(tape, 0, &plan.source_steps) else {
         write_json_tape_empty_stream_result(writer, &plan.sink)?;
         return Ok(());
