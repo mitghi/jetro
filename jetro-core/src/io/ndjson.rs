@@ -2964,6 +2964,7 @@ mod tests {
         let engine = crate::JetroEngine::new();
         for query in [
             "$.id",
+            "$.meta.id",
             "$.name",
             "$.attributes.len()",
             "$.attributes.map(@.key)",
@@ -3057,5 +3058,29 @@ mod tests {
             .expect("byte count should write");
         assert!(matches!(wrote, super::BytePlanWrite::Done));
         assert_eq!(out, b"2");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_uses_byte_paths_for_nested_object_items() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"meta":{"id":1,"kind":"a"}}
+{"meta":{"id":2,"kind":"b"}}
+"#,
+        );
+
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.meta.id", &mut out)
+            .expect("nested byte path should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n");
+
+        let rows = std::io::Cursor::new(br#"{"meta":{"id":1,"kind":"a"}}"#);
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.meta.keys()", &mut out)
+            .expect("nested byte object items should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "[\"id\",\"kind\"]\n");
     }
 }
