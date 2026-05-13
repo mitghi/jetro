@@ -954,10 +954,7 @@ where
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
-    let mut vm = plan.needs_vm().then(|| engine.lock_vm());
-    let env = plan
-        .needs_vm()
-        .then(|| crate::data::context::Env::new(Val::Null));
+    let mut runner = NdjsonTapeWriterRunner::new(engine, plan);
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
         scratch.parse_slice(row).map_err(|message| {
@@ -966,126 +963,7 @@ where
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        match plan {
-            NdjsonDirectTapePlan::RootPath(steps) => {
-                if let Some(idx) = json_tape_path_index(&scratch, steps) {
-                    write_json_tape_at(&mut writer, &scratch, idx)?;
-                } else {
-                    writer.write_all(b"null")?;
-                }
-            }
-            NdjsonDirectTapePlan::ViewScalarCall {
-                steps,
-                call,
-                optional,
-            } => {
-                let idx = json_tape_path_index(&scratch, steps);
-                let value = idx
-                    .map(|idx| json_tape_scalar(&scratch, idx))
-                    .unwrap_or(crate::util::JsonView::Null);
-                if *optional && matches!(value, crate::util::JsonView::Null) {
-                    writer.write_all(b"null")?;
-                } else if let Some(value) = call.try_apply_json_view(value) {
-                    write_val_json(&mut writer, &value)?;
-                } else if let Some(idx) = idx {
-                    write_json_tape_at(&mut writer, &scratch, idx)?;
-                } else {
-                    writer.write_all(b"null")?;
-                }
-            }
-            NdjsonDirectTapePlan::ArrayElementPath {
-                source_steps,
-                element,
-                suffix_steps,
-            } => {
-                let idx = json_tape_path_index(&scratch, source_steps)
-                    .and_then(|idx| json_tape_array_element(&scratch, idx, *element))
-                    .and_then(|idx| json_tape_path_index_from(&scratch, idx, suffix_steps));
-                if let Some(idx) = idx {
-                    write_json_tape_at(&mut writer, &scratch, idx)?;
-                } else {
-                    writer.write_all(b"null")?;
-                }
-            }
-            NdjsonDirectTapePlan::MapPath {
-                source_steps,
-                suffix_steps,
-            } => {
-                write_json_tape_map_path(&mut writer, &scratch, source_steps, suffix_steps)?;
-            }
-            NdjsonDirectTapePlan::FilterMapPath {
-                source_steps,
-                predicate,
-                suffix_steps,
-            } => {
-                write_json_tape_filter_map_path(
-                    &mut writer,
-                    &scratch,
-                    source_steps,
-                    predicate,
-                    suffix_steps,
-                )?;
-            }
-            NdjsonDirectTapePlan::CountFiltered {
-                source_steps,
-                predicate,
-            } => {
-                let count = count_json_tape_filtered(&scratch, source_steps, predicate);
-                write_i64(&mut writer, count as i64)?;
-            }
-            NdjsonDirectTapePlan::NumericReducePath {
-                source_steps,
-                suffix_steps,
-                op,
-            } => {
-                let value =
-                    reduce_json_tape_numeric_path(&scratch, source_steps, None, suffix_steps, *op);
-                write_val_json(&mut writer, &value)?;
-            }
-            NdjsonDirectTapePlan::FilterNumericReducePath {
-                source_steps,
-                predicate,
-                suffix_steps,
-                op,
-            } => {
-                let value = reduce_json_tape_numeric_path(
-                    &scratch,
-                    source_steps,
-                    Some(predicate),
-                    suffix_steps,
-                    *op,
-                );
-                write_val_json(&mut writer, &value)?;
-            }
-            NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
-                let (Some(vm), Some(env)) = (vm.as_deref_mut(), env.as_ref()) else {
-                    return Err(JetroEngineError::Eval(crate::EvalError(
-                        "NDJSON view pipeline requires VM state".to_string(),
-                    )));
-                };
-                let source = json_tape_path_index(&scratch, source_steps)
-                    .map(|idx| crate::data::view::TapeScratchView::Node {
-                        tape: &scratch,
-                        idx,
-                    })
-                    .unwrap_or(crate::data::view::TapeScratchView::Missing);
-                let Some(result) =
-                    crate::exec::view::run_with_env_and_vm(source, body, None, &env, vm)
-                else {
-                    writer.write_all(b"null")?;
-                    writer.write_all(b"\n")?;
-                    count += 1;
-                    if limit.is_some_and(|limit| count >= limit) {
-                        break;
-                    }
-                    continue;
-                };
-                write_val_json(
-                    &mut writer,
-                    &result.map_err(|err| JetroEngineError::Eval(err))?,
-                )?;
-            }
-        }
+        runner.write_row(&scratch, &mut writer)?;
         writer.write_all(b"\n")?;
         count += 1;
         if limit.is_some_and(|limit| count >= limit) {
@@ -1095,6 +973,142 @@ where
 
     writer.flush()?;
     Ok(count)
+}
+
+#[cfg(feature = "simd-json")]
+struct NdjsonTapeWriterRunner<'a, 'p> {
+    plan: &'p NdjsonDirectTapePlan,
+    vm: Option<MutexGuard<'a, VM>>,
+    env: Option<crate::data::context::Env>,
+}
+
+#[cfg(feature = "simd-json")]
+impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
+    fn new(engine: &'a JetroEngine, plan: &'p NdjsonDirectTapePlan) -> Self {
+        let needs_vm = plan.needs_vm();
+        Self {
+            plan,
+            vm: needs_vm.then(|| engine.lock_vm()),
+            env: needs_vm.then(|| crate::data::context::Env::new(Val::Null)),
+        }
+    }
+
+    fn write_row<W: Write>(
+        &mut self,
+        scratch: &crate::data::tape::TapeScratch,
+        writer: &mut W,
+    ) -> Result<(), JetroEngineError> {
+        match self.plan {
+            NdjsonDirectTapePlan::RootPath(steps) => {
+                if let Some(idx) = json_tape_path_index(scratch, steps) {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => {
+                let idx = json_tape_path_index(scratch, steps);
+                let value = idx
+                    .map(|idx| json_tape_scalar(scratch, idx))
+                    .unwrap_or(crate::util::JsonView::Null);
+                if *optional && matches!(value, crate::util::JsonView::Null) {
+                    writer.write_all(b"null")?;
+                } else if let Some(value) = call.try_apply_json_view(value) {
+                    write_val_json(writer, &value)?;
+                } else if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps,
+            } => {
+                let idx = json_tape_path_index(scratch, source_steps)
+                    .and_then(|idx| json_tape_array_element(scratch, idx, *element))
+                    .and_then(|idx| json_tape_path_index_from(scratch, idx, suffix_steps));
+                if let Some(idx) = idx {
+                    write_json_tape_at(writer, scratch, idx)?;
+                } else {
+                    writer.write_all(b"null")?;
+                }
+            }
+            NdjsonDirectTapePlan::MapPath {
+                source_steps,
+                suffix_steps,
+            } => {
+                write_json_tape_map_path(writer, scratch, source_steps, suffix_steps)?;
+            }
+            NdjsonDirectTapePlan::FilterMapPath {
+                source_steps,
+                predicate,
+                suffix_steps,
+            } => {
+                write_json_tape_filter_map_path(
+                    writer,
+                    scratch,
+                    source_steps,
+                    predicate,
+                    suffix_steps,
+                )?;
+            }
+            NdjsonDirectTapePlan::CountFiltered {
+                source_steps,
+                predicate,
+            } => {
+                let count = count_json_tape_filtered(scratch, source_steps, predicate);
+                write_i64(writer, count as i64)?;
+            }
+            NdjsonDirectTapePlan::NumericReducePath {
+                source_steps,
+                suffix_steps,
+                op,
+            } => {
+                let value =
+                    reduce_json_tape_numeric_path(scratch, source_steps, None, suffix_steps, *op);
+                write_val_json(writer, &value)?;
+            }
+            NdjsonDirectTapePlan::FilterNumericReducePath {
+                source_steps,
+                predicate,
+                suffix_steps,
+                op,
+            } => {
+                let value = reduce_json_tape_numeric_path(
+                    scratch,
+                    source_steps,
+                    Some(predicate),
+                    suffix_steps,
+                    *op,
+                );
+                write_val_json(writer, &value)?;
+            }
+            NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
+                let (Some(vm), Some(env)) = (self.vm.as_deref_mut(), self.env.as_ref()) else {
+                    return Err(JetroEngineError::Eval(crate::EvalError(
+                        "NDJSON view pipeline requires VM state".to_string(),
+                    )));
+                };
+                let source = json_tape_path_index(scratch, source_steps)
+                    .map(|idx| crate::data::view::TapeScratchView::Node { tape: scratch, idx })
+                    .unwrap_or(crate::data::view::TapeScratchView::Missing);
+                let Some(result) =
+                    crate::exec::view::run_with_env_and_vm(source, body, None, &env, vm)
+                else {
+                    writer.write_all(b"null")?;
+                    return Ok(());
+                };
+                write_val_json(writer, &result.map_err(JetroEngineError::Eval)?)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "simd-json")]
