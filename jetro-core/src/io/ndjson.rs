@@ -1049,6 +1049,33 @@ fn write_ndjson_byte_plan_row<W: Write>(
                 BytePlanWrite::Fallback => Ok(BytePlanWrite::Fallback),
             }
         }
+        NdjsonDirectBytePlan::RootArrayElementPath {
+            key,
+            element,
+            suffix_steps,
+        } => match root_field_raw_value(row, key.as_ref()) {
+            RawFieldValue::Found(value) => {
+                let Some(element) = raw_json_array_element(value, *element) else {
+                    writer.write_all(b"null")?;
+                    return Ok(BytePlanWrite::Done);
+                };
+                if suffix_steps.is_empty() {
+                    writer.write_all(element)?;
+                    return Ok(BytePlanWrite::Done);
+                }
+                let Some(value) = raw_json_path_value(element, suffix_steps) else {
+                    writer.write_all(b"null")?;
+                    return Ok(BytePlanWrite::Done);
+                };
+                writer.write_all(value)?;
+                Ok(BytePlanWrite::Done)
+            }
+            RawFieldValue::Missing => {
+                writer.write_all(b"null")?;
+                Ok(BytePlanWrite::Done)
+            }
+            RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
+        },
     }
 }
 
@@ -2502,6 +2529,75 @@ fn raw_json_object_len(value: &[u8], start: usize, end: usize) -> Option<usize> 
             _ => return None,
         }
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_array_element(
+    value: &[u8],
+    element: NdjsonDirectElement,
+) -> Option<&[u8]> {
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    if value.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut pos = skip_json_ws(value, start + 1);
+    if pos < end && value[pos] == b']' {
+        return None;
+    }
+    let wanted = match element {
+        NdjsonDirectElement::First => Some(0usize),
+        NdjsonDirectElement::Nth(n) => Some(n),
+        NdjsonDirectElement::Last => None,
+    };
+    let mut idx = 0usize;
+    let mut last: Option<&[u8]> = None;
+    loop {
+        let value_start = skip_json_ws(value, pos);
+        let value_end = skip_json_value(value, value_start)?;
+        if wanted == Some(idx) {
+            return Some(&value[value_start..value_end]);
+        }
+        last = Some(&value[value_start..value_end]);
+        idx += 1;
+        pos = skip_json_ws(value, value_end);
+        match value.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                return if matches!(element, NdjsonDirectElement::Last) {
+                    last
+                } else {
+                    None
+                };
+            }
+            _ => return None,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_path_value<'a>(
+    mut value: &'a [u8],
+    steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Option<&'a [u8]> {
+    for step in steps {
+        match step {
+            crate::ir::physical::PhysicalPathStep::Field(key) => {
+                value = match root_field_raw_value(value, key.as_ref()) {
+                    RawFieldValue::Found(value) => value,
+                    RawFieldValue::Missing => return None,
+                    RawFieldValue::Fallback => return None,
+                };
+            }
+            crate::ir::physical::PhysicalPathStep::Index(index) => {
+                let Ok(index) = usize::try_from(*index) else {
+                    return None;
+                };
+                value = raw_json_array_element(value, NdjsonDirectElement::Nth(index))?;
+            }
+        }
+    }
+    Some(value)
 }
 
 #[cfg(feature = "simd-json")]

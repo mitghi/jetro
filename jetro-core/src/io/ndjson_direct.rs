@@ -19,6 +19,11 @@ pub(super) enum NdjsonDirectBytePlan {
     RootObjectItems {
         method: crate::builtins::BuiltinMethod,
     },
+    RootArrayElementPath {
+        key: Arc<str>,
+        element: NdjsonDirectElement,
+        suffix_steps: NdjsonPhysicalPath,
+    },
 }
 
 #[derive(Clone)]
@@ -103,6 +108,17 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
         return None;
     };
     match plan.node(*root) {
+        PlanNode::Chain { base, steps } => {
+            let (source_steps, element) = direct_array_element_source(&plan, *base)?;
+            let [PhysicalPathStep::Field(key)] = source_steps.as_slice() else {
+                return None;
+            };
+            Some(NdjsonDirectBytePlan::RootArrayElementPath {
+                key: key.clone(),
+                element,
+                suffix_steps: physical_chain_to_path(steps)?,
+            })
+        }
         PlanNode::RootPath(steps) => {
             let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
                 return None;
@@ -172,7 +188,19 @@ pub(super) fn direct_byte_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
                 call: BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
             })
         }
-        _ => None,
+        _ => {
+            if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
+                let [PhysicalPathStep::Field(key)] = source_steps.as_slice() else {
+                    return None;
+                };
+                return Some(NdjsonDirectBytePlan::RootArrayElementPath {
+                    key: key.clone(),
+                    element,
+                    suffix_steps: Vec::new(),
+                });
+            }
+            None
+        }
     }
 }
 
