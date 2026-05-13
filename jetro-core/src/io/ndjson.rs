@@ -943,6 +943,10 @@ enum NdjsonDirectTapePlan {
         element: NdjsonDirectElement,
         suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
     },
+    MapPath {
+        source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+        suffix_steps: Vec<crate::ir::physical::PhysicalPathStep>,
+    },
     ViewPipeline {
         source_steps: Vec<crate::ir::physical::PhysicalPathStep>,
         body: crate::exec::pipeline::PipelineBody,
@@ -1054,6 +1058,12 @@ where
                 } else {
                     writer.write_all(b"null")?;
                 }
+            }
+            NdjsonDirectTapePlan::MapPath {
+                source_steps,
+                suffix_steps,
+            } => {
+                write_json_tape_map_path(&mut writer, &scratch, source_steps, suffix_steps)?;
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, body } => {
                 let source = json_tape_path_index(&scratch, source_steps)
@@ -1318,7 +1328,13 @@ impl<'a> NdjsonRowExecutor<'a> {
                     optional: *optional,
                 })
             }
-            PlanNode::Pipeline { source, body } if body.can_run_with_view() => {
+            PlanNode::Pipeline { source, body } => {
+                if let Some(plan) = direct_tape_map_path_plan(&plan, source, body) {
+                    return Some(plan);
+                }
+                if !body.can_run_with_view() {
+                    return None;
+                }
                 Some(NdjsonDirectTapePlan::ViewPipeline {
                     source_steps: pipeline_source_to_steps(&plan, source)?,
                     body: body.clone(),
@@ -1512,6 +1528,46 @@ fn direct_tape_predicate_node(
                 body: body.clone(),
             })
         }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_tape_map_path_plan(
+    plan: &crate::ir::physical::QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::exec::pipeline::{Sink, Stage};
+
+    if !matches!(body.sink, Sink::Collect) || body.stages.len() != 1 {
+        return None;
+    }
+    let Stage::Map(_, _) = body.stages.first()? else {
+        return None;
+    };
+    Some(NdjsonDirectTapePlan::MapPath {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        suffix_steps: kernel_to_physical_path(body.stage_kernels.first()?)?,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn kernel_to_physical_path(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<Vec<crate::ir::physical::PhysicalPathStep>> {
+    match kernel {
+        crate::exec::pipeline::BodyKernel::FieldRead(key) => {
+            Some(vec![crate::ir::physical::PhysicalPathStep::Field(
+                key.clone(),
+            )])
+        }
+        crate::exec::pipeline::BodyKernel::FieldChain(keys) => Some(
+            keys.iter()
+                .map(|key| crate::ir::physical::PhysicalPathStep::Field(key.clone()))
+                .collect(),
+        ),
+        crate::exec::pipeline::BodyKernel::Current => Some(Vec::new()),
         _ => None,
     }
 }
@@ -2062,6 +2118,57 @@ fn write_json_tape_at<W: Write, T: JsonTape>(
             Ok(cur)
         }
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_map_path<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Result<(), JetroEngineError> {
+    use crate::data::tape::TapeNode;
+
+    writer.write_all(b"[")?;
+    let Some(source_idx) = json_tape_path_index(tape, source_steps) else {
+        writer.write_all(b"]")?;
+        return Ok(());
+    };
+
+    match tape.nodes().get(source_idx).copied() {
+        Some(TapeNode::Array { len, .. }) => {
+            let mut cur = source_idx + 1;
+            for item_idx in 0..len {
+                if item_idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_tape_path_or_null(writer, tape, cur, suffix_steps)?;
+                cur += tape.span(cur);
+            }
+        }
+        Some(_) => {
+            write_json_tape_path_or_null(writer, tape, source_idx, suffix_steps)?;
+        }
+        None => {}
+    }
+
+    writer.write_all(b"]")?;
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_path_or_null<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    start: usize,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+) -> Result<(), JetroEngineError> {
+    if let Some(idx) = json_tape_path_index_from(tape, start, suffix_steps) {
+        write_json_tape_at(writer, tape, idx)?;
+    } else {
+        writer.write_all(b"null")?;
+    }
+    Ok(())
 }
 
 fn write_json_array<'a, W, I>(writer: &mut W, items: I) -> Result<(), JetroEngineError>
