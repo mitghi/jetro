@@ -107,6 +107,12 @@
   direct tape row writer as forward NDJSON for eligible queries, including
   reverse limit execution, instead of materializing each row through the
   generic executor.
+- **Byte-level NDJSON row scanning for simple projected shapes**. Root field
+  projections, root string case calls, root object item methods, and simple
+  first/last/nth root-array element projections can now emit directly from row
+  bytes and fall back to the tape writer only when the row requires full JSON
+  interpretation. This keeps common cold-path CLI projections out of both
+  `serde_json::Value` and simd-json tape construction.
 
 ### Demand/tape architecture cleanup
 

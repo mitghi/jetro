@@ -189,6 +189,11 @@ can execute directly on reusable simd-json tape scratch without building a
 per-row `serde_json::Value` tree. Stable row layouts also reuse verified
 field-position caches, with fallback when a row changes shape.
 
+For the simplest CLI-style projections, Jetro can skip tape construction too:
+root fields, root string case calls, root object item methods, and simple
+first/last/nth root-array child projections are scanned directly from row bytes
+with per-row fallback to the tape path when the raw shape is not safe.
+
 ```rust
 use jetro::JetroEngine;
 use std::io::Cursor;
