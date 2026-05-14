@@ -23,6 +23,12 @@
 
 ### NDJSON observability
 
+- **Reverse NDJSON has an exact stream-level `distinct_by` API**.
+  `run_ndjson_rev_distinct_by(key, query, limit, writer)` scans newest-to-oldest,
+  keeps only the first row seen for each key in that stream order, writes the
+  requested projection for retained rows, and stops once the retained-row limit
+  is reached. This is the correctness baseline for compacted-log/latest-per-key
+  workloads before adding direct byte keys and adaptive Bloom/Cuckoo filters.
 - **Direct writer plan kinds are now test-visible**. NDJSON direct planning can
   expose whether a query produced a byte expression plan, a tape root/scalar
   plan, a stream collect/count/numeric plan, or a static projection plan. This

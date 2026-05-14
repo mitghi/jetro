@@ -796,6 +796,56 @@ fn reverse_run_limit_writes_from_tail_and_stops() {
 }
 
 #[test]
+fn reverse_distinct_by_keeps_first_key_seen_from_tail() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by");
+    std::fs::write(
+        &path,
+        b"{\"id\":\"a\",\"v\":1}\n{\"id\":\"b\",\"v\":2}\n{\"id\":\"c\",\"v\":3}\n{\"id\":\"a\",\"v\":4}\n{\"id\":\"b\",\"v\":5}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let emitted = engine
+        .run_ndjson_rev_distinct_by_with_options(
+            &path,
+            "id",
+            r#"{id: $.id, v: $.v}"#,
+            10,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("reverse distinct_by should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(emitted, 3);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":\"b\",\"v\":5}\n{\"id\":\"a\",\"v\":4}\n{\"id\":\"c\",\"v\":3}\n"
+    );
+}
+
+#[test]
+fn reverse_distinct_by_limit_stops_before_old_invalid_rows() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-limit");
+    std::fs::write(
+        &path,
+        b"not-json\n{\"id\":\"a\",\"v\":1}\n{\"id\":\"b\",\"v\":2}\n{\"id\":\"a\",\"v\":3}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let emitted = engine
+        .run_ndjson_rev_distinct_by(&path, "id", "v", 2, &mut out)
+        .expect("reverse distinct_by should stop after demanded unique rows");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(emitted, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
+}
+
+#[test]
 fn reverse_for_each_until_stops_before_head_rows() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-until");

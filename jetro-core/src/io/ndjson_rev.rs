@@ -3,6 +3,7 @@ use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -322,6 +323,83 @@ where
     })?;
     writer.flush()?;
     Ok(count)
+}
+
+pub fn run_ndjson_rev_distinct_by<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(0);
+    }
+
+    let key_plan = engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes());
+    let value_plan = engine.cached_plan(query, crate::plan::physical::PlanningContext::bytes());
+    let mut vm = engine.lock_vm();
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
+    let mut seen = HashSet::new();
+    let mut emitted = 0usize;
+
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
+        let key = crate::exec::router::collect_plan_val_with_vm(&document, &key_plan, &mut vm)
+            .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+        let key = distinct_key_bytes(&key)?;
+        if !seen.insert(key) {
+            continue;
+        }
+
+        let value =
+            crate::exec::router::collect_plan_val_with_vm(&document, &value_plan, &mut vm)
+                .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+        super::ndjson::write_val_line(&mut writer, &value)?;
+        emitted += 1;
+        if emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
+fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEngineError> {
+    let mut out = Vec::new();
+    super::ndjson::write_val_json(&mut out, key)?;
+    Ok(out)
 }
 
 pub fn run_ndjson_rev_matches<P, W>(

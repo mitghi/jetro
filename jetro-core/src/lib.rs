@@ -561,6 +561,44 @@ impl JetroEngine {
         io::run_ndjson_rev_limit_with_options(self, path, query, limit, writer, options)
     }
 
+    /// Read an NDJSON file from tail to head, keep only the first row seen for
+    /// each `key_query` result in that reverse stream order, write `query` for
+    /// retained rows, and stop after `limit` retained rows.
+    pub fn run_ndjson_rev_distinct_by<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by(self, path, key_query, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by`] with explicit NDJSON
+    /// reader options.
+    pub fn run_ndjson_rev_distinct_by_with_options<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_options(
+            self, path, key_query, query, limit, writer, options,
+        )
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,
