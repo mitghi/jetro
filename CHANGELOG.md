@@ -169,6 +169,9 @@
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
+- **Full release workspace validation is green**.
+  `cargo test --release --verbose --workspace` passes after the
+  stream-first, byte-extrema, and reverse selective-demand changes.
 - **Core compile health is clean**. `cargo check -p jetro-core` passes after
   the demand propagation and NDJSON byte-executor changes.
 
