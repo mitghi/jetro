@@ -169,6 +169,7 @@ pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool 
     match &stream.sink {
         NdjsonDirectStreamSink::Count => stream.predicate.is_some(),
         NdjsonDirectStreamSink::Collect(map) => byte_stream_map_supported(map),
+        NdjsonDirectStreamSink::First(map) => byte_stream_map_supported(map),
         NdjsonDirectStreamSink::Numeric { suffix_steps, .. } => byte_path_supported(suffix_steps),
         NdjsonDirectStreamSink::Extreme {
             key_steps, value, ..
@@ -268,14 +269,24 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
             write_raw_json_stream_extreme_source(writer, source, key_steps, *want_max, value)
         }
         NdjsonDirectTapePlan::Stream(stream) => {
-            let NdjsonDirectStreamSink::Collect(map) = &stream.sink else {
-                return Ok(BytePlanWrite::Fallback);
+            let map = match &stream.sink {
+                NdjsonDirectStreamSink::Collect(map) | NdjsonDirectStreamSink::First(map) => map,
+                _ => return Ok(BytePlanWrite::Fallback),
             };
             if !byte_stream_map_supported(map) {
                 return Ok(BytePlanWrite::Fallback);
             }
             scratch.clear();
-            match write_raw_json_stream_collect(scratch, row, stream, map)? {
+            let written = match &stream.sink {
+                NdjsonDirectStreamSink::Collect(_) => {
+                    write_raw_json_stream_collect(scratch, row, stream, map)?
+                }
+                NdjsonDirectStreamSink::First(_) => {
+                    write_raw_json_stream_first(scratch, row, stream, map)?
+                }
+                _ => unreachable!(),
+            };
+            match written {
                 BytePlanWrite::Done => {
                     writer.write_all(scratch)?;
                     Ok(BytePlanWrite::Done)
@@ -367,13 +378,19 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
         }
         NdjsonDirectTapePlan::Stream(stream) => {
             match hinted_path_value(root, matched, &stream.source_steps) {
-                RawFieldValue::Found(source) => match &stream.sink {
-                    NdjsonDirectStreamSink::Collect(map) => {
-                        if !byte_stream_map_supported(map) {
-                            return Ok(BytePlanWrite::Fallback);
+                    RawFieldValue::Found(source) => match &stream.sink {
+                        NdjsonDirectStreamSink::Collect(map) => {
+                            if !byte_stream_map_supported(map) {
+                                return Ok(BytePlanWrite::Fallback);
+                            }
+                            write_raw_json_stream_collect_from_source(writer, source, stream, map)
                         }
-                        write_raw_json_stream_collect_from_source(writer, source, stream, map)
-                    }
+                        NdjsonDirectStreamSink::First(map) => {
+                            if !byte_stream_map_supported(map) {
+                                return Ok(BytePlanWrite::Fallback);
+                            }
+                            write_raw_json_stream_first_from_source(writer, source, stream, map)
+                        }
                     NdjsonDirectStreamSink::Count => {
                         let Some(predicate) = stream.predicate.as_ref() else {
                             return Ok(BytePlanWrite::Fallback);
@@ -407,6 +424,7 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                 RawFieldValue::Missing => {
                     match &stream.sink {
                         NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+                        NdjsonDirectStreamSink::First(_) => writer.write_all(b"null")?,
                         NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
                         NdjsonDirectStreamSink::Numeric { op, .. } => {
                             let value = crate::exec::pipeline::num_finalise(
@@ -1650,6 +1668,80 @@ fn write_raw_json_stream_collect<W: Write>(
     write_raw_json_stream_collect_from_source(writer, source, stream, map)
 }
 
+fn write_raw_json_stream_first<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    stream: &NdjsonDirectStreamPlan,
+    map: &NdjsonDirectStreamMap,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let source = match raw_json_byte_path_value(row, &stream.source_steps) {
+        RawFieldValue::Found(source) => source,
+        RawFieldValue::Missing => {
+            writer.write_all(b"null")?;
+            return Ok(BytePlanWrite::Done);
+        }
+        RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+    };
+
+    write_raw_json_stream_first_from_source(writer, source, stream, map)
+}
+
+fn write_raw_json_stream_first_from_source<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    stream: &NdjsonDirectStreamPlan,
+    map: &NdjsonDirectStreamMap,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut root_fields = RootFieldSet::new();
+    let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
+    if root_projectable {
+        if let Some(predicate) = stream.predicate.as_ref() {
+            if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
+                if let Some(()) =
+                    write_raw_json_stream_first_projected(writer, source, map, predicate, &root_fields)?
+                {
+                    return Ok(BytePlanWrite::Done);
+                }
+            }
+        } else if let Some(()) =
+            write_raw_json_stream_first_projected(writer, source, map, &NdjsonDirectItemPredicate::Literal(Val::Bool(true)), &root_fields)?
+        {
+            return Ok(BytePlanWrite::Done);
+        }
+    }
+
+    let mut failed = false;
+    let mut matched = false;
+    let visited = raw_json_source_items(source, |item| {
+        let Some(matches) = stream.predicate.as_ref().map_or(Some(true), |predicate| {
+            eval_raw_item_predicate(item, predicate)
+        }) else {
+            failed = true;
+            return None;
+        };
+        if matches {
+            if write_raw_json_stream_map(writer, item, map).is_err() {
+                failed = true;
+                return None;
+            }
+            matched = true;
+            return None;
+        }
+        Some(())
+    });
+    if failed {
+        return Ok(BytePlanWrite::Fallback);
+    }
+    if matched {
+        return Ok(BytePlanWrite::Done);
+    }
+    if visited.is_none() {
+        return Ok(BytePlanWrite::Fallback);
+    }
+    writer.write_all(b"null")?;
+    Ok(BytePlanWrite::Done)
+}
+
 fn write_raw_json_stream_collect_from_source<W: Write>(
     writer: &mut W,
     source: &[u8],
@@ -1799,6 +1891,74 @@ fn write_raw_json_stream_collect_projected_filtered<W: Write>(
             Some(b',') => pos += 1,
             Some(b']') => {
                 writer.write_all(b"]")?;
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn write_raw_json_stream_first_projected<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    map: &NdjsonDirectStreamMap,
+    predicate: &NdjsonDirectItemPredicate,
+    root_fields: &[&str],
+) -> Result<Option<()>, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"null")?;
+        return Ok(Some(()));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let direct_map = direct_root_stream_map(map, root_fields);
+    let mut spans = RootFieldSpans::new();
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        let Some(matches) =
+            eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
+        else {
+            return Ok(None);
+        };
+        if matches {
+            if let Some(direct_map) = direct_map.as_ref() {
+                write_direct_root_stream_map(writer, source, &spans, direct_map)?;
+            } else if !write_raw_json_stream_map_with_root_spans(
+                writer,
+                source,
+                map,
+                root_fields,
+                &spans,
+            )? {
+                return Ok(None);
+            }
+            return Ok(Some(()));
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                writer.write_all(b"null")?;
                 return Ok(Some(()));
             }
             _ => return Ok(None),
@@ -2919,6 +3079,9 @@ fn write_raw_json_tape_plan_value<W: Write>(
         NdjsonDirectTapePlan::Stream(stream) => match &stream.sink {
             NdjsonDirectStreamSink::Collect(map) if byte_stream_map_supported(map) => {
                 write_raw_json_stream_collect(writer, row, stream, map)
+            }
+            NdjsonDirectStreamSink::First(map) if byte_stream_map_supported(map) => {
+                write_raw_json_stream_first(writer, row, stream, map)
             }
             NdjsonDirectStreamSink::Count => {
                 let Some(predicate) = stream.predicate.as_ref() else {

@@ -52,6 +52,7 @@ impl NdjsonDirectTapePlan {
             Self::ObjectItems { .. } => NdjsonDirectPlanKind::TapeObjectItems,
             Self::Stream(stream) => match &stream.sink {
                 NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
+                NdjsonDirectStreamSink::First(_) => NdjsonDirectPlanKind::TapeStreamCollect,
                 NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
                 NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
                 NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamExtreme,
@@ -130,6 +131,7 @@ pub(super) enum NdjsonDirectStreamMap {
 #[derive(Clone)]
 pub(super) enum NdjsonDirectStreamSink {
     Collect(NdjsonDirectStreamMap),
+    First(NdjsonDirectStreamMap),
     Count,
     Numeric {
         suffix_steps: NdjsonPhysicalPath,
@@ -523,6 +525,9 @@ fn direct_tape_plan_for_node(
                 return Some(plan);
             }
             if let Some(plan) = direct_tape_count_filtered_plan(plan, source, body) {
+                return Some(plan);
+            }
+            if let Some(plan) = direct_tape_filter_map_first_plan(plan, source, body) {
                 return Some(plan);
             }
             if let Some(plan) = direct_tape_filter_map_path_plan(plan, source, body) {
@@ -931,6 +936,39 @@ fn direct_tape_filter_map_path_plan(
         source_steps,
         predicate: Some(predicate),
         sink: NdjsonDirectStreamSink::Collect(direct_stream_map_from_kernel(kernel)?),
+    }))
+}
+
+fn direct_tape_filter_map_first_plan(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::builtins::BuiltinMethod;
+    use crate::exec::pipeline::{Sink, Stage};
+
+    if !matches!(body.sink, Sink::Terminal(BuiltinMethod::First)) {
+        return None;
+    }
+    let (predicate, map) = match body.stages.as_slice() {
+        [Stage::Map(_, _)] => (
+            None,
+            direct_stream_map_from_kernel(body.stage_kernels.first()?)?,
+        ),
+        [Stage::Filter(_, _)] => (
+            Some(direct_item_predicate_from_kernel(body.stage_kernels.first()?)?),
+            NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(Vec::new())),
+        ),
+        [Stage::Filter(_, _), Stage::Map(_, _)] => (
+            Some(direct_item_predicate_from_kernel(body.stage_kernels.first()?)?),
+            direct_stream_map_from_kernel(body.stage_kernels.get(1)?)?,
+        ),
+        _ => return None,
+    };
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        predicate,
+        sink: NdjsonDirectStreamSink::First(map),
     }))
 }
 

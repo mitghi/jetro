@@ -1063,6 +1063,10 @@ where
                 ..
             })
             | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::First(_),
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
                 sink: NdjsonDirectStreamSink::Count,
                 ..
             })
@@ -2304,6 +2308,29 @@ where
 }
 
 #[cfg(feature = "simd-json")]
+fn find_json_tape_source_item<T, F>(tape: &T, source_idx: usize, mut matches: F) -> Option<usize>
+where
+    T: JsonTape,
+    F: FnMut(usize) -> bool,
+{
+    use crate::data::tape::TapeNode;
+
+    match tape.nodes().get(source_idx).copied()? {
+        TapeNode::Array { len, .. } => {
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                if matches(cur) {
+                    return Some(cur);
+                }
+                cur += tape.span(cur);
+            }
+            None
+        }
+        _ => matches(source_idx).then_some(source_idx),
+    }
+}
+
+#[cfg(feature = "simd-json")]
 fn write_json_tape_stream<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
@@ -2355,6 +2382,25 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
                 Ok(())
             });
             write_i64(writer, count as i64)?;
+        }
+        NdjsonDirectStreamSink::First(map) => {
+            let selected = find_json_tape_source_item(tape, source_idx, |item_idx| {
+                plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                })
+            });
+            if let Some(item_idx) = selected {
+                write_json_tape_stream_map(
+                    writer,
+                    tape,
+                    item_idx,
+                    map,
+                    suffix_cache,
+                    projection_caches,
+                )?;
+            } else {
+                writer.write_all(b"null")?;
+            }
         }
         NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
             let caches = NdjsonPathCaches {
@@ -2420,6 +2466,7 @@ fn write_json_tape_empty_stream_result<W: Write>(
 ) -> Result<(), JetroEngineError> {
     match sink {
         NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+        NdjsonDirectStreamSink::First(_) => writer.write_all(b"null")?,
         NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
         NdjsonDirectStreamSink::Numeric { op, .. } => {
             let value = crate::exec::pipeline::num_finalise(
@@ -3371,6 +3418,10 @@ mod tests {
                 (None, TapeStreamCollect),
             ),
             (
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
+                (None, TapeStreamCollect),
+            ),
+            (
                 r#"$.attributes.filter(@.value.contains("_3")).len()"#,
                 (None, TapeStreamCount),
             ),
@@ -3449,6 +3500,7 @@ mod tests {
             "$.attributes.map(@.key.upper())",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
             "$.attributes.map(@.weight).sum()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
@@ -3938,6 +3990,31 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&out).unwrap(),
             "\"first\"\n\"semantic-last\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_filter_map_first_stops_at_first_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x_3"},{"key":"b","value":"later_3"}]}
+{"attributes":[{"key":"a","value":"skip"},{"key":"b","value":"y_3"}]}
+{"attributes":[{"key":"a","value":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
+                &mut out,
+            )
+            .expect("filtered first should use direct stream first");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"key\":\"a\",\"value\":\"x_3\"}\n{\"key\":\"b\",\"value\":\"y_3\"}\nnull\n"
         );
     }
 
