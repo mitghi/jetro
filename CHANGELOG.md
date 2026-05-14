@@ -23,6 +23,22 @@
 
 ### NDJSON observability
 
+- **NDJSON can now opt into whole-stream semantics from the expression**.
+  Root-level `$.rows()` switches `--ndjson` evaluation from row-local mode to
+  one stream plan over all rows, so expressions such as
+  `$.rows().reverse().distinct_by($.id).take(100).map({id: $.id, v: $.v})`
+  configure reverse traversal, retained-row early stop, de-duplication, and
+  projection without extra CLI flags.
+- **`$.rows()` stream execution reuses existing direct byte/tape machinery**.
+  Supported `filter`, `distinct_by`, and final `map` stages use the shared
+  direct predicate, key canonicalization, adaptive distinct state, and
+  projection writer. Unsupported expressions fall back to the compiled VM over
+  the row value, preserving correctness without query-chain-specific kernels.
+- **Bounded row streams avoid unnecessary parsing**. `$.rows().take(n)` and
+  direct-filtered retained rows can write original NDJSON row bytes directly;
+  `first()` lowers to the same bounded stream stage as `take(1)`, and
+  file-backed `reverse()` uses the reverse NDJSON driver while reader-backed
+  reverse streams return a clear unsupported-source error.
 - **Reverse NDJSON has an exact stream-level `distinct_by` API**.
   `run_ndjson_rev_distinct_by(key, query, limit, writer)` scans newest-to-oldest,
   keeps only the first row seen for each key in that stream order, writes the
