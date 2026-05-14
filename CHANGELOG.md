@@ -166,8 +166,8 @@
   shape `filter(...).map({...}).first()` improved locally from roughly 4.26s to
   roughly 3.8s on the 4.76M-row file.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
-  suites for chain demand and NDJSON execution pass after the demand-safety and
-  byte-extrema changes.
+  suites for chain demand and NDJSON execution pass after the demand-safety,
+  byte-extrema, and stream-first changes.
 - **Core compile health is clean**. `cargo check -p jetro-core` passes after
   the demand propagation and NDJSON byte-executor changes.
 
