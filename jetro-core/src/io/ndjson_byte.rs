@@ -1283,6 +1283,20 @@ fn reduce_raw_json_numeric_source(
     suffix_steps: &[PhysicalPathStep],
     op: crate::exec::pipeline::NumOp,
 ) -> Option<Val> {
+    let mut root_fields = RootFieldSet::new();
+    let root_projectable = collect_path_root_field(suffix_steps, &mut root_fields)
+        && predicate.map_or(true, |predicate| {
+            collect_stream_predicate_root_fields(predicate, &mut root_fields)
+        });
+    if root_projectable {
+        return reduce_raw_json_numeric_source_from_root_fields(
+            source,
+            predicate,
+            suffix_steps,
+            op,
+            &root_fields,
+        );
+    }
     let mut acc_i = 0i64;
     let mut acc_f = 0.0f64;
     let mut floated = false;
@@ -1310,6 +1324,83 @@ fn reduce_raw_json_numeric_source(
     Some(crate::exec::pipeline::num_finalise(
         op, acc_i, acc_f, floated, min_f, max_f, n_obs,
     ))
+}
+
+fn reduce_raw_json_numeric_source_from_root_fields(
+    source: &[u8],
+    predicate: Option<&NdjsonDirectItemPredicate>,
+    suffix_steps: &[PhysicalPathStep],
+    op: crate::exec::pipeline::NumOp,
+    root_fields: &[&str],
+) -> Option<Val> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        return Some(crate::exec::pipeline::num_finalise(
+            op,
+            0,
+            0.0,
+            false,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0,
+        ));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let mut spans = RootFieldSpans::new();
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        }?;
+        if predicate.map_or(Some(true), |predicate| {
+            eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
+        })? {
+            if let Some(value) =
+                raw_json_projection_view_from_root(source, root_fields, &spans, suffix_steps)
+            {
+                fold_raw_json_numeric(
+                    value,
+                    op,
+                    &mut acc_i,
+                    &mut acc_f,
+                    &mut floated,
+                    &mut min_f,
+                    &mut max_f,
+                    &mut n_obs,
+                );
+            }
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                return Some(crate::exec::pipeline::num_finalise(
+                    op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+                ));
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn write_raw_json_stream_extreme_source<W: Write>(
