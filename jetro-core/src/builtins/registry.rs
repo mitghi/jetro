@@ -630,7 +630,7 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinSinkAccumulator,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator,
     };
 
     #[test]
@@ -905,6 +905,43 @@ mod tests {
         assert_eq!(count.pull, PullDemand::All);
         assert_eq!(count.value, ValueNeed::CountOnly);
         assert!(!count.order);
+    }
+
+    #[test]
+    fn registry_sink_demands_match_all_sink_accumulators() {
+        for (method, _, _) in all_method_entries() {
+            let Some(sink) = method.spec().sink else {
+                continue;
+            };
+            let demand = sink_demand(sink);
+            match sink.accumulator {
+                BuiltinSinkAccumulator::Count => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::CountOnly, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::Numeric => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Numeric, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::ApproxDistinct => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                    assert_eq!(demand.pull, PullDemand::FirstInput(1), "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                    assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(demand.order, "{method:?}");
+                }
+            }
+        }
     }
 
     #[test]

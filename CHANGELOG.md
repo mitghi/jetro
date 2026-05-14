@@ -42,6 +42,10 @@
 - **Builtin spec metadata has baseline invariant checks**. Registry tests now
   prove every builtin exposes a finite non-negative planner cost and that
   numeric reducer metadata cannot drift away from numeric sink metadata.
+- **Terminal sink demand is checked for every sink builtin**. Registry tests
+  now validate count, numeric, approximate-distinct, first, and last sink
+  accumulators against the shared `Demand` model used by planners and
+  executors.
 
 ## 0.5.9
 
