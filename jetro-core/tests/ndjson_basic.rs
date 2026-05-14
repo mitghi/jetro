@@ -896,6 +896,29 @@ fn reverse_distinct_by_canonicalizes_escaped_string_keys_directly() {
 }
 
 #[test]
+fn reverse_distinct_by_canonicalizes_compound_keys_directly() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-compound");
+    std::fs::write(
+        &path,
+        b"{\"k\":{\"a\" : 1,\"b\":\"x\\u0079\"},\"v\":1}\n{\"k\":{\"a\":1,\"b\":\"xy\"},\"v\":2}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let stats = engine
+        .run_ndjson_rev_distinct_by_with_stats(&path, "k", "v", 10, &mut out)
+        .expect("reverse distinct_by should canonicalize compound keys");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "2\n");
+    assert_eq!(stats.emitted, 1);
+    assert_eq!(stats.duplicate_rows, 1);
+    assert_eq!(stats.direct_key_rows, 2);
+    assert_eq!(stats.fallback_key_rows, 0);
+}
+
+#[test]
 fn reverse_for_each_until_stops_before_head_rows() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-until");
