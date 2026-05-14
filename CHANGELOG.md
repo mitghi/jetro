@@ -125,6 +125,11 @@
   suite passes with `cargo test --release --verbose --workspace`, covering the
   optimized NDJSON byte/tape paths alongside the existing VM, parser, planner,
   builtin, and API tests.
+- **The 25-query NDJSON CLI profile is re-baselined**. On the local
+  4.76M-row benchmark file, direct root projections run in 0.32-0.88s and
+  stream projection/filter/reducer cases are generally above 10x versus `jaq`.
+  Remaining weaker cases are concentrated around per-row tail/extrema access
+  and mixed root-plus-stream output, which are now the next optimization target.
 
 ### Builtin hardening
 
