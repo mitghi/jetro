@@ -139,6 +139,10 @@
   root-field value span when the downstream array walker can stop at the
   demanded element boundary. This improves `last()` and mixed root/stream
   projections without adding query-shape-specific fusion.
+- **Selective stages no longer publish unsafe last-input demand**. Filter-like
+  builtins and predicate match stages now convert downstream `last`/`nth`
+  demand into a conservative ordered full scan, preventing planners from
+  treating the physical last element as the semantic last matching output.
 
 ### Builtin hardening
 
