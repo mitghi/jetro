@@ -531,7 +531,7 @@ fn direct_tape_plan_for_node(
             if let Some(plan) = direct_tape_count_filtered_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_filter_map_first_plan(plan, source, body) {
+            if let Some(plan) = direct_tape_filter_map_positional_plan(plan, source, body) {
                 return Some(plan);
             }
             if let Some(plan) = direct_tape_filter_map_path_plan(plan, source, body) {
@@ -943,7 +943,7 @@ fn direct_tape_filter_map_path_plan(
     }))
 }
 
-fn direct_tape_filter_map_first_plan(
+fn direct_tape_filter_map_positional_plan(
     plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
