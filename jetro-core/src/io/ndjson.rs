@@ -1069,6 +1069,10 @@ where
                 sink: NdjsonDirectStreamSink::Numeric { .. },
                 ..
             })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Extreme { .. },
+                ..
+            })
     )
     .then(|| {
         NdjsonHintState::new(
