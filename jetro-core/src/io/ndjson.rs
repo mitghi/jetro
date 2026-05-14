@@ -3393,6 +3393,7 @@ mod tests {
                 r#"{name_upper: $.name.upper(), values: $.attributes.map(@.value), last: $.attributes.last().value}"#,
                 ByteWritableTape,
             ),
+            ("$.attributes.sort_by(@.value).last().key", ByteWritableTape),
         ] {
             assert_eq!(
                 super::direct_writer_path_kind(&engine, query),

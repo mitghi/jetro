@@ -320,6 +320,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
+        .or_else(|| try_lower_pipeline_path_suffix(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
         .or_else(|| try_lower_scalar(builder, expr))
         .or_else(|| try_lower_structural(builder, expr))
@@ -404,6 +405,54 @@ fn pipeline_parts_to_plan_node(
         Source::Receiver(_) => return None,
     };
     Some(PlanNode::Pipeline { source, body })
+}
+
+/// Lowers chains like `$.xs.sort_by(key).last().field` as a pipeline prefix followed by
+/// a plain path suffix. The pipeline lowerer requires terminal sinks to end the method
+/// chain, but the physical IR can represent the selected row as a `Pipeline` node and
+/// keep the final field/index lookup as a `Chain`.
+fn try_lower_pipeline_path_suffix(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    let mut split = steps.len();
+    let mut suffix = Vec::new();
+    while split > 0 {
+        let step = &steps[split - 1];
+        if let Some(physical) = physical_chain_path_step(step) {
+            suffix.push(physical);
+            split -= 1;
+            continue;
+        }
+        break;
+    }
+    if suffix.is_empty() || split == 0 {
+        return None;
+    }
+    suffix.reverse();
+    let prefix = Expr::Chain(base.clone(), steps[..split].to_vec());
+    let pipeline = lower_via_logical(&prefix).or_else(|| Pipeline::lower(&prefix))?;
+    if is_trivial_collect_pipeline(&pipeline) || is_scalar_unwrap_pipeline(&pipeline) {
+        return None;
+    }
+    let (source, mut body) = pipeline.into_source_body();
+    mask_active_local_stage_kernels(&mut body, builder);
+    let node = pipeline_parts_to_plan_node(source, body)?;
+    let base = builder.push(node);
+    Some(builder.push(PlanNode::Chain {
+        base,
+        steps: suffix,
+    }))
+}
+
+fn physical_chain_path_step(step: &Step) -> Option<PhysicalChainStep> {
+    match step {
+        Step::Field(key) | Step::OptField(key) => {
+            Some(PhysicalChainStep::Field(Arc::from(key.as_str())))
+        }
+        Step::Index(idx) => Some(PhysicalChainStep::Index(*idx)),
+        _ => None,
+    }
 }
 
 /// Returns `true` when the pipeline has no stages and sinks straight to `Collect`,
@@ -1092,6 +1141,21 @@ mod tests {
         if let PlanNode::Pipeline { body, .. } = plan.node(*base) {
             assert!(body.stages.is_empty(), "{body:?}");
         }
+    }
+
+    #[test]
+    fn byte_context_lowers_terminal_pipeline_with_path_suffix() {
+        let plan = plan_query_with_context(
+            "$.attributes.sort_by(@.value).last().key",
+            PlanningContext::bytes(),
+        );
+        let PlanNode::Chain { base, steps } = root_node(&plan) else {
+            panic!("expected suffix chain over terminal pipeline");
+        };
+        assert!(
+            matches!(steps.as_slice(), [PhysicalChainStep::Field(key)] if key.as_ref() == "key")
+        );
+        assert!(matches!(plan.node(*base), PlanNode::Pipeline { .. }));
     }
 
     #[test]
