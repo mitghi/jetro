@@ -23,6 +23,7 @@ pub(super) enum BytePlanWrite {
 pub(super) struct NdjsonConstantStreamCache {
     output: Vec<u8>,
     values: Vec<Vec<u8>>,
+    ranges: Vec<std::ops::Range<usize>>,
     disabled: bool,
     learned: bool,
 }
@@ -58,12 +59,14 @@ impl NdjsonConstantStreamCache {
         };
         if !self.learned {
             self.values.clear();
+            self.ranges.clear();
             self.output.clear();
             if !collect_constant_stream_single_field(
                 &mut self.output,
                 source,
                 field,
                 Some(&mut self.values),
+                Some(&mut self.ranges),
             )? {
                 self.disabled = true;
                 return Ok(None);
@@ -72,7 +75,9 @@ impl NdjsonConstantStreamCache {
             writer.write_all(&self.output)?;
             return Ok(Some(BytePlanWrite::Done));
         }
-        if validate_constant_stream_single_field(source, field, &self.values) {
+        if validate_constant_stream_single_field_fast(source, &self.values, &self.ranges)
+            || validate_constant_stream_single_field(source, field, &self.values)
+        {
             writer.write_all(&self.output)?;
             Ok(Some(BytePlanWrite::Done))
         } else {
@@ -1582,6 +1587,7 @@ fn collect_constant_stream_single_field<W: Write>(
     source: &[u8],
     field: &str,
     mut values: Option<&mut Vec<Vec<u8>>>,
+    mut ranges: Option<&mut Vec<std::ops::Range<usize>>>,
 ) -> Result<bool, JetroEngineError> {
     let start = skip_json_ws(source, 0);
     let end = trim_json_ws_end(source);
@@ -1597,7 +1603,9 @@ fn collect_constant_stream_single_field<W: Write>(
     let mut wrote = false;
     loop {
         pos = skip_json_ws(source, pos);
-        let Some((value, next)) = raw_json_object_field_value_and_end(source, pos, field) else {
+        let Some((value, range, next)) =
+            raw_json_object_field_value_range_and_end(source, pos, field)
+        else {
             return Ok(false);
         };
         if wrote {
@@ -1606,6 +1614,9 @@ fn collect_constant_stream_single_field<W: Write>(
         writer.write_all(value)?;
         if let Some(values) = values.as_deref_mut() {
             values.push(value.to_vec());
+        }
+        if let Some(ranges) = ranges.as_deref_mut() {
+            ranges.push(range);
         }
         wrote = true;
         pos = skip_json_ws(source, next);
@@ -1618,6 +1629,51 @@ fn collect_constant_stream_single_field<W: Write>(
             _ => return Ok(false),
         }
     }
+}
+
+fn validate_constant_stream_single_field_fast(
+    source: &[u8],
+    values: &[Vec<u8>],
+    ranges: &[std::ops::Range<usize>],
+) -> bool {
+    if values.len() != ranges.len() {
+        return false;
+    }
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return false;
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        return values.is_empty();
+    }
+    for (idx, expected) in values.iter().enumerate() {
+        pos = skip_json_ws(source, pos);
+        if source.get(pos) != Some(&b'{') {
+            return false;
+        }
+        let range = &ranges[idx];
+        let Some(value_start) = pos.checked_add(range.start) else {
+            return false;
+        };
+        let Some(value_end) = pos.checked_add(range.end) else {
+            return false;
+        };
+        if source.get(value_start..value_end) != Some(expected.as_slice()) {
+            return false;
+        }
+        let Some(close_rel) = memchr::memchr(b'}', &source[pos..]) else {
+            return false;
+        };
+        pos = skip_json_ws(source, pos + close_rel + 1);
+        match source.get(pos).copied() {
+            Some(b',') if idx + 1 < values.len() => pos += 1,
+            Some(b']') if idx + 1 == values.len() => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn validate_constant_stream_single_field(source: &[u8], field: &str, values: &[Vec<u8>]) -> bool {
@@ -1707,9 +1763,19 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
 
 fn raw_json_object_field_value_and_end<'a>(
     row: &'a [u8],
-    mut pos: usize,
+    pos: usize,
     field: &str,
 ) -> Option<(&'a [u8], usize)> {
+    raw_json_object_field_value_range_and_end(row, pos, field)
+        .map(|(value, _, next)| (value, next))
+}
+
+fn raw_json_object_field_value_range_and_end<'a>(
+    row: &'a [u8],
+    mut pos: usize,
+    field: &str,
+) -> Option<(&'a [u8], std::ops::Range<usize>, usize)> {
+    let item_start = pos;
     if row.get(pos) != Some(&b'{') {
         return None;
     }
@@ -1718,7 +1784,7 @@ fn raw_json_object_field_value_and_end<'a>(
     loop {
         pos = skip_json_ws(row, pos);
         match row.get(pos).copied()? {
-            b'}' => return found.map(|value| (value, pos + 1)),
+            b'}' => return found.map(|(value, range)| (value, range, pos + 1)),
             b'"' => {}
             _ => return None,
         }
@@ -1730,12 +1796,15 @@ fn raw_json_object_field_value_and_end<'a>(
         let value_start = skip_json_ws(row, pos + 1);
         let value_end = skip_json_value(row, value_start)?;
         if field_key == field.as_bytes() {
-            found = Some(&row[value_start..value_end]);
+            found = Some((
+                &row[value_start..value_end],
+                value_start - item_start..value_end - item_start,
+            ));
         }
         pos = skip_json_ws(row, value_end);
         match row.get(pos).copied()? {
             b',' => pos += 1,
-            b'}' => return found.map(|value| (value, pos + 1)),
+            b'}' => return found.map(|(value, range)| (value, range, pos + 1)),
             _ => return None,
         }
     }
