@@ -958,11 +958,19 @@ where
 }
 
 fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
+    if !looks_like_root_rows_query(query) {
+        return Ok(None);
+    }
     let Ok(expr) = crate::parse::parser::parse(query) else {
         return Ok(None);
     };
     lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn looks_like_root_rows_query(query: &str) -> bool {
+    let query = query.trim_start();
+    query.starts_with("$.rows(") || query.starts_with("$.rows.")
 }
 
 fn drive_ndjson_rows_stream_reader<R, W>(
@@ -3737,6 +3745,14 @@ fn non_ws_range(buf: &[u8]) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_stream_detection_is_root_specific() {
+        assert!(super::looks_like_root_rows_query("$.rows().take(1)"));
+        assert!(super::looks_like_root_rows_query("  $.rows().reverse()"));
+        assert!(!super::looks_like_root_rows_query("$.name"));
+        assert!(!super::looks_like_root_rows_query("$.items.rows().take(1)"));
+    }
+
     #[test]
     #[cfg(feature = "simd-json")]
     fn parse_row_keeps_simd_document_lazy() {
