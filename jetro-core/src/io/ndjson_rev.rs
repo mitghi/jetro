@@ -473,11 +473,12 @@ fn distinct_key_bytes_direct<'a>(
 #[derive(Default)]
 struct AdaptiveDistinctKeys {
     exact: HashSet<Vec<u8>>,
-    bloom: Option<BloomFilter>,
+    front: Option<DistinctFrontFilter>,
 }
 
 impl AdaptiveDistinctKeys {
-    const BLOOM_MIN_KEYS: usize = 64;
+    const FRONT_MIN_KEYS: usize = 64;
+    const CUCKOO_MIN_KEYS: usize = 4096;
     const BLOOM_BITS_PER_KEY: usize = 16;
 
     fn insert(&mut self, key: Vec<u8>) -> bool {
@@ -486,9 +487,7 @@ impl AdaptiveDistinctKeys {
         }
         let inserted = self.exact.insert(key.clone());
         if inserted {
-            if let Some(bloom) = self.bloom.as_mut() {
-                bloom.insert(&key);
-            }
+            self.insert_front(&key);
         }
         inserted
     }
@@ -499,39 +498,117 @@ impl AdaptiveDistinctKeys {
         }
         let inserted = self.exact.insert(key.to_vec());
         if inserted {
-            if let Some(bloom) = self.bloom.as_mut() {
-                bloom.insert(key);
-            }
+            self.insert_front(key);
         }
         inserted
     }
 
     fn maybe_contains(&mut self, key: &[u8]) -> bool {
-        self.ensure_bloom_capacity();
-        self
-            .bloom
+        self.ensure_front_capacity();
+        self.front
             .as_ref()
-            .is_none_or(|bloom| bloom.might_contain(key))
+            .is_none_or(|front| front.might_contain(key))
     }
 
-    fn ensure_bloom_capacity(&mut self) {
-        if self.exact.len() < Self::BLOOM_MIN_KEYS {
+    fn insert_front(&mut self, key: &[u8]) {
+        self.ensure_front_capacity();
+        let Some(front) = self.front.as_mut() else {
+            return;
+        };
+        if front.insert(key) {
             return;
         }
-        let needed_bits = (self.exact.len() + 1) * Self::BLOOM_BITS_PER_KEY;
-        if self
-            .bloom
-            .as_ref()
-            .is_some_and(|bloom| bloom.bit_len() >= needed_bits)
-        {
+        self.rebuild_front(self.exact.len() * 2);
+    }
+
+    fn ensure_front_capacity(&mut self) {
+        if self.exact.len() < Self::FRONT_MIN_KEYS {
             return;
         }
 
-        let mut bloom = BloomFilter::with_min_bits(needed_bits);
-        for key in &self.exact {
-            bloom.insert(key);
+        let target = if self.exact.len() >= Self::CUCKOO_MIN_KEYS {
+            DistinctFrontKind::Cuckoo
+        } else {
+            DistinctFrontKind::Bloom
+        };
+        if self.front.as_ref().is_some_and(|front| {
+            front.kind() == target && front.capacity_satisfies(self.exact.len() + 1)
+        }) {
+            return;
         }
-        self.bloom = Some(bloom);
+
+        self.rebuild_front(self.exact.len() + 1);
+    }
+
+    fn rebuild_front(&mut self, capacity_hint: usize) {
+        if self.exact.len() < Self::FRONT_MIN_KEYS {
+            self.front = None;
+            return;
+        }
+
+        let mut front = if self.exact.len() >= Self::CUCKOO_MIN_KEYS {
+            DistinctFrontFilter::Cuckoo(CuckooFilter::with_capacity(capacity_hint))
+        } else {
+            DistinctFrontFilter::Bloom(BloomFilter::with_min_bits(
+                capacity_hint * Self::BLOOM_BITS_PER_KEY,
+            ))
+        };
+        for key in &self.exact {
+            if !front.insert(key) {
+                front = DistinctFrontFilter::Bloom(BloomFilter::with_min_bits(
+                    capacity_hint * Self::BLOOM_BITS_PER_KEY * 2,
+                ));
+                for key in &self.exact {
+                    front.insert(key);
+                }
+                break;
+            }
+        }
+        self.front = Some(front);
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DistinctFrontKind {
+    Bloom,
+    Cuckoo,
+}
+
+enum DistinctFrontFilter {
+    Bloom(BloomFilter),
+    Cuckoo(CuckooFilter),
+}
+
+impl DistinctFrontFilter {
+    fn kind(&self) -> DistinctFrontKind {
+        match self {
+            Self::Bloom(_) => DistinctFrontKind::Bloom,
+            Self::Cuckoo(_) => DistinctFrontKind::Cuckoo,
+        }
+    }
+
+    fn capacity_satisfies(&self, keys: usize) -> bool {
+        match self {
+            Self::Bloom(bloom) => bloom.bit_len() >= keys * AdaptiveDistinctKeys::BLOOM_BITS_PER_KEY,
+            Self::Cuckoo(cuckoo) => cuckoo.capacity_satisfies(keys),
+        }
+    }
+
+    fn insert(&mut self, key: &[u8]) -> bool {
+        match self {
+            Self::Bloom(bloom) => {
+                bloom.insert(key);
+                true
+            }
+            Self::Cuckoo(cuckoo) => cuckoo.insert(key),
+        }
+    }
+
+    fn might_contain(&self, key: &[u8]) -> bool {
+        match self {
+            Self::Bloom(bloom) => bloom.might_contain(key),
+            Self::Cuckoo(cuckoo) => cuckoo.might_contain(key),
+        }
     }
 }
 
@@ -584,6 +661,91 @@ fn bloom_hashes(key: &[u8]) -> (u64, u64) {
     0xbf58_476d_1ce4_e5b9u64.hash(&mut b);
     key.hash(&mut b);
     (a.finish(), b.finish())
+}
+
+struct CuckooFilter {
+    buckets: Vec<[u16; 4]>,
+    bucket_mask: usize,
+}
+
+impl CuckooFilter {
+    const MAX_KICKS: usize = 64;
+
+    fn with_capacity(keys: usize) -> Self {
+        let bucket_count = ((keys.max(1) * 2).div_ceil(4))
+            .next_power_of_two()
+            .max(1024);
+        Self {
+            buckets: vec![[0; 4]; bucket_count],
+            bucket_mask: bucket_count - 1,
+        }
+    }
+
+    fn capacity_satisfies(&self, keys: usize) -> bool {
+        self.buckets.len() * 2 >= keys
+    }
+
+    fn insert(&mut self, key: &[u8]) -> bool {
+        let hash = bloom_hashes(key).0;
+        let fp = cuckoo_fingerprint(hash);
+        let i1 = (hash as usize) & self.bucket_mask;
+        let i2 = self.alt_index(i1, fp);
+        if self.bucket_contains(i1, fp) || self.bucket_contains(i2, fp) {
+            return true;
+        }
+        if self.insert_bucket(i1, fp) || self.insert_bucket(i2, fp) {
+            return true;
+        }
+
+        let mut index = if hash & 1 == 0 { i1 } else { i2 };
+        let mut fp = fp;
+        for kick in 0..Self::MAX_KICKS {
+            let slot = ((hash >> ((kick % 8) * 8)) as usize) & 3;
+            std::mem::swap(&mut self.buckets[index][slot], &mut fp);
+            index = self.alt_index(index, fp);
+            if self.insert_bucket(index, fp) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn might_contain(&self, key: &[u8]) -> bool {
+        let hash = bloom_hashes(key).0;
+        let fp = cuckoo_fingerprint(hash);
+        let i1 = (hash as usize) & self.bucket_mask;
+        let i2 = self.alt_index(i1, fp);
+        self.bucket_contains(i1, fp) || self.bucket_contains(i2, fp)
+    }
+
+    fn alt_index(&self, index: usize, fp: u16) -> usize {
+        (index ^ cuckoo_fp_hash(fp)) & self.bucket_mask
+    }
+
+    fn insert_bucket(&mut self, index: usize, fp: u16) -> bool {
+        if let Some(slot) = self.buckets[index].iter_mut().find(|slot| **slot == 0) {
+            *slot = fp;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn bucket_contains(&self, index: usize, fp: u16) -> bool {
+        self.buckets[index].contains(&fp)
+    }
+}
+
+fn cuckoo_fingerprint(hash: u64) -> u16 {
+    let fp = (hash as u16) ^ ((hash >> 16) as u16) ^ ((hash >> 32) as u16);
+    if fp == 0 { 1 } else { fp }
+}
+
+fn cuckoo_fp_hash(fp: u16) -> usize {
+    let mut x = fp as u64;
+    x = x.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x ^= x >> 32;
+    x as usize
 }
 
 pub fn run_ndjson_rev_matches<P, W>(
@@ -907,16 +1069,32 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_distinct_keys_remain_exact_after_bloom_activation() {
+    fn adaptive_distinct_keys_remain_exact_after_front_filter_activation() {
         let mut keys = super::AdaptiveDistinctKeys::default();
         for n in 0..128 {
             assert!(keys.insert(format!("k{n}").into_bytes()));
         }
-        assert!(keys.bloom.is_some());
+        assert!(keys.front.is_some());
         for n in 0..128 {
             assert!(!keys.insert(format!("k{n}").into_bytes()));
         }
         assert!(keys.insert(b"new".to_vec()));
+    }
+
+    #[test]
+    fn adaptive_distinct_keys_promote_to_cuckoo_front_filter() {
+        let mut keys = super::AdaptiveDistinctKeys::default();
+        for n in 0..5000 {
+            assert!(keys.insert(format!("k{n}").into_bytes()));
+        }
+        assert!(matches!(
+            keys.front,
+            Some(super::DistinctFrontFilter::Cuckoo(_))
+        ));
+        for n in 0..5000 {
+            assert!(!keys.insert_slice(format!("k{n}").as_bytes()));
+        }
+        assert!(keys.insert_slice(b"fresh"));
     }
 
     fn temp_path(name: &str) -> PathBuf {
