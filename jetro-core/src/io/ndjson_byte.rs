@@ -1612,6 +1612,7 @@ pub(super) fn collect_constant_stream_single_field<W: Write>(
     field: &str,
     mut values: Option<&mut Vec<Vec<u8>>>,
     mut ranges: Option<&mut Vec<std::ops::Range<usize>>>,
+    mut prefixes: Option<&mut Vec<Vec<u8>>>,
 ) -> Result<bool, JetroEngineError> {
     let start = skip_json_ws(source, 0);
     let end = trim_json_ws_end(source);
@@ -1639,8 +1640,12 @@ pub(super) fn collect_constant_stream_single_field<W: Write>(
         if let Some(values) = values.as_deref_mut() {
             values.push(value.to_vec());
         }
+        let prefix_end = pos + range.start;
         if let Some(ranges) = ranges.as_deref_mut() {
             ranges.push(range);
+        }
+        if let Some(prefixes) = prefixes.as_deref_mut() {
+            prefixes.push(source[pos..prefix_end].to_vec());
         }
         wrote = true;
         pos = skip_json_ws(source, next);
@@ -1659,8 +1664,9 @@ pub(super) fn validate_constant_stream_single_field_fast(
     source: &[u8],
     values: &[Vec<u8>],
     ranges: &[std::ops::Range<usize>],
+    prefixes: &[Vec<u8>],
 ) -> bool {
-    if values.len() != ranges.len() {
+    if values.len() != ranges.len() || values.len() != prefixes.len() {
         return false;
     }
     let start = skip_json_ws(source, 0);
@@ -1684,6 +1690,9 @@ pub(super) fn validate_constant_stream_single_field_fast(
         let Some(value_end) = pos.checked_add(range.end) else {
             return false;
         };
+        if source.get(pos..value_start) != Some(prefixes[idx].as_slice()) {
+            return false;
+        }
         if source.get(value_start..value_end) != Some(expected.as_slice()) {
             return false;
         }

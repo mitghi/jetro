@@ -12,6 +12,7 @@ pub(super) struct NdjsonConstantStreamCache {
     output: Vec<u8>,
     values: Vec<Vec<u8>>,
     ranges: Vec<std::ops::Range<usize>>,
+    prefixes: Vec<Vec<u8>>,
     disabled: bool,
     learned: bool,
 }
@@ -48,6 +49,7 @@ impl NdjsonConstantStreamCache {
         if !self.learned {
             self.values.clear();
             self.ranges.clear();
+            self.prefixes.clear();
             self.output.clear();
             if !collect_constant_stream_single_field(
                 &mut self.output,
@@ -55,6 +57,7 @@ impl NdjsonConstantStreamCache {
                 field,
                 Some(&mut self.values),
                 Some(&mut self.ranges),
+                Some(&mut self.prefixes),
             )? {
                 self.disabled = true;
                 return Ok(None);
@@ -63,7 +66,12 @@ impl NdjsonConstantStreamCache {
             writer.write_all(&self.output)?;
             return Ok(Some(BytePlanWrite::Done));
         }
-        if validate_constant_stream_single_field_fast(source, &self.values, &self.ranges)
+        if validate_constant_stream_single_field_fast(
+            source,
+            &self.values,
+            &self.ranges,
+            &self.prefixes,
+        )
             || validate_constant_stream_single_field(source, field, &self.values)
         {
             writer.write_all(&self.output)?;
