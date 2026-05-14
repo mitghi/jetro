@@ -11,7 +11,11 @@ use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
 use crate::JetroEngineError;
 use memchr::memchr2;
+use smallvec::SmallVec;
 use std::io::Write;
+
+type RootFieldSet<'a> = SmallVec<[&'a str; 4]>;
+type RootFieldSpans = SmallVec<[Option<std::ops::Range<usize>>; 4]>;
 
 #[derive(Clone, Copy)]
 pub(super) enum BytePlanWrite {
@@ -1376,7 +1380,7 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     stream: &NdjsonDirectStreamPlan,
     map: &NdjsonDirectStreamMap,
 ) -> Result<BytePlanWrite, JetroEngineError> {
-    let mut root_fields = Vec::new();
+    let mut root_fields = RootFieldSet::new();
     let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
     if root_projectable && stream.predicate.is_none() {
         if let Some(()) = write_raw_json_stream_collect_single_field(
@@ -1410,7 +1414,7 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
             }
         }
     }
-    let mut root_spans = Vec::new();
+    let mut root_spans = RootFieldSpans::new();
     writer.write_all(b"[")?;
     let mut wrote = false;
     let mut failed = false;
@@ -1472,7 +1476,7 @@ fn write_raw_json_stream_collect_projected_filtered<W: Write>(
         return Ok(Some(()));
     }
     let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
-    let mut spans = Vec::new();
+    let mut spans = RootFieldSpans::new();
     let mut wrote = false;
     loop {
         pos = skip_json_ws(source, pos);
@@ -1747,7 +1751,7 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
         return Ok(Some(()));
     }
     let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
-    let mut spans = Vec::new();
+    let mut spans = RootFieldSpans::new();
     let mut wrote = false;
     loop {
         pos = skip_json_ws(source, pos);
@@ -1882,7 +1886,7 @@ fn infer_raw_json_object_field_ordinals_at(
 
 fn collect_stream_map_root_fields<'a>(
     map: &'a NdjsonDirectStreamMap,
-    out: &mut Vec<&'a str>,
+    out: &mut RootFieldSet<'a>,
 ) -> bool {
     out.clear();
     match map {
@@ -1898,7 +1902,7 @@ fn collect_stream_map_root_fields<'a>(
 
 fn collect_projection_root_field<'a>(
     value: &'a NdjsonDirectProjectionValue,
-    out: &mut Vec<&'a str>,
+    out: &mut RootFieldSet<'a>,
 ) -> bool {
     match value {
         NdjsonDirectProjectionValue::Path(steps)
@@ -1912,7 +1916,7 @@ fn collect_projection_root_field<'a>(
 
 fn collect_stream_predicate_root_fields<'a>(
     predicate: &'a NdjsonDirectItemPredicate,
-    out: &mut Vec<&'a str>,
+    out: &mut RootFieldSet<'a>,
 ) -> bool {
     match predicate {
         NdjsonDirectItemPredicate::Path(steps)
@@ -1929,7 +1933,7 @@ fn collect_stream_predicate_root_fields<'a>(
     }
 }
 
-fn collect_path_root_field<'a>(steps: &'a [PhysicalPathStep], out: &mut Vec<&'a str>) -> bool {
+fn collect_path_root_field<'a>(steps: &'a [PhysicalPathStep], out: &mut RootFieldSet<'a>) -> bool {
     let Some(PhysicalPathStep::Field(key)) = steps.first() else {
         return false;
     };
@@ -1944,7 +1948,7 @@ fn write_raw_json_stream_map_from_root_fields<W: Write>(
     item: &[u8],
     map: &NdjsonDirectStreamMap,
     root_fields: &[&str],
-    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+    spans: &mut RootFieldSpans,
 ) -> Result<bool, JetroEngineError> {
     if !scan_raw_json_root_field_spans(item, root_fields, spans) {
         return Ok(false);
@@ -2024,7 +2028,7 @@ fn write_raw_json_stream_map_with_root_spans<W: Write>(
 fn scan_raw_json_root_field_spans(
     item: &[u8],
     root_fields: &[&str],
-    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+    spans: &mut RootFieldSpans,
 ) -> bool {
     spans.clear();
     spans.resize(root_fields.len(), None);
@@ -2046,7 +2050,7 @@ fn scan_raw_json_object_field_spans_at(
     row: &[u8],
     mut pos: usize,
     root_fields: &[&str],
-    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+    spans: &mut RootFieldSpans,
 ) -> Option<usize> {
     spans.resize(root_fields.len(), None);
     let mut remaining = root_fields.len();
@@ -2091,7 +2095,7 @@ fn scan_raw_json_object_field_spans_by_ordinals_at(
     mut pos: usize,
     root_fields: &[&str],
     ordinals: &[usize],
-    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+    spans: &mut RootFieldSpans,
 ) -> Option<usize> {
     spans.resize(root_fields.len(), None);
     if row.get(pos) != Some(&b'{') {
