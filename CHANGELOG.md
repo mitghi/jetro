@@ -160,6 +160,11 @@
   scalar comparison, improving `sort_by(string).first()/last()` without adding
   query-chain-specific fusion. Escaped string keys have regression coverage for
   the fallback path.
+- **NDJSON streams have a generic `first` sink**. Filter/map pipelines ending
+  in `first()` now lower to a reusable direct stream sink that stops at the
+  first matching item and applies the planned projection once. The benchmark
+  shape `filter(...).map({...}).first()` improved locally from roughly 4.26s to
+  roughly 3.8s on the 4.76M-row file.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety and
   byte-extrema changes.
