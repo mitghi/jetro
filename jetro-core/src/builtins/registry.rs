@@ -669,6 +669,24 @@ mod tests {
     }
 
     #[test]
+    fn registry_names_and_aliases_are_unambiguous() {
+        use std::collections::BTreeMap;
+
+        let mut seen = BTreeMap::new();
+        for (method, canonical, aliases) in all_method_entries() {
+            for name in std::iter::once(canonical).chain(aliases.iter().copied()) {
+                if let Some(existing) = seen.insert(name, method) {
+                    panic!(
+                        "builtin name/alias {name:?} is registered for both {existing:?} and {method:?}"
+                    );
+                }
+                assert_eq!(by_name(name).and_then(BuiltinId::method), Some(method));
+                assert_eq!(BuiltinMethod::from_name(name), method);
+            }
+        }
+    }
+
+    #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
         let map = BuiltinId::from_method(BuiltinMethod::Map);

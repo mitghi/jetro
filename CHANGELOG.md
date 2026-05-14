@@ -34,6 +34,12 @@
   and tape fallback writers, so performance assertions match the actual writer
   branch used by `run_ndjson`.
 
+### Builtin hardening
+
+- **Builtin names and aliases are now collision-checked**. Registry tests prove
+  every canonical builtin name and alias resolves back to exactly one
+  `BuiltinMethod`, preventing silent lookup drift as the builtin catalog grows.
+
 ## 0.5.9
 
 ### Release focus
