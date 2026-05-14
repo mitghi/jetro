@@ -957,13 +957,20 @@ fn raw_json_view(value: &[u8]) -> Option<JsonView<'_>> {
 fn raw_json_cmp_values_fast(a: &[u8], b: &[u8]) -> Option<std::cmp::Ordering> {
     let a = trim_json_ws(a);
     let b = trim_json_ws(b);
-    raw_json_simple_string_bytes(a)
+    if let Some(order) = raw_json_simple_string_bytes(a)
         .zip(raw_json_simple_string_bytes(b))
         .map(|(a, b)| a.cmp(b))
+    {
+        return Some(order);
+    }
+    raw_json_number_view(a)
+        .zip(raw_json_number_view(b))
+        .map(|(a, b)| crate::util::json_cmp_vals(a, b))
 }
 
 fn raw_json_value_has_fast_comparison(value: &[u8]) -> bool {
-    raw_json_simple_string_bytes(trim_json_ws(value)).is_some()
+    let value = trim_json_ws(value);
+    raw_json_simple_string_bytes(value).is_some() || raw_json_number_view(value).is_some()
 }
 
 fn trim_json_ws(value: &[u8]) -> &[u8] {

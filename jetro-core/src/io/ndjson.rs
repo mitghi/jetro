@@ -4108,6 +4108,21 @@ mod tests {
     }
 
     #[test]
+    fn run_ndjson_stream_extreme_handles_numeric_keys() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","score":1},{"key":"b","score":10},{"key":"c","score":2}]}
+{"attributes":[{"key":"x","score":-2},{"key":"y","score":-1.5}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.score).last().key", &mut out)
+            .expect("numeric extrema keys should use direct stream extrema");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"y\"\n");
+    }
+
+    #[test]
     #[cfg(feature = "simd-json")]
     fn run_ndjson_nested_direct_projection_writes_without_fallback() {
         let engine = crate::JetroEngine::new();
