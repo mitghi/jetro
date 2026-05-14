@@ -3829,6 +3829,22 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_extreme_projects_selected_item_field() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"m"},{"key":"b","value":"z"},{"key":"c","value":"n"}]}
+{"attributes":[{"key":"x","value":"b"},{"key":"y","value":"a"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.value).last().key", &mut out)
+            .expect("stream extreme should project selected item field");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"x\"\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_nested_direct_projection_writes_without_fallback() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
