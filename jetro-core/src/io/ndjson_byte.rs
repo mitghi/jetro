@@ -1209,6 +1209,10 @@ fn raw_json_count_filtered_source(
     source: &[u8],
     predicate: &NdjsonDirectItemPredicate,
 ) -> Option<usize> {
+    let mut root_fields = RootFieldSet::new();
+    if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
+        return raw_json_count_filtered_source_from_root_fields(source, predicate, &root_fields);
+    }
     let mut count = 0usize;
     raw_json_source_items(source, |item| {
         if eval_raw_item_predicate(item, predicate)? {
@@ -1217,6 +1221,49 @@ fn raw_json_count_filtered_source(
         Some(())
     })?;
     Some(count)
+}
+
+fn raw_json_count_filtered_source_from_root_fields(
+    source: &[u8],
+    predicate: &NdjsonDirectItemPredicate,
+    root_fields: &[&str],
+) -> Option<usize> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        return Some(0);
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let mut spans = RootFieldSpans::new();
+    let mut count = 0usize;
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        }?;
+        if eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)? {
+            count += 1;
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => return Some(count),
+            _ => return None,
+        }
+    }
 }
 
 fn reduce_raw_json_numeric_path(
