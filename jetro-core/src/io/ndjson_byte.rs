@@ -17,6 +17,8 @@ use std::io::Write;
 type RootFieldSet<'a> = SmallVec<[&'a str; 4]>;
 type RootFieldSpans = SmallVec<[Option<std::ops::Range<usize>>; 4]>;
 type RootFieldOrdinals = SmallVec<[usize; 4]>;
+type DirectRootArraySlots = SmallVec<[usize; 4]>;
+type DirectRootObjectSlots<'a> = SmallVec<[(&'a str, usize); 4]>;
 
 #[derive(Clone, Copy)]
 pub(super) enum BytePlanWrite {
@@ -1716,6 +1718,7 @@ fn write_raw_json_stream_collect_projected_filtered<W: Write>(
         return Ok(Some(()));
     }
     let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let direct_map = direct_root_stream_map(map, root_fields);
     let mut spans = RootFieldSpans::new();
     let mut wrote = false;
     loop {
@@ -1744,7 +1747,9 @@ fn write_raw_json_stream_collect_projected_filtered<W: Write>(
             if wrote {
                 writer.write_all(b",")?;
             }
-            if !write_raw_json_stream_map_with_root_spans(
+            if let Some(direct_map) = direct_map.as_ref() {
+                write_direct_root_stream_map(writer, source, &spans, direct_map)?;
+            } else if !write_raw_json_stream_map_with_root_spans(
                 writer,
                 source,
                 map,
@@ -2000,6 +2005,7 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
         return Ok(Some(()));
     }
     let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let direct_map = direct_root_stream_map(map, root_fields);
     let mut spans = RootFieldSpans::new();
     let mut wrote = false;
     loop {
@@ -2022,7 +2028,15 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        if !write_raw_json_stream_map_with_root_spans(writer, source, map, root_fields, &spans)? {
+        if let Some(direct_map) = direct_map.as_ref() {
+            write_direct_root_stream_map(writer, source, &spans, direct_map)?;
+        } else if !write_raw_json_stream_map_with_root_spans(
+            writer,
+            source,
+            map,
+            root_fields,
+            &spans,
+        )? {
             return Ok(None);
         }
         wrote = true;
@@ -2273,6 +2287,99 @@ fn write_raw_json_stream_map_with_root_spans<W: Write>(
             Ok(true)
         }
     }
+}
+
+enum DirectRootStreamMap<'a> {
+    Array(DirectRootArraySlots),
+    Object(DirectRootObjectSlots<'a>),
+}
+
+fn direct_root_stream_map<'a>(
+    map: &'a NdjsonDirectStreamMap,
+    root_fields: &[&str],
+) -> Option<DirectRootStreamMap<'a>> {
+    match map {
+        NdjsonDirectStreamMap::Array(items) => {
+            let mut slots = DirectRootArraySlots::new();
+            for value in items {
+                slots.push(direct_root_projection_slot(value, root_fields)?);
+            }
+            Some(DirectRootStreamMap::Array(slots))
+        }
+        NdjsonDirectStreamMap::Object(fields) => {
+            let mut slots = DirectRootObjectSlots::new();
+            for field in fields {
+                if field.optional {
+                    return None;
+                }
+                slots.push((
+                    field.key.as_ref(),
+                    direct_root_projection_slot(&field.value, root_fields)?,
+                ));
+            }
+            Some(DirectRootStreamMap::Object(slots))
+        }
+        _ => None,
+    }
+}
+
+fn direct_root_projection_slot(
+    value: &NdjsonDirectProjectionValue,
+    root_fields: &[&str],
+) -> Option<usize> {
+    let NdjsonDirectProjectionValue::Path(steps) = value else {
+        return None;
+    };
+    let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+        return None;
+    };
+    root_fields.iter().position(|field| *field == key.as_ref())
+}
+
+fn write_direct_root_stream_map<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    spans: &[Option<std::ops::Range<usize>>],
+    map: &DirectRootStreamMap<'_>,
+) -> Result<(), JetroEngineError> {
+    match map {
+        DirectRootStreamMap::Array(slots) => {
+            writer.write_all(b"[")?;
+            for (idx, slot) in slots.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_direct_root_slot_value(writer, item, spans, *slot)?;
+            }
+            writer.write_all(b"]")?;
+        }
+        DirectRootStreamMap::Object(slots) => {
+            writer.write_all(b"{")?;
+            for (idx, (key, slot)) in slots.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                write_json_str(writer, key)?;
+                writer.write_all(b":")?;
+                write_direct_root_slot_value(writer, item, spans, *slot)?;
+            }
+            writer.write_all(b"}")?;
+        }
+    }
+    Ok(())
+}
+
+fn write_direct_root_slot_value<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    spans: &[Option<std::ops::Range<usize>>],
+    slot: usize,
+) -> Result<(), JetroEngineError> {
+    match spans.get(slot).and_then(Option::as_ref) {
+        Some(span) => writer.write_all(&item[span.clone()])?,
+        None => writer.write_all(b"null")?,
+    }
+    Ok(())
 }
 
 fn scan_raw_json_root_field_spans(
