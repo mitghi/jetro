@@ -1395,6 +1395,21 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
             return Ok(BytePlanWrite::Done);
         }
     }
+    if root_projectable {
+        if let Some(predicate) = stream.predicate.as_ref() {
+            if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
+                if let Some(()) = write_raw_json_stream_collect_projected_filtered(
+                    writer,
+                    source,
+                    map,
+                    predicate,
+                    &root_fields,
+                )? {
+                    return Ok(BytePlanWrite::Done);
+                }
+            }
+        }
+    }
     let mut root_spans = Vec::new();
     writer.write_all(b"[")?;
     let mut wrote = false;
@@ -1436,6 +1451,76 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     }
     writer.write_all(b"]")?;
     Ok(BytePlanWrite::Done)
+}
+
+fn write_raw_json_stream_collect_projected_filtered<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    map: &NdjsonDirectStreamMap,
+    predicate: &NdjsonDirectItemPredicate,
+    root_fields: &[&str],
+) -> Result<Option<()>, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    writer.write_all(b"[")?;
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"]")?;
+        return Ok(Some(()));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let mut spans = Vec::new();
+    let mut wrote = false;
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        let Some(matches) =
+            eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
+        else {
+            return Ok(None);
+        };
+        if matches {
+            if wrote {
+                writer.write_all(b",")?;
+            }
+            if !write_raw_json_stream_map_with_root_spans(
+                writer,
+                source,
+                map,
+                root_fields,
+                &spans,
+            )? {
+                return Ok(None);
+            }
+            wrote = true;
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                writer.write_all(b"]")?;
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
 }
 
 fn write_raw_json_stream_collect_single_field<W: Write>(
@@ -1818,17 +1903,40 @@ fn collect_projection_root_field<'a>(
     match value {
         NdjsonDirectProjectionValue::Path(steps)
         | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-            let Some(PhysicalPathStep::Field(key)) = steps.first() else {
-                return false;
-            };
-            if !out.contains(&key.as_ref()) {
-                out.push(key.as_ref());
-            }
-            true
+            collect_path_root_field(steps, out)
         }
         NdjsonDirectProjectionValue::Nested(_) => false,
         NdjsonDirectProjectionValue::Literal(_) => true,
     }
+}
+
+fn collect_stream_predicate_root_fields<'a>(
+    predicate: &'a NdjsonDirectItemPredicate,
+    out: &mut Vec<&'a str>,
+) -> bool {
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps)
+        | NdjsonDirectItemPredicate::CmpLit { lhs: steps, .. }
+        | NdjsonDirectItemPredicate::ViewScalarCall {
+            suffix_steps: steps,
+            ..
+        } => collect_path_root_field(steps, out),
+        NdjsonDirectItemPredicate::Literal(_) => true,
+        NdjsonDirectItemPredicate::Binary { lhs, rhs, .. } => {
+            collect_stream_predicate_root_fields(lhs, out)
+                && collect_stream_predicate_root_fields(rhs, out)
+        }
+    }
+}
+
+fn collect_path_root_field<'a>(steps: &'a [PhysicalPathStep], out: &mut Vec<&'a str>) -> bool {
+    let Some(PhysicalPathStep::Field(key)) = steps.first() else {
+        return false;
+    };
+    if !out.contains(&key.as_ref()) {
+        out.push(key.as_ref());
+    }
+    true
 }
 
 fn write_raw_json_stream_map_from_root_fields<W: Write>(
@@ -2111,6 +2219,80 @@ fn raw_json_projection_value_from_root<'a>(
         RawFieldValue::Found(value)
     } else {
         raw_json_path_value_precise(value, rest)
+    }
+}
+
+fn eval_raw_item_predicate_from_root_fields<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    predicate: &'a NdjsonDirectItemPredicate,
+) -> Option<bool> {
+    use crate::parse::ast::BinOp;
+
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => {
+            raw_json_projection_view_from_root(item, root_fields, spans, steps).map(json_view_truthy)
+        }
+        NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            let lhs = eval_raw_item_predicate_from_root_fields(item, root_fields, spans, lhs)?;
+            if !lhs {
+                return Some(false);
+            }
+            eval_raw_item_predicate_from_root_fields(item, root_fields, spans, rhs)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            let lhs = eval_raw_item_predicate_from_root_fields(item, root_fields, spans, lhs)?;
+            if lhs {
+                return Some(true);
+            }
+            eval_raw_item_predicate_from_root_fields(item, root_fields, spans, rhs)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } => {
+            let lhs =
+                eval_raw_item_predicate_scalar_from_root_fields(item, root_fields, spans, lhs)?;
+            let rhs =
+                eval_raw_item_predicate_scalar_from_root_fields(item, root_fields, spans, rhs)?;
+            Some(crate::util::json_cmp_binop(lhs, *op, rhs))
+        }
+        NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => {
+            raw_json_projection_view_from_root(item, root_fields, spans, lhs)
+                .map(|value| crate::util::json_cmp_binop(value, *op, JsonView::from_val(lit)))
+        }
+        NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
+            let value =
+                raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
+            call.try_apply_json_view(value)
+                .map(|value| crate::util::is_truthy(&value))
+        }
+    }
+}
+
+fn eval_raw_item_predicate_scalar_from_root_fields<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    predicate: &'a NdjsonDirectItemPredicate,
+) -> Option<JsonView<'a>> {
+    match predicate {
+        NdjsonDirectItemPredicate::Path(steps) => {
+            raw_json_projection_view_from_root(item, root_fields, spans, steps)
+        }
+        NdjsonDirectItemPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        _ => None,
+    }
+}
+
+fn raw_json_projection_view_from_root<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    steps: &[PhysicalPathStep],
+) -> Option<JsonView<'a>> {
+    match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
+        RawFieldValue::Found(value) => raw_json_view(value),
+        RawFieldValue::Missing | RawFieldValue::Fallback => None,
     }
 }
 
