@@ -3831,6 +3831,22 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_filtered_count_ignores_missing_predicate_fields() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"value":"x_3"},{"key":"missing"},{"value":"y"}]}
+{"attributes":[{"key":"missing"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, r#"$.attributes.filter(@.value.contains("_3")).len()"#, &mut out)
+            .expect("filtered count should ignore missing predicate fields");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_numeric_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
