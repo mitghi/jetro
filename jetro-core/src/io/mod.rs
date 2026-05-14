@@ -16,6 +16,8 @@ mod ndjson_hint;
 mod ndjson_stream_cache;
 mod ndjson_rev;
 mod source;
+#[allow(dead_code)]
+mod stream_plan;
 
 pub use ndjson::{
     collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options, collect_ndjson_matches,

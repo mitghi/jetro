@@ -678,6 +678,8 @@ mod tests {
             BuiltinMethod::from_name("distinct_by"),
             BuiltinMethod::UniqueBy
         );
+        assert_eq!(BuiltinMethod::from_name("rows"), BuiltinMethod::Rows);
+        assert!(BuiltinMethod::Rows.spec().stream_source);
         assert_eq!(BuiltinMethod::from_name("lstrip"), BuiltinMethod::TrimLeft);
     }
 

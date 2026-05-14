@@ -2743,6 +2743,25 @@ impl Builtin for Unknown {
     }
 }
 
+/// `rows()` — source-lifting marker used by stream planners.
+///
+/// Runtime row-local dispatch intentionally leaves the receiver unchanged; the
+/// planner is responsible for recognizing root `$.rows()` as a stream boundary.
+pub(crate) struct Rows;
+impl Builtin for Rows {
+    const METHOD: BuiltinMethod = BuiltinMethod::Rows;
+    const NAME: &'static str = "rows";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+            .stream_source()
+            .never_unwrap()
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        Some(recv.clone())
+    }
+}
+
 // ── Wildcard-default methods now made explicit (so all methods have defs entries) ──
 
 /// `from_json` — string → JSON value (default scalar element).
