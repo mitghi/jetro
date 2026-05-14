@@ -658,11 +658,8 @@ fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
 fn root_field_raw_value_for_element<'a>(
     row: &'a [u8],
     key: &str,
-    element: NdjsonDirectElement,
+    _element: NdjsonDirectElement,
 ) -> RawFieldValue<'a> {
-    if matches!(element, NdjsonDirectElement::Last) {
-        return root_field_raw_value(row, key);
-    }
     root_field_raw_value_prefix(row, key)
 }
 

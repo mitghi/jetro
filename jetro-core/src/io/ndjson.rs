@@ -3660,8 +3660,8 @@ mod tests {
     fn run_ndjson_uses_byte_paths_for_nested_array_demands() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
-            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}]}}
-{"store":{"attributes":[{"value":"c"},{"value":"d"}]}}
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}],"after":1}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}],"after":2}}
 "#,
         );
 
@@ -3670,6 +3670,17 @@ mod tests {
             .run_ndjson(rows, "$.store.attributes.first().value", &mut out)
             .expect("nested byte array demand should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"c\"\n");
+
+        out.clear();
+        let rows = std::io::Cursor::new(
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}],"after":1}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}],"after":2}}
+"#,
+        );
+        engine
+            .run_ndjson(rows, "$.store.attributes.last().value", &mut out)
+            .expect("nested byte last demand should run from field prefix");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"d\"\n");
     }
 
     #[test]
