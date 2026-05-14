@@ -328,11 +328,20 @@ pub(super) enum NdjsonHintDecision {
     Disabled,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct NdjsonHintStats {
+    pub(super) learned_rows: usize,
+    pub(super) rejected_rows: usize,
+    pub(super) hinted_rows: usize,
+    pub(super) disabled: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct NdjsonHintState {
     config: NdjsonHintConfig,
     access: NdjsonHintAccessPlan,
     schema: NdjsonSchemaHints,
+    stats: NdjsonHintStats,
     disabled: bool,
 }
 
@@ -342,6 +351,7 @@ impl NdjsonHintState {
             config,
             access,
             schema: NdjsonSchemaHints::default(),
+            stats: NdjsonHintStats::default(),
             disabled: false,
         }
     }
@@ -351,8 +361,11 @@ impl NdjsonHintState {
             return NdjsonHintDecision::Disabled;
         }
         self.schema.observe_row(row);
+        self.stats.learned_rows = self.schema.rows_observed;
+        self.stats.rejected_rows = self.schema.rows_rejected;
         if self.schema.rows_rejected > self.config.max_rejects {
             self.disabled = true;
+            self.stats.disabled = true;
             return NdjsonHintDecision::Disabled;
         }
         if self.schema.rows_observed < self.config.min_rows {
@@ -362,6 +375,7 @@ impl NdjsonHintState {
             .schema
             .root_has_stable_fields(self.access.required_root_fields())
         {
+            self.stats.hinted_rows += 1;
             NdjsonHintDecision::UseHints
         } else {
             NdjsonHintDecision::Learning
@@ -374,6 +388,10 @@ impl NdjsonHintState {
 
     pub(super) fn root_layout(&self) -> Option<&NdjsonObjectLayoutHint> {
         self.schema.root_object.as_ref()
+    }
+
+    pub(super) fn stats(&self) -> &NdjsonHintStats {
+        &self.stats
     }
 }
 
@@ -481,6 +499,7 @@ mod tests {
             NdjsonHintDecision::UseHints
         );
         assert_eq!(state.schema().root_slot_for("name"), Some(1));
+        assert_eq!(state.stats().hinted_rows, 1);
     }
 
     #[test]
@@ -516,6 +535,7 @@ mod tests {
         assert_eq!(state.observe_row(br#"[]"#), NdjsonHintDecision::Learning);
         assert_eq!(state.observe_row(br#"{"bad\nkey":1}"#), NdjsonHintDecision::Disabled);
         assert_eq!(state.observe_row(br#"{"id":1}"#), NdjsonHintDecision::Disabled);
+        assert!(state.stats().disabled);
     }
 
     #[test]

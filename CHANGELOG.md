@@ -54,6 +54,9 @@
   learning threshold, byte-writable object and array projection plans can use a
   validated root-layout match to emit root-field values by slot, while any
   unsupported value shape or row mismatch falls back to the existing writer.
+- **NDJSON hint state now tracks activation counters**. The adaptive hint layer
+  records learned rows, rejected rows, hinted rows, and disabled state so future
+  explain/debug output can prove when schema-guided byte access is active.
 
 ### Builtin hardening
 
