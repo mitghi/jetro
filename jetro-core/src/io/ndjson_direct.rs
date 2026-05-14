@@ -25,6 +25,7 @@ pub(super) enum NdjsonDirectPlanKind {
     TapeStreamCollect,
     TapeStreamCount,
     TapeStreamNumeric,
+    TapeStreamExtreme,
     TapeObjectProjection,
     TapeArrayProjection,
     TapeViewPipeline,
@@ -52,8 +53,8 @@ impl NdjsonDirectTapePlan {
             Self::Stream(stream) => match &stream.sink {
                 NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
                 NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
-                NdjsonDirectStreamSink::Numeric { .. }
-                | NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
+                NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
+                NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamExtreme,
             },
             Self::Object(_) => NdjsonDirectPlanKind::TapeObjectProjection,
             Self::Array(_) => NdjsonDirectPlanKind::TapeArrayProjection,

@@ -3353,8 +3353,8 @@ mod tests {
     fn direct_writer_plan_kind_exposes_hot_path_selection() {
         let engine = crate::JetroEngine::new();
         use super::NdjsonDirectPlanKind::{
-            ByteExpr, TapeArrayProjection, TapeObjectProjection, TapeStreamCollect,
-            TapeRootPath, TapeStreamCount, TapeStreamNumeric,
+            ByteExpr, TapeArrayProjection, TapeObjectProjection, TapeRootPath, TapeStreamCollect,
+            TapeStreamCount, TapeStreamExtreme, TapeStreamNumeric,
         };
 
         for (query, expected) in [
@@ -3384,7 +3384,7 @@ mod tests {
             ),
             (
                 "$.attributes.sort_by(@.value).last().key",
-                (None, TapeStreamNumeric),
+                (None, TapeStreamExtreme),
             ),
         ] {
             let actual = super::direct_writer_plan_kind(&engine, query)
