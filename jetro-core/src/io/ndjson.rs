@@ -3995,6 +3995,20 @@ mod tests {
     }
 
     #[test]
+    fn run_ndjson_stream_extreme_handles_escaped_string_keys() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"v\"1"},{"key":"b","value":"v_9"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.value).last().key", &mut out)
+            .expect("escaped extrema keys should fall back safely");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n");
+    }
+
+    #[test]
     #[cfg(feature = "simd-json")]
     fn run_ndjson_nested_direct_projection_writes_without_fallback() {
         let engine = crate::JetroEngine::new();
