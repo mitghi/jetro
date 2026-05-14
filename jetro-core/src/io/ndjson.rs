@@ -3829,6 +3829,26 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_filtered_stream_numeric_uses_shared_fields() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"value":"x_3","weight":1},{"value":"skip","weight":10},{"value":"y_3","weight":2.5}]}
+{"attributes":[{"value":"skip","weight":4}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                &mut out,
+            )
+            .expect("filtered numeric stream should use byte path");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "3.5\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_extreme_projects_selected_item_field() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
