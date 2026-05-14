@@ -3779,6 +3779,22 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_cache_rejects_reordered_item_prefixes() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"k1","value":"a"}]}
+{"attributes":[{"value":"k1","key":"actual"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.key)", &mut out)
+            .expect("stream cache should fall back on reordered item fields");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "[\"k1\"]\n[\"actual\"]\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_count_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
