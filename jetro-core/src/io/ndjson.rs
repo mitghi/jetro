@@ -3412,4 +3412,42 @@ mod tests {
 {\"id\":9,\"name\":\"i\"}\n"
         );
     }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_nested_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"profile":{"name":"a","score":10},"active":true}
+{"id":2,"profile":{"name":"b","score":20},"active":true}
+{"id":3,"profile":{"name":"c","score":30},"active":true}
+{"id":4,"profile":{"name":"d","score":40},"active":true}
+{"id":5,"profile":{"name":"e","score":50},"active":true}
+{"id":6,"profile":{"name":"f","score":60},"active":true}
+{"id":7,"profile":{"name":"g","score":70},"active":true}
+{"id":8,"profile":{"name":"h","score":80},"active":true}
+{"id":9,"profile":{"name":"i","score":90},"active":true}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"{id: $.id, name: $.profile.name, profile: $.profile}"#,
+                &mut out,
+            )
+            .expect("hinted nested projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"a\",\"profile\":{\"name\":\"a\",\"score\":10}}\n\
+{\"id\":2,\"name\":\"b\",\"profile\":{\"name\":\"b\",\"score\":20}}\n\
+{\"id\":3,\"name\":\"c\",\"profile\":{\"name\":\"c\",\"score\":30}}\n\
+{\"id\":4,\"name\":\"d\",\"profile\":{\"name\":\"d\",\"score\":40}}\n\
+{\"id\":5,\"name\":\"e\",\"profile\":{\"name\":\"e\",\"score\":50}}\n\
+{\"id\":6,\"name\":\"f\",\"profile\":{\"name\":\"f\",\"score\":60}}\n\
+{\"id\":7,\"name\":\"g\",\"profile\":{\"name\":\"g\",\"score\":70}}\n\
+{\"id\":8,\"name\":\"h\",\"profile\":{\"name\":\"h\",\"score\":80}}\n\
+{\"id\":9,\"name\":\"i\",\"profile\":{\"name\":\"i\",\"score\":90}}\n"
+        );
+    }
 }

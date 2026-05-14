@@ -312,10 +312,15 @@ fn hinted_projection_value<'a>(
 ) -> Option<&'a [u8]> {
     match value {
         NdjsonDirectProjectionValue::Path(steps) => {
-            let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+            let Some((PhysicalPathStep::Field(key), rest)) = steps.split_first() else {
                 return None;
             };
-            matched.value_at(root.slot_for(key.as_ref())?)
+            let value = matched.value_at(root.slot_for(key.as_ref())?)?;
+            if rest.is_empty() {
+                Some(value)
+            } else {
+                raw_json_path_value(value, rest)
+            }
         }
         NdjsonDirectProjectionValue::Literal(lit) => match lit {
             crate::data::value::Val::Null => Some(b"null"),
