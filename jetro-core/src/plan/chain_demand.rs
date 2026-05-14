@@ -122,10 +122,11 @@ impl DemandOperator for ChainOp {
                         PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
                             PullDemand::UntilOutput(n)
                         }
+                        PullDemand::LastInput(_) | PullDemand::NthInput(_) => PullDemand::All,
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order,
+                    order: downstream.order || matches!(downstream.pull, PullDemand::LastInput(_)),
                 },
                 // Transform match is 1:1, so demand passes through.
                 MatchRole::Transform => downstream,
@@ -253,10 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn filter_last_requests_reverse_until_output() {
+    fn filter_last_requests_ordered_full_scan() {
         let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
-        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
     }
