@@ -318,6 +318,7 @@ fn root_simple_keys(row: &[u8]) -> Option<Vec<Arc<str>>> {
 pub(super) struct NdjsonHintConfig {
     pub(super) min_rows: usize,
     pub(super) max_rejects: usize,
+    pub(super) max_layout_misses: usize,
 }
 
 impl Default for NdjsonHintConfig {
@@ -325,6 +326,7 @@ impl Default for NdjsonHintConfig {
         Self {
             min_rows: 8,
             max_rejects: 2,
+            max_layout_misses: 8,
         }
     }
 }
@@ -341,6 +343,7 @@ pub(super) struct NdjsonHintStats {
     pub(super) learned_rows: usize,
     pub(super) rejected_rows: usize,
     pub(super) hinted_rows: usize,
+    pub(super) layout_misses: usize,
     pub(super) disabled: bool,
 }
 
@@ -402,7 +405,17 @@ impl NdjsonHintState {
         f: impl FnOnce(&NdjsonObjectLayoutHint, &NdjsonRootLayoutMatch<'a, '_>) -> R,
     ) -> Option<R> {
         let root = self.schema.root_object.as_ref()?;
-        let matched = root.match_row(row, &mut self.span_scratch)?;
+        let matched = match root.match_row(row, &mut self.span_scratch) {
+            Some(matched) => matched,
+            None => {
+                self.stats.layout_misses += 1;
+                if self.stats.layout_misses > self.config.max_layout_misses {
+                    self.disabled = true;
+                    self.stats.disabled = true;
+                }
+                return None;
+            }
+        };
         Some(f(root, &matched))
     }
 
@@ -502,6 +515,7 @@ mod tests {
             NdjsonHintConfig {
                 min_rows: 2,
                 max_rejects: 0,
+                max_layout_misses: 8,
             },
             access,
         );
@@ -529,6 +543,7 @@ mod tests {
             NdjsonHintConfig {
                 min_rows: 2,
                 max_rejects: 0,
+                max_layout_misses: 8,
             },
             access,
         );
@@ -544,6 +559,7 @@ mod tests {
             NdjsonHintConfig {
                 min_rows: 1,
                 max_rejects: 1,
+                max_layout_misses: 8,
             },
             access,
         );
@@ -552,6 +568,35 @@ mod tests {
         assert_eq!(state.observe_row(br#"{"bad\nkey":1}"#), NdjsonHintDecision::Disabled);
         assert_eq!(state.observe_row(br#"{"id":1}"#), NdjsonHintDecision::Disabled);
         assert!(state.stats().disabled);
+    }
+
+    #[test]
+    fn hint_state_disables_after_too_many_layout_misses() {
+        let access = NdjsonHintAccessPlan {
+            paths: vec![NdjsonHintPath {
+                steps: vec![NdjsonHintPathStep::Field(Arc::from("name"))],
+            }],
+        };
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 1,
+                max_rejects: 0,
+                max_layout_misses: 1,
+            },
+            access,
+        );
+
+        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::UseHints);
+        assert!(state
+            .with_root_layout_match(br#"{"name":"b","id":2}"#, |_, _| ())
+            .is_none());
+        assert!(!state.stats().disabled);
+        assert!(state
+            .with_root_layout_match(br#"{"name":"c","id":3}"#, |_, _| ())
+            .is_none());
+        assert!(state.stats().disabled);
+        assert_eq!(state.stats().layout_misses, 2);
+        assert_eq!(state.observe_row(br#"{"id":4,"name":"d"}"#), NdjsonHintDecision::Disabled);
     }
 
     #[test]
