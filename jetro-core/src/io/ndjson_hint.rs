@@ -398,6 +398,7 @@ pub(super) struct NdjsonHintState {
     stats: NdjsonHintStats,
     required_root_slots: Vec<usize>,
     span_scratch: Vec<std::ops::Range<usize>>,
+    active: bool,
     disabled: bool,
 }
 
@@ -410,6 +411,7 @@ impl NdjsonHintState {
             stats: NdjsonHintStats::default(),
             required_root_slots: Vec::new(),
             span_scratch: Vec::new(),
+            active: false,
             disabled: false,
         }
     }
@@ -418,11 +420,16 @@ impl NdjsonHintState {
         if self.disabled {
             return NdjsonHintDecision::Disabled;
         }
+        if self.active {
+            self.stats.hinted_rows += 1;
+            return NdjsonHintDecision::UseHints;
+        }
         self.schema.observe_row(row);
         self.stats.learned_rows = self.schema.rows_observed;
         self.stats.rejected_rows = self.schema.rows_rejected;
         if self.schema.rows_rejected > self.config.max_rejects {
             self.disabled = true;
+            self.active = false;
             self.stats.disabled = true;
             return NdjsonHintDecision::Disabled;
         }
@@ -434,6 +441,7 @@ impl NdjsonHintState {
             .root_has_stable_fields(self.access.required_root_fields())
         {
             self.refresh_required_root_slots();
+            self.active = true;
             self.stats.hinted_rows += 1;
             NdjsonHintDecision::UseHints
         } else {
@@ -461,6 +469,7 @@ impl NdjsonHintState {
                 self.stats.layout_misses += 1;
                 if self.stats.layout_misses > self.config.max_layout_misses {
                     self.disabled = true;
+                    self.active = false;
                     self.stats.disabled = true;
                 }
                 return None;
@@ -702,6 +711,29 @@ mod tests {
             .is_some());
         assert!(saw_name);
         assert_eq!(state.stats().layout_misses, 0);
+    }
+
+    #[test]
+    fn hint_state_stops_learning_after_activation() {
+        let access = NdjsonHintAccessPlan {
+            paths: vec![NdjsonHintPath {
+                steps: vec![NdjsonHintPathStep::Field(Arc::from("id"))],
+            }],
+        };
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 2,
+                max_rejects: 0,
+                max_layout_misses: 0,
+            },
+            access,
+        );
+
+        assert_eq!(state.observe_row(br#"{"id":1,"tail":{"x":1}}"#), NdjsonHintDecision::Learning);
+        assert_eq!(state.observe_row(br#"{"id":2,"tail":{"x":2}}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(state.observe_row(br#"{"id":3,"tail":{"different":true}}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(state.stats().learned_rows, 2);
+        assert_eq!(state.stats().hinted_rows, 2);
     }
 
     #[test]
