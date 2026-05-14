@@ -3547,6 +3547,14 @@ mod tests {
                 r#"attributes.filter(@.value.contains("2")).map(@.key)"#,
                 r#"["k2"]"#,
             ),
+            (
+                r#"attributes.filter(@.value.contains("2")).map({key: @.key, value: @.value})"#,
+                r#"[{"key":"k2","value":"v2"}]"#,
+            ),
+            (
+                r#"attributes.filter(@.key != "k1").map([@.key, @.value])"#,
+                r#"[["k2","v2"]]"#,
+            ),
         ] {
             let plan = super::direct_tape_plan(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should be direct"));
