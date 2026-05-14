@@ -177,7 +177,8 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
         BuiltinDemandLaw::FilterLike => Demand {
             pull: match downstream.pull {
                 PullDemand::All => PullDemand::All,
-                PullDemand::LastInput(_) | PullDemand::NthInput(_) => PullDemand::All,
+                PullDemand::LastInput(n) => PullDemand::LastInput(n),
+                PullDemand::NthInput(_) => PullDemand::All,
                 PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
                     PullDemand::UntilOutput(n)
                 }
@@ -748,7 +749,7 @@ mod tests {
             order: true,
         };
         let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
-        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
 
