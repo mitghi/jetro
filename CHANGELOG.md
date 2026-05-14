@@ -117,6 +117,10 @@
   array/object stream maps now derive reusable slot plans for raw fields and
   supported scalar calls, reducing per-item projection work while preserving
   fallback through the generic writer for nested or optional shapes.
+- **Direct stream projection plans understand nested suffixes**. Stream item
+  projections can jump to a root item field and then reuse the byte suffix
+  walker for paths and scalar calls such as `@.meta.code.upper()`, keeping
+  nested item shaping on the same algorithmic direct projection path.
 
 ### Builtin hardening
 
