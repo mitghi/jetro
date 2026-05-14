@@ -706,6 +706,17 @@ impl VM {
         self.exec(program, &env)
     }
 
+    /// Execute `program` against a short-lived root value whose allocation
+    /// address may be reused by the allocator between calls.
+    pub(crate) fn execute_val_raw_fresh_root(
+        &mut self,
+        program: &Program,
+        root: Val,
+    ) -> Result<Val, EvalError> {
+        self.root_hash_cache = None;
+        self.execute_val_raw(program, root)
+    }
+
     /// Execute `program` within an already-constructed `Env`, bypassing document-hash
     /// setup. Used by the runtime when the caller manages the environment directly.
     #[inline]

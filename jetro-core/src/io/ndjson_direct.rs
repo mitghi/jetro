@@ -414,11 +414,6 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
         .or_else(|| direct_tape_plan_inner(engine, query))
 }
 
-pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapePlan> {
-    let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
-    direct_tape_plan_from_plan(&plan)
-}
-
 fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     direct_tape_plan_from_plan(&plan)

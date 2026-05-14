@@ -29,11 +29,11 @@
   `$.rows().reverse().distinct_by($.id).take(100).map({id: $.id, v: $.v})`
   configure reverse traversal, retained-row early stop, de-duplication, and
   projection without extra CLI flags.
-- **`$.rows()` stream execution reuses existing direct byte/tape machinery**.
-  Supported `filter`, `distinct_by`, and final `map` stages use the shared
-  direct predicate, key canonicalization, adaptive distinct state, and
-  projection writer. Unsupported expressions fall back to the compiled VM over
-  the row value, preserving correctness without query-chain-specific kernels.
+- **`$.rows()` stream execution reuses existing stage machinery**. Supported
+  `filter` stages can use direct predicates, `distinct_by` uses the shared
+  adaptive distinct state and canonical key serialization, and unsupported
+  expressions fall back to the compiled VM over the row value, preserving
+  correctness without query-chain-specific kernels.
 - **Bounded row streams avoid unnecessary parsing**. `$.rows().take(n)` and
   direct-filtered retained rows can write original NDJSON row bytes directly;
   `first()` lowers to the same bounded stream stage as `take(1)`, and
