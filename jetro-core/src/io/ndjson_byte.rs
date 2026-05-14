@@ -936,6 +936,28 @@ fn raw_json_view(value: &[u8]) -> Option<JsonView<'_>> {
     }
 }
 
+fn raw_json_cmp_values_fast(a: &[u8], b: &[u8]) -> Option<std::cmp::Ordering> {
+    let a = trim_json_ws(a);
+    let b = trim_json_ws(b);
+    raw_json_simple_string_bytes(a)
+        .zip(raw_json_simple_string_bytes(b))
+        .map(|(a, b)| a.cmp(b))
+}
+
+fn trim_json_ws(value: &[u8]) -> &[u8] {
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    &value[start..end]
+}
+
+fn raw_json_simple_string_bytes(value: &[u8]) -> Option<&[u8]> {
+    if value.len() < 2 || value[0] != b'"' || *value.last()? != b'"' {
+        return None;
+    }
+    let body = &value[1..value.len() - 1];
+    (!body.iter().any(|byte| *byte == b'\\' || *byte < 0x20)).then_some(body)
+}
+
 fn write_raw_string_case_call<W: Write>(
     writer: &mut W,
     value: &[u8],
@@ -1433,18 +1455,26 @@ fn write_raw_json_stream_extreme_source<W: Write>(
             failed = true;
             return None;
         };
-        let Some(key_view) = raw_json_view(key_value) else {
-            failed = true;
-            return None;
-        };
         let replace = if best_item.is_empty() {
-            true
-        } else {
-            let Some(best_view) = raw_json_view(&best_key) else {
+            if raw_json_view(key_value).is_none() {
                 failed = true;
                 return None;
+            }
+            true
+        } else {
+            let order = if let Some(order) = raw_json_cmp_values_fast(key_value, &best_key) {
+                order
+            } else {
+                let Some(key_view) = raw_json_view(key_value) else {
+                    failed = true;
+                    return None;
+                };
+                let Some(best_view) = raw_json_view(&best_key) else {
+                    failed = true;
+                    return None;
+                };
+                crate::util::json_cmp_vals(key_view, best_view)
             };
-            let order = crate::util::json_cmp_vals(key_view, best_view);
             (want_max && order.is_gt()) || (!want_max && order.is_lt())
         };
         if replace {
@@ -1510,16 +1540,23 @@ fn write_raw_json_stream_extreme_from_root_fields<W: Write>(
             RawFieldValue::Found(value) => value,
             RawFieldValue::Missing | RawFieldValue::Fallback => return Ok(None),
         };
-        let Some(key_view) = raw_json_view(key_value) else {
-            return Ok(None);
-        };
         let replace = if best_output.is_empty() {
+            if raw_json_view(key_value).is_none() {
+                return Ok(None);
+            }
             true
         } else {
-            let Some(best_view) = raw_json_view(&best_key) else {
-                return Ok(None);
+            let order = if let Some(order) = raw_json_cmp_values_fast(key_value, &best_key) {
+                order
+            } else {
+                let Some(key_view) = raw_json_view(key_value) else {
+                    return Ok(None);
+                };
+                let Some(best_view) = raw_json_view(&best_key) else {
+                    return Ok(None);
+                };
+                crate::util::json_cmp_vals(key_view, best_view)
             };
-            let order = crate::util::json_cmp_vals(key_view, best_view);
             (want_max && order.is_gt()) || (!want_max && order.is_lt())
         };
         if replace {
