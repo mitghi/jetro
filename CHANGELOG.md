@@ -89,6 +89,10 @@
 - **Numeric NDJSON streams can stay byte-native**. Queries such as
   `$.attributes.map(@.weight).sum()` now route through byte-writable tape plans
   instead of forcing tape materialization for every row.
+- **Stream item projections avoid repeated item scans**. Root-field stream maps
+  such as `attributes.map([@.key, @.value])` and object-shaped maps now scan
+  each simple item object once, cache the requested field spans for that item,
+  and reuse the spans across array/object/scalar projection writers.
 
 ### Builtin hardening
 
