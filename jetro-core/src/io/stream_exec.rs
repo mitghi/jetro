@@ -169,6 +169,11 @@ impl CompiledRowStream {
             }
         }
 
+        if value.is_none() {
+            if let Some(row) = row {
+                return Ok(RowStreamRowResult::EmitBytes(row));
+            }
+        }
         let value = ensure_row_stream_value(engine, line_no, &mut row, &mut document, &mut value)?;
         Ok(RowStreamRowResult::Emit(value))
     }

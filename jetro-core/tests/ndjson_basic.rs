@@ -390,6 +390,26 @@ not-json
 }
 
 #[test]
+fn rows_stream_take_writes_original_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"Ada"}
+{"id":2,"name":"Bob"}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(Cursor::new(input), "$.rows().take(2)", &mut out)
+        .expect("rows stream take should preserve raw row output");
+
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"name\":\"Ada\"}\n{\"id\":2,\"name\":\"Bob\"}\n"
+    );
+}
+
+#[test]
 fn rows_stream_first_stops_after_one_row() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1}
