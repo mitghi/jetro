@@ -377,9 +377,9 @@ where
     let direct_value_plan = super::ndjson::direct_tape_plan(engine, query)
         .filter(|plan| tape_plan_can_write_byte_row(plan));
 
-    let key_plan = engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes());
-    let value_plan = engine.cached_plan(query, crate::plan::physical::PlanningContext::bytes());
-    let mut vm = engine.lock_vm();
+    let mut key_plan = None;
+    let mut value_plan = None;
+    let mut vm = None;
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     #[cfg(feature = "simd-json")]
@@ -403,7 +403,11 @@ where
         } else {
             let parsed =
                 super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
-            let key = crate::exec::router::collect_plan_val_with_vm(&parsed, &key_plan, &mut vm)
+            let plan = key_plan.get_or_insert_with(|| {
+                engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes())
+            });
+            let vm = vm.get_or_insert_with(|| engine.lock_vm());
+            let key = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
                 .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
             let key = distinct_key_bytes(&key)?;
             document = Some(parsed);
@@ -433,7 +437,11 @@ where
             Some(document) => document,
             None => super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?,
         };
-        let value = crate::exec::router::collect_plan_val_with_vm(&parsed, &value_plan, &mut vm)
+        let plan = value_plan.get_or_insert_with(|| {
+            engine.cached_plan(query, crate::plan::physical::PlanningContext::bytes())
+        });
+        let vm = vm.get_or_insert_with(|| engine.lock_vm());
+        let value = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
             .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
         super::ndjson::write_val_line(&mut writer, &value)?;
         emitted += 1;
