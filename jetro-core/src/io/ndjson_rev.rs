@@ -6,7 +6,6 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -654,13 +653,37 @@ impl BloomFilter {
 }
 
 fn bloom_hashes(key: &[u8]) -> (u64, u64) {
-    let mut a = std::collections::hash_map::DefaultHasher::new();
-    0x9e37_79b9_7f4a_7c15u64.hash(&mut a);
-    key.hash(&mut a);
-    let mut b = std::collections::hash_map::DefaultHasher::new();
-    0xbf58_476d_1ce4_e5b9u64.hash(&mut b);
-    key.hash(&mut b);
-    (a.finish(), b.finish())
+    (
+        fast_key_hash(key, 0x9e37_79b9_7f4a_7c15),
+        fast_key_hash(key, 0xbf58_476d_1ce4_e5b9),
+    )
+}
+
+fn fast_key_hash(key: &[u8], seed: u64) -> u64 {
+    let mut hash = seed ^ ((key.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut chunks = key.chunks_exact(8);
+    for chunk in &mut chunks {
+        let lane = u64::from_le_bytes(chunk.try_into().unwrap());
+        hash ^= mix_u64(lane.wrapping_add(0x9e37_79b9_7f4a_7c15));
+        hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
+    }
+    let rem = chunks.remainder();
+    if !rem.is_empty() {
+        let mut tail = 0u64;
+        for (idx, byte) in rem.iter().enumerate() {
+            tail |= (*byte as u64) << (idx * 8);
+        }
+        hash ^= mix_u64(tail ^ 0xd6e8_feb8_6659_fd93);
+    }
+    mix_u64(hash)
+}
+
+fn mix_u64(mut x: u64) -> u64 {
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }
 
 struct CuckooFilter {
