@@ -183,6 +183,10 @@
   keeps only the latest semantic output and applies projection only to the
   retained item. Unfiltered stream-last can select the last array child before
   projection; filtered stream-last still scans for the latest matching output.
+- **Filtered stream-last shares item field spans**. Root-field predicates and
+  projections in `filter(...).map(...).last()` now reuse the same item scan,
+  matching the collect/first span-sharing architecture while retaining only one
+  selected output.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.

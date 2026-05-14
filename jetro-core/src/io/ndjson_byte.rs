@@ -1811,6 +1811,8 @@ fn write_raw_json_stream_last_from_source<W: Write>(
     stream: &NdjsonDirectStreamPlan,
     map: &NdjsonDirectStreamMap,
 ) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut root_fields = RootFieldSet::new();
+    let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
     if stream.predicate.is_none() {
         if let Some(item) = raw_json_array_element(source, NdjsonDirectElement::Last) {
             write_raw_json_stream_map(writer, item, map)?;
@@ -1819,6 +1821,20 @@ fn write_raw_json_stream_last_from_source<W: Write>(
         if raw_json_is_empty_array(source) {
             writer.write_all(b"null")?;
             return Ok(BytePlanWrite::Done);
+        }
+    } else if root_projectable {
+        if let Some(predicate) = stream.predicate.as_ref() {
+            if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
+                if let Some(()) = write_raw_json_stream_last_projected(
+                    writer,
+                    source,
+                    map,
+                    predicate,
+                    &root_fields,
+                )? {
+                    return Ok(BytePlanWrite::Done);
+                }
+            }
         }
     }
 
@@ -1849,6 +1865,79 @@ fn write_raw_json_stream_last_from_source<W: Write>(
         writer.write_all(&selected)?;
     }
     Ok(BytePlanWrite::Done)
+}
+
+fn write_raw_json_stream_last_projected<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    map: &NdjsonDirectStreamMap,
+    predicate: &NdjsonDirectItemPredicate,
+    root_fields: &[&str],
+) -> Result<Option<()>, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"null")?;
+        return Ok(Some(()));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let direct_map = direct_root_stream_map(map, root_fields);
+    let mut spans = RootFieldSpans::new();
+    let mut selected = Vec::new();
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        let Some(matches) =
+            eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
+        else {
+            return Ok(None);
+        };
+        if matches {
+            selected.clear();
+            if let Some(direct_map) = direct_map.as_ref() {
+                write_direct_root_stream_map(&mut selected, source, &spans, direct_map)?;
+            } else if !write_raw_json_stream_map_with_root_spans(
+                &mut selected,
+                source,
+                map,
+                root_fields,
+                &spans,
+            )? {
+                return Ok(None);
+            }
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                if selected.is_empty() {
+                    writer.write_all(b"null")?;
+                } else {
+                    writer.write_all(&selected)?;
+                }
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
 }
 
 fn write_raw_json_stream_collect_from_source<W: Write>(
