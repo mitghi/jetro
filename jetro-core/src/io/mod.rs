@@ -9,6 +9,7 @@ mod ndjson_byte;
 #[cfg(feature = "simd-json")]
 mod ndjson_direct;
 #[cfg(feature = "simd-json")]
+#[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
 mod ndjson_rev;
 mod source;
