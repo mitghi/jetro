@@ -152,6 +152,7 @@ impl NdjsonHintAccessPlan {
             | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                 self.push_physical(steps)
             }
+            NdjsonDirectProjectionValue::Nested(plan) => self.collect_tape_plan(plan),
             NdjsonDirectProjectionValue::Literal(_) => {}
         }
     }
@@ -307,6 +308,10 @@ pub(super) struct NdjsonRootLayoutMatch<'a, 's> {
 }
 
 impl<'a, 's> NdjsonRootLayoutMatch<'a, 's> {
+    pub(super) fn row(&self) -> &'a [u8] {
+        self.row
+    }
+
     pub(super) fn value_at(&self, slot: usize) -> Option<&'a [u8]> {
         let span = self.spans.get(slot)?;
         Some(&self.row[span.clone()])

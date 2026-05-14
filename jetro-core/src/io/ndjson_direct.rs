@@ -52,7 +52,8 @@ impl NdjsonDirectTapePlan {
             Self::Stream(stream) => match &stream.sink {
                 NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
                 NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
-                NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
+                NdjsonDirectStreamSink::Numeric { .. }
+                | NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
             },
             Self::Object(_) => NdjsonDirectPlanKind::TapeObjectProjection,
             Self::Array(_) => NdjsonDirectPlanKind::TapeArrayProjection,
@@ -132,6 +133,11 @@ pub(super) enum NdjsonDirectStreamSink {
     Numeric {
         suffix_steps: NdjsonPhysicalPath,
         op: crate::exec::pipeline::NumOp,
+    },
+    Extreme {
+        key_steps: NdjsonPhysicalPath,
+        want_max: bool,
+        value: NdjsonDirectProjectionValue,
     },
 }
 
@@ -331,6 +337,7 @@ pub(super) enum NdjsonDirectProjectionValue {
         call: crate::builtins::BuiltinCall,
         optional: bool,
     },
+    Nested(Box<NdjsonDirectTapePlan>),
     Literal(Val),
 }
 
@@ -405,13 +412,26 @@ fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
 }
 
 fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> {
-    use crate::builtins::{BuiltinArgs, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
     let QueryRoot::Node(root) = plan.root() else {
         return None;
     };
-    if let PlanNode::Chain { base, steps } = plan.node(*root) {
+    direct_tape_plan_for_node(plan, *root)
+}
+
+fn direct_tape_plan_for_node(
+    plan: &QueryPlan,
+    id: crate::ir::physical::NodeId,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::builtins::{BuiltinArgs, BuiltinMethod};
+
+    if let PlanNode::Chain { base, steps } = plan.node(id) {
+        if let Some(plan) =
+            direct_tape_sort_extreme_plan_for_node(plan, *base, physical_chain_to_path(steps)?)
+        {
+            return Some(plan);
+        }
         let (source_steps, element) = direct_array_element_source(plan, *base)?;
         return Some(NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
@@ -419,14 +439,14 @@ fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> 
             suffix_steps: physical_chain_to_path(steps)?,
         });
     }
-    if let Some((source_steps, element)) = direct_array_element_source(plan, *root) {
+    if let Some((source_steps, element)) = direct_array_element_source(plan, id) {
         return Some(NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
             element,
             suffix_steps: Vec::new(),
         });
     }
-    match plan.node(*root) {
+    match plan.node(id) {
         PlanNode::RootPath(steps) => Some(NdjsonDirectTapePlan::RootPath(steps.clone())),
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
@@ -492,6 +512,9 @@ fn direct_tape_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectTapePlan> 
             })
         }
         PlanNode::Pipeline { source, body } => {
+            if let Some(plan) = direct_tape_sort_extreme_plan(plan, source, body, Vec::new()) {
+                return Some(plan);
+            }
             if let Some(plan) = direct_tape_filter_numeric_reduce_path_plan(plan, source, body) {
                 return Some(plan);
             }
@@ -537,7 +560,9 @@ fn direct_object_value_from_node(
             optional: *optional,
         }),
         PlanNode::Literal(value) => Some(NdjsonDirectProjectionValue::Literal(value.clone())),
-        _ => None,
+        _ => direct_tape_plan_for_node(plan, id)
+            .map(Box::new)
+            .map(NdjsonDirectProjectionValue::Nested),
     }
 }
 
@@ -582,6 +607,87 @@ fn direct_tape_array_plan(
         out.push(direct_object_value_from_node(plan, *id)?);
     }
     Some(NdjsonDirectTapePlan::Array(out))
+}
+
+fn direct_tape_sort_extreme_plan_for_node(
+    plan: &QueryPlan,
+    id: crate::ir::physical::NodeId,
+    suffix_steps: NdjsonPhysicalPath,
+) -> Option<NdjsonDirectTapePlan> {
+    if let PlanNode::Call {
+        receiver,
+        call,
+        optional,
+    } = plan.node(id)
+    {
+        if *optional {
+            return None;
+        }
+        let want_last = match call.method {
+            crate::builtins::BuiltinMethod::Last => true,
+            crate::builtins::BuiltinMethod::First => false,
+            _ => return None,
+        };
+        let PlanNode::Pipeline { source, body } = plan.node(*receiver) else {
+            return None;
+        };
+        return direct_tape_sort_extreme_plan_with_position(
+            plan,
+            source,
+            body,
+            suffix_steps,
+            want_last,
+        );
+    }
+    let PlanNode::Pipeline { source, body } = plan.node(id) else {
+        return None;
+    };
+    direct_tape_sort_extreme_plan(plan, source, body, suffix_steps)
+}
+
+fn direct_tape_sort_extreme_plan(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+    suffix_steps: NdjsonPhysicalPath,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::builtins::BuiltinMethod;
+    use crate::exec::pipeline::{Sink, Stage};
+
+    let [Stage::Sort(_)] = body.stages.as_slice() else {
+        return None;
+    };
+    let want_last = match body.sink {
+        Sink::Terminal(BuiltinMethod::Last) => true,
+        Sink::Terminal(BuiltinMethod::First) => false,
+        _ => return None,
+    };
+    direct_tape_sort_extreme_plan_with_position(plan, source, body, suffix_steps, want_last)
+}
+
+fn direct_tape_sort_extreme_plan_with_position(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+    suffix_steps: NdjsonPhysicalPath,
+    want_last: bool,
+) -> Option<NdjsonDirectTapePlan> {
+    use crate::exec::pipeline::Stage;
+
+    let [Stage::Sort(sort)] = body.stages.as_slice() else {
+        return None;
+    };
+    let key_steps = kernel_to_physical_path(body.stage_kernels.first()?)?;
+    let want_max = want_last ^ sort.descending;
+    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+        source_steps: pipeline_source_to_steps(plan, source)?,
+        predicate: None,
+        sink: NdjsonDirectStreamSink::Extreme {
+            key_steps,
+            want_max,
+            value: NdjsonDirectProjectionValue::Path(suffix_steps),
+        },
+    }))
 }
 
 fn pipeline_source_to_steps(

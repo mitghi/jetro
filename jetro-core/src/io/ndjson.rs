@@ -2358,6 +2358,42 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
             );
             write_val_json(writer, &value)?;
         }
+        NdjsonDirectStreamSink::Extreme {
+            key_steps,
+            want_max,
+            value,
+        } => {
+            let mut best_idx = None;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                let Some(key_idx) = suffix_cache.index(tape, item_idx, key_steps) else {
+                    return Ok::<(), JetroEngineError>(());
+                };
+                let key = json_tape_scalar(tape, key_idx);
+                let replace = best_idx
+                    .and_then(|idx| suffix_cache.index(tape, idx, key_steps))
+                    .map(|idx| {
+                        let order = crate::util::json_cmp_vals(key, json_tape_scalar(tape, idx));
+                        (*want_max && order.is_gt()) || (!*want_max && order.is_lt())
+                    })
+                    .unwrap_or(true);
+                if replace {
+                    best_idx = Some(item_idx);
+                }
+                Ok(())
+            })?;
+            if let Some(item_idx) = best_idx {
+                let path_idx = match value {
+                    NdjsonDirectProjectionValue::Path(steps)
+                    | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+                        suffix_cache.index(tape, item_idx, steps)
+                    }
+                    NdjsonDirectProjectionValue::Nested(_) | NdjsonDirectProjectionValue::Literal(_) => None,
+                };
+                write_json_tape_direct_value(writer, tape, value, path_idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
     }
 
     Ok(())
@@ -2383,6 +2419,7 @@ fn write_json_tape_empty_stream_result<W: Write>(
             );
             write_val_json(writer, &value)?;
         }
+        NdjsonDirectStreamSink::Extreme { .. } => writer.write_all(b"null")?,
     }
     Ok(())
 }
@@ -2403,6 +2440,7 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
                 | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                     suffix_cache.index(tape, item_idx, steps)
                 }
+                NdjsonDirectProjectionValue::Nested(_) => None,
                 NdjsonDirectProjectionValue::Literal(_) => None,
             };
             write_json_tape_direct_value(writer, tape, value, path_idx)?;
@@ -2497,6 +2535,7 @@ fn write_json_tape_object_projection_from<W: Write, T: JsonTape>(
             NdjsonDirectProjectionValue::Literal(Val::Null) if field.optional => {
                 continue;
             }
+            NdjsonDirectProjectionValue::Nested(_) => {}
             NdjsonDirectProjectionValue::Literal(_) => {}
         }
         if wrote {
@@ -2542,6 +2581,7 @@ fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
             | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                 path_caches[idx].index(tape, start, steps)
             }
+            NdjsonDirectProjectionValue::Nested(_) => None,
             NdjsonDirectProjectionValue::Literal(_) => None,
         };
         write_json_tape_direct_value(writer, tape, item, path_idx)?;
@@ -2578,6 +2618,157 @@ fn write_json_tape_direct_value<W: Write, T: JsonTape>(
             }
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+        NdjsonDirectProjectionValue::Nested(plan) => {
+            write_json_tape_nested_plan(writer, tape, plan)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    plan: &NdjsonDirectTapePlan,
+) -> Result<(), JetroEngineError> {
+    let mut root_cache = NdjsonPathCache::default();
+    let mut source_cache = NdjsonPathCache::default();
+    let mut suffix_cache = NdjsonPathCache::default();
+    let mut predicate_cache = NdjsonPathCache::default();
+    let mut projection_caches = Vec::new();
+    match plan {
+        NdjsonDirectTapePlan::RootPath(steps) => {
+            if let Some(idx) = root_cache.index(tape, 0, steps) {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectTapePlan::ViewScalarCall {
+            steps,
+            call,
+            optional,
+        } => {
+            let idx = root_cache.index(tape, 0, steps);
+            let value = idx
+                .map(|idx| json_tape_scalar(tape, idx))
+                .unwrap_or(crate::util::JsonView::Null);
+            if *optional && matches!(value, crate::util::JsonView::Null) {
+                writer.write_all(b"null")?;
+            } else if let Some(value) = call.try_apply_json_view(value) {
+                write_val_json(writer, &value)?;
+            } else if let Some(idx) = idx {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectTapePlan::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => {
+            write_json_tape_array_element_path(
+                writer,
+                tape,
+                source_steps,
+                *element,
+                suffix_steps,
+                &mut source_cache,
+                &mut suffix_cache,
+            )?;
+        }
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            write_json_tape_array_element_scalar(
+                writer,
+                tape,
+                source_steps,
+                *element,
+                suffix_steps,
+                call,
+                &mut source_cache,
+                &mut suffix_cache,
+            )?;
+        }
+        NdjsonDirectTapePlan::Stream(stream) => {
+            write_json_tape_stream(
+                writer,
+                tape,
+                stream,
+                &mut source_cache,
+                &mut suffix_cache,
+                &mut predicate_cache,
+                &mut projection_caches,
+            )?;
+        }
+        NdjsonDirectTapePlan::Object(fields) => {
+            write_json_tape_object_projection(writer, tape, fields, &mut projection_caches)?;
+        }
+        NdjsonDirectTapePlan::Array(items) => {
+            write_json_tape_array_projection(writer, tape, items, &mut projection_caches)?;
+        }
+        NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+            let idx = root_cache.index(tape, 0, steps);
+            write_json_tape_object_items(writer, tape, idx, *method)?;
+        }
+        NdjsonDirectTapePlan::ViewPipeline { .. } => {
+            writer.write_all(b"null")?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_element_path<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    element: super::ndjson_direct::NdjsonDirectElement,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    source_cache: &mut NdjsonPathCache,
+    suffix_cache: &mut NdjsonPathCache,
+) -> Result<(), JetroEngineError> {
+    let idx = source_cache
+        .index(tape, 0, source_steps)
+        .and_then(|idx| json_tape_array_element(tape, idx, element))
+        .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
+    if let Some(idx) = idx {
+        write_json_tape_at(writer, tape, idx)?;
+    } else {
+        writer.write_all(b"null")?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_element_scalar<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    element: super::ndjson_direct::NdjsonDirectElement,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    call: &crate::builtins::BuiltinCall,
+    source_cache: &mut NdjsonPathCache,
+    suffix_cache: &mut NdjsonPathCache,
+) -> Result<(), JetroEngineError> {
+    let idx = source_cache
+        .index(tape, 0, source_steps)
+        .and_then(|idx| json_tape_array_element(tape, idx, element))
+        .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
+    if let Some(value) = idx
+        .map(|idx| json_tape_scalar(tape, idx))
+        .and_then(|value| call.try_apply_json_view(value))
+    {
+        write_val_json(writer, &value)?;
+    } else if let Some(idx) = idx {
+        write_json_tape_at(writer, tape, idx)?;
+    } else {
+        writer.write_all(b"null")?;
     }
     Ok(())
 }
@@ -3190,6 +3381,18 @@ mod tests {
                 ByteWritableTape,
             ),
             ("$.attributes.map(@.weight).sum()", ByteWritableTape),
+            (
+                r#"{id: $.id, name: $.name, count: $.attributes.len()}"#,
+                ByteWritableTape,
+            ),
+            (
+                r#"[$.id, $.name, $.attributes.first().value, $.attributes.last().value]"#,
+                ByteWritableTape,
+            ),
+            (
+                r#"{name_upper: $.name.upper(), values: $.attributes.map(@.value), last: $.attributes.last().value}"#,
+                ByteWritableTape,
+            ),
         ] {
             assert_eq!(
                 super::direct_writer_path_kind(&engine, query),
@@ -3580,5 +3783,29 @@ mod tests {
             .run_ndjson(rows, "$.attributes.map(@.weight).sum()", &mut out)
             .expect("hinted numeric stream should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "3\n7.5\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_nested_direct_projection_writes_without_fallback() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"name":"ada","attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+{"id":2,"name":"bob","attributes":[{"key":"c","value":"z"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"{id: $.id, name: $.name, count: $.attributes.len(), first: $.attributes.first().value, values: $.attributes.map(@.value)}"#,
+                &mut out,
+            )
+            .expect("nested direct projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"ada\",\"count\":2,\"first\":\"x\",\"values\":[\"x\",\"y\"]}\n\
+{\"id\":2,\"name\":\"bob\",\"count\":1,\"first\":\"z\",\"values\":[\"z\"]}\n"
+        );
     }
 }

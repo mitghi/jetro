@@ -160,18 +160,43 @@ pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool 
         NdjsonDirectStreamSink::Count => stream.predicate.is_some(),
         NdjsonDirectStreamSink::Collect(map) => byte_stream_map_supported(map),
         NdjsonDirectStreamSink::Numeric { suffix_steps, .. } => byte_path_supported(suffix_steps),
+        NdjsonDirectStreamSink::Extreme {
+            key_steps, value, ..
+        } => byte_path_supported(key_steps) && byte_projection_value_supported(value),
     }
 }
 
 fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
     match plan {
         NdjsonDirectTapePlan::RootPath(steps) => byte_path_supported(steps),
+        NdjsonDirectTapePlan::ViewScalarCall { steps, call, .. } => {
+            byte_path_supported(steps) && byte_scalar_call_supported(call.method)
+        }
+        NdjsonDirectTapePlan::ArrayElementPath {
+            source_steps,
+            suffix_steps,
+            ..
+        } => byte_path_supported(source_steps) && byte_path_supported(suffix_steps),
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            suffix_steps,
+            call,
+            ..
+        } => {
+            byte_path_supported(source_steps)
+                && byte_path_supported(suffix_steps)
+                && byte_scalar_call_supported(call.method)
+        }
         NdjsonDirectTapePlan::Object(fields) => fields
             .iter()
             .all(|field| byte_projection_value_supported(&field.value)),
         NdjsonDirectTapePlan::Array(items) => items.iter().all(byte_projection_value_supported),
         _ => false,
     }
+}
+
+fn byte_scalar_call_supported(method: BuiltinMethod) -> bool {
+    method == BuiltinMethod::Len || method == BuiltinMethod::Upper || method == BuiltinMethod::Lower
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -211,6 +236,27 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
             write_val_json(writer, &value)?;
             Ok(BytePlanWrite::Done)
         }
+        NdjsonDirectTapePlan::Stream(stream)
+            if matches!(stream.sink, NdjsonDirectStreamSink::Extreme { .. }) =>
+        {
+            let NdjsonDirectStreamSink::Extreme {
+                key_steps,
+                want_max,
+                value,
+            } = &stream.sink
+            else {
+                unreachable!();
+            };
+            let source = match raw_json_byte_path_value(row, &stream.source_steps) {
+                RawFieldValue::Found(source) => source,
+                RawFieldValue::Missing => {
+                    writer.write_all(b"null")?;
+                    return Ok(BytePlanWrite::Done);
+                }
+                RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+            };
+            write_raw_json_stream_extreme_source(writer, source, key_steps, *want_max, value)
+        }
         NdjsonDirectTapePlan::Stream(stream) => {
             let NdjsonDirectStreamSink::Collect(map) = &stream.sink else {
                 return Ok(BytePlanWrite::Fallback);
@@ -230,6 +276,13 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
         NdjsonDirectTapePlan::RootPath(steps) if byte_path_supported(steps) => {
             write_raw_json_path(writer, row, steps)?;
             Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ViewScalarCall { .. }
+        | NdjsonDirectTapePlan::ArrayElementPath { .. }
+        | NdjsonDirectTapePlan::ArrayElementViewScalarCall { .. }
+            if byte_projection_plan_supported(plan) =>
+        {
+            write_raw_json_tape_plan_value(writer, row, plan)
         }
         NdjsonDirectTapePlan::Object(fields)
             if fields
@@ -294,6 +347,14 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
             writer.write_all(b"]")?;
             Ok(BytePlanWrite::Done)
         }
+        NdjsonDirectTapePlan::RootPath(_)
+        | NdjsonDirectTapePlan::ViewScalarCall { .. }
+        | NdjsonDirectTapePlan::ArrayElementPath { .. }
+        | NdjsonDirectTapePlan::ArrayElementViewScalarCall { .. }
+            if byte_projection_plan_supported(plan) =>
+        {
+            write_raw_json_tape_plan_value(writer, matched.row(), plan)
+        }
         NdjsonDirectTapePlan::Stream(stream) => {
             match hinted_path_value(root, matched, &stream.source_steps) {
                 RawFieldValue::Found(source) => match &stream.sink {
@@ -325,6 +386,13 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                         write_val_json(writer, &value)?;
                         Ok(BytePlanWrite::Done)
                     }
+                    NdjsonDirectStreamSink::Extreme {
+                        key_steps,
+                        want_max,
+                        value,
+                    } => write_raw_json_stream_extreme_source(
+                        writer, source, key_steps, *want_max, value,
+                    ),
                 },
                 RawFieldValue::Missing => {
                     match &stream.sink {
@@ -342,6 +410,7 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                             );
                             write_val_json(writer, &value)?;
                         }
+                        NdjsonDirectStreamSink::Extreme { .. } => writer.write_all(b"null")?,
                     }
                     Ok(BytePlanWrite::Done)
                 }
@@ -375,10 +444,9 @@ fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool 
     match value {
         NdjsonDirectProjectionValue::Path(_) | NdjsonDirectProjectionValue::Literal(_) => true,
         NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => {
-            call.method == BuiltinMethod::Len
-                || call.method == BuiltinMethod::Upper
-                || call.method == BuiltinMethod::Lower
+            byte_scalar_call_supported(call.method)
         }
+        NdjsonDirectProjectionValue::Nested(plan) => tape_plan_can_write_byte_row(plan),
     }
 }
 
@@ -420,6 +488,10 @@ fn write_hinted_projection_value<W: Write>(
             crate::data::value::Val::Bool(false) => writer.write_all(b"false")?,
             _ => write_val_json(writer, lit)?,
         },
+        NdjsonDirectProjectionValue::Nested(plan) => {
+            return write_ndjson_hinted_tape_plan_row(writer, plan, root, matched)
+                .map(|write| matches!(write, BytePlanWrite::Done));
+        }
     }
     Ok(true)
 }
@@ -453,6 +525,7 @@ fn hinted_projection_value_is_null_or_missing(
         NdjsonDirectProjectionValue::Literal(value) => {
             Some(matches!(value, crate::data::value::Val::Null))
         }
+        NdjsonDirectProjectionValue::Nested(_) => Some(false),
     }
 }
 
@@ -1185,6 +1258,54 @@ fn reduce_raw_json_numeric_source(
     ))
 }
 
+fn write_raw_json_stream_extreme_source<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    key_steps: &[PhysicalPathStep],
+    want_max: bool,
+    value: &NdjsonDirectProjectionValue,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut best_item = Vec::new();
+    let mut best_key = Vec::new();
+    let mut failed = false;
+    let visited = raw_json_source_items(source, |item| {
+        let Some(key_value) = raw_json_path_value(item, key_steps) else {
+            failed = true;
+            return None;
+        };
+        let Some(key_view) = raw_json_view(key_value) else {
+            failed = true;
+            return None;
+        };
+        let replace = if best_item.is_empty() {
+            true
+        } else {
+            let Some(best_view) = raw_json_view(&best_key) else {
+                failed = true;
+                return None;
+            };
+            let order = crate::util::json_cmp_vals(key_view, best_view);
+            (want_max && order.is_gt()) || (!want_max && order.is_lt())
+        };
+        if replace {
+            best_item.clear();
+            best_item.extend_from_slice(item);
+            best_key.clear();
+            best_key.extend_from_slice(key_value);
+        }
+        Some(())
+    });
+    if failed || visited.is_none() {
+        return Ok(BytePlanWrite::Fallback);
+    }
+    if best_item.is_empty() {
+        writer.write_all(b"null")?;
+        return Ok(BytePlanWrite::Done);
+    }
+    write_raw_json_projection_value(writer, &best_item, value)?;
+    Ok(BytePlanWrite::Done)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fold_raw_json_numeric(
     value: JsonView<'_>,
@@ -1254,6 +1375,16 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
 ) -> Result<BytePlanWrite, JetroEngineError> {
     let mut root_fields = Vec::new();
     let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
+    if root_projectable && stream.predicate.is_none() {
+        if let Some(()) = write_raw_json_stream_collect_root_projected(
+            writer,
+            source,
+            map,
+            &root_fields,
+        )? {
+            return Ok(BytePlanWrite::Done);
+        }
+    }
     let mut root_spans = Vec::new();
     writer.write_all(b"[")?;
     let mut wrote = false;
@@ -1297,6 +1428,108 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     Ok(BytePlanWrite::Done)
 }
 
+fn write_raw_json_stream_collect_root_projected<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    map: &NdjsonDirectStreamMap,
+    root_fields: &[&str],
+) -> Result<Option<()>, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    writer.write_all(b"[")?;
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"]")?;
+        return Ok(Some(()));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let mut spans = Vec::new();
+    let mut wrote = false;
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        if !write_raw_json_stream_map_with_root_spans(writer, source, map, root_fields, &spans)? {
+            return Ok(None);
+        }
+        wrote = true;
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                writer.write_all(b"]")?;
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
+}
+
+fn infer_raw_json_object_field_ordinals_at(
+    row: &[u8],
+    mut pos: usize,
+    root_fields: &[&str],
+) -> Option<Vec<usize>> {
+    let mut ordinals = vec![usize::MAX; root_fields.len()];
+    let mut remaining = root_fields.len();
+    if row.get(pos) != Some(&b'{') {
+        return None;
+    }
+    pos += 1;
+    let mut ordinal = 0usize;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied()? {
+            b'}' => {
+                return (remaining == 0).then_some(ordinals);
+            }
+            b'"' => {}
+            _ => return None,
+        }
+        let (field_key, next) = parse_simple_json_string(row, pos)?;
+        for (idx, field) in root_fields.iter().enumerate() {
+            if ordinals[idx] == usize::MAX && field_key == field.as_bytes() {
+                ordinals[idx] = ordinal;
+                remaining -= 1;
+                break;
+            }
+        }
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        pos = skip_json_ws(row, skip_json_value(row, value_start)?);
+        match row.get(pos).copied()? {
+            b',' => {
+                pos += 1;
+                ordinal += 1;
+            }
+            b'}' => return (remaining == 0).then_some(ordinals),
+            _ => return None,
+        }
+    }
+}
+
 fn collect_stream_map_root_fields<'a>(
     map: &'a NdjsonDirectStreamMap,
     out: &mut Vec<&'a str>,
@@ -1328,6 +1561,7 @@ fn collect_projection_root_field<'a>(
             }
             true
         }
+        NdjsonDirectProjectionValue::Nested(_) => false,
         NdjsonDirectProjectionValue::Literal(_) => true,
     }
 }
@@ -1342,6 +1576,16 @@ fn write_raw_json_stream_map_from_root_fields<W: Write>(
     if !scan_raw_json_root_field_spans(item, root_fields, spans) {
         return Ok(false);
     }
+    write_raw_json_stream_map_with_root_spans(writer, item, map, root_fields, spans)
+}
+
+fn write_raw_json_stream_map_with_root_spans<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    map: &NdjsonDirectStreamMap,
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+) -> Result<bool, JetroEngineError> {
     match map {
         NdjsonDirectStreamMap::Value(value) => {
             write_raw_json_projection_value_from_root_fields(writer, item, root_fields, spans, value)
@@ -1425,6 +1669,101 @@ fn scan_raw_json_root_field_spans(
     visited || remaining == 0
 }
 
+fn scan_raw_json_object_field_spans_at(
+    row: &[u8],
+    mut pos: usize,
+    root_fields: &[&str],
+    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+) -> Option<usize> {
+    spans.resize(root_fields.len(), None);
+    let mut remaining = root_fields.len();
+    if row.get(pos) != Some(&b'{') {
+        return None;
+    }
+    pos += 1;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied()? {
+            b'}' => return Some(pos + 1),
+            b'"' => {}
+            _ => return None,
+        }
+        let (field_key, next) = parse_simple_json_string(row, pos)?;
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        let value_end = skip_json_value(row, value_start)?;
+        if remaining > 0 {
+            for (idx, field) in root_fields.iter().enumerate() {
+                if spans[idx].is_none() && field_key == field.as_bytes() {
+                    spans[idx] = Some(value_start..value_end);
+                    remaining -= 1;
+                    break;
+                }
+            }
+        }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied()? {
+            b',' => pos += 1,
+            b'}' => return Some(pos + 1),
+            _ => return None,
+        }
+    }
+}
+
+fn scan_raw_json_object_field_spans_by_ordinals_at(
+    row: &[u8],
+    mut pos: usize,
+    root_fields: &[&str],
+    ordinals: &[usize],
+    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+) -> Option<usize> {
+    spans.resize(root_fields.len(), None);
+    if row.get(pos) != Some(&b'{') {
+        return None;
+    }
+    pos += 1;
+    let mut ordinal = 0usize;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied()? {
+            b'}' => return Some(pos + 1),
+            b'"' => {}
+            _ => return None,
+        }
+        let requested = ordinals.iter().position(|field_ordinal| *field_ordinal == ordinal);
+        let next = if let Some(field_idx) = requested {
+            let (field_key, next) = parse_simple_json_string(row, pos)?;
+            if field_key != root_fields[field_idx].as_bytes() {
+                return None;
+            }
+            next
+        } else {
+            skip_json_string(row, pos)?
+        };
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        let value_end = skip_json_value(row, value_start)?;
+        if let Some(field_idx) = requested {
+            spans[field_idx] = Some(value_start..value_end);
+        }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied()? {
+            b',' => {
+                pos += 1;
+                ordinal += 1;
+            }
+            b'}' => return Some(pos + 1),
+            _ => return None,
+        }
+    }
+}
+
 fn write_raw_json_projection_value_from_root_fields<W: Write>(
     writer: &mut W,
     item: &[u8],
@@ -1460,6 +1799,7 @@ fn write_raw_json_projection_value_from_root_fields<W: Write>(
             }
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+        NdjsonDirectProjectionValue::Nested(_) => return Ok(false),
     }
     Ok(true)
 }
@@ -1482,6 +1822,7 @@ fn raw_json_projection_value_from_root_is_null_or_missing(
         NdjsonDirectProjectionValue::Literal(value) => {
             Some(matches!(value, crate::data::value::Val::Null))
         }
+        NdjsonDirectProjectionValue::Nested(_) => Some(false),
     }
 }
 
@@ -1605,6 +1946,160 @@ fn write_raw_json_path<W: Write>(
     Ok(())
 }
 
+fn write_raw_json_tape_plan_value<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    plan: &NdjsonDirectTapePlan,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    match plan {
+        NdjsonDirectTapePlan::RootPath(steps) => {
+            write_raw_json_path(writer, row, steps)?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ViewScalarCall { steps, call, .. } => {
+            match raw_json_path_value_demand(row, steps, None) {
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Missing => writer.write_all(b"null")?,
+                RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+            }
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => {
+            write_raw_json_array_element_path(writer, row, source_steps, *element, suffix_steps)?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            match raw_json_array_element_path_value(row, source_steps, *element, suffix_steps) {
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Missing => writer.write_all(b"null")?,
+                RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+            }
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::Stream(stream) => match &stream.sink {
+            NdjsonDirectStreamSink::Collect(map) if byte_stream_map_supported(map) => {
+                write_raw_json_stream_collect(writer, row, stream, map)
+            }
+            NdjsonDirectStreamSink::Count => {
+                let Some(predicate) = stream.predicate.as_ref() else {
+                    return Ok(BytePlanWrite::Fallback);
+                };
+                let Some(count) = raw_json_count_filtered(row, &stream.source_steps, predicate)
+                else {
+                    return Ok(BytePlanWrite::Fallback);
+                };
+                write_i64(writer, count as i64)?;
+                Ok(BytePlanWrite::Done)
+            }
+            NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
+                let Some(value) = reduce_raw_json_numeric_path(
+                    row,
+                    &stream.source_steps,
+                    stream.predicate.as_ref(),
+                    suffix_steps,
+                    *op,
+                ) else {
+                    return Ok(BytePlanWrite::Fallback);
+                };
+                write_val_json(writer, &value)?;
+                Ok(BytePlanWrite::Done)
+            }
+            NdjsonDirectStreamSink::Extreme {
+                key_steps,
+                want_max,
+                value,
+            } => {
+                let source = match raw_json_byte_path_value(row, &stream.source_steps) {
+                    RawFieldValue::Found(source) => source,
+                    RawFieldValue::Missing => {
+                        writer.write_all(b"null")?;
+                        return Ok(BytePlanWrite::Done);
+                    }
+                    RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+                };
+                write_raw_json_stream_extreme_source(writer, source, key_steps, *want_max, value)
+            }
+            _ => Ok(BytePlanWrite::Fallback),
+        },
+        NdjsonDirectTapePlan::Object(fields) => {
+            write_raw_json_object_projection(writer, row, fields)?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::Array(items) => {
+            write_raw_json_array_projection(writer, row, items)?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+            match raw_json_path_value_demand(row, steps, None) {
+                RawFieldValue::Found(value) => {
+                    if !matches!(
+                        write_json_object_items_raw(writer, value, *method)?,
+                        BytePlanWrite::Done
+                    ) {
+                        return Ok(BytePlanWrite::Fallback);
+                    }
+                }
+                RawFieldValue::Missing => writer.write_all(b"[]")?,
+                RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
+            }
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::ViewPipeline { .. } => Ok(BytePlanWrite::Fallback),
+    }
+}
+
+fn write_raw_json_array_element_path<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    source_steps: &[PhysicalPathStep],
+    element: NdjsonDirectElement,
+    suffix_steps: &[PhysicalPathStep],
+) -> Result<(), JetroEngineError> {
+    match raw_json_array_element_path_value(row, source_steps, element, suffix_steps) {
+        RawFieldValue::Found(value) => writer.write_all(value)?,
+        RawFieldValue::Missing => writer.write_all(b"null")?,
+        RawFieldValue::Fallback => {
+            return Err(JetroEngineError::Eval(crate::EvalError(
+                "unsupported raw array element path".to_string(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn raw_json_array_element_path_value<'a>(
+    row: &'a [u8],
+    source_steps: &[PhysicalPathStep],
+    element: NdjsonDirectElement,
+    suffix_steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
+    let demand = Some(BytePathDemand::ArrayElement(element));
+    let source = match raw_json_path_value_demand(row, source_steps, demand) {
+        RawFieldValue::Found(value) => value,
+        RawFieldValue::Missing => return RawFieldValue::Missing,
+        RawFieldValue::Fallback => return RawFieldValue::Fallback,
+    };
+    let Some(element) = raw_json_array_element(source, element) else {
+        return RawFieldValue::Missing;
+    };
+    if suffix_steps.is_empty() {
+        RawFieldValue::Found(element)
+    } else {
+        raw_json_path_value(element, suffix_steps)
+            .map(RawFieldValue::Found)
+            .unwrap_or(RawFieldValue::Missing)
+    }
+}
+
 fn raw_json_projection_value_is_null_or_missing(
     item: &[u8],
     value: &NdjsonDirectProjectionValue,
@@ -1632,6 +2127,30 @@ fn raw_json_projection_value_is_null_or_missing(
         NdjsonDirectProjectionValue::Literal(value) => {
             Ok(matches!(value, crate::data::value::Val::Null))
         }
+        NdjsonDirectProjectionValue::Nested(plan) => match plan.as_ref() {
+            NdjsonDirectTapePlan::RootPath(steps) => {
+                match raw_json_path_value_demand(item, steps, None) {
+                    RawFieldValue::Found(value) => Ok(raw_json_is_null(value)),
+                    RawFieldValue::Missing => Ok(true),
+                    RawFieldValue::Fallback => Err(JetroEngineError::Eval(crate::EvalError(
+                        "unsupported byte stream optional nested path".to_string(),
+                    ))),
+                }
+            }
+            NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps,
+            } => match raw_json_array_element_path_value(item, source_steps, *element, suffix_steps)
+            {
+                RawFieldValue::Found(value) => Ok(raw_json_is_null(value)),
+                RawFieldValue::Missing => Ok(true),
+                RawFieldValue::Fallback => Err(JetroEngineError::Eval(crate::EvalError(
+                    "unsupported byte stream optional nested array element".to_string(),
+                ))),
+            },
+            _ => Ok(false),
+        },
     }
 }
 
@@ -1664,6 +2183,16 @@ fn write_raw_json_projection_value<W: Write>(
             }
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+        NdjsonDirectProjectionValue::Nested(plan) => {
+            if !matches!(
+                write_raw_json_tape_plan_value(writer, item, plan)?,
+                BytePlanWrite::Done
+            ) {
+                return Err(JetroEngineError::Eval(crate::EvalError(
+                    "unsupported nested byte stream projection".to_string(),
+                )));
+            }
+        }
     }
     Ok(())
 }
