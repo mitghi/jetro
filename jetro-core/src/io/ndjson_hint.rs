@@ -1,7 +1,7 @@
 use super::ndjson_byte::visit_root_object_fields;
 use super::ndjson_direct::{
-    NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
-    NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+    NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectProjectionValue,
+    NdjsonDirectTapePlan,
 };
 use crate::ir::physical::PhysicalPathStep;
 use std::sync::Arc;
@@ -110,9 +110,6 @@ impl NdjsonHintAccessPlan {
             }
             NdjsonDirectTapePlan::Stream(stream) => {
                 self.push_physical(&stream.source_steps);
-                if let NdjsonDirectStreamSink::Collect(map) = &stream.sink {
-                    self.collect_stream_map(map);
-                }
             }
             NdjsonDirectTapePlan::Object(fields) => {
                 for field in fields {
@@ -126,22 +123,6 @@ impl NdjsonHintAccessPlan {
             }
             NdjsonDirectTapePlan::ViewPipeline { source_steps, .. } => {
                 self.push_physical(source_steps)
-            }
-        }
-    }
-
-    fn collect_stream_map(&mut self, map: &NdjsonDirectStreamMap) {
-        match map {
-            NdjsonDirectStreamMap::Value(value) => self.collect_projection_value(value),
-            NdjsonDirectStreamMap::Array(items) => {
-                for item in items {
-                    self.collect_projection_value(item);
-                }
-            }
-            NdjsonDirectStreamMap::Object(fields) => {
-                for field in fields {
-                    self.collect_projection_value(&field.value);
-                }
             }
         }
     }
@@ -567,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn access_plan_collects_stream_source_and_projection_paths() {
+    fn access_plan_collects_stream_source_without_item_projection_paths() {
         let engine = crate::JetroEngine::new();
         let (byte, tape) = direct_writer_plans(
             &engine,
@@ -580,10 +561,14 @@ mod tests {
             .paths
             .iter()
             .any(|path| path.root_field() == Some("attributes")));
-        assert!(access.paths.iter().any(|path| path.steps
-            == vec![NdjsonHintPathStep::Field(Arc::from("key"))]));
-        assert!(access.paths.iter().any(|path| path.steps
-            == vec![NdjsonHintPathStep::Field(Arc::from("value"))]));
+        assert!(!access
+            .paths
+            .iter()
+            .any(|path| path.root_field() == Some("key")));
+        assert!(!access
+            .paths
+            .iter()
+            .any(|path| path.root_field() == Some("value")));
     }
 
     #[test]
