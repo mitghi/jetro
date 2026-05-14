@@ -3498,6 +3498,7 @@ mod tests {
         for query in [
             "$.attributes.map(@.key)",
             "$.attributes.map(@.key.upper())",
+            "$.attributes.map(@.value).first()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
             r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
@@ -4015,6 +4016,27 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&out).unwrap(),
             "{\"key\":\"a\",\"value\":\"x_3\"}\n{\"key\":\"b\",\"value\":\"y_3\"}\nnull\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_map_first_projects_first_item_without_filter() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"first"},{"key":"b","value":"later"}]}
+{"attributes":[]}
+{"attributes":[{"key":"c","value":"only"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.value).first()", &mut out)
+            .expect("unfiltered first should use direct stream first");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"first\"\nnull\n\"only\"\n"
         );
     }
 
