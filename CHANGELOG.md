@@ -39,6 +39,18 @@
   root and nested path keys can now be read from row bytes before parsing, so
   duplicate rows are discarded without VM evaluation; retained rows also reuse
   the direct byte/tape writer for supported projections.
+- **Reverse NDJSON `distinct_by` exposes execution stats**. Callers can request
+  counters for scanned rows, emitted rows, duplicate drops, direct versus
+  fallback key evaluation, direct versus fallback value writing, and the active
+  probabilistic front filter.
+- **Reverse NDJSON `distinct_by` canonicalizes direct keys**. Escaped string
+  keys and compound object/array keys can be normalized from the raw key slice,
+  avoiding full-row fallback while preserving exact duplicate behavior for
+  those key forms.
+- **Compacted-topic benchmark coverage was added**. The core NDJSON benchmark
+  now includes reverse `distinct_by` cases for high-duplicate streams,
+  low-duplicate streams, retained-row limits, direct key/projection paths, and
+  fallback key evaluation.
 - **Direct writer plan kinds are now test-visible**. NDJSON direct planning can
   expose whether a query produced a byte expression plan, a tape root/scalar
   plan, a stream collect/count/numeric plan, or a static projection plan. This
