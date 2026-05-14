@@ -143,6 +143,10 @@
   builtins and predicate match stages now convert downstream `last`/`nth`
   demand into a conservative ordered full scan, preventing planners from
   treating the physical last element as the semantic last matching output.
+- **Bounded positional demand is explicitly order-sensitive**. Selective,
+  distinct-like, expanding, and multi-match demand laws now mark bounded
+  positional output as ordered work, so later physical planners cannot treat
+  `first`, `nth`, `last`, or `take` after these stages as order-insensitive.
 
 ### Builtin hardening
 
