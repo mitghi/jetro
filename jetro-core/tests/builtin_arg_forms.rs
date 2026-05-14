@@ -310,6 +310,12 @@ fn flat_map_last_uses_semantic_output_order() {
 }
 
 #[test]
+fn unique_last_uses_distinct_output_order() {
+    let d = json!({"xs": ["a", "b", "a", "c", "b"]});
+    assert_eq!(run("$.xs.unique().last()", &d), "\"c\"");
+}
+
+#[test]
 fn sort_lambda_forms() {
     let d = users();
     let asc = r#"[{"active":false,"age":24,"id":2,"name":"Bob","score":40},{"active":true,"age":30,"id":1,"name":"Ada","score":80},{"active":true,"age":42,"id":3,"name":"Carol","score":95}]"#;
