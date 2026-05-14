@@ -24,6 +24,7 @@ pub(super) enum NdjsonDirectPlanKind {
     TapeObjectItems,
     TapeStreamCollect,
     TapeStreamFirst,
+    TapeStreamLast,
     TapeStreamCount,
     TapeStreamNumeric,
     TapeStreamExtreme,
@@ -54,6 +55,7 @@ impl NdjsonDirectTapePlan {
             Self::Stream(stream) => match &stream.sink {
                 NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
                 NdjsonDirectStreamSink::First(_) => NdjsonDirectPlanKind::TapeStreamFirst,
+                NdjsonDirectStreamSink::Last(_) => NdjsonDirectPlanKind::TapeStreamLast,
                 NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
                 NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
                 NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamExtreme,
@@ -133,6 +135,7 @@ pub(super) enum NdjsonDirectStreamMap {
 pub(super) enum NdjsonDirectStreamSink {
     Collect(NdjsonDirectStreamMap),
     First(NdjsonDirectStreamMap),
+    Last(NdjsonDirectStreamMap),
     Count,
     Numeric {
         suffix_steps: NdjsonPhysicalPath,
@@ -948,9 +951,11 @@ fn direct_tape_filter_map_first_plan(
     use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::{Sink, Stage};
 
-    if !matches!(body.sink, Sink::Terminal(BuiltinMethod::First)) {
-        return None;
-    }
+    let want_last = match body.sink {
+        Sink::Terminal(BuiltinMethod::First) => false,
+        Sink::Terminal(BuiltinMethod::Last) => true,
+        _ => return None,
+    };
     let (predicate, map) = match body.stages.as_slice() {
         [Stage::Map(_, _)] => (
             None,
@@ -969,7 +974,11 @@ fn direct_tape_filter_map_first_plan(
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate,
-        sink: NdjsonDirectStreamSink::First(map),
+        sink: if want_last {
+            NdjsonDirectStreamSink::Last(map)
+        } else {
+            NdjsonDirectStreamSink::First(map)
+        },
     }))
 }
 

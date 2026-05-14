@@ -1067,6 +1067,10 @@ where
                 ..
             })
             | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Last(_),
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
                 sink: NdjsonDirectStreamSink::Count,
                 ..
             })
@@ -2402,6 +2406,29 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
                 writer.write_all(b"null")?;
             }
         }
+        NdjsonDirectStreamSink::Last(map) => {
+            let mut selected = None;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    selected = Some(item_idx);
+                }
+                Ok::<(), JetroEngineError>(())
+            })?;
+            if let Some(item_idx) = selected {
+                write_json_tape_stream_map(
+                    writer,
+                    tape,
+                    item_idx,
+                    map,
+                    suffix_cache,
+                    projection_caches,
+                )?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
         NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
             let caches = NdjsonPathCaches {
                 source: source_cache,
@@ -2466,7 +2493,9 @@ fn write_json_tape_empty_stream_result<W: Write>(
 ) -> Result<(), JetroEngineError> {
     match sink {
         NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
-        NdjsonDirectStreamSink::First(_) => writer.write_all(b"null")?,
+        NdjsonDirectStreamSink::First(_) | NdjsonDirectStreamSink::Last(_) => {
+            writer.write_all(b"null")?
+        }
         NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
         NdjsonDirectStreamSink::Numeric { op, .. } => {
             let value = crate::exec::pipeline::num_finalise(
@@ -3499,6 +3528,7 @@ mod tests {
             "$.attributes.map(@.key)",
             "$.attributes.map(@.key.upper())",
             "$.attributes.map(@.value).first()",
+            "$.attributes.map(@.value).last()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
             r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
@@ -4037,6 +4067,52 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(&out).unwrap(),
             "\"first\"\nnull\n\"only\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_map_last_projects_last_item_without_filter() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"first"},{"key":"b","value":"last"}]}
+{"attributes":[]}
+{"attributes":[{"key":"c","value":"only"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.value).last()", &mut out)
+            .expect("unfiltered last should use direct stream last");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"last\"\nnull\n\"only\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_filter_map_last_keeps_latest_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x_3"},{"key":"b","value":"later_3"}]}
+{"attributes":[{"key":"a","value":"skip"},{"key":"b","value":"y_3"}]}
+{"attributes":[{"key":"a","value":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).last()"#,
+                &mut out,
+            )
+            .expect("filtered last should use direct stream last");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"key\":\"b\",\"value\":\"later_3\"}\n{\"key\":\"b\",\"value\":\"y_3\"}\nnull\n"
         );
     }
 

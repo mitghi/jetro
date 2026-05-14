@@ -178,6 +178,11 @@
   no predicate can require a later item; filtered `first()` still scans until
   the first matching semantic output. Locally, `$.attributes.map(@.value).first()`
   improved from roughly 2.56s to roughly 1.97s on the 4.76M-row file.
+- **NDJSON streams have a generic `last` sink**. `map(...).last()` and
+  `filter(...).map(...).last()` now lower to a reusable stream-last sink that
+  keeps only the latest semantic output and applies projection only to the
+  retained item. Unfiltered stream-last can select the last array child before
+  projection; filtered stream-last still scans for the latest matching output.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
