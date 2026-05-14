@@ -873,6 +873,28 @@ fn reverse_distinct_by_stats_report_fast_paths_and_duplicates() {
 }
 
 #[test]
+fn reverse_distinct_by_stats_report_front_filter_activation() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-front-filter");
+    let mut data = Vec::new();
+    for id in 0..5000 {
+        data.extend_from_slice(format!(r#"{{"id":{id},"v":{id}}}"#).as_bytes());
+        data.push(b'\n');
+    }
+    std::fs::write(&path, data).unwrap();
+    let mut out = Vec::new();
+
+    let stats = engine
+        .run_ndjson_rev_distinct_by_with_stats(&path, "id", "v", 5000, &mut out)
+        .expect("reverse distinct_by stats should expose front filter activation");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(stats.emitted, 5000);
+    assert_eq!(stats.duplicate_rows, 0);
+    assert_eq!(stats.front_filter, DistinctFrontFilterKind::Cuckoo);
+}
+
+#[test]
 fn reverse_distinct_by_canonicalizes_escaped_string_keys_directly() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-distinct-by-escaped");
