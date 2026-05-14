@@ -3,6 +3,7 @@ use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -437,13 +438,16 @@ where
         #[cfg(feature = "simd-json")]
         let direct_key = direct_key_plan
             .as_ref()
-            .and_then(|plan| row.as_deref().and_then(|row| distinct_key_bytes_direct(row, plan)));
+            .and_then(|plan| row.as_deref().and_then(|row| distinct_key_direct(row, plan)));
         #[cfg(not(feature = "simd-json"))]
         let direct_key = None;
 
         let inserted = if let Some(key) = direct_key {
             stats.direct_key_rows += 1;
-            seen.insert_slice(key)
+            match key {
+                Cow::Borrowed(key) => seen.insert_slice(key),
+                Cow::Owned(key) => seen.insert(key),
+            }
         } else {
             stats.fallback_key_rows += 1;
             let parsed =
@@ -522,33 +526,43 @@ fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEng
 }
 
 #[cfg(feature = "simd-json")]
-fn distinct_key_bytes_direct<'a>(
+fn distinct_key_direct<'a>(
     row: &'a [u8],
     plan: &super::ndjson::NdjsonDirectTapePlan,
-) -> Option<&'a [u8]> {
+) -> Option<Cow<'a, [u8]>> {
     const NULL_KEY: &[u8] = b"null";
 
     let super::ndjson::NdjsonDirectTapePlan::RootPath(steps) = plan else {
         return None;
     };
     match raw_json_byte_path_value(row, steps) {
-        RawFieldValue::Found(value) if raw_distinct_key_is_byte_stable(value) => Some(value),
-        RawFieldValue::Found(_) => None,
-        RawFieldValue::Missing => Some(NULL_KEY),
+        RawFieldValue::Found(value) => raw_distinct_key_bytes(value),
+        RawFieldValue::Missing => Some(Cow::Borrowed(NULL_KEY)),
         RawFieldValue::Fallback => None,
     }
 }
 
 #[cfg(feature = "simd-json")]
-fn raw_distinct_key_is_byte_stable(value: &[u8]) -> bool {
+fn raw_distinct_key_bytes(value: &[u8]) -> Option<Cow<'_, [u8]>> {
     let Some(first) = value.iter().copied().find(|b| !b.is_ascii_whitespace()) else {
-        return false;
+        return None;
     };
     match first {
-        b'n' | b't' | b'f' | b'-' | b'0'..=b'9' => true,
-        b'"' => !raw_json_string_has_escape(value),
-        _ => false,
+        b'n' | b't' | b'f' => Some(Cow::Borrowed(value)),
+        b'-' | b'0'..=b'9' if raw_json_number_is_integer(value) => Some(Cow::Borrowed(value)),
+        b'"' if !raw_json_string_has_escape(value) => Some(Cow::Borrowed(value)),
+        b'"' => canonical_escaped_json_string_key(value).map(Cow::Owned),
+        _ => None,
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_number_is_integer(value: &[u8]) -> bool {
+    value
+        .iter()
+        .copied()
+        .take_while(|b| !b.is_ascii_whitespace())
+        .all(|b| b != b'.' && b != b'e' && b != b'E')
 }
 
 #[cfg(feature = "simd-json")]
@@ -561,6 +575,14 @@ fn raw_json_string_has_escape(value: &[u8]) -> bool {
         }
     }
     true
+}
+
+#[cfg(feature = "simd-json")]
+fn canonical_escaped_json_string_key(value: &[u8]) -> Option<Vec<u8>> {
+    let decoded: String = serde_json::from_slice(value).ok()?;
+    let mut out = Vec::with_capacity(value.len());
+    super::ndjson::write_json_str(&mut out, &decoded).ok()?;
+    Some(out)
 }
 
 pub fn run_ndjson_rev_matches<P, W>(
@@ -886,10 +908,20 @@ mod tests {
     #[cfg(feature = "simd-json")]
     #[test]
     fn direct_distinct_key_classifier_rejects_escaped_strings() {
-        assert!(super::raw_distinct_key_is_byte_stable(br#""plain""#));
-        assert!(!super::raw_distinct_key_is_byte_stable(br#""a\u0062""#));
-        assert!(!super::raw_distinct_key_is_byte_stable(br#"{"k":"v"}"#));
-        assert!(super::raw_distinct_key_is_byte_stable(b"123"));
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#""plain""#).as_deref(),
+            Some(br#""plain""#.as_slice())
+        );
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#""a\u0062""#).as_deref(),
+            Some(br#""ab""#.as_slice())
+        );
+        assert_eq!(super::raw_distinct_key_bytes(br#"{"k":"v"}"#), None);
+        assert_eq!(
+            super::raw_distinct_key_bytes(b"123").as_deref(),
+            Some(b"123".as_slice())
+        );
+        assert_eq!(super::raw_distinct_key_bytes(b"1.0"), None);
     }
 
     fn temp_path(name: &str) -> PathBuf {

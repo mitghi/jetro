@@ -873,6 +873,29 @@ fn reverse_distinct_by_stats_report_fast_paths_and_duplicates() {
 }
 
 #[test]
+fn reverse_distinct_by_canonicalizes_escaped_string_keys_directly() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-escaped");
+    std::fs::write(
+        &path,
+        b"{\"id\":\"a\\u0062\",\"v\":1}\n{\"id\":\"ab\",\"v\":2}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let stats = engine
+        .run_ndjson_rev_distinct_by_with_stats(&path, "id", "v", 10, &mut out)
+        .expect("reverse distinct_by should canonicalize escaped string keys");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "2\n");
+    assert_eq!(stats.emitted, 1);
+    assert_eq!(stats.duplicate_rows, 1);
+    assert_eq!(stats.direct_key_rows, 2);
+    assert_eq!(stats.fallback_key_rows, 0);
+}
+
+#[test]
 fn reverse_for_each_until_stops_before_head_rows() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-until");
