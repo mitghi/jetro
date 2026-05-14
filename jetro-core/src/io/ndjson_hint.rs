@@ -371,6 +371,10 @@ impl NdjsonHintState {
     pub(super) fn schema(&self) -> &NdjsonSchemaHints {
         &self.schema
     }
+
+    pub(super) fn root_layout(&self) -> Option<&NdjsonObjectLayoutHint> {
+        self.schema.root_object.as_ref()
+    }
 }
 
 #[cfg(test)]

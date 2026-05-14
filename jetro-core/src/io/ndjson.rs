@@ -13,7 +13,11 @@ use std::sync::MutexGuard;
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
-    write_ndjson_byte_tape_plan_row, BytePlanWrite,
+    write_ndjson_byte_tape_plan_row, write_ndjson_hinted_tape_plan_row, BytePlanWrite,
+};
+#[cfg(feature = "simd-json")]
+use super::ndjson_hint::{
+    NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
 };
 #[cfg(test)]
 #[cfg(feature = "simd-json")]
@@ -1048,10 +1052,37 @@ where
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut hint_state = matches!(
+        tape_plan,
+        NdjsonDirectTapePlan::Object(_) | NdjsonDirectTapePlan::Array(_)
+    )
+    .then(|| {
+        NdjsonHintState::new(
+            NdjsonHintConfig::default(),
+            NdjsonHintAccessPlan::from_direct_plans(None, tape_plan),
+        )
+    });
     let mut count = 0usize;
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
-        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan, &mut byte_scratch)? {
+        let hinted = match hint_state.as_mut().map(|state| state.observe_row(row)) {
+            Some(NdjsonHintDecision::UseHints) => hint_state
+                .as_ref()
+                .and_then(NdjsonHintState::root_layout)
+                .map(|root| write_ndjson_hinted_tape_plan_row(&mut writer, row, tape_plan, root))
+                .transpose()?,
+            Some(NdjsonHintDecision::Learning | NdjsonHintDecision::Disabled) | None => None,
+        };
+        let write = match hinted {
+            Some(write) => Ok(write),
+            None => write_ndjson_byte_tape_plan_row(
+                &mut writer,
+                row,
+                tape_plan,
+                &mut byte_scratch,
+            ),
+        };
+        match write? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
                 scratch.parse_slice(row).map_err(|message| {
@@ -3334,5 +3365,39 @@ mod tests {
             .run_ndjson(rows, "$.store.attributes.first().value", &mut out)
             .expect("nested byte array demand should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"c\"\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_static_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"name":"a","active":true}
+{"id":2,"name":"b","active":true}
+{"id":3,"name":"c","active":true}
+{"id":4,"name":"d","active":true}
+{"id":5,"name":"e","active":true}
+{"id":6,"name":"f","active":true}
+{"id":7,"name":"g","active":true}
+{"id":8,"name":"h","active":true}
+{"id":9,"name":"i","active":true}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, r#"{id: $.id, name: $.name}"#, &mut out)
+            .expect("hinted static projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"a\"}\n\
+{\"id\":2,\"name\":\"b\"}\n\
+{\"id\":3,\"name\":\"c\"}\n\
+{\"id\":4,\"name\":\"d\"}\n\
+{\"id\":5,\"name\":\"e\"}\n\
+{\"id\":6,\"name\":\"f\"}\n\
+{\"id\":7,\"name\":\"g\"}\n\
+{\"id\":8,\"name\":\"h\"}\n\
+{\"id\":9,\"name\":\"i\"}\n"
+        );
     }
 }

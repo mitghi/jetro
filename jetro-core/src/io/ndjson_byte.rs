@@ -4,6 +4,7 @@ use super::ndjson_direct::{
     NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
     NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
+use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
@@ -226,6 +227,55 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
     }
 }
 
+pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
+    writer: &mut W,
+    row: &[u8],
+    plan: &NdjsonDirectTapePlan,
+    root: &NdjsonObjectLayoutHint,
+) -> Result<BytePlanWrite, JetroEngineError> {
+    let Some(matched) = root.match_row(row) else {
+        return Ok(BytePlanWrite::Fallback);
+    };
+    match plan {
+        NdjsonDirectTapePlan::Object(fields) => {
+            writer.write_all(b"{")?;
+            let mut wrote = false;
+            for field in fields {
+                let Some(value) = hinted_projection_value(row, root, &matched, &field.value) else {
+                    return Ok(BytePlanWrite::Fallback);
+                };
+                if field.optional && is_json_null(value) {
+                    continue;
+                }
+                if wrote {
+                    writer.write_all(b",")?;
+                }
+                write_json_escaped_ascii_slice(writer, field.key.as_bytes())?;
+                writer.write_all(b":")?;
+                writer.write_all(value)?;
+                wrote = true;
+            }
+            writer.write_all(b"}")?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::Array(items) => {
+            writer.write_all(b"[")?;
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                let Some(value) = hinted_projection_value(row, root, &matched, item) else {
+                    return Ok(BytePlanWrite::Fallback);
+                };
+                writer.write_all(value)?;
+            }
+            writer.write_all(b"]")?;
+            Ok(BytePlanWrite::Done)
+        }
+        _ => Ok(BytePlanWrite::Fallback),
+    }
+}
+
 fn byte_path_supported(steps: &[PhysicalPathStep]) -> bool {
     steps.iter().all(|step| {
         matches!(
@@ -254,6 +304,38 @@ fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool 
                 || call.method == BuiltinMethod::Lower
         }
     }
+}
+
+fn hinted_projection_value<'a>(
+    row: &'a [u8],
+    root: &NdjsonObjectLayoutHint,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a>,
+    value: &NdjsonDirectProjectionValue,
+) -> Option<&'a [u8]> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+                return None;
+            };
+            matched.value_at(root.slot_for(key.as_ref())?)
+        }
+        NdjsonDirectProjectionValue::Literal(lit) => match lit {
+            crate::data::value::Val::Null => Some(b"null"),
+            crate::data::value::Val::Bool(true) => Some(b"true"),
+            crate::data::value::Val::Bool(false) => Some(b"false"),
+            _ => {
+                let _ = row;
+                None
+            }
+        },
+        NdjsonDirectProjectionValue::ViewScalarCall { .. } => None,
+    }
+}
+
+fn is_json_null(value: &[u8]) -> bool {
+    let start = skip_json_ws(value, 0);
+    let end = trim_json_ws_end(value);
+    start < end && &value[start..end] == b"null"
 }
 
 enum RawFieldValue<'a> {

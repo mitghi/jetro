@@ -50,6 +50,10 @@
   object layouts can validate a row's field order and expose raw value byte
   spans by slot, providing the primitive needed for projection pushdown without
   building a full per-row structural index.
+- **Adaptive hints are wired into static NDJSON projections**. After the
+  learning threshold, byte-writable object and array projection plans can use a
+  validated root-layout match to emit root-field values by slot, while any
+  unsupported value shape or row mismatch falls back to the existing writer.
 
 ### Builtin hardening
 
