@@ -57,6 +57,27 @@
 - **NDJSON hint state now tracks activation counters**. The adaptive hint layer
   records learned rows, rejected rows, hinted rows, and disabled state so future
   explain/debug output can prove when schema-guided byte access is active.
+- **NDJSON hints now avoid per-row span allocation**. Active hint matches reuse
+  state-owned span scratch storage, keeping the hot projection path allocation
+  free after schema learning.
+- **Nested and scalar projection values can use hints**. Static object and
+  array projections can jump to a learned root slot and then reuse the existing
+  byte suffix walker or scalar writer for paths such as `$.profile.name` and
+  `$.profile.name.upper()`, without adding query-specific fusion chains.
+- **Hint fallback is preflighted before output**. Hinted projection writers now
+  prove every projected value can be emitted before writing an object or array,
+  so unsupported nested suffixes fall back cleanly without partial output.
+- **Stale hints self-disable on layout misses**. Once active, the hint layer
+  counts post-activation layout mismatches and disables itself after repeated
+  misses, preserving correctness on mixed-shape NDJSON while avoiding repeated
+  failed fast-path attempts.
+- **Root-slot matching now stops at the demanded fields**. Active hints validate
+  only the root slots required by the direct plan and stop after the last needed
+  slot, avoiding full root-object scans for early-field projections.
+- **Schema learning stops after activation**. The adaptive state machine now
+  performs full schema observation only during the learning window; active rows
+  go directly through the required-slot matcher. The default learning threshold
+  is two stable rows to favor cold NDJSON workloads.
 
 ### Builtin hardening
 
