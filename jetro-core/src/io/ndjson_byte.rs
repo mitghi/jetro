@@ -235,12 +235,6 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
 ) -> Result<BytePlanWrite, JetroEngineError> {
     match plan {
         NdjsonDirectTapePlan::Object(fields) => {
-            if !fields
-                .iter()
-                .all(|field| hinted_projection_value_ready(root, matched, &field.value))
-            {
-                return Ok(BytePlanWrite::Fallback);
-            }
             writer.write_all(b"{")?;
             let mut wrote = false;
             for field in fields {
@@ -268,12 +262,6 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
             Ok(BytePlanWrite::Done)
         }
         NdjsonDirectTapePlan::Array(items) => {
-            if !items
-                .iter()
-                .all(|item| hinted_projection_value_ready(root, matched, item))
-            {
-                return Ok(BytePlanWrite::Fallback);
-            }
             writer.write_all(b"[")?;
             for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
@@ -359,23 +347,6 @@ fn write_hinted_projection_value<W: Write>(
         },
     }
     Ok(true)
-}
-
-fn hinted_projection_value_ready(
-    root: &NdjsonObjectLayoutHint,
-    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
-    value: &NdjsonDirectProjectionValue,
-) -> bool {
-    match value {
-        NdjsonDirectProjectionValue::Path(steps)
-        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-            !matches!(
-                hinted_path_value(root, matched, steps),
-                RawFieldValue::Fallback
-            )
-        }
-        NdjsonDirectProjectionValue::Literal(_) => true,
-    }
 }
 
 fn hinted_projection_value_is_null_or_missing(

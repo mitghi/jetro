@@ -1067,17 +1067,22 @@ where
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
         let hinted = if let Some(state) = hint_state.as_mut() {
             if state.observe_row(row) == NdjsonHintDecision::UseHints {
-                state
+                byte_scratch.clear();
+                let write = state
                     .with_root_layout_match(row, |root, matched| {
                         write_ndjson_hinted_tape_plan_row(
-                            &mut writer,
+                            &mut byte_scratch,
                             tape_plan,
                             root,
                             matched,
                         )
                     })
                     .transpose()?
-                    .or(Some(BytePlanWrite::Fallback))
+                    .unwrap_or(BytePlanWrite::Fallback);
+                if matches!(write, BytePlanWrite::Done) {
+                    writer.write_all(&byte_scratch)?;
+                }
+                Some(write)
             } else {
                 None
             }
