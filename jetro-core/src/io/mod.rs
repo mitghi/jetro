@@ -4,6 +4,7 @@
 //! caller's [`crate::JetroEngine`] plan, VM, and tape execution caches.
 
 mod ndjson;
+mod ndjson_distinct;
 #[cfg(feature = "simd-json")]
 mod ndjson_byte;
 #[cfg(feature = "simd-json")]
