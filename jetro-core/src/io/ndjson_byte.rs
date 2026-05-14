@@ -6,6 +6,7 @@ use super::ndjson_direct::{
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::BuiltinMethod;
+use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
 use crate::JetroEngineError;
@@ -158,7 +159,7 @@ pub(super) fn tape_plan_can_write_byte_row(plan: &NdjsonDirectTapePlan) -> bool 
     match &stream.sink {
         NdjsonDirectStreamSink::Count => stream.predicate.is_some(),
         NdjsonDirectStreamSink::Collect(map) => byte_stream_map_supported(map),
-        NdjsonDirectStreamSink::Numeric { .. } => false,
+        NdjsonDirectStreamSink::Numeric { suffix_steps, .. } => byte_path_supported(suffix_steps),
     }
 }
 
@@ -190,6 +191,24 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
                 return Ok(BytePlanWrite::Fallback);
             };
             write_i64(writer, count as i64)?;
+            Ok(BytePlanWrite::Done)
+        }
+        NdjsonDirectTapePlan::Stream(stream)
+            if matches!(stream.sink, NdjsonDirectStreamSink::Numeric { .. }) =>
+        {
+            let NdjsonDirectStreamSink::Numeric { suffix_steps, op } = &stream.sink else {
+                unreachable!();
+            };
+            let Some(value) = reduce_raw_json_numeric_path(
+                row,
+                &stream.source_steps,
+                stream.predicate.as_ref(),
+                suffix_steps,
+                *op,
+            ) else {
+                return Ok(BytePlanWrite::Fallback);
+            };
+            write_val_json(writer, &value)?;
             Ok(BytePlanWrite::Done)
         }
         NdjsonDirectTapePlan::Stream(stream) => {
@@ -294,14 +313,34 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                         write_i64(writer, count as i64)?;
                         Ok(BytePlanWrite::Done)
                     }
-                    NdjsonDirectStreamSink::Numeric { .. } => Ok(BytePlanWrite::Fallback),
+                    NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
+                        let Some(value) = reduce_raw_json_numeric_source(
+                            source,
+                            stream.predicate.as_ref(),
+                            suffix_steps,
+                            *op,
+                        ) else {
+                            return Ok(BytePlanWrite::Fallback);
+                        };
+                        write_val_json(writer, &value)?;
+                        Ok(BytePlanWrite::Done)
+                    }
                 },
                 RawFieldValue::Missing => {
                     match &stream.sink {
                         NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
                         NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
-                        NdjsonDirectStreamSink::Numeric { .. } => {
-                            return Ok(BytePlanWrite::Fallback);
+                        NdjsonDirectStreamSink::Numeric { op, .. } => {
+                            let value = crate::exec::pipeline::num_finalise(
+                                *op,
+                                0,
+                                0.0,
+                                false,
+                                f64::INFINITY,
+                                f64::NEG_INFINITY,
+                                0,
+                            );
+                            write_val_json(writer, &value)?;
                         }
                     }
                     Ok(BytePlanWrite::Done)
@@ -1098,6 +1137,95 @@ fn raw_json_count_filtered_source(
         Some(())
     })?;
     Some(count)
+}
+
+fn reduce_raw_json_numeric_path(
+    row: &[u8],
+    source_steps: &[PhysicalPathStep],
+    predicate: Option<&NdjsonDirectItemPredicate>,
+    suffix_steps: &[PhysicalPathStep],
+    op: crate::exec::pipeline::NumOp,
+) -> Option<Val> {
+    let source = raw_json_path_value(row, source_steps)?;
+    reduce_raw_json_numeric_source(source, predicate, suffix_steps, op)
+}
+
+fn reduce_raw_json_numeric_source(
+    source: &[u8],
+    predicate: Option<&NdjsonDirectItemPredicate>,
+    suffix_steps: &[PhysicalPathStep],
+    op: crate::exec::pipeline::NumOp,
+) -> Option<Val> {
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+    raw_json_source_items(source, |item| {
+        if !predicate.map_or(Some(true), |predicate| eval_raw_item_predicate(item, predicate))? {
+            return Some(());
+        }
+        if let Some(value) = raw_json_path_view(item, suffix_steps) {
+            fold_raw_json_numeric(
+                value,
+                op,
+                &mut acc_i,
+                &mut acc_f,
+                &mut floated,
+                &mut min_f,
+                &mut max_f,
+                &mut n_obs,
+            );
+        }
+        Some(())
+    })?;
+    Some(crate::exec::pipeline::num_finalise(
+        op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_raw_json_numeric(
+    value: JsonView<'_>,
+    op: crate::exec::pipeline::NumOp,
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+) {
+    let (as_f, as_i) = match value {
+        JsonView::Int(value) => (value as f64, Some(value)),
+        JsonView::UInt(value) => (value as f64, i64::try_from(value).ok()),
+        JsonView::Float(value) => (value, None),
+        _ => return,
+    };
+    *n_obs += 1;
+    match op {
+        crate::exec::pipeline::NumOp::Sum | crate::exec::pipeline::NumOp::Avg => {
+            if let Some(value) = as_i.filter(|_| !*floated) {
+                *acc_i += value;
+            } else {
+                if !*floated {
+                    *acc_f = *acc_i as f64;
+                    *floated = true;
+                }
+                *acc_f += as_f;
+            }
+        }
+        crate::exec::pipeline::NumOp::Min => {
+            if as_f < *min_f {
+                *min_f = as_f;
+            }
+        }
+        crate::exec::pipeline::NumOp::Max => {
+            if as_f > *max_f {
+                *max_f = as_f;
+            }
+        }
+    }
 }
 
 fn write_raw_json_stream_collect<W: Write>(

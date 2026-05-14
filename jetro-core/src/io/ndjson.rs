@@ -1063,6 +1063,10 @@ where
                 sink: NdjsonDirectStreamSink::Count,
                 ..
             })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Numeric { .. },
+                ..
+            })
     )
     .then(|| {
         NdjsonHintState::new(
@@ -3173,7 +3177,7 @@ mod tests {
     #[cfg(feature = "simd-json")]
     fn direct_writer_path_kind_matches_runtime_writer_family() {
         let engine = crate::JetroEngine::new();
-        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape, Tape};
+        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape};
 
         for (query, expected) in [
             ("$.name", ByteExpr),
@@ -3185,7 +3189,7 @@ mod tests {
                 r#"$.attributes.filter(@.value.contains("_3")).len()"#,
                 ByteWritableTape,
             ),
-            ("$.attributes.map(@.weight).sum()", Tape),
+            ("$.attributes.map(@.weight).sum()", ByteWritableTape),
         ] {
             assert_eq!(
                 super::direct_writer_path_kind(&engine, query),
@@ -3276,6 +3280,33 @@ mod tests {
             .expect("byte count should write");
         assert!(matches!(wrote, super::BytePlanWrite::Done));
         assert_eq!(out, b"2");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_reduces_numeric_streams() {
+        let engine = crate::JetroEngine::new();
+        let row =
+            br#"{"attributes":[{"weight":1},{"weight":2.5},{"weight":3},{"weight":"skip"}]}"#;
+        for (query, expected) in [
+            ("$.attributes.map(@.weight).sum()", "6.5"),
+            ("$.attributes.map(@.weight).avg()", "2.1666666666666665"),
+            ("$.attributes.map(@.weight).min()", "1.0"),
+            ("$.attributes.map(@.weight).max()", "3.0"),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte numeric stream should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
     }
 
     #[test]
@@ -3532,5 +3563,22 @@ mod tests {
             .run_ndjson(rows, r#"$.attributes.filter(@.value.contains("_3")).len()"#, &mut out)
             .expect("hinted stream count should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_numeric_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"weight":1},{"weight":2}]}
+{"id":2,"attributes":[{"weight":3.5},{"weight":4}]}
+{"id":3,"attributes":[{"weight":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.weight).sum()", &mut out)
+            .expect("hinted numeric stream should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "3\n7.5\n0\n");
     }
 }
