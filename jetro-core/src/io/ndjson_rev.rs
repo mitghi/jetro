@@ -399,8 +399,8 @@ where
         #[cfg(not(feature = "simd-json"))]
         let direct_key = None;
 
-        let key = if let Some(key) = direct_key {
-            key
+        let inserted = if let Some(key) = direct_key {
+            seen.insert_slice(key)
         } else {
             let parsed =
                 super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
@@ -408,9 +408,9 @@ where
                 .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
             let key = distinct_key_bytes(&key)?;
             document = Some(parsed);
-            key
+            seen.insert(key)
         };
-        if !seen.insert(key) {
+        if !inserted {
             continue;
         }
 
@@ -454,16 +454,18 @@ fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEng
 }
 
 #[cfg(feature = "simd-json")]
-fn distinct_key_bytes_direct(
-    row: &[u8],
+fn distinct_key_bytes_direct<'a>(
+    row: &'a [u8],
     plan: &super::ndjson::NdjsonDirectTapePlan,
-) -> Option<Vec<u8>> {
+) -> Option<&'a [u8]> {
+    const NULL_KEY: &[u8] = b"null";
+
     let super::ndjson::NdjsonDirectTapePlan::RootPath(steps) = plan else {
         return None;
     };
     match raw_json_byte_path_value(row, steps) {
-        RawFieldValue::Found(value) => Some(value.to_vec()),
-        RawFieldValue::Missing => Some(b"null".to_vec()),
+        RawFieldValue::Found(value) => Some(value),
+        RawFieldValue::Missing => Some(NULL_KEY),
         RawFieldValue::Fallback => None,
     }
 }
@@ -479,21 +481,9 @@ impl AdaptiveDistinctKeys {
     const BLOOM_BITS_PER_KEY: usize = 16;
 
     fn insert(&mut self, key: Vec<u8>) -> bool {
-        self.ensure_bloom_capacity();
-        let might_exist = self
-            .bloom
-            .as_ref()
-            .is_some_and(|bloom| bloom.might_contain(&key));
-        if !might_exist {
-            let inserted = self.exact.insert(key.clone());
-            if inserted {
-                if let Some(bloom) = self.bloom.as_mut() {
-                    bloom.insert(&key);
-                }
-            }
-            return inserted;
+        if self.maybe_contains(&key) && self.exact.contains(&key) {
+            return false;
         }
-
         let inserted = self.exact.insert(key.clone());
         if inserted {
             if let Some(bloom) = self.bloom.as_mut() {
@@ -501,6 +491,27 @@ impl AdaptiveDistinctKeys {
             }
         }
         inserted
+    }
+
+    fn insert_slice(&mut self, key: &[u8]) -> bool {
+        if self.maybe_contains(key) && self.exact.contains(key) {
+            return false;
+        }
+        let inserted = self.exact.insert(key.to_vec());
+        if inserted {
+            if let Some(bloom) = self.bloom.as_mut() {
+                bloom.insert(key);
+            }
+        }
+        inserted
+    }
+
+    fn maybe_contains(&mut self, key: &[u8]) -> bool {
+        self.ensure_bloom_capacity();
+        self
+            .bloom
+            .as_ref()
+            .is_none_or(|bloom| bloom.might_contain(key))
     }
 
     fn ensure_bloom_capacity(&mut self) {
