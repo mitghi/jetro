@@ -19,74 +19,6 @@ pub(super) enum BytePlanWrite {
     Fallback,
 }
 
-#[derive(Default)]
-pub(super) struct NdjsonConstantStreamCache {
-    output: Vec<u8>,
-    values: Vec<Vec<u8>>,
-    ranges: Vec<std::ops::Range<usize>>,
-    disabled: bool,
-    learned: bool,
-}
-
-impl NdjsonConstantStreamCache {
-    pub(super) fn write_row<W: Write>(
-        &mut self,
-        writer: &mut W,
-        row: &[u8],
-        plan: &NdjsonDirectTapePlan,
-    ) -> Result<Option<BytePlanWrite>, JetroEngineError> {
-        if self.disabled {
-            return Ok(None);
-        }
-        let Some((source_steps, field)) = constant_stream_single_field(plan) else {
-            self.disabled = true;
-            return Ok(None);
-        };
-        let source = match raw_json_byte_path_value(row, source_steps) {
-            RawFieldValue::Found(source) => source,
-            RawFieldValue::Missing => {
-                if self.learned && self.values.is_empty() {
-                    writer.write_all(&self.output)?;
-                    return Ok(Some(BytePlanWrite::Done));
-                }
-                self.disabled = true;
-                return Ok(None);
-            }
-            RawFieldValue::Fallback => {
-                self.disabled = true;
-                return Ok(None);
-            }
-        };
-        if !self.learned {
-            self.values.clear();
-            self.ranges.clear();
-            self.output.clear();
-            if !collect_constant_stream_single_field(
-                &mut self.output,
-                source,
-                field,
-                Some(&mut self.values),
-                Some(&mut self.ranges),
-            )? {
-                self.disabled = true;
-                return Ok(None);
-            }
-            self.learned = true;
-            writer.write_all(&self.output)?;
-            return Ok(Some(BytePlanWrite::Done));
-        }
-        if validate_constant_stream_single_field_fast(source, &self.values, &self.ranges)
-            || validate_constant_stream_single_field(source, field, &self.values)
-        {
-            writer.write_all(&self.output)?;
-            Ok(Some(BytePlanWrite::Done))
-        } else {
-            self.disabled = true;
-            Ok(None)
-        }
-    }
-}
-
 pub(super) fn write_ndjson_byte_plan_row<W: Write>(
     writer: &mut W,
     row: &[u8],
@@ -206,7 +138,10 @@ fn raw_json_byte_expr_value<'a>(row: &'a [u8], expr: &NdjsonDirectByteExpr) -> R
 }
 
 #[inline(always)]
-fn raw_json_byte_path_value<'a>(row: &'a [u8], steps: &[PhysicalPathStep]) -> RawFieldValue<'a> {
+pub(super) fn raw_json_byte_path_value<'a>(
+    row: &'a [u8],
+    steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
     if let [PhysicalPathStep::Field(key)] = steps {
         return root_field_raw_value(row, key.as_ref());
     }
@@ -626,7 +561,7 @@ fn is_json_null(value: &[u8]) -> bool {
     start < end && &value[start..end] == b"null"
 }
 
-enum RawFieldValue<'a> {
+pub(super) enum RawFieldValue<'a> {
     Found(&'a [u8]),
     Missing,
     Fallback,
@@ -1561,7 +1496,7 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
     }
 }
 
-fn constant_stream_single_field(
+pub(super) fn constant_stream_single_field(
     plan: &NdjsonDirectTapePlan,
 ) -> Option<(&[PhysicalPathStep], &str)> {
     let NdjsonDirectTapePlan::Stream(stream) = plan else {
@@ -1582,7 +1517,7 @@ fn constant_stream_single_field(
     Some((&stream.source_steps, field.as_ref()))
 }
 
-fn collect_constant_stream_single_field<W: Write>(
+pub(super) fn collect_constant_stream_single_field<W: Write>(
     writer: &mut W,
     source: &[u8],
     field: &str,
@@ -1631,7 +1566,7 @@ fn collect_constant_stream_single_field<W: Write>(
     }
 }
 
-fn validate_constant_stream_single_field_fast(
+pub(super) fn validate_constant_stream_single_field_fast(
     source: &[u8],
     values: &[Vec<u8>],
     ranges: &[std::ops::Range<usize>],
@@ -1676,7 +1611,11 @@ fn validate_constant_stream_single_field_fast(
     false
 }
 
-fn validate_constant_stream_single_field(source: &[u8], field: &str, values: &[Vec<u8>]) -> bool {
+pub(super) fn validate_constant_stream_single_field(
+    source: &[u8],
+    field: &str,
+    values: &[Vec<u8>],
+) -> bool {
     let start = skip_json_ws(source, 0);
     let end = trim_json_ws_end(source);
     if source.get(start) != Some(&b'[') {

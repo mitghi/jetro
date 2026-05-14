@@ -11,6 +11,8 @@ mod ndjson_direct;
 #[cfg(feature = "simd-json")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
+#[cfg(feature = "simd-json")]
+mod ndjson_stream_cache;
 mod ndjson_rev;
 mod source;
 

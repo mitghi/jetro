@@ -14,12 +14,13 @@ use std::sync::MutexGuard;
 use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
     write_ndjson_byte_tape_plan_row, write_ndjson_hinted_tape_plan_row, BytePlanWrite,
-    NdjsonConstantStreamCache,
 };
 #[cfg(feature = "simd-json")]
 use super::ndjson_hint::{
     NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
 };
+#[cfg(feature = "simd-json")]
+use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 #[cfg(test)]
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
