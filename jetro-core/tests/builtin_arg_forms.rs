@@ -304,6 +304,12 @@ fn flat_map_all_forms() {
 }
 
 #[test]
+fn flat_map_last_uses_semantic_output_order() {
+    let d = json!({"groups": [[1, 2], [], [3, 4], [5]]});
+    assert_eq!(run("$.groups.flat_map(@).last()", &d), "5");
+}
+
+#[test]
 fn sort_lambda_forms() {
     let d = users();
     let asc = r#"[{"active":false,"age":24,"id":2,"name":"Bob","score":40},{"active":true,"age":30,"id":1,"name":"Ada","score":80},{"active":true,"age":42,"id":3,"name":"Carol","score":95}]"#;
