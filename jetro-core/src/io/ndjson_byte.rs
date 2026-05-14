@@ -276,18 +276,34 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
             Ok(BytePlanWrite::Done)
         }
         NdjsonDirectTapePlan::Stream(stream) => {
-            let NdjsonDirectStreamSink::Collect(map) = &stream.sink else {
-                return Ok(BytePlanWrite::Fallback);
-            };
-            if !byte_stream_map_supported(map) {
-                return Ok(BytePlanWrite::Fallback);
-            }
             match hinted_path_value(root, matched, &stream.source_steps) {
-                RawFieldValue::Found(source) => {
-                    write_raw_json_stream_collect_from_source(writer, source, stream, map)
-                }
+                RawFieldValue::Found(source) => match &stream.sink {
+                    NdjsonDirectStreamSink::Collect(map) => {
+                        if !byte_stream_map_supported(map) {
+                            return Ok(BytePlanWrite::Fallback);
+                        }
+                        write_raw_json_stream_collect_from_source(writer, source, stream, map)
+                    }
+                    NdjsonDirectStreamSink::Count => {
+                        let Some(predicate) = stream.predicate.as_ref() else {
+                            return Ok(BytePlanWrite::Fallback);
+                        };
+                        let Some(count) = raw_json_count_filtered_source(source, predicate) else {
+                            return Ok(BytePlanWrite::Fallback);
+                        };
+                        write_i64(writer, count as i64)?;
+                        Ok(BytePlanWrite::Done)
+                    }
+                    NdjsonDirectStreamSink::Numeric { .. } => Ok(BytePlanWrite::Fallback),
+                },
                 RawFieldValue::Missing => {
-                    writer.write_all(b"[]")?;
+                    match &stream.sink {
+                        NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+                        NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
+                        NdjsonDirectStreamSink::Numeric { .. } => {
+                            return Ok(BytePlanWrite::Fallback);
+                        }
+                    }
                     Ok(BytePlanWrite::Done)
                 }
                 RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
@@ -1067,6 +1083,13 @@ fn raw_json_count_filtered(
     predicate: &NdjsonDirectItemPredicate,
 ) -> Option<usize> {
     let source = raw_json_path_value(row, source_steps)?;
+    raw_json_count_filtered_source(source, predicate)
+}
+
+fn raw_json_count_filtered_source(
+    source: &[u8],
+    predicate: &NdjsonDirectItemPredicate,
+) -> Option<usize> {
     let mut count = 0usize;
     raw_json_source_items(source, |item| {
         if eval_raw_item_predicate(item, predicate)? {

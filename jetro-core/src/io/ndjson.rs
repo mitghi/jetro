@@ -1059,6 +1059,10 @@ where
                 sink: NdjsonDirectStreamSink::Collect(_),
                 ..
             })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Count,
+                ..
+            })
     )
     .then(|| {
         NdjsonHintState::new(
@@ -3511,5 +3515,22 @@ mod tests {
             std::str::from_utf8(&out).unwrap(),
             "[[\"a\",\"x\"],[\"b\",\"y\"]]\n[[\"c\",\"z\"]]\n[[\"d\",\"w\"]]\n"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_count_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"value":"x_3"},{"value":"y"}]}
+{"id":2,"attributes":[{"value":"z_3"},{"value":"w_3"}]}
+{"id":3,"attributes":[{"value":"n"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, r#"$.attributes.filter(@.value.contains("_3")).len()"#, &mut out)
+            .expect("hinted stream count should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n0\n");
     }
 }
