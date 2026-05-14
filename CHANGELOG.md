@@ -113,6 +113,10 @@
   stream field sets and span buffers use inline storage, and fixed projection
   keys are written directly through the JSON string writer rather than via
   temporary `Val` allocation.
+- **Direct stream projection plans are built once per row source**. Root-field
+  array/object stream maps now derive reusable slot plans for raw fields and
+  supported scalar calls, reducing per-item projection work while preserving
+  fallback through the generic writer for nested or optional shapes.
 
 ### Builtin hardening
 
