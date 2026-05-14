@@ -3113,7 +3113,10 @@ fn write_json_objvec<W: Write>(
     Ok(())
 }
 
-fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngineError> {
+pub(super) fn write_json_str<W: Write>(
+    writer: &mut W,
+    value: &str,
+) -> Result<(), JetroEngineError> {
     writer.write_all(b"\"")?;
     let bytes = value.as_bytes();
     if !needs_json_escape(bytes) {

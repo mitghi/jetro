@@ -1,4 +1,4 @@
-use super::ndjson::{write_i64, write_val_json};
+use super::ndjson::{write_i64, write_json_str, write_val_json};
 use super::ndjson_direct::{
     NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
     NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
@@ -2002,7 +2002,7 @@ fn write_raw_json_stream_map_with_root_spans<W: Write>(
                 if wrote {
                     writer.write_all(b",")?;
                 }
-                write_val_json(writer, &crate::data::value::Val::Str(field.key.clone()))?;
+                write_json_str(writer, field.key.as_ref())?;
                 writer.write_all(b":")?;
                 if !write_raw_json_projection_value_from_root_fields(
                     writer,
@@ -2326,7 +2326,7 @@ fn write_raw_json_stream_map<W: Write>(
                 if wrote {
                     writer.write_all(b",")?;
                 }
-                write_val_json(writer, &crate::data::value::Val::Str(field.key.clone()))?;
+                write_json_str(writer, field.key.as_ref())?;
                 writer.write_all(b":")?;
                 write_raw_json_projection_value(writer, item, &field.value)?;
                 wrote = true;
@@ -2351,7 +2351,7 @@ fn write_raw_json_object_projection<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        write_val_json(writer, &crate::data::value::Val::Str(field.key.clone()))?;
+        write_json_str(writer, field.key.as_ref())?;
         writer.write_all(b":")?;
         write_raw_json_projection_value(writer, row, &field.value)?;
         wrote = true;
