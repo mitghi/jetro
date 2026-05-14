@@ -1,5 +1,5 @@
 use super::{NdjsonSource, RowError};
-use super::ndjson_distinct::AdaptiveDistinctKeys;
+use super::ndjson_distinct::{distinct_key_bytes, AdaptiveDistinctKeys};
 use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamSourceKind, RowStreamStage,
 };
@@ -1287,12 +1287,6 @@ impl CompiledRowStreamStage {
             },
         }
     }
-}
-
-fn distinct_key_bytes(key: &Val) -> Result<Vec<u8>, JetroEngineError> {
-    let mut out = Vec::new();
-    write_val_json(&mut out, key)?;
-    Ok(out)
 }
 
 fn drive_ndjson_writer<R, W>(

@@ -1,3 +1,5 @@
+use crate::{JetroEngineError, Val};
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 #[derive(Default)]
@@ -103,6 +105,67 @@ impl AdaptiveDistinctKeys {
         }
         self.front = Some(front);
     }
+}
+
+pub(super) fn distinct_key_bytes(key: &Val) -> Result<Vec<u8>, JetroEngineError> {
+    let mut out = Vec::new();
+    super::ndjson::write_val_json(&mut out, key)?;
+    Ok(out)
+}
+
+#[cfg(feature = "simd-json")]
+pub(super) fn raw_distinct_key_bytes(value: &[u8]) -> Option<Cow<'_, [u8]>> {
+    let first = value.iter().copied().find(|b| !b.is_ascii_whitespace())?;
+    match first {
+        b'n' | b't' | b'f' => Some(Cow::Borrowed(value)),
+        b'-' | b'0'..=b'9' if raw_json_number_is_integer(value) => Some(Cow::Borrowed(value)),
+        b'"' if !raw_json_string_has_escape(value) => Some(Cow::Borrowed(value)),
+        b'"' => canonical_escaped_json_string_key(value).map(Cow::Owned),
+        b'{' | b'[' => canonical_json_value_key(value).map(Cow::Owned),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_number_is_integer(value: &[u8]) -> bool {
+    value
+        .iter()
+        .copied()
+        .take_while(|b| !b.is_ascii_whitespace())
+        .all(|b| b != b'.' && b != b'e' && b != b'E')
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_string_has_escape(value: &[u8]) -> bool {
+    for byte in value
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .skip(1)
+    {
+        match byte {
+            b'\\' => return true,
+            b'"' => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+#[cfg(feature = "simd-json")]
+fn canonical_escaped_json_string_key(value: &[u8]) -> Option<Vec<u8>> {
+    let decoded: String = serde_json::from_slice(value).ok()?;
+    let mut out = Vec::with_capacity(value.len());
+    super::ndjson::write_json_str(&mut out, &decoded).ok()?;
+    Some(out)
+}
+
+#[cfg(feature = "simd-json")]
+fn canonical_json_value_key(value: &[u8]) -> Option<Vec<u8>> {
+    let decoded: serde_json::Value = serde_json::from_slice(value).ok()?;
+    let mut out = Vec::with_capacity(value.len());
+    serde_json::to_writer(&mut out, &decoded).ok()?;
+    Some(out)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
