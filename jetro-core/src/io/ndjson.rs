@@ -1,8 +1,14 @@
 use super::{NdjsonSource, RowError};
+use super::ndjson_distinct::AdaptiveDistinctKeys;
+use super::stream_plan::{
+    lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamSourceKind, RowStreamStage,
+};
+use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
+use crate::vm::opcode::Program;
 use crate::util::is_truthy;
-use crate::{Jetro, JetroEngine, JetroEngineError, VM};
+use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 use memchr::memchr;
 use serde_json::Value;
 use std::fs::File;
@@ -587,15 +593,8 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let file = File::open(path)?;
     let options = NdjsonOptions::default();
-    run_ndjson_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        writer,
-        options,
-    )
+    run_ndjson_file_with_options(engine, path, query, writer, options)
 }
 
 pub fn run_ndjson_file_with_options<P, W>(
@@ -609,6 +608,10 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_file(engine, path, &plan, None, options, writer);
+    }
+
     let file = File::open(path)?;
     run_ndjson_with_options(
         engine,
@@ -630,6 +633,10 @@ where
     R: BufRead,
     W: Write,
 {
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer);
+    }
+
     drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
 
@@ -670,6 +677,10 @@ where
         return Ok(0);
     }
 
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_reader(engine, reader, &plan, Some(limit), options, writer);
+    }
+
     drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
 }
 
@@ -684,16 +695,8 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let file = File::open(path)?;
     let options = NdjsonOptions::default();
-    run_ndjson_limit_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        limit,
-        writer,
-        options,
-    )
+    run_ndjson_file_limit_with_options(engine, path, query, limit, writer, options)
 }
 
 pub fn run_ndjson_file_limit_with_options<P, W>(
@@ -708,6 +711,13 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if limit == 0 {
+        return Ok(0);
+    }
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_file(engine, path, &plan, Some(limit), options, writer);
+    }
+
     let file = File::open(path)?;
     run_ndjson_limit_with_options(
         engine,
@@ -941,6 +951,233 @@ where
     }
 
     Ok(count)
+}
+
+fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
+    let Ok(expr) = crate::parse::parser::parse(query) else {
+        return Ok(None);
+    };
+    lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn drive_ndjson_rows_stream_reader<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if plan.direction == RowStreamDirection::Reverse {
+        return Err(JetroEngineError::Eval(EvalError(
+            "$.rows().reverse() requires a file-backed NDJSON source".into(),
+        )));
+    }
+
+    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut executor = CompiledRowStream::new(plan);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+
+    while !executor.is_exhausted() {
+        let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
+            break;
+        };
+        match executor.apply_owned_row(engine, line_no, row)? {
+            RowStreamRowResult::Emit(value) => {
+                write_val_line(&mut writer, &value)?;
+                emitted += 1;
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+            }
+            RowStreamRowResult::Skip => {}
+            RowStreamRowResult::Stop => break,
+        }
+        if executor.is_exhausted() {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
+fn drive_ndjson_rows_stream_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if plan.direction == RowStreamDirection::Forward {
+        let file = File::open(path)?;
+        return drive_ndjson_rows_stream_reader(
+            engine,
+            std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+            plan,
+            external_limit,
+            options,
+            writer,
+        );
+    }
+
+    let mut driver = super::ndjson_rev::NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut executor = CompiledRowStream::new(plan);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut emitted = 0usize;
+
+    while !executor.is_exhausted() {
+        let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
+            break;
+        };
+        match executor.apply_owned_row(engine, line_no, row)? {
+            RowStreamRowResult::Emit(value) => {
+                write_val_line(&mut writer, &value)?;
+                emitted += 1;
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+            }
+            RowStreamRowResult::Skip => {}
+            RowStreamRowResult::Stop => break,
+        }
+        if executor.is_exhausted() {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok(emitted)
+}
+
+enum RowStreamRowResult {
+    Emit(Val),
+    Skip,
+    Stop,
+}
+
+struct CompiledRowStream {
+    stages: Vec<CompiledRowStreamStage>,
+    exhausted: bool,
+}
+
+impl CompiledRowStream {
+    fn new(plan: &RowStreamPlan) -> Self {
+        let stages: Vec<_> = plan.stages.iter().map(CompiledRowStreamStage::new).collect();
+        let exhausted = stages
+            .iter()
+            .any(|stage| matches!(stage, CompiledRowStreamStage::Take { limit: 0, .. }));
+        Self {
+            stages,
+            exhausted,
+        }
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    fn apply_owned_row(
+        &mut self,
+        engine: &JetroEngine,
+        line_no: u64,
+        row: Vec<u8>,
+    ) -> Result<RowStreamRowResult, JetroEngineError> {
+        let document = parse_row(engine, line_no, row)?;
+        let mut value = document
+            .root_val_with(engine.keys())
+            .map_err(|err| row_eval_error(line_no, err))?;
+        let mut vm = engine.lock_vm();
+
+        for stage in &mut self.stages {
+            match stage {
+                CompiledRowStreamStage::Filter(program) => {
+                    let keep = vm
+                        .execute_val_raw(program, value.clone())
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                    if !is_truthy(&keep) {
+                        return Ok(RowStreamRowResult::Skip);
+                    }
+                }
+                CompiledRowStreamStage::DistinctBy { program, seen } => {
+                    let key = vm
+                        .execute_val_raw(program, value.clone())
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                    let key = distinct_key_bytes(&key)?;
+                    if !seen.insert(key) {
+                        return Ok(RowStreamRowResult::Skip);
+                    }
+                }
+                CompiledRowStreamStage::Take { limit, seen } => {
+                    if *seen >= *limit {
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    *seen += 1;
+                    if *seen >= *limit {
+                        self.exhausted = true;
+                    }
+                }
+                CompiledRowStreamStage::Map(program) => {
+                    value = vm
+                        .execute_val_raw(program, value)
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                }
+            }
+        }
+
+        Ok(RowStreamRowResult::Emit(value))
+    }
+}
+
+enum CompiledRowStreamStage {
+    Filter(Program),
+    DistinctBy {
+        program: Program,
+        seen: AdaptiveDistinctKeys,
+    },
+    Take {
+        limit: usize,
+        seen: usize,
+    },
+    Map(Program),
+}
+
+impl CompiledRowStreamStage {
+    fn new(stage: &RowStreamStage) -> Self {
+        match stage {
+            RowStreamStage::Filter(expr) => {
+                Self::Filter(Compiler::compile(expr, "<ndjson-rows-filter>"))
+            }
+            RowStreamStage::DistinctBy(expr) => Self::DistinctBy {
+                program: Compiler::compile(expr, "<ndjson-rows-distinct-by>"),
+                seen: AdaptiveDistinctKeys::default(),
+            },
+            RowStreamStage::Take(limit) => Self::Take {
+                limit: *limit,
+                seen: 0,
+            },
+            RowStreamStage::Map(expr) => Self::Map(Compiler::compile(expr, "<ndjson-rows-map>")),
+        }
+    }
+}
+
+fn distinct_key_bytes(key: &Val) -> Result<Vec<u8>, JetroEngineError> {
+    let mut out = Vec::new();
+    write_val_json(&mut out, key)?;
+    Ok(out)
 }
 
 fn drive_ndjson_writer<R, W>(

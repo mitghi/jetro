@@ -373,6 +373,92 @@ not-json
 }
 
 #[test]
+fn rows_stream_take_map_runs_over_ndjson_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"Ada"}
+{"id":2,"name":"Bob"}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(Cursor::new(input), "$.rows().take(2).map($.name)", &mut out)
+        .expect("rows stream should stop before the invalid tail");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"Ada\"\n\"Bob\"\n");
+}
+
+#[test]
+fn rows_stream_reverse_requires_file_backed_ndjson() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+"#;
+    let mut out = Vec::new();
+
+    let err = engine
+        .run_ndjson(Cursor::new(input), "$.rows().reverse().take(1)", &mut out)
+        .expect_err("reader-backed reverse rows stream should be rejected");
+
+    assert!(err
+        .to_string()
+        .contains("$.rows().reverse() requires a file-backed NDJSON source"));
+}
+
+#[test]
+fn rows_stream_reverse_take_map_runs_from_file_tail() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-reverse");
+    std::fs::write(
+        &path,
+        b"not-json\n{\"id\":1,\"name\":\"Ada\"}\n{\"id\":2,\"name\":\"Bob\"}\n{\"id\":3,\"name\":\"Cid\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_source_with_options(
+            NdjsonSource::file(path.clone()),
+            "$.rows().reverse().take(2).map($.id)",
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(6),
+        )
+        .expect("file-backed reverse rows stream should stop before invalid head");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
+}
+
+#[test]
+fn rows_stream_reverse_distinct_by_keeps_latest_rows() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-reverse-distinct");
+    std::fs::write(
+        &path,
+        b"not-json\n{\"id\":\"a\",\"v\":1}\n{\"id\":\"b\",\"v\":2}\n{\"id\":\"a\",\"v\":3}\n{\"id\":\"c\",\"v\":4}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            "$.rows().reverse().distinct_by($.id).take(2).map({id: $.id, v: $.v})",
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(7),
+        )
+        .expect("reverse rows stream should apply stream-level distinct_by");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":\"c\",\"v\":4}\n{\"id\":\"a\",\"v\":3}\n"
+    );
+}
+
+#[test]
 fn run_ndjson_source_limit_dispatches_file_and_reader_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(b"{\"n\":1}\n{\"n\":2}\nnot-json\n".to_vec()));
