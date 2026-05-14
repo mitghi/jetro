@@ -164,7 +164,8 @@
   in `first()` now lower to a reusable direct stream sink that stops at the
   first matching item and applies the planned projection once. The benchmark
   shape `filter(...).map({...}).first()` improved locally from roughly 4.26s to
-  roughly 3.8s on the 4.76M-row file.
+  roughly 3.8s on the 4.76M-row file, and the direct-plan test label now
+  distinguishes stream-first from stream-collect.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
