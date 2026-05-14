@@ -3367,6 +3367,10 @@ mod tests {
             (r#"[$.id, $.name]"#, (None, TapeArrayProjection)),
             ("$.attributes.map(@.key)", (None, TapeStreamCollect)),
             (
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                (None, TapeStreamCollect),
+            ),
+            (
                 r#"$.attributes.filter(@.value.contains("_3")).len()"#,
                 (None, TapeStreamCount),
             ),
@@ -3401,6 +3405,10 @@ mod tests {
             (r#"{test: $.a.b.c, b: $.a.b}"#, ByteWritableTape),
             (r#"[$.id, $.name]"#, ByteWritableTape),
             ("$.attributes.map(@.key)", ByteWritableTape),
+            (
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                ByteWritableTape,
+            ),
             (
                 r#"$.attributes.filter(@.value.contains("_3")).len()"#,
                 ByteWritableTape,
