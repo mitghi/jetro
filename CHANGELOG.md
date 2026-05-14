@@ -38,6 +38,10 @@
   the existing byte scanner, records stable field slots, detects unstable field
   order, and rejects rows the byte scanner cannot validate instead of creating
   unsafe hints.
+- **Hintable NDJSON access is derived from direct plan metadata**. Static
+  projections and stream plans now feed a generic access-path inventory that
+  captures source and projected paths algorithmically, forming the basis for
+  schema-guided byte access without query-chain-specific fusions.
 
 ### Builtin hardening
 
