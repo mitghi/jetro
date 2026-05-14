@@ -16,6 +16,7 @@ use std::io::Write;
 
 type RootFieldSet<'a> = SmallVec<[&'a str; 4]>;
 type RootFieldSpans = SmallVec<[Option<std::ops::Range<usize>>; 4]>;
+type RootFieldOrdinals = SmallVec<[usize; 4]>;
 
 #[derive(Clone, Copy)]
 pub(super) enum BytePlanWrite {
@@ -2090,8 +2091,9 @@ fn infer_raw_json_object_field_ordinals_at(
     row: &[u8],
     mut pos: usize,
     root_fields: &[&str],
-) -> Option<Vec<usize>> {
-    let mut ordinals = vec![usize::MAX; root_fields.len()];
+) -> Option<RootFieldOrdinals> {
+    let mut ordinals = RootFieldOrdinals::new();
+    ordinals.resize(root_fields.len(), usize::MAX);
     let mut remaining = root_fields.len();
     if row.get(pos) != Some(&b'{') {
         return None;
