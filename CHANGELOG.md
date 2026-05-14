@@ -147,6 +147,10 @@
   distinct-like, expanding, and multi-match demand laws now mark bounded
   positional output as ordered work, so later physical planners cannot treat
   `first`, `nth`, `last`, or `take` after these stages as order-insensitive.
+- **Selective and expanding positional semantics have runtime proof**. NDJSON
+  coverage now proves `filter(...).last()` returns the last matching output,
+  and builtin coverage proves `flat_map(...).last()` follows semantic output
+  order.
 
 ### Builtin hardening
 
