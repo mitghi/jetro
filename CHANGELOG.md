@@ -93,6 +93,22 @@
   such as `attributes.map([@.key, @.value])` and object-shaped maps now scan
   each simple item object once, cache the requested field spans for that item,
   and reuse the spans across array/object/scalar projection writers.
+- **Filtered stream sinks now share item field spans**. Filtered stream maps,
+  filtered counts, and filtered numeric reducers can evaluate root-field
+  predicates and projections/reducer inputs from the same per-item byte scan,
+  avoiding duplicated path resolution without adding query-shape-specific
+  fusion chains.
+- **Stream extrema retain projected output directly**. Root-projectable
+  `sort_by(...).first()/last()` suffixes can keep only the selected projection
+  bytes while scanning candidates, avoiding whole-item retention for hot
+  extrema such as `$.attributes.sort_by(@.value).last().key`.
+- **NDJSON stream caches validate learned item prefixes**. Constant stream-map
+  reuse now proves that learned value offsets still belong to the same item
+  field prefix, so reordered or mixed-shape item objects fall back safely.
+- **Stream writer scratch storage is smaller and allocation-light**. Common
+  stream field sets and span buffers use inline storage, and fixed projection
+  keys are written directly through the JSON string writer rather than via
+  temporary `Val` allocation.
 
 ### Builtin hardening
 
