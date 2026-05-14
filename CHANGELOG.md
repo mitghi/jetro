@@ -46,6 +46,10 @@
   now validate count, numeric, approximate-distinct, first, and last sink
   accumulators against the shared `Demand` model used by planners and
   executors.
+- **Logical pipeline shapes must participate in demand propagation**. Registry
+  tests now assert that every builtin exposed to logical pipeline lowering also
+  publishes demand metadata, keeping logical planning and demand planning tied
+  together.
 
 ## 0.5.9
 

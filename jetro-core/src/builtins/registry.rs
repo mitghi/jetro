@@ -945,6 +945,19 @@ mod tests {
     }
 
     #[test]
+    fn registry_logical_shapes_participate_in_demand_model() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if logical_shape(id).is_some() {
+                assert!(
+                    participates_in_demand(id),
+                    "{method:?} has logical pipeline shape but no demand metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_marks_one_to_one_element_demands() {
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
