@@ -3374,6 +3374,14 @@ mod tests {
                 "$.attributes.map(@.weight).sum()",
                 (None, TapeStreamNumeric),
             ),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                (None, TapeStreamNumeric),
+            ),
+            (
+                "$.attributes.sort_by(@.value).last().key",
+                (None, TapeStreamNumeric),
+            ),
         ] {
             let actual = super::direct_writer_plan_kind(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have an observable direct plan"));
@@ -3398,6 +3406,10 @@ mod tests {
                 ByteWritableTape,
             ),
             ("$.attributes.map(@.weight).sum()", ByteWritableTape),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                ByteWritableTape,
+            ),
             (
                 r#"{id: $.id, name: $.name, count: $.attributes.len()}"#,
                 ByteWritableTape,
@@ -3432,6 +3444,7 @@ mod tests {
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
             "$.attributes.map(@.weight).sum()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+            "$.attributes.sort_by(@.value).last().key",
         ] {
             let plan =
                 super::direct_tape_plan(&engine, query).expect("query should be direct NDJSON");
