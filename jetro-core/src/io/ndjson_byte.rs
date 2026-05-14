@@ -309,6 +309,7 @@ fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool 
     }
 }
 
+#[inline(always)]
 fn write_hinted_projection_value<W: Write>(
     writer: &mut W,
     root: &NdjsonObjectLayoutHint,
@@ -350,6 +351,7 @@ fn write_hinted_projection_value<W: Write>(
     Ok(true)
 }
 
+#[inline(always)]
 fn hinted_projection_value_is_null_or_missing(
     root: &NdjsonObjectLayoutHint,
     matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
@@ -381,6 +383,7 @@ fn hinted_projection_value_is_null_or_missing(
     }
 }
 
+#[inline(always)]
 fn hinted_path_value<'a>(
     root: &NdjsonObjectLayoutHint,
     matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a, '_>,
@@ -402,6 +405,7 @@ fn hinted_path_value<'a>(
     }
 }
 
+#[inline(always)]
 fn is_json_null(value: &[u8]) -> bool {
     let start = skip_json_ws(value, 0);
     let end = trim_json_ws_end(value);
@@ -693,6 +697,7 @@ fn skip_json_ws(row: &[u8], mut pos: usize) -> usize {
     pos
 }
 
+#[inline(always)]
 fn parse_simple_json_string(row: &[u8], start: usize) -> Option<(&[u8], usize)> {
     if row.get(start) != Some(&b'"') {
         return None;
@@ -705,6 +710,7 @@ fn parse_simple_json_string(row: &[u8], start: usize) -> Option<(&[u8], usize)> 
     Some((&body[..end], start + end + 2))
 }
 
+#[inline(always)]
 fn skip_json_string(row: &[u8], start: usize) -> Option<usize> {
     if row.get(start) != Some(&b'"') {
         return None;
@@ -729,6 +735,7 @@ fn skip_json_string(row: &[u8], start: usize) -> Option<usize> {
     }
 }
 
+#[inline(always)]
 fn has_json_control_byte(bytes: &[u8]) -> bool {
     bytes.iter().any(|byte| *byte < 0x20)
 }
