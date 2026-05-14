@@ -33,6 +33,31 @@ const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NdjsonWriterPathKind {
+    ByteExpr,
+    ByteWritableTape,
+    Tape,
+}
+
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+pub(super) fn direct_writer_path_kind(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<NdjsonWriterPathKind> {
+    let (byte, tape) = direct_writer_plans(engine, query)?;
+    if byte.is_some() {
+        return Some(NdjsonWriterPathKind::ByteExpr);
+    }
+    if tape_plan_can_write_byte_row(&tape) {
+        return Some(NdjsonWriterPathKind::ByteWritableTape);
+    }
+    Some(NdjsonWriterPathKind::Tape)
+}
+
 /// Configuration for per-row NDJSON execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NdjsonOptions {
@@ -3086,6 +3111,32 @@ mod tests {
             let actual = super::direct_writer_plan_kind(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have an observable direct plan"));
             assert_eq!(actual, expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_writer_path_kind_matches_runtime_writer_family() {
+        let engine = crate::JetroEngine::new();
+        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape, Tape};
+
+        for (query, expected) in [
+            ("$.name", ByteExpr),
+            ("$.a.b.c", ByteExpr),
+            (r#"{test: $.a.b.c, b: $.a.b}"#, ByteWritableTape),
+            (r#"[$.id, $.name]"#, ByteWritableTape),
+            ("$.attributes.map(@.key)", ByteWritableTape),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                ByteWritableTape,
+            ),
+            ("$.attributes.map(@.weight).sum()", Tape),
+        ] {
+            assert_eq!(
+                super::direct_writer_path_kind(&engine, query),
+                Some(expected),
+                "{query}"
+            );
         }
     }
 

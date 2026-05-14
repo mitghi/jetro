@@ -29,6 +29,10 @@
   gives regression tests a stable way to prove hot shapes such as `$.name`,
   `$.a.b.c`, object/array projections, filtered counts, and numeric reducers
   stay on the expected direct execution family.
+- **Runtime writer-family selection is now test-visible**. NDJSON tests can
+  distinguish pure byte-expression writers, byte-writable tape-plan writers,
+  and tape fallback writers, so performance assertions match the actual writer
+  branch used by `run_ndjson`.
 
 ## 0.5.9
 
