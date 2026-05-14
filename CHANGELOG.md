@@ -105,6 +105,10 @@
 - **NDJSON stream caches validate learned item prefixes**. Constant stream-map
   reuse now proves that learned value offsets still belong to the same item
   field prefix, so reordered or mixed-shape item objects fall back safely.
+- **Mixed-shape stream items have explicit regression proof**. Optimized
+  stream maps and filtered counts are now covered for missing item fields,
+  preserving `null` projection output and non-matching predicate behavior on
+  heterogeneous NDJSON arrays.
 - **Stream writer scratch storage is smaller and allocation-light**. Common
   stream field sets and span buffers use inline storage, and fixed projection
   keys are written directly through the JSON string writer rather than via
