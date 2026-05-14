@@ -9,6 +9,7 @@ use crate::builtins::BuiltinMethod;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
 use crate::JetroEngineError;
+use memchr::memchr2;
 use std::io::Write;
 
 #[derive(Clone, Copy)]
@@ -696,15 +697,12 @@ fn parse_simple_json_string(row: &[u8], start: usize) -> Option<(&[u8], usize)> 
     if row.get(start) != Some(&b'"') {
         return None;
     }
-    let mut pos = start + 1;
-    while let Some(byte) = row.get(pos).copied() {
-        match byte {
-            b'"' => return Some((&row[start + 1..pos], pos + 1)),
-            b'\\' | 0x00..=0x1f => return None,
-            _ => pos += 1,
-        }
+    let body = row.get(start + 1..)?;
+    let end = memchr2(b'"', b'\\', body)?;
+    if body[end] == b'\\' || has_json_control_byte(&body[..end]) {
+        return None;
     }
-    None
+    Some((&body[..end], start + end + 2))
 }
 
 fn skip_json_string(row: &[u8], start: usize) -> Option<usize> {
@@ -712,17 +710,27 @@ fn skip_json_string(row: &[u8], start: usize) -> Option<usize> {
         return None;
     }
     let mut pos = start + 1;
-    while let Some(byte) = row.get(pos).copied() {
-        match byte {
-            b'"' => return Some(pos + 1),
+    loop {
+        let tail = row.get(pos..)?;
+        let found = memchr2(b'"', b'\\', tail)?;
+        if has_json_control_byte(&tail[..found]) {
+            return None;
+        }
+        match tail[found] {
+            b'"' => return Some(pos + found + 1),
             b'\\' => {
-                pos += 2;
+                pos += found + 2;
+                if pos > row.len() {
+                    return None;
+                }
             }
-            0x00..=0x1f => return None,
-            _ => pos += 1,
+            _ => unreachable!(),
         }
     }
-    None
+}
+
+fn has_json_control_byte(bytes: &[u8]) -> bool {
+    bytes.iter().any(|byte| *byte < 0x20)
 }
 
 fn skip_json_value(row: &[u8], start: usize) -> Option<usize> {
