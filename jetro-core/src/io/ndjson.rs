@@ -3918,6 +3918,30 @@ mod tests {
     }
 
     #[test]
+    fn run_ndjson_filter_last_returns_last_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"keep","value":"first"},{"key":"drop","value":"physical-last"}]}
+{"attributes":[{"key":"drop","value":"first"},{"key":"keep","value":"semantic-last"},{"key":"drop","value":"physical-last"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.key == "keep").last().value"#,
+                &mut out,
+            )
+            .expect("filtered last should preserve semantic output order");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"first\"\n\"semantic-last\"\n"
+        );
+    }
+
+    #[test]
     #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_numeric_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
