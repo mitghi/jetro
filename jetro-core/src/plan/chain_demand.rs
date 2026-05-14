@@ -468,6 +468,7 @@ mod tests {
             let demand = source_demand(&ops, Demand::RESULT);
             assert_eq!(demand.pull, PullDemand::All, "{method:?}");
             assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
         }
     }
 

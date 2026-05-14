@@ -797,6 +797,17 @@ mod tests {
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
 
+        let flat_map = BuiltinId::from_method(BuiltinMethod::FlatMap);
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(1),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(flat_map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
         let demand = propagate_demand(count_by, BuiltinDemandArg::None, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Predicate);
