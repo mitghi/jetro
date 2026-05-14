@@ -229,43 +229,59 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
 
 pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
     writer: &mut W,
-    row: &[u8],
     plan: &NdjsonDirectTapePlan,
     root: &NdjsonObjectLayoutHint,
     matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
 ) -> Result<BytePlanWrite, JetroEngineError> {
     match plan {
         NdjsonDirectTapePlan::Object(fields) => {
+            if !fields
+                .iter()
+                .all(|field| hinted_projection_value_ready(root, matched, &field.value))
+            {
+                return Ok(BytePlanWrite::Fallback);
+            }
             writer.write_all(b"{")?;
             let mut wrote = false;
             for field in fields {
-                let Some(value) = hinted_projection_value(row, root, matched, &field.value) else {
-                    return Ok(BytePlanWrite::Fallback);
-                };
-                if field.optional && is_json_null(value) {
-                    continue;
+                if field.optional {
+                    let Some(is_null) =
+                        hinted_projection_value_is_null_or_missing(root, matched, &field.value)
+                    else {
+                        return Ok(BytePlanWrite::Fallback);
+                    };
+                    if is_null {
+                        continue;
+                    }
                 }
                 if wrote {
                     writer.write_all(b",")?;
                 }
                 write_json_escaped_ascii_slice(writer, field.key.as_bytes())?;
                 writer.write_all(b":")?;
-                writer.write_all(value)?;
+                if !write_hinted_projection_value(writer, root, matched, &field.value)? {
+                    return Ok(BytePlanWrite::Fallback);
+                }
                 wrote = true;
             }
             writer.write_all(b"}")?;
             Ok(BytePlanWrite::Done)
         }
         NdjsonDirectTapePlan::Array(items) => {
+            if !items
+                .iter()
+                .all(|item| hinted_projection_value_ready(root, matched, item))
+            {
+                return Ok(BytePlanWrite::Fallback);
+            }
             writer.write_all(b"[")?;
             for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
                     writer.write_all(b",")?;
                 }
-                let Some(value) = hinted_projection_value(row, root, matched, item) else {
+                if !write_hinted_projection_value(writer, root, matched, item)? {
                     return Ok(BytePlanWrite::Fallback);
-                };
-                writer.write_all(value)?;
+                }
             }
             writer.write_all(b"]")?;
             Ok(BytePlanWrite::Done)
@@ -304,34 +320,113 @@ fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool 
     }
 }
 
-fn hinted_projection_value<'a>(
-    row: &'a [u8],
+fn write_hinted_projection_value<W: Write>(
+    writer: &mut W,
     root: &NdjsonObjectLayoutHint,
-    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a, '_>,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
     value: &NdjsonDirectProjectionValue,
-) -> Option<&'a [u8]> {
+) -> Result<bool, JetroEngineError> {
     match value {
-        NdjsonDirectProjectionValue::Path(steps) => {
-            let Some((PhysicalPathStep::Field(key), rest)) = steps.split_first() else {
-                return None;
+        NdjsonDirectProjectionValue::Path(steps) => match hinted_path_value(root, matched, steps) {
+            RawFieldValue::Found(value) => writer.write_all(value)?,
+            RawFieldValue::Missing => writer.write_all(b"null")?,
+            RawFieldValue::Fallback => return Ok(false),
+        },
+        NdjsonDirectProjectionValue::ViewScalarCall {
+            steps,
+            call,
+            optional,
+        } => {
+            let value = match hinted_path_value(root, matched, steps) {
+                RawFieldValue::Found(value) => value,
+                RawFieldValue::Missing => {
+                    writer.write_all(b"null")?;
+                    return Ok(true);
+                }
+                RawFieldValue::Fallback => return Ok(false),
             };
-            let value = matched.value_at(root.slot_for(key.as_ref())?)?;
-            if rest.is_empty() {
-                Some(value)
+            if *optional && is_json_null(value) {
+                writer.write_all(b"null")?;
             } else {
-                raw_json_path_value(value, rest)
+                write_raw_scalar_call(writer, value, call.method)?;
             }
         }
         NdjsonDirectProjectionValue::Literal(lit) => match lit {
-            crate::data::value::Val::Null => Some(b"null"),
-            crate::data::value::Val::Bool(true) => Some(b"true"),
-            crate::data::value::Val::Bool(false) => Some(b"false"),
-            _ => {
-                let _ = row;
-                None
-            }
+            crate::data::value::Val::Null => writer.write_all(b"null")?,
+            crate::data::value::Val::Bool(true) => writer.write_all(b"true")?,
+            crate::data::value::Val::Bool(false) => writer.write_all(b"false")?,
+            _ => write_val_json(writer, lit)?,
         },
-        NdjsonDirectProjectionValue::ViewScalarCall { .. } => None,
+    }
+    Ok(true)
+}
+
+fn hinted_projection_value_ready(
+    root: &NdjsonObjectLayoutHint,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
+    value: &NdjsonDirectProjectionValue,
+) -> bool {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps)
+        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+            !matches!(
+                hinted_path_value(root, matched, steps),
+                RawFieldValue::Fallback
+            )
+        }
+        NdjsonDirectProjectionValue::Literal(_) => true,
+    }
+}
+
+fn hinted_projection_value_is_null_or_missing(
+    root: &NdjsonObjectLayoutHint,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
+    value: &NdjsonDirectProjectionValue,
+) -> Option<bool> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            match hinted_path_value(root, matched, steps) {
+                RawFieldValue::Found(value) => Some(is_json_null(value)),
+                RawFieldValue::Missing => Some(true),
+                RawFieldValue::Fallback => None,
+            }
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall {
+            steps, optional, ..
+        } => {
+            if !optional {
+                return Some(false);
+            }
+            match hinted_path_value(root, matched, steps) {
+                RawFieldValue::Found(value) => Some(is_json_null(value)),
+                RawFieldValue::Missing => Some(true),
+                RawFieldValue::Fallback => None,
+            }
+        }
+        NdjsonDirectProjectionValue::Literal(value) => {
+            Some(matches!(value, crate::data::value::Val::Null))
+        }
+    }
+}
+
+fn hinted_path_value<'a>(
+    root: &NdjsonObjectLayoutHint,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a, '_>,
+    steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
+    let Some((PhysicalPathStep::Field(key), rest)) = steps.split_first() else {
+        return RawFieldValue::Fallback;
+    };
+    let Some(slot) = root.slot_for(key.as_ref()) else {
+        return RawFieldValue::Missing;
+    };
+    let Some(value) = matched.value_at(slot) else {
+        return RawFieldValue::Missing;
+    };
+    if rest.is_empty() {
+        RawFieldValue::Found(value)
+    } else {
+        raw_json_path_value_precise(value, rest)
     }
 }
 
@@ -885,6 +980,34 @@ fn raw_json_path_value<'a>(mut value: &'a [u8], steps: &[PhysicalPathStep]) -> O
         }
     }
     Some(value)
+}
+
+fn raw_json_path_value_precise<'a>(
+    mut value: &'a [u8],
+    steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
+    for step in steps {
+        match step {
+            PhysicalPathStep::Field(key) => {
+                value = match root_field_raw_value(value, key.as_ref()) {
+                    RawFieldValue::Found(value) => value,
+                    RawFieldValue::Missing => return RawFieldValue::Missing,
+                    RawFieldValue::Fallback => return RawFieldValue::Fallback,
+                };
+            }
+            PhysicalPathStep::Index(index) => {
+                let Ok(index) = usize::try_from(*index) else {
+                    return RawFieldValue::Missing;
+                };
+                let Some(next) = raw_json_array_element(value, NdjsonDirectElement::Nth(index))
+                else {
+                    return RawFieldValue::Missing;
+                };
+                value = next;
+            }
+        }
+    }
+    RawFieldValue::Found(value)
 }
 
 fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<bool> {

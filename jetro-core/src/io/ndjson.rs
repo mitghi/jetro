@@ -1071,7 +1071,6 @@ where
                     .with_root_layout_match(row, |root, matched| {
                         write_ndjson_hinted_tape_plan_row(
                             &mut writer,
-                            row,
                             tape_plan,
                             root,
                             matched,
@@ -3448,6 +3447,40 @@ mod tests {
 {\"id\":7,\"name\":\"g\",\"profile\":{\"name\":\"g\",\"score\":70}}\n\
 {\"id\":8,\"name\":\"h\",\"profile\":{\"name\":\"h\",\"score\":80}}\n\
 {\"id\":9,\"name\":\"i\",\"profile\":{\"name\":\"i\",\"score\":90}}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_scalar_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"profile":{"name":"a"}}
+{"id":2,"profile":{"name":"b"}}
+{"id":3,"profile":{"name":"c"}}
+{"id":4,"profile":{"name":"d"}}
+{"id":5,"profile":{"name":"e"}}
+{"id":6,"profile":{"name":"f"}}
+{"id":7,"profile":{"name":"g"}}
+{"id":8,"profile":{"name":"h"}}
+{"id":9,"profile":{"name":"i"}}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, r#"{id: $.id, name: $.profile.name.upper()}"#, &mut out)
+            .expect("hinted scalar projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"A\"}\n\
+{\"id\":2,\"name\":\"B\"}\n\
+{\"id\":3,\"name\":\"C\"}\n\
+{\"id\":4,\"name\":\"D\"}\n\
+{\"id\":5,\"name\":\"E\"}\n\
+{\"id\":6,\"name\":\"F\"}\n\
+{\"id\":7,\"name\":\"G\"}\n\
+{\"id\":8,\"name\":\"H\"}\n\
+{\"id\":9,\"name\":\"I\"}\n"
         );
     }
 }
