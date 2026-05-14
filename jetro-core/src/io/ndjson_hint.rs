@@ -199,13 +199,10 @@ impl NdjsonObjectLayoutHint {
     }
 
     fn observe_keys(&mut self, keys: &[Arc<str>]) {
-        if self.fields.len() != keys.len()
-            || self
-                .fields
-                .iter()
-                .zip(keys)
-                .any(|(field, key)| field.key.as_ref() != key.as_ref())
-        {
+        if self.fields.iter().any(|field| match keys.get(field.slot) {
+            Some(key) => field.key.as_ref() != key.as_ref(),
+            None => true,
+        }) {
             self.stable_order = false;
         }
 
@@ -255,6 +252,52 @@ impl NdjsonObjectLayoutHint {
             row,
             spans: spans.as_slice(),
         })
+    }
+
+    pub(super) fn match_required_slots<'a, 's>(
+        &self,
+        row: &'a [u8],
+        required_slots: &[usize],
+        spans: &'s mut Vec<std::ops::Range<usize>>,
+    ) -> Option<NdjsonRootLayoutMatch<'a, 's>> {
+        if !self.stable_order {
+            return None;
+        }
+        spans.clear();
+        let Some(max_slot) = required_slots.last().copied() else {
+            return Some(NdjsonRootLayoutMatch {
+                row,
+                spans: spans.as_slice(),
+            });
+        };
+        spans.resize(max_slot + 1, 0..0);
+        let mut slot = 0usize;
+        let mut required_idx = 0usize;
+        let mut captured_all = false;
+        let visited_all = visit_root_object_fields(row, |key, value_start, value_end| {
+            let Some(expected) = self.fields.get(slot) else {
+                return false;
+            };
+            if expected.key.as_bytes() != key {
+                return false;
+            }
+            if required_slots.get(required_idx) == Some(&slot) {
+                spans[slot] = value_start..value_end;
+                required_idx += 1;
+                if required_idx == required_slots.len() {
+                    captured_all = true;
+                    return false;
+                }
+            }
+            slot += 1;
+            true
+        });
+        (captured_all || (visited_all && required_idx == required_slots.len())).then_some(
+            NdjsonRootLayoutMatch {
+                row,
+                spans: spans.as_slice(),
+            },
+        )
     }
 }
 
@@ -353,6 +396,7 @@ pub(super) struct NdjsonHintState {
     access: NdjsonHintAccessPlan,
     schema: NdjsonSchemaHints,
     stats: NdjsonHintStats,
+    required_root_slots: Vec<usize>,
     span_scratch: Vec<std::ops::Range<usize>>,
     disabled: bool,
 }
@@ -364,6 +408,7 @@ impl NdjsonHintState {
             access,
             schema: NdjsonSchemaHints::default(),
             stats: NdjsonHintStats::default(),
+            required_root_slots: Vec::new(),
             span_scratch: Vec::new(),
             disabled: false,
         }
@@ -388,6 +433,7 @@ impl NdjsonHintState {
             .schema
             .root_has_stable_fields(self.access.required_root_fields())
         {
+            self.refresh_required_root_slots();
             self.stats.hinted_rows += 1;
             NdjsonHintDecision::UseHints
         } else {
@@ -405,7 +451,11 @@ impl NdjsonHintState {
         f: impl FnOnce(&NdjsonObjectLayoutHint, &NdjsonRootLayoutMatch<'a, '_>) -> R,
     ) -> Option<R> {
         let root = self.schema.root_object.as_ref()?;
-        let matched = match root.match_row(row, &mut self.span_scratch) {
+        let matched = match root.match_required_slots(
+            row,
+            &self.required_root_slots,
+            &mut self.span_scratch,
+        ) {
             Some(matched) => matched,
             None => {
                 self.stats.layout_misses += 1;
@@ -421,6 +471,21 @@ impl NdjsonHintState {
 
     pub(super) fn stats(&self) -> &NdjsonHintStats {
         &self.stats
+    }
+
+    fn refresh_required_root_slots(&mut self) {
+        let Some(root) = self.schema.root_object.as_ref() else {
+            self.required_root_slots.clear();
+            return;
+        };
+        self.required_root_slots = self
+            .access
+            .required_root_fields()
+            .into_iter()
+            .filter_map(|field| root.slot_for(field))
+            .collect();
+        self.required_root_slots.sort_unstable();
+        self.required_root_slots.dedup();
     }
 }
 
@@ -597,6 +662,46 @@ mod tests {
         assert!(state.stats().disabled);
         assert_eq!(state.stats().layout_misses, 2);
         assert_eq!(state.observe_row(br#"{"id":4,"name":"d"}"#), NdjsonHintDecision::Disabled);
+    }
+
+    #[test]
+    fn hint_state_matches_only_required_root_slots() {
+        let access = NdjsonHintAccessPlan {
+            paths: vec![
+                NdjsonHintPath {
+                    steps: vec![NdjsonHintPathStep::Field(Arc::from("id"))],
+                },
+                NdjsonHintPath {
+                    steps: vec![NdjsonHintPathStep::Field(Arc::from("name"))],
+                },
+            ],
+        };
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 1,
+                max_rejects: 0,
+                max_layout_misses: 0,
+            },
+            access,
+        );
+
+        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(
+            state.observe_row(br#"{"id":2,"name":"b","extra":{"large":true}}"#),
+            NdjsonHintDecision::UseHints
+        );
+        let mut saw_name = false;
+        assert!(state
+            .with_root_layout_match(br#"{"id":3,"name":"c","extra":{"large":true}}"#, |root, matched| {
+                assert_eq!(
+                    matched.value_at(root.slot_for("name").unwrap()),
+                    Some(&b"\"c\""[..])
+                );
+                saw_name = true;
+            })
+            .is_some());
+        assert!(saw_name);
+        assert_eq!(state.stats().layout_misses, 0);
     }
 
     #[test]
