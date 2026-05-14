@@ -19,6 +19,69 @@ pub(super) enum BytePlanWrite {
     Fallback,
 }
 
+#[derive(Default)]
+pub(super) struct NdjsonConstantStreamCache {
+    output: Vec<u8>,
+    values: Vec<Vec<u8>>,
+    disabled: bool,
+    learned: bool,
+}
+
+impl NdjsonConstantStreamCache {
+    pub(super) fn write_row<W: Write>(
+        &mut self,
+        writer: &mut W,
+        row: &[u8],
+        plan: &NdjsonDirectTapePlan,
+    ) -> Result<Option<BytePlanWrite>, JetroEngineError> {
+        if self.disabled {
+            return Ok(None);
+        }
+        let Some((source_steps, field)) = constant_stream_single_field(plan) else {
+            self.disabled = true;
+            return Ok(None);
+        };
+        let source = match raw_json_byte_path_value(row, source_steps) {
+            RawFieldValue::Found(source) => source,
+            RawFieldValue::Missing => {
+                if self.learned && self.values.is_empty() {
+                    writer.write_all(&self.output)?;
+                    return Ok(Some(BytePlanWrite::Done));
+                }
+                self.disabled = true;
+                return Ok(None);
+            }
+            RawFieldValue::Fallback => {
+                self.disabled = true;
+                return Ok(None);
+            }
+        };
+        if !self.learned {
+            self.values.clear();
+            self.output.clear();
+            if !collect_constant_stream_single_field(
+                &mut self.output,
+                source,
+                field,
+                Some(&mut self.values),
+            )? {
+                self.disabled = true;
+                return Ok(None);
+            }
+            self.learned = true;
+            writer.write_all(&self.output)?;
+            return Ok(Some(BytePlanWrite::Done));
+        }
+        if validate_constant_stream_single_field(source, field, &self.values) {
+            writer.write_all(&self.output)?;
+            Ok(Some(BytePlanWrite::Done))
+        } else {
+            self.disabled = true;
+            Ok(None)
+        }
+    }
+}
+
 pub(super) fn write_ndjson_byte_plan_row<W: Write>(
     writer: &mut W,
     row: &[u8],
@@ -1489,6 +1552,99 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
                 return Ok(Some(()));
             }
             _ => return Ok(None),
+        }
+    }
+}
+
+fn constant_stream_single_field(
+    plan: &NdjsonDirectTapePlan,
+) -> Option<(&[PhysicalPathStep], &str)> {
+    let NdjsonDirectTapePlan::Stream(stream) = plan else {
+        return None;
+    };
+    if stream.predicate.is_some() {
+        return None;
+    }
+    let NdjsonDirectStreamSink::Collect(NdjsonDirectStreamMap::Value(
+        NdjsonDirectProjectionValue::Path(steps),
+    )) = &stream.sink
+    else {
+        return None;
+    };
+    let [PhysicalPathStep::Field(field)] = steps.as_slice() else {
+        return None;
+    };
+    Some((&stream.source_steps, field.as_ref()))
+}
+
+fn collect_constant_stream_single_field<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    field: &str,
+    mut values: Option<&mut Vec<Vec<u8>>>,
+) -> Result<bool, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(false);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    writer.write_all(b"[")?;
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"]")?;
+        return Ok(true);
+    }
+    let mut wrote = false;
+    loop {
+        pos = skip_json_ws(source, pos);
+        let Some((value, next)) = raw_json_object_field_value_and_end(source, pos, field) else {
+            return Ok(false);
+        };
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        writer.write_all(value)?;
+        if let Some(values) = values.as_deref_mut() {
+            values.push(value.to_vec());
+        }
+        wrote = true;
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                writer.write_all(b"]")?;
+                return Ok(true);
+            }
+            _ => return Ok(false),
+        }
+    }
+}
+
+fn validate_constant_stream_single_field(source: &[u8], field: &str, values: &[Vec<u8>]) -> bool {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return false;
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        return values.is_empty();
+    }
+    let mut idx = 0usize;
+    loop {
+        pos = skip_json_ws(source, pos);
+        let Some((value, next)) = raw_json_object_field_value_and_end(source, pos, field) else {
+            return false;
+        };
+        if values.get(idx).map(Vec::as_slice) != Some(value) {
+            return false;
+        }
+        idx += 1;
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => return idx == values.len(),
+            _ => return false,
         }
     }
 }

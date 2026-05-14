@@ -14,6 +14,7 @@ use std::sync::MutexGuard;
 use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
     write_ndjson_byte_tape_plan_row, write_ndjson_hinted_tape_plan_row, BytePlanWrite,
+    NdjsonConstantStreamCache,
 };
 #[cfg(feature = "simd-json")]
 use super::ndjson_hint::{
@@ -1052,6 +1053,7 @@ where
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut constant_stream_cache = NdjsonConstantStreamCache::default();
     let mut hint_state = matches!(
         tape_plan,
         NdjsonDirectTapePlan::Object(_) | NdjsonDirectTapePlan::Array(_)
@@ -1077,6 +1079,13 @@ where
     let mut count = 0usize;
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
+        if let Some(write) = constant_stream_cache.write_row(&mut writer, row, tape_plan)? {
+            if matches!(write, BytePlanWrite::Done) {
+                writer.write_all(b"\n")?;
+                count += 1;
+                return Ok(!limit.is_some_and(|limit| count >= limit));
+            }
+        }
         let hinted = if let Some(state) = hint_state.as_mut() {
             if state.observe_row(row) == NdjsonHintDecision::UseHints {
                 byte_scratch.clear();
