@@ -163,6 +163,8 @@
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety and
   byte-extrema changes.
+- **Core compile health is clean**. `cargo check -p jetro-core` passes after
+  the demand propagation and NDJSON byte-executor changes.
 
 ### Builtin hardening
 
