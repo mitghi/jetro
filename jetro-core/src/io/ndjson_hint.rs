@@ -160,6 +160,17 @@ impl NdjsonHintAccessPlan {
         self.paths.sort();
         self.paths.dedup();
     }
+
+    fn required_root_fields(&self) -> Vec<&str> {
+        let mut fields = self
+            .paths
+            .iter()
+            .filter_map(NdjsonHintPath::root_field)
+            .collect::<Vec<_>>();
+        fields.sort_unstable();
+        fields.dedup();
+        fields
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -242,6 +253,13 @@ impl NdjsonSchemaHints {
     pub(super) fn root_slot_for(&self, key: &str) -> Option<usize> {
         self.root_object.as_ref()?.slot_for(key)
     }
+
+    fn root_has_stable_fields<'a>(&self, fields: impl IntoIterator<Item = &'a str>) -> bool {
+        let Some(root) = &self.root_object else {
+            return false;
+        };
+        root.stable_order && fields.into_iter().all(|field| root.slot_for(field).is_some())
+    }
 }
 
 fn root_simple_keys(row: &[u8]) -> Option<Vec<Arc<str>>> {
@@ -254,6 +272,73 @@ fn root_simple_keys(row: &[u8]) -> Option<Vec<Arc<str>>> {
         true
     });
     ok.then_some(keys)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct NdjsonHintConfig {
+    pub(super) min_rows: usize,
+    pub(super) max_rejects: usize,
+}
+
+impl Default for NdjsonHintConfig {
+    fn default() -> Self {
+        Self {
+            min_rows: 8,
+            max_rejects: 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NdjsonHintDecision {
+    Learning,
+    UseHints,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct NdjsonHintState {
+    config: NdjsonHintConfig,
+    access: NdjsonHintAccessPlan,
+    schema: NdjsonSchemaHints,
+    disabled: bool,
+}
+
+impl NdjsonHintState {
+    pub(super) fn new(config: NdjsonHintConfig, access: NdjsonHintAccessPlan) -> Self {
+        Self {
+            config,
+            access,
+            schema: NdjsonSchemaHints::default(),
+            disabled: false,
+        }
+    }
+
+    pub(super) fn observe_row(&mut self, row: &[u8]) -> NdjsonHintDecision {
+        if self.disabled {
+            return NdjsonHintDecision::Disabled;
+        }
+        self.schema.observe_row(row);
+        if self.schema.rows_rejected > self.config.max_rejects {
+            self.disabled = true;
+            return NdjsonHintDecision::Disabled;
+        }
+        if self.schema.rows_observed < self.config.min_rows {
+            return NdjsonHintDecision::Learning;
+        }
+        if self
+            .schema
+            .root_has_stable_fields(self.access.required_root_fields())
+        {
+            NdjsonHintDecision::UseHints
+        } else {
+            NdjsonHintDecision::Learning
+        }
+    }
+
+    pub(super) fn schema(&self) -> &NdjsonSchemaHints {
+        &self.schema
+    }
 }
 
 #[cfg(test)]
@@ -329,5 +414,71 @@ mod tests {
             == vec![NdjsonHintPathStep::Field(Arc::from("key"))]));
         assert!(access.paths.iter().any(|path| path.steps
             == vec![NdjsonHintPathStep::Field(Arc::from("value"))]));
+    }
+
+    #[test]
+    fn hint_state_enables_only_after_stable_required_fields_are_seen() {
+        let access = NdjsonHintAccessPlan {
+            paths: vec![
+                NdjsonHintPath {
+                    steps: vec![NdjsonHintPathStep::Field(Arc::from("id"))],
+                },
+                NdjsonHintPath {
+                    steps: vec![NdjsonHintPathStep::Field(Arc::from("name"))],
+                },
+            ],
+        };
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 2,
+                max_rejects: 0,
+            },
+            access,
+        );
+
+        assert_eq!(
+            state.observe_row(br#"{"id":1,"name":"a","extra":true}"#),
+            NdjsonHintDecision::Learning
+        );
+        assert_eq!(
+            state.observe_row(br#"{"id":2,"name":"b","extra":false}"#),
+            NdjsonHintDecision::UseHints
+        );
+        assert_eq!(state.schema().root_slot_for("name"), Some(1));
+    }
+
+    #[test]
+    fn hint_state_keeps_learning_when_required_fields_are_unstable() {
+        let access = NdjsonHintAccessPlan {
+            paths: vec![NdjsonHintPath {
+                steps: vec![NdjsonHintPathStep::Field(Arc::from("name"))],
+            }],
+        };
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 2,
+                max_rejects: 0,
+            },
+            access,
+        );
+
+        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::Learning);
+        assert_eq!(state.observe_row(br#"{"name":"b","id":2}"#), NdjsonHintDecision::Learning);
+    }
+
+    #[test]
+    fn hint_state_disables_after_too_many_rejected_rows() {
+        let access = NdjsonHintAccessPlan::default();
+        let mut state = NdjsonHintState::new(
+            NdjsonHintConfig {
+                min_rows: 1,
+                max_rejects: 1,
+            },
+            access,
+        );
+
+        assert_eq!(state.observe_row(br#"[]"#), NdjsonHintDecision::Learning);
+        assert_eq!(state.observe_row(br#"{"bad\nkey":1}"#), NdjsonHintDecision::Disabled);
+        assert_eq!(state.observe_row(br#"{"id":1}"#), NdjsonHintDecision::Disabled);
     }
 }

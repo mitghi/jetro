@@ -42,6 +42,10 @@
   projections and stream plans now feed a generic access-path inventory that
   captures source and projected paths algorithmically, forming the basis for
   schema-guided byte access without query-chain-specific fusions.
+- **NDJSON structural hints now have adaptive activation rules**. The internal
+  hint state stays in learning mode until enough rows validate the required
+  root fields, refuses unstable field orders, and disables itself after too
+  many byte-scanner rejections so hinting remains fallback-safe.
 
 ### Builtin hardening
 
