@@ -183,7 +183,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 }
             },
             value: downstream.value.merge(ValueNeed::Predicate),
-            order: downstream.order || matches!(downstream.pull, PullDemand::LastInput(_)),
+            order: downstream.order
+                || matches!(
+                    downstream.pull,
+                    PullDemand::LastInput(_) | PullDemand::NthInput(_)
+                ),
         },
         BuiltinDemandLaw::TakeWhile => Demand {
             pull: match downstream.pull {
@@ -752,7 +756,7 @@ mod tests {
         let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
-        assert!(!demand.order);
+        assert!(demand.order);
 
         let downstream = Demand {
             pull: PullDemand::NthInput(4),

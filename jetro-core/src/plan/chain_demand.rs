@@ -126,7 +126,11 @@ impl DemandOperator for ChainOp {
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order || matches!(downstream.pull, PullDemand::LastInput(_)),
+                    order: downstream.order
+                        || matches!(
+                            downstream.pull,
+                            PullDemand::LastInput(_) | PullDemand::NthInput(_)
+                        ),
                 },
                 // Transform match is 1:1, so demand passes through.
                 MatchRole::Transform => downstream,
@@ -256,6 +260,18 @@ mod tests {
     #[test]
     fn filter_last_requests_ordered_full_scan() {
         let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Last)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
+    fn predicate_nth_requests_ordered_full_scan() {
+        let ops = [
+            match_op(MatchRole::Predicate),
+            op_usize(BuiltinMethod::Nth, 2),
+        ];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
