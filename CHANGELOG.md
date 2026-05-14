@@ -29,6 +29,10 @@
   requested projection for retained rows, and stops once the retained-row limit
   is reached. This is the correctness baseline for compacted-log/latest-per-key
   workloads before adding direct byte keys and adaptive Bloom/Cuckoo filters.
+- **Reverse NDJSON `distinct_by` has an adaptive Bloom front filter**. The
+  retained-key set remains exact, but large streams lazily build a Bloom filter
+  in front of the exact set so definitely-new keys avoid duplicate-probe work
+  while Bloom false positives still fall through to exact confirmation.
 - **Direct writer plan kinds are now test-visible**. NDJSON direct planning can
   expose whether a query produced a byte expression plan, a tape root/scalar
   plan, a stream collect/count/numeric plan, or a static projection plan. This

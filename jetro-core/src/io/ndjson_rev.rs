@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -370,7 +371,7 @@ where
     let mut vm = engine.lock_vm();
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
-    let mut seen = HashSet::new();
+    let mut seen = AdaptiveDistinctKeys::default();
     let mut emitted = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
@@ -400,6 +401,113 @@ fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEng
     let mut out = Vec::new();
     super::ndjson::write_val_json(&mut out, key)?;
     Ok(out)
+}
+
+#[derive(Default)]
+struct AdaptiveDistinctKeys {
+    exact: HashSet<Vec<u8>>,
+    bloom: Option<BloomFilter>,
+}
+
+impl AdaptiveDistinctKeys {
+    const BLOOM_MIN_KEYS: usize = 64;
+    const BLOOM_BITS_PER_KEY: usize = 16;
+
+    fn insert(&mut self, key: Vec<u8>) -> bool {
+        self.ensure_bloom_capacity();
+        let might_exist = self
+            .bloom
+            .as_ref()
+            .is_some_and(|bloom| bloom.might_contain(&key));
+        if !might_exist {
+            let inserted = self.exact.insert(key.clone());
+            if inserted {
+                if let Some(bloom) = self.bloom.as_mut() {
+                    bloom.insert(&key);
+                }
+            }
+            return inserted;
+        }
+
+        let inserted = self.exact.insert(key.clone());
+        if inserted {
+            if let Some(bloom) = self.bloom.as_mut() {
+                bloom.insert(&key);
+            }
+        }
+        inserted
+    }
+
+    fn ensure_bloom_capacity(&mut self) {
+        if self.exact.len() < Self::BLOOM_MIN_KEYS {
+            return;
+        }
+        let needed_bits = (self.exact.len() + 1) * Self::BLOOM_BITS_PER_KEY;
+        if self
+            .bloom
+            .as_ref()
+            .is_some_and(|bloom| bloom.bit_len() >= needed_bits)
+        {
+            return;
+        }
+
+        let mut bloom = BloomFilter::with_min_bits(needed_bits);
+        for key in &self.exact {
+            bloom.insert(key);
+        }
+        self.bloom = Some(bloom);
+    }
+}
+
+struct BloomFilter {
+    words: Vec<u64>,
+    bit_mask: usize,
+}
+
+impl BloomFilter {
+    fn with_min_bits(bits: usize) -> Self {
+        let bit_len = bits.next_power_of_two().max(1024);
+        Self {
+            words: vec![0; bit_len / 64],
+            bit_mask: bit_len - 1,
+        }
+    }
+
+    fn bit_len(&self) -> usize {
+        self.words.len() * 64
+    }
+
+    fn insert(&mut self, key: &[u8]) {
+        let (a, b) = bloom_hashes(key);
+        self.set(a);
+        self.set(b);
+        self.set(a.wrapping_add(b.rotate_left(17)));
+    }
+
+    fn might_contain(&self, key: &[u8]) -> bool {
+        let (a, b) = bloom_hashes(key);
+        self.get(a) && self.get(b) && self.get(a.wrapping_add(b.rotate_left(17)))
+    }
+
+    fn set(&mut self, hash: u64) {
+        let bit = (hash as usize) & self.bit_mask;
+        self.words[bit / 64] |= 1u64 << (bit % 64);
+    }
+
+    fn get(&self, hash: u64) -> bool {
+        let bit = (hash as usize) & self.bit_mask;
+        (self.words[bit / 64] & (1u64 << (bit % 64))) != 0
+    }
+}
+
+fn bloom_hashes(key: &[u8]) -> (u64, u64) {
+    let mut a = std::collections::hash_map::DefaultHasher::new();
+    0x9e37_79b9_7f4a_7c15u64.hash(&mut a);
+    key.hash(&mut a);
+    let mut b = std::collections::hash_map::DefaultHasher::new();
+    0xbf58_476d_1ce4_e5b9u64.hash(&mut b);
+    key.hash(&mut b);
+    (a.finish(), b.finish())
 }
 
 pub fn run_ndjson_rev_matches<P, W>(
@@ -720,6 +828,19 @@ mod tests {
             "[[\"b\",2]]\n[[\"a\",1]]\n"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn adaptive_distinct_keys_remain_exact_after_bloom_activation() {
+        let mut keys = super::AdaptiveDistinctKeys::default();
+        for n in 0..128 {
+            assert!(keys.insert(format!("k{n}").into_bytes()));
+        }
+        assert!(keys.bloom.is_some());
+        for n in 0..128 {
+            assert!(!keys.insert(format!("k{n}").into_bytes()));
+        }
+        assert!(keys.insert(b"new".to_vec()));
     }
 
     fn temp_path(name: &str) -> PathBuf {
