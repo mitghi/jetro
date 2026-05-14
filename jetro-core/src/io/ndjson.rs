@@ -3845,6 +3845,28 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_map_projects_nested_item_paths() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","meta":{"code":"x"}},{"key":"b","meta":{"code":"y"}}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                &mut out,
+            )
+            .expect("stream map should project nested item paths");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[{\"k\":\"a\",\"code\":\"X\"},{\"k\":\"b\",\"code\":\"Y\"}]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_count_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
