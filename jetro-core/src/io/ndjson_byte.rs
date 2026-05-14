@@ -275,6 +275,24 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
             writer.write_all(b"]")?;
             Ok(BytePlanWrite::Done)
         }
+        NdjsonDirectTapePlan::Stream(stream) => {
+            let NdjsonDirectStreamSink::Collect(map) = &stream.sink else {
+                return Ok(BytePlanWrite::Fallback);
+            };
+            if !byte_stream_map_supported(map) {
+                return Ok(BytePlanWrite::Fallback);
+            }
+            match hinted_path_value(root, matched, &stream.source_steps) {
+                RawFieldValue::Found(source) => {
+                    write_raw_json_stream_collect_from_source(writer, source, stream, map)
+                }
+                RawFieldValue::Missing => {
+                    writer.write_all(b"[]")?;
+                    Ok(BytePlanWrite::Done)
+                }
+                RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
+            }
+        }
         _ => Ok(BytePlanWrite::Fallback),
     }
 }
@@ -1074,6 +1092,15 @@ fn write_raw_json_stream_collect<W: Write>(
         RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
     };
 
+    write_raw_json_stream_collect_from_source(writer, source, stream, map)
+}
+
+fn write_raw_json_stream_collect_from_source<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    stream: &NdjsonDirectStreamPlan,
+    map: &NdjsonDirectStreamMap,
+) -> Result<BytePlanWrite, JetroEngineError> {
     writer.write_all(b"[")?;
     let mut wrote = false;
     let mut failed = false;

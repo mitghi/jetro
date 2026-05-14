@@ -1055,6 +1055,10 @@ where
     let mut hint_state = matches!(
         tape_plan,
         NdjsonDirectTapePlan::Object(_) | NdjsonDirectTapePlan::Array(_)
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Collect(_),
+                ..
+            })
     )
     .then(|| {
         NdjsonHintState::new(
@@ -3486,6 +3490,26 @@ mod tests {
 {\"id\":7,\"name\":\"G\"}\n\
 {\"id\":8,\"name\":\"H\"}\n\
 {\"id\":9,\"name\":\"I\"}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_collect_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+{"id":2,"attributes":[{"key":"c","value":"z"}]}
+{"id":3,"attributes":[{"key":"d","value":"w"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map([@.key, @.value])", &mut out)
+            .expect("hinted stream collect should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[[\"a\",\"x\"],[\"b\",\"y\"]]\n[[\"c\",\"z\"]]\n[[\"d\",\"w\"]]\n"
         );
     }
 }
