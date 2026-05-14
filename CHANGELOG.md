@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.10
+
+### Release focus
+
+- **End-to-end demand/tape execution**. Planned work for this release focuses
+  on carrying shared demand metadata from builtin definitions through logical
+  planning, physical planning, backend selection, tape/view execution, pipeline
+  execution, and NDJSON row execution without query-shape-specific fusions.
+- **Clean architecture and observability**. Planned work includes explicit
+  execution-path labels, fallback reasons, tighter module boundaries, removal
+  of unwired prototype code where it is not useful, and regression tests that
+  prove hot paths stay on the intended backend.
+- **Correctness hardening for all builtins**. Planned work includes auditing
+  builtin metadata, VM/pipeline/view/tape consistency, null/missing behavior,
+  arity and alias behavior, and adding equivalence tests for optimized builtin
+  families.
+- **NDJSON performance and proof**. Planned work includes extending generic
+  byte/tape direct execution, preserving cold-path performance, documenting
+  benchmark methodology, and adding path-selection tests for static projections,
+  filtered streams, reducers, and early-stop queries.
+
 ## 0.5.9
 
 ### Release focus
