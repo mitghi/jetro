@@ -173,6 +173,11 @@
   `map(...).first()` now has focused NDJSON coverage for empty and non-empty
   arrays, proving the generic stream-first sink also handles demand without a
   predicate stage.
+- **Unfiltered stream-first uses first-child source demand**. Byte execution
+  now extracts only the demanded first array child for `map(...).first()` when
+  no predicate can require a later item; filtered `first()` still scans until
+  the first matching semantic output. Locally, `$.attributes.map(@.value).first()`
+  improved from roughly 2.56s to roughly 1.97s on the 4.76M-row file.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.

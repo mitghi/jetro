@@ -1687,7 +1687,11 @@ fn write_raw_json_stream_first<W: Write>(
     stream: &NdjsonDirectStreamPlan,
     map: &NdjsonDirectStreamMap,
 ) -> Result<BytePlanWrite, JetroEngineError> {
-    let source = match raw_json_byte_path_value(row, &stream.source_steps) {
+    let source_demand = stream
+        .predicate
+        .is_none()
+        .then_some(BytePathDemand::ArrayElement(NdjsonDirectElement::First));
+    let source = match raw_json_path_value_demand(row, &stream.source_steps, source_demand) {
         RawFieldValue::Found(source) => source,
         RawFieldValue::Missing => {
             writer.write_all(b"null")?;
