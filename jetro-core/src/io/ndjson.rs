@@ -34,8 +34,9 @@ pub(super) use super::ndjson_direct::{
 };
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
-    direct_tape_plan, direct_tape_predicate, direct_tape_predicate_for_expr, direct_writer_plans,
-    NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
+    direct_tape_plan, direct_tape_plan_for_expr, direct_tape_predicate,
+    direct_tape_predicate_for_expr, direct_writer_plans, NdjsonDirectBytePlan,
+    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
     NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
     NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
@@ -997,6 +998,14 @@ where
                     break;
                 }
             }
+            RowStreamRowResult::EmitBytes(bytes) => {
+                writer.write_all(&bytes)?;
+                writer.write_all(b"\n")?;
+                emitted += 1;
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+            }
             RowStreamRowResult::Skip => {}
             RowStreamRowResult::Stop => break,
         }
@@ -1050,6 +1059,14 @@ where
                     break;
                 }
             }
+            RowStreamRowResult::EmitBytes(bytes) => {
+                writer.write_all(&bytes)?;
+                writer.write_all(b"\n")?;
+                emitted += 1;
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+            }
             RowStreamRowResult::Skip => {}
             RowStreamRowResult::Stop => break,
         }
@@ -1064,6 +1081,7 @@ where
 
 enum RowStreamRowResult {
     Emit(Val),
+    EmitBytes(Vec<u8>),
     Skip,
     Stop,
 }
@@ -1100,7 +1118,9 @@ impl CompiledRowStream {
         let mut value = None;
         let mut vm = engine.lock_vm();
 
-        for stage in &mut self.stages {
+        let stage_count = self.stages.len();
+        for (idx, stage) in self.stages.iter_mut().enumerate() {
+            let is_last_stage = idx + 1 == stage_count;
             match stage {
                 CompiledRowStreamStage::Filter {
                     program,
@@ -1157,7 +1177,28 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
-                CompiledRowStreamStage::Map(program) => {
+                CompiledRowStreamStage::Map {
+                    program,
+                    #[cfg(feature = "simd-json")]
+                    direct,
+                } => {
+                    #[cfg(feature = "simd-json")]
+                    if is_last_stage {
+                        if let (Some(plan), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                            let mut out = Vec::new();
+                            let mut scratch = Vec::new();
+                            match write_ndjson_byte_tape_plan_row(
+                                &mut out,
+                                raw_row,
+                                plan,
+                                &mut scratch,
+                            )? {
+                                BytePlanWrite::Done => return Ok(RowStreamRowResult::EmitBytes(out)),
+                                BytePlanWrite::Fallback => {}
+                            }
+                        }
+                    }
+
                     let current = ensure_row_stream_value(
                         engine,
                         line_no,
@@ -1216,7 +1257,11 @@ enum CompiledRowStreamStage {
         limit: usize,
         seen: usize,
     },
-    Map(Program),
+    Map {
+        program: Program,
+        #[cfg(feature = "simd-json")]
+        direct: Option<NdjsonDirectTapePlan>,
+    },
 }
 
 impl CompiledRowStreamStage {
@@ -1235,7 +1280,11 @@ impl CompiledRowStreamStage {
                 limit: *limit,
                 seen: 0,
             },
-            RowStreamStage::Map(expr) => Self::Map(Compiler::compile(expr, "<ndjson-rows-map>")),
+            RowStreamStage::Map(expr) => Self::Map {
+                program: Compiler::compile(expr, "<ndjson-rows-map>"),
+                #[cfg(feature = "simd-json")]
+                direct: direct_tape_plan_for_expr(expr).filter(tape_plan_can_write_byte_row),
+            },
         }
     }
 }
