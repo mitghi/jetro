@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use super::ndjson_distinct::AdaptiveDistinctKeys;
+use super::ndjson_distinct::{AdaptiveDistinctKeys, DistinctFrontFilterKind};
 
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
@@ -367,8 +367,50 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine, path, key_query, query, limit, writer, options,
+    )
+    .map(|stats| stats.emitted)
+}
+
+pub fn run_ndjson_rev_distinct_by_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonRevDistinctStats, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_stats_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonRevDistinctStats, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
     if limit == 0 {
-        return Ok(0);
+        return Ok(NdjsonRevDistinctStats::default());
     }
 
     #[cfg(feature = "simd-json")]
@@ -385,9 +427,10 @@ where
     #[cfg(feature = "simd-json")]
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut seen = AdaptiveDistinctKeys::default();
-    let mut emitted = 0usize;
+    let mut stats = NdjsonRevDistinctStats::default();
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
         let mut row = Some(row);
         let mut document = None;
 
@@ -399,8 +442,10 @@ where
         let direct_key = None;
 
         let inserted = if let Some(key) = direct_key {
+            stats.direct_key_rows += 1;
             seen.insert_slice(key)
         } else {
+            stats.fallback_key_rows += 1;
             let parsed =
                 super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
             let plan = key_plan.get_or_insert_with(|| {
@@ -414,6 +459,7 @@ where
             seen.insert(key)
         };
         if !inserted {
+            stats.duplicate_rows += 1;
             continue;
         }
 
@@ -423,8 +469,9 @@ where
             match write_ndjson_byte_tape_plan_row(&mut writer, row, plan, &mut byte_scratch)? {
                 BytePlanWrite::Done => {
                     writer.write_all(b"\n")?;
-                    emitted += 1;
-                    if emitted >= limit {
+                    stats.direct_value_rows += 1;
+                    stats.emitted += 1;
+                    if stats.emitted >= limit {
                         break;
                     }
                     continue;
@@ -444,14 +491,28 @@ where
         let value = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
             .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
         super::ndjson::write_val_line(&mut writer, &value)?;
-        emitted += 1;
-        if emitted >= limit {
+        stats.fallback_value_rows += 1;
+        stats.emitted += 1;
+        if stats.emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    stats.front_filter = seen.front_kind();
+    Ok(stats)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NdjsonRevDistinctStats {
+    pub rows_scanned: usize,
+    pub emitted: usize,
+    pub duplicate_rows: usize,
+    pub direct_key_rows: usize,
+    pub fallback_key_rows: usize,
+    pub direct_value_rows: usize,
+    pub fallback_value_rows: usize,
+    pub front_filter: DistinctFrontFilterKind,
 }
 
 fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEngineError> {

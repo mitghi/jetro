@@ -599,6 +599,43 @@ impl JetroEngine {
         )
     }
 
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by`], returning execution
+    /// counters for path-selection and duplicate-drop observability.
+    pub fn run_ndjson_rev_distinct_by_with_stats<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonRevDistinctStats, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_stats(self, path, key_query, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by_with_stats`] with explicit
+    /// NDJSON reader options.
+    pub fn run_ndjson_rev_distinct_by_with_stats_and_options<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonRevDistinctStats, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_stats_and_options(
+            self, path, key_query, query, limit, writer, options,
+        )
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,

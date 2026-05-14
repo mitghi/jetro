@@ -1,4 +1,4 @@
-use jetro_core::io::{NdjsonControl, NdjsonOptions, NdjsonSource};
+use jetro_core::io::{DistinctFrontFilterKind, NdjsonControl, NdjsonOptions, NdjsonSource};
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
@@ -843,6 +843,33 @@ fn reverse_distinct_by_limit_stops_before_old_invalid_rows() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(emitted, 2);
     assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
+}
+
+#[test]
+fn reverse_distinct_by_stats_report_fast_paths_and_duplicates() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-stats");
+    std::fs::write(
+        &path,
+        b"{\"id\":\"a\",\"v\":1}\n{\"id\":\"b\",\"v\":2}\n{\"id\":\"a\",\"v\":3}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let stats = engine
+        .run_ndjson_rev_distinct_by_with_stats(&path, "id", "v", 10, &mut out)
+        .expect("reverse distinct_by stats should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
+    assert_eq!(stats.rows_scanned, 3);
+    assert_eq!(stats.emitted, 2);
+    assert_eq!(stats.duplicate_rows, 1);
+    assert_eq!(stats.direct_key_rows, 3);
+    assert_eq!(stats.fallback_key_rows, 0);
+    assert_eq!(stats.direct_value_rows, 2);
+    assert_eq!(stats.fallback_value_rows, 0);
+    assert_eq!(stats.front_filter, DistinctFrontFilterKind::None);
 }
 
 #[test]

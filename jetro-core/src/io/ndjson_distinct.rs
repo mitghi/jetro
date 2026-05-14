@@ -33,6 +33,13 @@ impl AdaptiveDistinctKeys {
         inserted
     }
 
+    pub(super) fn front_kind(&self) -> DistinctFrontFilterKind {
+        self.front
+            .as_ref()
+            .map(DistinctFrontFilter::kind)
+            .unwrap_or(DistinctFrontFilterKind::None)
+    }
+
     fn maybe_contains(&mut self, key: &[u8]) -> bool {
         self.ensure_front_capacity();
         self.front
@@ -57,9 +64,9 @@ impl AdaptiveDistinctKeys {
         }
 
         let target = if self.exact.len() >= Self::CUCKOO_MIN_KEYS {
-            DistinctFrontKind::Cuckoo
+            DistinctFrontFilterKind::Cuckoo
         } else {
-            DistinctFrontKind::Bloom
+            DistinctFrontFilterKind::Bloom
         };
         if self.front.as_ref().is_some_and(|front| {
             front.kind() == target && front.capacity_satisfies(self.exact.len() + 1)
@@ -98,8 +105,10 @@ impl AdaptiveDistinctKeys {
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum DistinctFrontKind {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DistinctFrontFilterKind {
+    #[default]
+    None,
     Bloom,
     Cuckoo,
 }
@@ -110,10 +119,10 @@ enum DistinctFrontFilter {
 }
 
 impl DistinctFrontFilter {
-    fn kind(&self) -> DistinctFrontKind {
+    fn kind(&self) -> DistinctFrontFilterKind {
         match self {
-            Self::Bloom(_) => DistinctFrontKind::Bloom,
-            Self::Cuckoo(_) => DistinctFrontKind::Cuckoo,
+            Self::Bloom(_) => DistinctFrontFilterKind::Bloom,
+            Self::Cuckoo(_) => DistinctFrontFilterKind::Cuckoo,
         }
     }
 
