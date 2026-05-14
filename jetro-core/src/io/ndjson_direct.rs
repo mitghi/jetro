@@ -1,6 +1,7 @@
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
-use crate::plan::physical::PlanningContext;
+use crate::parse::ast::Expr;
+use crate::plan::physical::{plan_ast_with_context, PlanningContext};
 use crate::JetroEngine;
 use std::sync::Arc;
 
@@ -742,6 +743,11 @@ pub(super) fn direct_tape_predicate(
     rootless_ndjson_query(predicate)
         .and_then(|query| direct_tape_predicate_inner(engine, query))
         .or_else(|| direct_tape_predicate_inner(engine, predicate))
+}
+
+pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
+    let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
+    direct_tape_predicate_from_plan(&plan)
 }
 
 fn direct_tape_predicate_inner(

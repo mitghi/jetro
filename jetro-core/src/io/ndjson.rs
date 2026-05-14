@@ -34,8 +34,8 @@ pub(super) use super::ndjson_direct::{
 };
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
-    direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
-    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
+    direct_tape_plan, direct_tape_predicate, direct_tape_predicate_for_expr, direct_writer_plans,
+    NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
     NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
     NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
@@ -1095,15 +1095,35 @@ impl CompiledRowStream {
         line_no: u64,
         row: Vec<u8>,
     ) -> Result<RowStreamRowResult, JetroEngineError> {
-        let document = parse_row(engine, line_no, row)?;
-        let mut value = document
-            .root_val_with(engine.keys())
-            .map_err(|err| row_eval_error(line_no, err))?;
+        let mut row = Some(row);
+        let mut document = None;
+        let mut value = None;
         let mut vm = engine.lock_vm();
 
         for stage in &mut self.stages {
             match stage {
-                CompiledRowStreamStage::Filter(program) => {
+                CompiledRowStreamStage::Filter {
+                    program,
+                    #[cfg(feature = "simd-json")]
+                    direct,
+                } => {
+                    #[cfg(feature = "simd-json")]
+                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+                            if !keep {
+                                return Ok(RowStreamRowResult::Skip);
+                            }
+                            continue;
+                        }
+                    }
+
+                    let value = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
                     let keep = vm
                         .execute_val_raw(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
@@ -1112,6 +1132,13 @@ impl CompiledRowStream {
                     }
                 }
                 CompiledRowStreamStage::DistinctBy { program, seen } => {
+                    let value = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
                     let key = vm
                         .execute_val_raw(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
@@ -1131,19 +1158,56 @@ impl CompiledRowStream {
                     }
                 }
                 CompiledRowStreamStage::Map(program) => {
-                    value = vm
-                        .execute_val_raw(program, value)
-                        .map_err(|err| row_eval_error(line_no, err))?;
+                    let current = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
+                    value = Some(vm
+                        .execute_val_raw(program, current)
+                        .map_err(|err| row_eval_error(line_no, err))?);
                 }
             }
         }
 
+        let value = ensure_row_stream_value(engine, line_no, &mut row, &mut document, &mut value)?;
         Ok(RowStreamRowResult::Emit(value))
     }
 }
 
+fn ensure_row_stream_value(
+    engine: &JetroEngine,
+    line_no: u64,
+    row: &mut Option<Vec<u8>>,
+    document: &mut Option<Jetro>,
+    value: &mut Option<Val>,
+) -> Result<Val, JetroEngineError> {
+    if let Some(value) = value.as_ref() {
+        return Ok(value.clone());
+    }
+    if document.is_none() {
+        let row = row.take().ok_or_else(|| {
+            JetroEngineError::Eval(EvalError("rows() stream row was already consumed".into()))
+        })?;
+        *document = Some(parse_row(engine, line_no, row)?);
+    }
+    let root = document
+        .as_ref()
+        .expect("row document initialized")
+        .root_val_with(engine.keys())
+        .map_err(|err| row_eval_error(line_no, err))?;
+    *value = Some(root.clone());
+    Ok(root)
+}
+
 enum CompiledRowStreamStage {
-    Filter(Program),
+    Filter {
+        program: Program,
+        #[cfg(feature = "simd-json")]
+        direct: Option<NdjsonDirectPredicate>,
+    },
     DistinctBy {
         program: Program,
         seen: AdaptiveDistinctKeys,
@@ -1158,9 +1222,11 @@ enum CompiledRowStreamStage {
 impl CompiledRowStreamStage {
     fn new(stage: &RowStreamStage) -> Self {
         match stage {
-            RowStreamStage::Filter(expr) => {
-                Self::Filter(Compiler::compile(expr, "<ndjson-rows-filter>"))
-            }
+            RowStreamStage::Filter(expr) => Self::Filter {
+                program: Compiler::compile(expr, "<ndjson-rows-filter>"),
+                #[cfg(feature = "simd-json")]
+                direct: direct_tape_predicate_for_expr(expr),
+            },
             RowStreamStage::DistinctBy(expr) => Self::DistinctBy {
                 program: Compiler::compile(expr, "<ndjson-rows-distinct-by>"),
                 seen: AdaptiveDistinctKeys::default(),

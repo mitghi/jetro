@@ -1005,6 +1005,10 @@ pub(crate) fn plan_query_with_context(expr: &str, context: PlanningContext) -> Q
     let Ok(ast) = parser::parse(expr) else {
         return QueryPlan::source_vm(expr);
     };
+    plan_ast_with_context(ast, context)
+}
+
+pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> QueryPlan {
     // Phase B: fuse contiguous same-root chain-writes into multi-op
     // `Expr::Patch` nodes before lowering. The resulting Patches are
     // automatically routed to Phase D's PathTrie execution path by the
