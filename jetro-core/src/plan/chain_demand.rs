@@ -126,11 +126,7 @@ impl DemandOperator for ChainOp {
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order
-                        || matches!(
-                            downstream.pull,
-                            PullDemand::LastInput(_) | PullDemand::NthInput(_)
-                        ),
+                    order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
                 // Transform match is 1:1, so demand passes through.
                 MatchRole::Transform => downstream,
@@ -141,7 +137,7 @@ impl DemandOperator for ChainOp {
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order,
+                    order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
             },
             ChainOp::Builtin { id, demand_arg } => {
@@ -409,8 +405,9 @@ mod tests {
 
         let ops = [op(BuiltinMethod::Remove), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
-        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
     }
 
     #[test]

@@ -183,11 +183,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 }
             },
             value: downstream.value.merge(ValueNeed::Predicate),
-            order: downstream.order
-                || matches!(
-                    downstream.pull,
-                    PullDemand::LastInput(_) | PullDemand::NthInput(_)
-                ),
+            order: downstream.order || pull_is_positional(downstream.pull),
         },
         BuiltinDemandLaw::TakeWhile => Demand {
             pull: match downstream.pull {
@@ -213,7 +209,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 }
             },
             value: downstream.value.merge(ValueNeed::Whole),
-            order: downstream.order,
+            order: downstream.order || pull_is_positional(downstream.pull),
         },
         BuiltinDemandLaw::MapLike => Demand {
             value: downstream.value.merge(ValueNeed::Whole),
@@ -223,7 +219,10 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value.merge(ValueNeed::Whole),
             ..downstream
         },
-        BuiltinDemandLaw::FlatMapLike => Demand::all(ValueNeed::Whole),
+        BuiltinDemandLaw::FlatMapLike => Demand {
+            order: downstream.order || pull_is_positional(downstream.pull),
+            ..Demand::all(ValueNeed::Whole)
+        },
         BuiltinDemandLaw::Take => match arg {
             BuiltinDemandArg::Usize(n) => Demand {
                 pull: downstream.pull.cap_inputs(n),
@@ -330,6 +329,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             order: downstream.order,
         },
     }
+}
+
+#[inline(always)]
+fn pull_is_positional(pull: PullDemand) -> bool {
+    !matches!(pull, PullDemand::All)
 }
 
 /// Convert builtin terminal-sink metadata into the shared planner demand model.
