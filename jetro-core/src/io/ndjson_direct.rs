@@ -23,6 +23,7 @@ pub(super) enum NdjsonDirectPlanKind {
     TapeArrayElement,
     TapeObjectItems,
     TapeStreamCollect,
+    TapeStreamFirst,
     TapeStreamCount,
     TapeStreamNumeric,
     TapeStreamExtreme,
@@ -52,7 +53,7 @@ impl NdjsonDirectTapePlan {
             Self::ObjectItems { .. } => NdjsonDirectPlanKind::TapeObjectItems,
             Self::Stream(stream) => match &stream.sink {
                 NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
-                NdjsonDirectStreamSink::First(_) => NdjsonDirectPlanKind::TapeStreamCollect,
+                NdjsonDirectStreamSink::First(_) => NdjsonDirectPlanKind::TapeStreamFirst,
                 NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
                 NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
                 NdjsonDirectStreamSink::Extreme { .. } => NdjsonDirectPlanKind::TapeStreamExtreme,
