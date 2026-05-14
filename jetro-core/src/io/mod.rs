@@ -8,6 +8,8 @@ mod ndjson;
 mod ndjson_byte;
 #[cfg(feature = "simd-json")]
 mod ndjson_direct;
+#[cfg(feature = "simd-json")]
+mod ndjson_hint;
 mod ndjson_rev;
 mod source;
 

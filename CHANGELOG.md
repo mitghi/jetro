@@ -33,6 +33,11 @@
   distinguish pure byte-expression writers, byte-writable tape-plan writers,
   and tape fallback writers, so performance assertions match the actual writer
   branch used by `run_ndjson`.
+- **Adaptive structural hint groundwork has started**. NDJSON now has an
+  internal schema-hint module that observes simple root object layouts through
+  the existing byte scanner, records stable field slots, detects unstable field
+  order, and rejects rows the byte scanner cannot validate instead of creating
+  unsafe hints.
 
 ### Builtin hardening
 

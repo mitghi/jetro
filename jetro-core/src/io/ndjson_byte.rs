@@ -325,39 +325,21 @@ fn raw_json_path_value_demand<'a>(
 
 #[inline(always)]
 fn root_field_raw_value<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a> {
-    let mut pos = skip_json_ws(row, 0);
-    if row.get(pos) != Some(&b'{') {
-        return RawFieldValue::Fallback;
-    }
-    pos += 1;
-    loop {
-        pos = skip_json_ws(row, pos);
-        match row.get(pos).copied() {
-            Some(b'}') => return RawFieldValue::Missing,
-            Some(b'"') => {}
-            _ => return RawFieldValue::Fallback,
-        }
-        let Some((field_key, next)) = parse_simple_json_string(row, pos) else {
-            return RawFieldValue::Fallback;
-        };
-        pos = skip_json_ws(row, next);
-        if row.get(pos) != Some(&b':') {
-            return RawFieldValue::Fallback;
-        }
-        pos += 1;
-        let value_start = skip_json_ws(row, pos);
-        let Some(value_end) = skip_json_value(row, value_start) else {
-            return RawFieldValue::Fallback;
-        };
+    let mut found = None;
+    let visited = visit_root_object_fields(row, |field_key, value_start, value_end| {
         if field_key == key.as_bytes() {
-            return RawFieldValue::Found(&row[value_start..value_end]);
+            found = Some(&row[value_start..value_end]);
+            return false;
         }
-        pos = skip_json_ws(row, value_end);
-        match row.get(pos).copied() {
-            Some(b',') => pos += 1,
-            Some(b'}') => return RawFieldValue::Missing,
-            _ => return RawFieldValue::Fallback,
-        }
+        true
+    });
+    if let Some(value) = found {
+        return RawFieldValue::Found(value);
+    }
+    if visited {
+        RawFieldValue::Missing
+    } else {
+        RawFieldValue::Fallback
     }
 }
 
@@ -465,6 +447,45 @@ fn write_json_object_items_raw<W: Write>(
                 return Ok(BytePlanWrite::Done);
             }
             _ => return Ok(BytePlanWrite::Fallback),
+        }
+    }
+}
+
+pub(super) fn visit_root_object_fields<F>(row: &[u8], mut visit: F) -> bool
+where
+    F: FnMut(&[u8], usize, usize) -> bool,
+{
+    let mut pos = skip_json_ws(row, 0);
+    if row.get(pos) != Some(&b'{') {
+        return false;
+    }
+    pos += 1;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied() {
+            Some(b'}') => return true,
+            Some(b'"') => {}
+            _ => return false,
+        }
+        let Some((field_key, next)) = parse_simple_json_string(row, pos) else {
+            return false;
+        };
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return false;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        let Some(value_end) = skip_json_value(row, value_start) else {
+            return false;
+        };
+        if !visit(field_key, value_start, value_end) {
+            return true;
+        }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b'}') => return true,
+            _ => return false,
         }
     }
 }
