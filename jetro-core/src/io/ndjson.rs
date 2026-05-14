@@ -993,24 +993,13 @@ where
         let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
             break;
         };
-        match executor.apply_owned_row(engine, line_no, row)? {
-            RowStreamRowResult::Emit(value) => {
-                write_val_line(&mut writer, &value)?;
-                emitted += 1;
-                if external_limit.is_some_and(|limit| emitted >= limit) {
-                    break;
-                }
-            }
-            RowStreamRowResult::EmitBytes(bytes) => {
-                writer.write_all(&bytes)?;
-                writer.write_all(b"\n")?;
-                emitted += 1;
-                if external_limit.is_some_and(|limit| emitted >= limit) {
-                    break;
-                }
-            }
-            RowStreamRowResult::Skip => {}
-            RowStreamRowResult::Stop => break,
+        if emit_row_stream_result(
+            executor.apply_owned_row(engine, line_no, row)?,
+            &mut writer,
+            &mut emitted,
+            external_limit,
+        )? {
+            break;
         }
         if executor.is_exhausted() {
             break;
@@ -1054,24 +1043,13 @@ where
         let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
             break;
         };
-        match executor.apply_owned_row(engine, line_no, row)? {
-            RowStreamRowResult::Emit(value) => {
-                write_val_line(&mut writer, &value)?;
-                emitted += 1;
-                if external_limit.is_some_and(|limit| emitted >= limit) {
-                    break;
-                }
-            }
-            RowStreamRowResult::EmitBytes(bytes) => {
-                writer.write_all(&bytes)?;
-                writer.write_all(b"\n")?;
-                emitted += 1;
-                if external_limit.is_some_and(|limit| emitted >= limit) {
-                    break;
-                }
-            }
-            RowStreamRowResult::Skip => {}
-            RowStreamRowResult::Stop => break,
+        if emit_row_stream_result(
+            executor.apply_owned_row(engine, line_no, row)?,
+            &mut writer,
+            &mut emitted,
+            external_limit,
+        )? {
+            break;
         }
         if executor.is_exhausted() {
             break;
@@ -1087,6 +1065,28 @@ enum RowStreamRowResult {
     EmitBytes(Vec<u8>),
     Skip,
     Stop,
+}
+
+fn emit_row_stream_result<W: Write>(
+    result: RowStreamRowResult,
+    writer: &mut W,
+    emitted: &mut usize,
+    external_limit: Option<usize>,
+) -> Result<bool, JetroEngineError> {
+    match result {
+        RowStreamRowResult::Emit(value) => {
+            write_val_line(writer, &value)?;
+            *emitted += 1;
+        }
+        RowStreamRowResult::EmitBytes(bytes) => {
+            writer.write_all(&bytes)?;
+            writer.write_all(b"\n")?;
+            *emitted += 1;
+        }
+        RowStreamRowResult::Skip => return Ok(false),
+        RowStreamRowResult::Stop => return Ok(true),
+    }
+    Ok(external_limit.is_some_and(|limit| *emitted >= limit))
 }
 
 struct CompiledRowStream {
