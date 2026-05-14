@@ -1376,6 +1376,13 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     let mut root_fields = Vec::new();
     let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
     if root_projectable && stream.predicate.is_none() {
+        if let Some(()) = write_raw_json_stream_collect_single_field(
+            writer,
+            source,
+            map,
+        )? {
+            return Ok(BytePlanWrite::Done);
+        }
         if let Some(()) = write_raw_json_stream_collect_root_projected(
             writer,
             source,
@@ -1426,6 +1433,64 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     }
     writer.write_all(b"]")?;
     Ok(BytePlanWrite::Done)
+}
+
+fn write_raw_json_stream_collect_single_field<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    map: &NdjsonDirectStreamMap,
+) -> Result<Option<()>, JetroEngineError> {
+    let (steps, call) = match map {
+        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(steps)) => {
+            (steps.as_slice(), None)
+        }
+        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::ViewScalarCall {
+            steps,
+            call,
+            ..
+        }) if byte_scalar_call_supported(call.method) => (steps.as_slice(), Some(call.method)),
+        _ => return Ok(None),
+    };
+    let [PhysicalPathStep::Field(field)] = steps else {
+        return Ok(None);
+    };
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    writer.write_all(b"[")?;
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"]")?;
+        return Ok(Some(()));
+    }
+    let mut wrote = false;
+    loop {
+        pos = skip_json_ws(source, pos);
+        let Some((value, next)) = raw_json_object_field_value_and_end(source, pos, field.as_ref())
+        else {
+            return Ok(None);
+        };
+        if wrote {
+            writer.write_all(b",")?;
+        }
+        if let Some(method) = call {
+            write_raw_scalar_call(writer, value, method)?;
+        } else {
+            writer.write_all(value)?;
+        }
+        wrote = true;
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                writer.write_all(b"]")?;
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
 }
 
 fn write_raw_json_stream_collect_root_projected<W: Write>(
@@ -1480,6 +1545,42 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
                 return Ok(Some(()));
             }
             _ => return Ok(None),
+        }
+    }
+}
+
+fn raw_json_object_field_value_and_end<'a>(
+    row: &'a [u8],
+    mut pos: usize,
+    field: &str,
+) -> Option<(&'a [u8], usize)> {
+    if row.get(pos) != Some(&b'{') {
+        return None;
+    }
+    pos += 1;
+    let mut found = None;
+    loop {
+        pos = skip_json_ws(row, pos);
+        match row.get(pos).copied()? {
+            b'}' => return found.map(|value| (value, pos + 1)),
+            b'"' => {}
+            _ => return None,
+        }
+        let (field_key, next) = parse_simple_json_string(row, pos)?;
+        pos = skip_json_ws(row, next);
+        if row.get(pos) != Some(&b':') {
+            return None;
+        }
+        let value_start = skip_json_ws(row, pos + 1);
+        let value_end = skip_json_value(row, value_start)?;
+        if field_key == field.as_bytes() {
+            found = Some(&row[value_start..value_end]);
+        }
+        pos = skip_json_ws(row, value_end);
+        match row.get(pos).copied()? {
+            b',' => pos += 1,
+            b'}' => return found.map(|value| (value, pos + 1)),
+            _ => return None,
         }
     }
 }
