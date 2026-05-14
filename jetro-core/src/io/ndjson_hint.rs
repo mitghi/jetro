@@ -228,6 +228,38 @@ impl NdjsonObjectLayoutHint {
             .find(|field| field.key.as_ref() == key)
             .map(|field| field.slot)
     }
+
+    pub(super) fn match_row<'a>(&self, row: &'a [u8]) -> Option<NdjsonRootLayoutMatch<'a>> {
+        if !self.stable_order {
+            return None;
+        }
+        let mut spans = Vec::with_capacity(self.fields.len());
+        let mut slot = 0usize;
+        let ok = visit_root_object_fields(row, |key, value_start, value_end| {
+            let Some(expected) = self.fields.get(slot) else {
+                return false;
+            };
+            if expected.key.as_bytes() != key {
+                return false;
+            }
+            spans.push(value_start..value_end);
+            slot += 1;
+            true
+        });
+        (ok && slot == self.fields.len()).then_some(NdjsonRootLayoutMatch { row, spans })
+    }
+}
+
+pub(super) struct NdjsonRootLayoutMatch<'a> {
+    row: &'a [u8],
+    spans: Vec<std::ops::Range<usize>>,
+}
+
+impl<'a> NdjsonRootLayoutMatch<'a> {
+    pub(super) fn value_at(&self, slot: usize) -> Option<&'a [u8]> {
+        let span = self.spans.get(slot)?;
+        Some(&self.row[span.clone()])
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -480,5 +512,21 @@ mod tests {
         assert_eq!(state.observe_row(br#"[]"#), NdjsonHintDecision::Learning);
         assert_eq!(state.observe_row(br#"{"bad\nkey":1}"#), NdjsonHintDecision::Disabled);
         assert_eq!(state.observe_row(br#"{"id":1}"#), NdjsonHintDecision::Disabled);
+    }
+
+    #[test]
+    fn root_layout_match_validates_order_and_exposes_value_spans() {
+        let mut hints = NdjsonSchemaHints::default();
+        hints.observe_row(br#"{"id":1,"name":"a"}"#);
+        hints.observe_row(br#"{"id":2,"name":"b"}"#);
+        let root = hints.root_object.as_ref().unwrap();
+
+        let matched = root.match_row(br#"{"id":3,"name":"c"}"#).unwrap();
+        assert_eq!(matched.value_at(root.slot_for("id").unwrap()), Some(&b"3"[..]));
+        assert_eq!(
+            matched.value_at(root.slot_for("name").unwrap()),
+            Some(&b"\"c\""[..])
+        );
+        assert!(root.match_row(br#"{"name":"c","id":3}"#).is_none());
     }
 }

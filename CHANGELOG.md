@@ -46,6 +46,10 @@
   hint state stays in learning mode until enough rows validate the required
   root fields, refuses unstable field orders, and disables itself after too
   many byte-scanner rejections so hinting remains fallback-safe.
+- **Stable root layouts can now produce a partial row index**. Learned root
+  object layouts can validate a row's field order and expose raw value byte
+  spans by slot, providing the primitive needed for projection pushdown without
+  building a full per-row structural index.
 
 ### Builtin hardening
 
