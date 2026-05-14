@@ -1039,6 +1039,33 @@ mod tests {
     }
 
     #[test]
+    fn registry_preserves_order_for_positional_selective_and_expanding_demands() {
+        let positional = Demand {
+            pull: PullDemand::FirstInput(1),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+
+        for method in [
+            BuiltinMethod::Filter,
+            BuiltinMethod::Remove,
+            BuiltinMethod::Compact,
+            BuiltinMethod::Unique,
+            BuiltinMethod::UniqueBy,
+            BuiltinMethod::FlatMap,
+            BuiltinMethod::Flatten,
+            BuiltinMethod::Explode,
+        ] {
+            let demand = propagate_demand(
+                BuiltinId::from_method(method),
+                BuiltinDemandArg::None,
+                positional,
+            );
+            assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
     fn registry_drives_pipeline_execution_policy() {
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Sort)),
