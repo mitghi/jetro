@@ -3827,6 +3827,24 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_object_map_preserves_scalar_calls() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map({k: @.key, v: @.value.upper()})", &mut out)
+            .expect("stream object map should preserve scalar calls");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[{\"k\":\"a\",\"v\":\"X\"},{\"k\":\"b\",\"v\":\"Y\"}]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_count_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
