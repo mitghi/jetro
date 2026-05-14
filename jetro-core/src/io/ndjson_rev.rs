@@ -10,6 +10,12 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[cfg(feature = "simd-json")]
+use super::ndjson_byte::{
+    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
+    BytePlanWrite, RawFieldValue,
+};
+
 /// Reverse NDJSON line reader over a seekable file.
 ///
 /// The reader scans fixed-size chunks from EOF to BOF and returns owned line
@@ -366,26 +372,70 @@ where
         return Ok(0);
     }
 
+    #[cfg(feature = "simd-json")]
+    let direct_key_plan = super::ndjson::direct_tape_plan(engine, key_query);
+    #[cfg(feature = "simd-json")]
+    let direct_value_plan = super::ndjson::direct_tape_plan(engine, query)
+        .filter(|plan| tape_plan_can_write_byte_row(plan));
+
     let key_plan = engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes());
     let value_plan = engine.cached_plan(query, crate::plan::physical::PlanningContext::bytes());
     let mut vm = engine.lock_vm();
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
+    #[cfg(feature = "simd-json")]
+    let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut seen = AdaptiveDistinctKeys::default();
     let mut emitted = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
-        let document = super::ndjson::parse_row(engine, reverse_row_no, row)?;
-        let key = crate::exec::router::collect_plan_val_with_vm(&document, &key_plan, &mut vm)
-            .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
-        let key = distinct_key_bytes(&key)?;
+        let mut row = Some(row);
+        let mut document = None;
+
+        #[cfg(feature = "simd-json")]
+        let direct_key = direct_key_plan
+            .as_ref()
+            .and_then(|plan| row.as_deref().and_then(|row| distinct_key_bytes_direct(row, plan)));
+        #[cfg(not(feature = "simd-json"))]
+        let direct_key = None;
+
+        let key = if let Some(key) = direct_key {
+            key
+        } else {
+            let parsed =
+                super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
+            let key = crate::exec::router::collect_plan_val_with_vm(&parsed, &key_plan, &mut vm)
+                .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+            let key = distinct_key_bytes(&key)?;
+            document = Some(parsed);
+            key
+        };
         if !seen.insert(key) {
             continue;
         }
 
-        let value =
-            crate::exec::router::collect_plan_val_with_vm(&document, &value_plan, &mut vm)
-                .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+        #[cfg(feature = "simd-json")]
+        if let (Some(plan), Some(row)) = (direct_value_plan.as_ref(), row.as_deref()) {
+            byte_scratch.clear();
+            match write_ndjson_byte_tape_plan_row(&mut writer, row, plan, &mut byte_scratch)? {
+                BytePlanWrite::Done => {
+                    writer.write_all(b"\n")?;
+                    emitted += 1;
+                    if emitted >= limit {
+                        break;
+                    }
+                    continue;
+                }
+                BytePlanWrite::Fallback => {}
+            }
+        }
+
+        let parsed = match document {
+            Some(document) => document,
+            None => super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?,
+        };
+        let value = crate::exec::router::collect_plan_val_with_vm(&parsed, &value_plan, &mut vm)
+            .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
         super::ndjson::write_val_line(&mut writer, &value)?;
         emitted += 1;
         if emitted >= limit {
@@ -401,6 +451,21 @@ fn distinct_key_bytes(key: &crate::data::value::Val) -> Result<Vec<u8>, JetroEng
     let mut out = Vec::new();
     super::ndjson::write_val_json(&mut out, key)?;
     Ok(out)
+}
+
+#[cfg(feature = "simd-json")]
+fn distinct_key_bytes_direct(
+    row: &[u8],
+    plan: &super::ndjson::NdjsonDirectTapePlan,
+) -> Option<Vec<u8>> {
+    let super::ndjson::NdjsonDirectTapePlan::RootPath(steps) = plan else {
+        return None;
+    };
+    match raw_json_byte_path_value(row, steps) {
+        RawFieldValue::Found(value) => Some(value.to_vec()),
+        RawFieldValue::Missing => Some(b"null".to_vec()),
+        RawFieldValue::Fallback => None,
+    }
 }
 
 #[derive(Default)]
