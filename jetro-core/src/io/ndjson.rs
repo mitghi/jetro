@@ -3430,7 +3430,8 @@ mod tests {
         let engine = crate::JetroEngine::new();
         use super::NdjsonDirectPlanKind::{
             ByteExpr, TapeArrayProjection, TapeObjectProjection, TapeRootPath, TapeStreamCollect,
-            TapeStreamCount, TapeStreamExtreme, TapeStreamFirst, TapeStreamNumeric,
+            TapeStreamCount, TapeStreamExtreme, TapeStreamFirst, TapeStreamLast,
+            TapeStreamNumeric,
         };
 
         for (query, expected) in [
@@ -3450,6 +3451,7 @@ mod tests {
                 r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
                 (None, TapeStreamFirst),
             ),
+            ("$.attributes.map(@.value).last()", (None, TapeStreamLast)),
             (
                 r#"$.attributes.filter(@.value.contains("_3")).len()"#,
                 (None, TapeStreamCount),
