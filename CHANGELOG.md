@@ -121,6 +121,10 @@
   projections can jump to a root item field and then reuse the byte suffix
   walker for paths and scalar calls such as `@.meta.code.upper()`, keeping
   nested item shaping on the same algorithmic direct projection path.
+- **Release validation is green in release mode**. The full workspace test
+  suite passes with `cargo test --release --verbose --workspace`, covering the
+  optimized NDJSON byte/tape paths alongside the existing VM, parser, planner,
+  builtin, and API tests.
 
 ### Builtin hardening
 
