@@ -155,6 +155,11 @@
   tests now assert that selective, distinct-like, and expanding demand laws
   preserve ordering for bounded positional sinks, with runtime coverage for
   `unique().last()`.
+- **NDJSON string extrema compare simple keys directly**. Stream extrema can
+  compare simple JSON string keys from raw bytes before falling back to full
+  scalar comparison, improving `sort_by(string).first()/last()` without adding
+  query-chain-specific fusion. Escaped string keys have regression coverage for
+  the fallback path.
 
 ### Builtin hardening
 
