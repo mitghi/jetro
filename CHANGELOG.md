@@ -151,6 +151,10 @@
   coverage now proves `filter(...).last()` returns the last matching output,
   and builtin coverage proves `flat_map(...).last()` follows semantic output
   order.
+- **Registry demand invariants guard positional ordering**. Builtin registry
+  tests now assert that selective, distinct-like, and expanding demand laws
+  preserve ordering for bounded positional sinks, with runtime coverage for
+  `unique().last()`.
 
 ### Builtin hardening
 
