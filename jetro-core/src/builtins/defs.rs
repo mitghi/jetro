@@ -1527,6 +1527,7 @@ pub(crate) struct UniqueBy;
 impl Builtin for UniqueBy {
     const METHOD: BuiltinMethod = BuiltinMethod::UniqueBy;
     const NAME: &'static str = "unique_by";
+    const ALIASES: &'static [&'static str] = &["distinct_by"];
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
     }

@@ -674,6 +674,10 @@ mod tests {
         assert_eq!(BuiltinMethod::from_name("group_by"), BuiltinMethod::GroupBy);
         assert_eq!(BuiltinMethod::from_name("exists"), BuiltinMethod::Any);
         assert_eq!(BuiltinMethod::from_name("distinct"), BuiltinMethod::Unique);
+        assert_eq!(
+            BuiltinMethod::from_name("distinct_by"),
+            BuiltinMethod::UniqueBy
+        );
         assert_eq!(BuiltinMethod::from_name("lstrip"), BuiltinMethod::TrimLeft);
     }
 

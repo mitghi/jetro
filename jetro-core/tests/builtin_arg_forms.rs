@@ -354,6 +354,7 @@ fn unique_by_all_forms() {
         "unique_by",
         &[
             "$.xs.unique_by(@.k)",
+            "$.xs.distinct_by(@.k)",
             "$.xs.unique_by(.k)",
             "$.xs.unique_by(x => x.k)",
             "$.xs.unique_by(lambda x: x.k)",

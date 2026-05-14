@@ -204,6 +204,10 @@
 
 ### Builtin hardening
 
+- **`distinct_by` is available as a key-based distinct alias**.
+  `distinct_by(key)` now resolves to the exact first-seen `unique_by(key)`
+  semantics, matching the NDJSON terminology planned for current-order
+  compaction and reverse-log latest-per-key scans.
 - **Builtin names and aliases are now collision-checked**. Registry tests prove
   every canonical builtin name and alias resolves back to exactly one
   `BuiltinMethod`, preventing silent lookup drift as the builtin catalog grows.
