@@ -459,6 +459,27 @@ fn rows_stream_reverse_distinct_by_keeps_latest_rows() {
 }
 
 #[test]
+fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":"ab","v":1}
+{"id":"a\u0062","v":2}
+{"id":"cd","v":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().distinct_by($.id).map($.v)",
+            &mut out,
+        )
+        .expect("rows stream distinct_by should canonicalize direct keys");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+}
+
+#[test]
 fn run_ndjson_source_limit_dispatches_file_and_reader_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(b"{\"n\":1}\n{\"n\":2}\nnot-json\n".to_vec()));
