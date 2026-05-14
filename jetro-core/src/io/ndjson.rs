@@ -1065,13 +1065,25 @@ where
     let mut count = 0usize;
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
-        let hinted = match hint_state.as_mut().map(|state| state.observe_row(row)) {
-            Some(NdjsonHintDecision::UseHints) => hint_state
-                .as_ref()
-                .and_then(NdjsonHintState::root_layout)
-                .map(|root| write_ndjson_hinted_tape_plan_row(&mut writer, row, tape_plan, root))
-                .transpose()?,
-            Some(NdjsonHintDecision::Learning | NdjsonHintDecision::Disabled) | None => None,
+        let hinted = if let Some(state) = hint_state.as_mut() {
+            if state.observe_row(row) == NdjsonHintDecision::UseHints {
+                state
+                    .with_root_layout_match(row, |root, matched| {
+                        write_ndjson_hinted_tape_plan_row(
+                            &mut writer,
+                            row,
+                            tape_plan,
+                            root,
+                            matched,
+                        )
+                    })
+                    .transpose()?
+                    .or(Some(BytePlanWrite::Fallback))
+            } else {
+                None
+            }
+        } else {
+            None
         };
         let write = match hinted {
             Some(write) => Ok(write),

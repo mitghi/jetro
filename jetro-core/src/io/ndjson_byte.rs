@@ -232,16 +232,14 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
     row: &[u8],
     plan: &NdjsonDirectTapePlan,
     root: &NdjsonObjectLayoutHint,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'_, '_>,
 ) -> Result<BytePlanWrite, JetroEngineError> {
-    let Some(matched) = root.match_row(row) else {
-        return Ok(BytePlanWrite::Fallback);
-    };
     match plan {
         NdjsonDirectTapePlan::Object(fields) => {
             writer.write_all(b"{")?;
             let mut wrote = false;
             for field in fields {
-                let Some(value) = hinted_projection_value(row, root, &matched, &field.value) else {
+                let Some(value) = hinted_projection_value(row, root, matched, &field.value) else {
                     return Ok(BytePlanWrite::Fallback);
                 };
                 if field.optional && is_json_null(value) {
@@ -264,7 +262,7 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                 if idx > 0 {
                     writer.write_all(b",")?;
                 }
-                let Some(value) = hinted_projection_value(row, root, &matched, item) else {
+                let Some(value) = hinted_projection_value(row, root, matched, item) else {
                     return Ok(BytePlanWrite::Fallback);
                 };
                 writer.write_all(value)?;
@@ -309,7 +307,7 @@ fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool 
 fn hinted_projection_value<'a>(
     row: &'a [u8],
     root: &NdjsonObjectLayoutHint,
-    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a>,
+    matched: &super::ndjson_hint::NdjsonRootLayoutMatch<'a, '_>,
     value: &NdjsonDirectProjectionValue,
 ) -> Option<&'a [u8]> {
     match value {

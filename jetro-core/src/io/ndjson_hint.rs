@@ -229,11 +229,16 @@ impl NdjsonObjectLayoutHint {
             .map(|field| field.slot)
     }
 
-    pub(super) fn match_row<'a>(&self, row: &'a [u8]) -> Option<NdjsonRootLayoutMatch<'a>> {
+    pub(super) fn match_row<'a, 's>(
+        &self,
+        row: &'a [u8],
+        spans: &'s mut Vec<std::ops::Range<usize>>,
+    ) -> Option<NdjsonRootLayoutMatch<'a, 's>> {
         if !self.stable_order {
             return None;
         }
-        let mut spans = Vec::with_capacity(self.fields.len());
+        spans.clear();
+        spans.reserve(self.fields.len());
         let mut slot = 0usize;
         let ok = visit_root_object_fields(row, |key, value_start, value_end| {
             let Some(expected) = self.fields.get(slot) else {
@@ -246,16 +251,19 @@ impl NdjsonObjectLayoutHint {
             slot += 1;
             true
         });
-        (ok && slot == self.fields.len()).then_some(NdjsonRootLayoutMatch { row, spans })
+        (ok && slot == self.fields.len()).then_some(NdjsonRootLayoutMatch {
+            row,
+            spans: spans.as_slice(),
+        })
     }
 }
 
-pub(super) struct NdjsonRootLayoutMatch<'a> {
+pub(super) struct NdjsonRootLayoutMatch<'a, 's> {
     row: &'a [u8],
-    spans: Vec<std::ops::Range<usize>>,
+    spans: &'s [std::ops::Range<usize>],
 }
 
-impl<'a> NdjsonRootLayoutMatch<'a> {
+impl<'a, 's> NdjsonRootLayoutMatch<'a, 's> {
     pub(super) fn value_at(&self, slot: usize) -> Option<&'a [u8]> {
         let span = self.spans.get(slot)?;
         Some(&self.row[span.clone()])
@@ -342,6 +350,7 @@ pub(super) struct NdjsonHintState {
     access: NdjsonHintAccessPlan,
     schema: NdjsonSchemaHints,
     stats: NdjsonHintStats,
+    span_scratch: Vec<std::ops::Range<usize>>,
     disabled: bool,
 }
 
@@ -352,6 +361,7 @@ impl NdjsonHintState {
             access,
             schema: NdjsonSchemaHints::default(),
             stats: NdjsonHintStats::default(),
+            span_scratch: Vec::new(),
             disabled: false,
         }
     }
@@ -386,8 +396,14 @@ impl NdjsonHintState {
         &self.schema
     }
 
-    pub(super) fn root_layout(&self) -> Option<&NdjsonObjectLayoutHint> {
-        self.schema.root_object.as_ref()
+    pub(super) fn with_root_layout_match<'a, R>(
+        &mut self,
+        row: &'a [u8],
+        f: impl FnOnce(&NdjsonObjectLayoutHint, &NdjsonRootLayoutMatch<'a, '_>) -> R,
+    ) -> Option<R> {
+        let root = self.schema.root_object.as_ref()?;
+        let matched = root.match_row(row, &mut self.span_scratch)?;
+        Some(f(root, &matched))
     }
 
     pub(super) fn stats(&self) -> &NdjsonHintStats {
@@ -545,12 +561,17 @@ mod tests {
         hints.observe_row(br#"{"id":2,"name":"b"}"#);
         let root = hints.root_object.as_ref().unwrap();
 
-        let matched = root.match_row(br#"{"id":3,"name":"c"}"#).unwrap();
+        let mut spans = Vec::new();
+        let matched = root
+            .match_row(br#"{"id":3,"name":"c"}"#, &mut spans)
+            .unwrap();
         assert_eq!(matched.value_at(root.slot_for("id").unwrap()), Some(&b"3"[..]));
         assert_eq!(
             matched.value_at(root.slot_for("name").unwrap()),
             Some(&b"\"c\""[..])
         );
-        assert!(root.match_row(br#"{"name":"c","id":3}"#).is_none());
+        assert!(root
+            .match_row(br#"{"name":"c","id":3}"#, &mut spans)
+            .is_none());
     }
 }
