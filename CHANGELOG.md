@@ -78,6 +78,17 @@
   performs full schema observation only during the learning window; active rows
   go directly through the required-slot matcher. The default learning threshold
   is two stable rows to favor cold NDJSON workloads.
+- **NDJSON string scanning uses SIMD byte search**. The byte parser now uses
+  `memchr2` for quote/backslash discovery in JSON string scanning, keeping the
+  simple-key and value-skip paths conservative while using platform-accelerated
+  byte search where available.
+- **Stream source hints now cover map, count, and numeric reducers**. Direct
+  stream plans can reuse the learned root source slot for collect, filtered
+  count, and numeric reducer sinks, then execute the existing raw-byte item
+  predicate, projection, and numeric fold logic.
+- **Numeric NDJSON streams can stay byte-native**. Queries such as
+  `$.attributes.map(@.weight).sum()` now route through byte-writable tape plans
+  instead of forcing tape materialization for every row.
 
 ### Builtin hardening
 
