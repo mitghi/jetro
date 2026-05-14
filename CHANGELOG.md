@@ -186,6 +186,9 @@
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
+- **NDJSON module validation is green**. The full `io::ndjson` release-mode
+  module suite passes after adding stream-last and the first/last source-demand
+  changes, covering byte, hinted, tape, and reverse NDJSON paths.
 - **Full release workspace validation is green**.
   `cargo test --release --verbose --workspace` passes after the
   stream-first, byte-extrema, and reverse selective-demand changes.
