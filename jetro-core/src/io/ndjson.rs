@@ -3795,6 +3795,25 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_map_preserves_missing_field_nulls() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x"},{"key":"b"}]}
+{"attributes":[{"value":"z"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map([@.key, @.value])", &mut out)
+            .expect("stream map should preserve nulls for missing fields");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[[\"a\",\"x\"],[\"b\",null]]\n[[null,\"z\"]]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn run_ndjson_stream_count_survives_hint_activation() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
