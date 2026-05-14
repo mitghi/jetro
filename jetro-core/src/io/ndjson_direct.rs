@@ -14,6 +14,53 @@ pub(super) enum NdjsonDirectBytePlan {
     Expr(NdjsonDirectByteExpr),
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NdjsonDirectPlanKind {
+    ByteExpr,
+    TapeRootPath,
+    TapeScalarCall,
+    TapeArrayElement,
+    TapeObjectItems,
+    TapeStreamCollect,
+    TapeStreamCount,
+    TapeStreamNumeric,
+    TapeObjectProjection,
+    TapeArrayProjection,
+    TapeViewPipeline,
+}
+
+#[cfg(test)]
+impl NdjsonDirectBytePlan {
+    pub(super) fn kind(&self) -> NdjsonDirectPlanKind {
+        match self {
+            Self::Expr(_) => NdjsonDirectPlanKind::ByteExpr,
+        }
+    }
+}
+
+#[cfg(test)]
+impl NdjsonDirectTapePlan {
+    pub(super) fn kind(&self) -> NdjsonDirectPlanKind {
+        match self {
+            Self::RootPath(_) => NdjsonDirectPlanKind::TapeRootPath,
+            Self::ViewScalarCall { .. } | Self::ArrayElementViewScalarCall { .. } => {
+                NdjsonDirectPlanKind::TapeScalarCall
+            }
+            Self::ArrayElementPath { .. } => NdjsonDirectPlanKind::TapeArrayElement,
+            Self::ObjectItems { .. } => NdjsonDirectPlanKind::TapeObjectItems,
+            Self::Stream(stream) => match &stream.sink {
+                NdjsonDirectStreamSink::Collect(_) => NdjsonDirectPlanKind::TapeStreamCollect,
+                NdjsonDirectStreamSink::Count => NdjsonDirectPlanKind::TapeStreamCount,
+                NdjsonDirectStreamSink::Numeric { .. } => NdjsonDirectPlanKind::TapeStreamNumeric,
+            },
+            Self::Object(_) => NdjsonDirectPlanKind::TapeObjectProjection,
+            Self::Array(_) => NdjsonDirectPlanKind::TapeArrayProjection,
+            Self::ViewPipeline { .. } => NdjsonDirectPlanKind::TapeViewPipeline,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum NdjsonDirectByteExpr {
     Path(NdjsonPhysicalPath),
@@ -102,6 +149,15 @@ pub(super) fn direct_writer_plans(
     rootless_ndjson_query(query)
         .and_then(|query| direct_writer_plans_inner(engine, query))
         .or_else(|| direct_writer_plans_inner(engine, query))
+}
+
+#[cfg(test)]
+pub(super) fn direct_writer_plan_kind(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<(Option<NdjsonDirectPlanKind>, NdjsonDirectPlanKind)> {
+    let (byte, tape) = direct_writer_plans(engine, query)?;
+    Some((byte.as_ref().map(NdjsonDirectBytePlan::kind), tape.kind()))
 }
 
 fn direct_writer_plans_inner(

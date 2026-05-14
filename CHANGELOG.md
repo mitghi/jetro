@@ -21,6 +21,15 @@
   benchmark methodology, and adding path-selection tests for static projections,
   filtered streams, reducers, and early-stop queries.
 
+### NDJSON observability
+
+- **Direct writer plan kinds are now test-visible**. NDJSON direct planning can
+  expose whether a query produced a byte expression plan, a tape root/scalar
+  plan, a stream collect/count/numeric plan, or a static projection plan. This
+  gives regression tests a stable way to prove hot shapes such as `$.name`,
+  `$.a.b.c`, object/array projections, filtered counts, and numeric reducers
+  stay on the expected direct execution family.
+
 ## 0.5.9
 
 ### Release focus

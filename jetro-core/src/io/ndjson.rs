@@ -17,7 +17,9 @@ use super::ndjson_byte::{
 };
 #[cfg(test)]
 #[cfg(feature = "simd-json")]
-pub(super) use super::ndjson_direct::direct_byte_plan;
+pub(super) use super::ndjson_direct::{
+    direct_byte_plan, direct_writer_plan_kind, NdjsonDirectPlanKind,
+};
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
     direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
@@ -3051,6 +3053,39 @@ mod tests {
         ] {
             super::direct_tape_plan(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have a direct NDJSON tape plan"));
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_writer_plan_kind_exposes_hot_path_selection() {
+        let engine = crate::JetroEngine::new();
+        use super::NdjsonDirectPlanKind::{
+            ByteExpr, TapeArrayProjection, TapeObjectProjection, TapeStreamCollect,
+            TapeRootPath, TapeStreamCount, TapeStreamNumeric,
+        };
+
+        for (query, expected) in [
+            ("$.name", (Some(ByteExpr), TapeRootPath)),
+            ("$.a.b.c", (Some(ByteExpr), TapeRootPath)),
+            (
+                r#"{test: $.a.b.c, b: $.a.b}"#,
+                (None, TapeObjectProjection),
+            ),
+            (r#"[$.id, $.name]"#, (None, TapeArrayProjection)),
+            ("$.attributes.map(@.key)", (None, TapeStreamCollect)),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                (None, TapeStreamCount),
+            ),
+            (
+                "$.attributes.map(@.weight).sum()",
+                (None, TapeStreamNumeric),
+            ),
+        ] {
+            let actual = super::direct_writer_plan_kind(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have an observable direct plan"));
+            assert_eq!(actual, expected, "{query}");
         }
     }
 
