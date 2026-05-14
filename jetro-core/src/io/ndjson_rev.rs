@@ -463,10 +463,35 @@ fn distinct_key_bytes_direct<'a>(
         return None;
     };
     match raw_json_byte_path_value(row, steps) {
-        RawFieldValue::Found(value) => Some(value),
+        RawFieldValue::Found(value) if raw_distinct_key_is_byte_stable(value) => Some(value),
+        RawFieldValue::Found(_) => None,
         RawFieldValue::Missing => Some(NULL_KEY),
         RawFieldValue::Fallback => None,
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_distinct_key_is_byte_stable(value: &[u8]) -> bool {
+    let Some(first) = value.iter().copied().find(|b| !b.is_ascii_whitespace()) else {
+        return false;
+    };
+    match first {
+        b'n' | b't' | b'f' | b'-' | b'0'..=b'9' => true,
+        b'"' => !raw_json_string_has_escape(value),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn raw_json_string_has_escape(value: &[u8]) -> bool {
+    for byte in value.iter().copied().skip_while(|b| b.is_ascii_whitespace()).skip(1) {
+        match byte {
+            b'\\' => return true,
+            b'"' => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 #[derive(Default)]
@@ -1118,6 +1143,15 @@ mod tests {
             assert!(!keys.insert_slice(format!("k{n}").as_bytes()));
         }
         assert!(keys.insert_slice(b"fresh"));
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn direct_distinct_key_classifier_rejects_escaped_strings() {
+        assert!(super::raw_distinct_key_is_byte_stable(br#""plain""#));
+        assert!(!super::raw_distinct_key_is_byte_stable(br#""a\u0062""#));
+        assert!(!super::raw_distinct_key_is_byte_stable(br#"{"k":"v"}"#));
+        assert!(super::raw_distinct_key_is_byte_stable(b"123"));
     }
 
     fn temp_path(name: &str) -> PathBuf {
