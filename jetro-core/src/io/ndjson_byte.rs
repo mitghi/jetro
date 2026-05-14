@@ -962,6 +962,10 @@ fn raw_json_cmp_values_fast(a: &[u8], b: &[u8]) -> Option<std::cmp::Ordering> {
         .map(|(a, b)| a.cmp(b))
 }
 
+fn raw_json_value_has_fast_comparison(value: &[u8]) -> bool {
+    raw_json_simple_string_bytes(trim_json_ws(value)).is_some()
+}
+
 fn trim_json_ws(value: &[u8]) -> &[u8] {
     let start = skip_json_ws(value, 0);
     let end = trim_json_ws_end(value);
@@ -1474,7 +1478,8 @@ fn write_raw_json_stream_extreme_source<W: Write>(
             return None;
         };
         let replace = if best_item.is_empty() {
-            if raw_json_view(key_value).is_none() {
+            if !raw_json_value_has_fast_comparison(key_value) && raw_json_view(key_value).is_none()
+            {
                 failed = true;
                 return None;
             }
@@ -1559,7 +1564,8 @@ fn write_raw_json_stream_extreme_from_root_fields<W: Write>(
             RawFieldValue::Missing | RawFieldValue::Fallback => return Ok(None),
         };
         let replace = if best_output.is_empty() {
-            if raw_json_view(key_value).is_none() {
+            if !raw_json_value_has_fast_comparison(key_value) && raw_json_view(key_value).is_none()
+            {
                 return Ok(None);
             }
             true
