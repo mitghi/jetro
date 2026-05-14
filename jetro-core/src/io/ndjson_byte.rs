@@ -17,8 +17,8 @@ use std::io::Write;
 type RootFieldSet<'a> = SmallVec<[&'a str; 4]>;
 type RootFieldSpans = SmallVec<[Option<std::ops::Range<usize>>; 4]>;
 type RootFieldOrdinals = SmallVec<[usize; 4]>;
-type DirectRootArraySlots = SmallVec<[usize; 4]>;
-type DirectRootObjectSlots<'a> = SmallVec<[(&'a str, usize); 4]>;
+type DirectRootArraySlots = SmallVec<[DirectRootProjection; 4]>;
+type DirectRootObjectSlots<'a> = SmallVec<[(&'a str, DirectRootProjection); 4]>;
 
 #[derive(Clone, Copy)]
 pub(super) enum BytePlanWrite {
@@ -2294,6 +2294,16 @@ enum DirectRootStreamMap<'a> {
     Object(DirectRootObjectSlots<'a>),
 }
 
+#[derive(Clone, Copy)]
+enum DirectRootProjection {
+    Raw(usize),
+    Scalar {
+        slot: usize,
+        method: BuiltinMethod,
+        optional: bool,
+    },
+}
+
 fn direct_root_stream_map<'a>(
     map: &'a NdjsonDirectStreamMap,
     root_fields: &[&str],
@@ -2302,7 +2312,7 @@ fn direct_root_stream_map<'a>(
         NdjsonDirectStreamMap::Array(items) => {
             let mut slots = DirectRootArraySlots::new();
             for value in items {
-                slots.push(direct_root_projection_slot(value, root_fields)?);
+                slots.push(direct_root_projection(value, root_fields)?);
             }
             Some(DirectRootStreamMap::Array(slots))
         }
@@ -2314,7 +2324,7 @@ fn direct_root_stream_map<'a>(
                 }
                 slots.push((
                     field.key.as_ref(),
-                    direct_root_projection_slot(&field.value, root_fields)?,
+                    direct_root_projection(&field.value, root_fields)?,
                 ));
             }
             Some(DirectRootStreamMap::Object(slots))
@@ -2323,14 +2333,32 @@ fn direct_root_stream_map<'a>(
     }
 }
 
-fn direct_root_projection_slot(
+fn direct_root_projection(
     value: &NdjsonDirectProjectionValue,
     root_fields: &[&str],
-) -> Option<usize> {
-    let NdjsonDirectProjectionValue::Path(steps) = value else {
-        return None;
-    };
-    let [PhysicalPathStep::Field(key)] = steps.as_slice() else {
+) -> Option<DirectRootProjection> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            Some(DirectRootProjection::Raw(direct_root_path_slot(
+                steps,
+                root_fields,
+            )?))
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall {
+            steps,
+            call,
+            optional,
+        } if byte_scalar_call_supported(call.method) => Some(DirectRootProjection::Scalar {
+            slot: direct_root_path_slot(steps, root_fields)?,
+            method: call.method,
+            optional: *optional,
+        }),
+        _ => None,
+    }
+}
+
+fn direct_root_path_slot(steps: &[PhysicalPathStep], root_fields: &[&str]) -> Option<usize> {
+    let [PhysicalPathStep::Field(key)] = steps else {
         return None;
     };
     root_fields.iter().position(|field| *field == key.as_ref())
@@ -2345,28 +2373,54 @@ fn write_direct_root_stream_map<W: Write>(
     match map {
         DirectRootStreamMap::Array(slots) => {
             writer.write_all(b"[")?;
-            for (idx, slot) in slots.iter().enumerate() {
+            for (idx, projection) in slots.iter().enumerate() {
                 if idx > 0 {
                     writer.write_all(b",")?;
                 }
-                write_direct_root_slot_value(writer, item, spans, *slot)?;
+                write_direct_root_projection_value(writer, item, spans, *projection)?;
             }
             writer.write_all(b"]")?;
         }
         DirectRootStreamMap::Object(slots) => {
             writer.write_all(b"{")?;
-            for (idx, (key, slot)) in slots.iter().enumerate() {
+            for (idx, (key, projection)) in slots.iter().enumerate() {
                 if idx > 0 {
                     writer.write_all(b",")?;
                 }
                 write_json_str(writer, key)?;
                 writer.write_all(b":")?;
-                write_direct_root_slot_value(writer, item, spans, *slot)?;
+                write_direct_root_projection_value(writer, item, spans, *projection)?;
             }
             writer.write_all(b"}")?;
         }
     }
     Ok(())
+}
+
+fn write_direct_root_projection_value<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    spans: &[Option<std::ops::Range<usize>>],
+    projection: DirectRootProjection,
+) -> Result<(), JetroEngineError> {
+    match projection {
+        DirectRootProjection::Raw(slot) => write_direct_root_slot_value(writer, item, spans, slot),
+        DirectRootProjection::Scalar {
+            slot,
+            method,
+            optional,
+        } => match spans.get(slot).and_then(Option::as_ref) {
+            Some(span) if optional && is_json_null(&item[span.clone()]) => {
+                writer.write_all(b"null")?;
+                Ok(())
+            }
+            Some(span) => write_raw_scalar_call(writer, &item[span.clone()], method),
+            None => {
+                writer.write_all(b"null")?;
+                Ok(())
+            }
+        },
+    }
 }
 
 fn write_direct_root_slot_value<W: Write>(
