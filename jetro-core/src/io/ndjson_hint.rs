@@ -367,7 +367,7 @@ pub(super) struct NdjsonHintConfig {
 impl Default for NdjsonHintConfig {
     fn default() -> Self {
         Self {
-            min_rows: 8,
+            min_rows: 2,
             max_rejects: 2,
             max_layout_misses: 8,
         }
@@ -536,6 +536,14 @@ mod tests {
         assert_eq!(hints.rows_observed, 0);
         assert_eq!(hints.rows_rejected, 1);
         assert!(hints.root_object.is_none());
+    }
+
+    #[test]
+    fn hint_config_defaults_for_cold_path_activation() {
+        let config = NdjsonHintConfig::default();
+        assert_eq!(config.min_rows, 2);
+        assert_eq!(config.max_rejects, 2);
+        assert_eq!(config.max_layout_misses, 8);
     }
 
     #[test]
