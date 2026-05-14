@@ -390,6 +390,22 @@ not-json
 }
 
 #[test]
+fn rows_stream_first_stops_after_one_row() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(Cursor::new(input), "$.rows().first().map($.id)", &mut out)
+        .expect("rows stream first should stop before invalid tail");
+
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n");
+}
+
+#[test]
 fn rows_stream_reverse_requires_file_backed_ndjson() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1}

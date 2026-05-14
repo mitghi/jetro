@@ -113,6 +113,10 @@ pub(super) fn lower_root_rows_expr(
                 let n = single_usize_arg(name, args)?;
                 plan.stages.push(RowStreamStage::Take(n));
             }
+            BuiltinMethod::First => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Take(1));
+            }
             BuiltinMethod::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Map(expr));
