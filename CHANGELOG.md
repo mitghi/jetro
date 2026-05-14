@@ -160,6 +160,9 @@
   scalar comparison, improving `sort_by(string).first()/last()` without adding
   query-chain-specific fusion. Escaped string keys have regression coverage for
   the fallback path.
+- **Demand and NDJSON focused validation is green**. Release-mode focused
+  suites for chain demand and NDJSON execution pass after the demand-safety and
+  byte-extrema changes.
 
 ### Builtin hardening
 
