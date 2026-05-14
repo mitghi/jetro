@@ -1697,14 +1697,19 @@ fn write_raw_json_stream_first_from_source<W: Write>(
     if root_projectable {
         if let Some(predicate) = stream.predicate.as_ref() {
             if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
-                if let Some(()) =
-                    write_raw_json_stream_first_projected(writer, source, map, predicate, &root_fields)?
+                if let Some(()) = write_raw_json_stream_first_projected(
+                    writer,
+                    source,
+                    map,
+                    Some(predicate),
+                    &root_fields,
+                )?
                 {
                     return Ok(BytePlanWrite::Done);
                 }
             }
         } else if let Some(()) =
-            write_raw_json_stream_first_projected(writer, source, map, &NdjsonDirectItemPredicate::Literal(Val::Bool(true)), &root_fields)?
+            write_raw_json_stream_first_projected(writer, source, map, None, &root_fields)?
         {
             return Ok(BytePlanWrite::Done);
         }
@@ -1902,7 +1907,7 @@ fn write_raw_json_stream_first_projected<W: Write>(
     writer: &mut W,
     source: &[u8],
     map: &NdjsonDirectStreamMap,
-    predicate: &NdjsonDirectItemPredicate,
+    predicate: Option<&NdjsonDirectItemPredicate>,
     root_fields: &[&str],
 ) -> Result<Option<()>, JetroEngineError> {
     let start = skip_json_ws(source, 0);
@@ -1935,10 +1940,15 @@ fn write_raw_json_stream_first_projected<W: Write>(
         let Some(next) = next else {
             return Ok(None);
         };
-        let Some(matches) =
-            eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
-        else {
-            return Ok(None);
+        let matches = if let Some(predicate) = predicate {
+            let Some(matches) =
+                eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)
+            else {
+                return Ok(None);
+            };
+            matches
+        } else {
+            true
         };
         if matches {
             if let Some(direct_map) = direct_map.as_ref() {
