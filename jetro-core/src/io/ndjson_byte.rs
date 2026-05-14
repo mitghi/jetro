@@ -1252,6 +1252,9 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     stream: &NdjsonDirectStreamPlan,
     map: &NdjsonDirectStreamMap,
 ) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut root_fields = Vec::new();
+    let root_projectable = collect_stream_map_root_fields(map, &mut root_fields);
+    let mut root_spans = Vec::new();
     writer.write_all(b"[")?;
     let mut wrote = false;
     let mut failed = false;
@@ -1269,7 +1272,18 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
             failed = true;
             return None;
         }
-        if write_raw_json_stream_map(writer, item, map).is_err() {
+        let wrote_item = if root_projectable {
+            write_raw_json_stream_map_from_root_fields(
+                writer,
+                item,
+                map,
+                &root_fields,
+                &mut root_spans,
+            )
+        } else {
+            write_raw_json_stream_map(writer, item, map).map(|_| true)
+        };
+        if !matches!(wrote_item, Ok(true)) {
             failed = true;
             return None;
         }
@@ -1281,6 +1295,217 @@ fn write_raw_json_stream_collect_from_source<W: Write>(
     }
     writer.write_all(b"]")?;
     Ok(BytePlanWrite::Done)
+}
+
+fn collect_stream_map_root_fields<'a>(
+    map: &'a NdjsonDirectStreamMap,
+    out: &mut Vec<&'a str>,
+) -> bool {
+    out.clear();
+    match map {
+        NdjsonDirectStreamMap::Value(value) => collect_projection_root_field(value, out),
+        NdjsonDirectStreamMap::Array(items) => items
+            .iter()
+            .all(|value| collect_projection_root_field(value, out)),
+        NdjsonDirectStreamMap::Object(fields) => fields
+            .iter()
+            .all(|field| collect_projection_root_field(&field.value, out)),
+    }
+}
+
+fn collect_projection_root_field<'a>(
+    value: &'a NdjsonDirectProjectionValue,
+    out: &mut Vec<&'a str>,
+) -> bool {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps)
+        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+            let Some(PhysicalPathStep::Field(key)) = steps.first() else {
+                return false;
+            };
+            if !out.contains(&key.as_ref()) {
+                out.push(key.as_ref());
+            }
+            true
+        }
+        NdjsonDirectProjectionValue::Literal(_) => true,
+    }
+}
+
+fn write_raw_json_stream_map_from_root_fields<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    map: &NdjsonDirectStreamMap,
+    root_fields: &[&str],
+    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+) -> Result<bool, JetroEngineError> {
+    if !scan_raw_json_root_field_spans(item, root_fields, spans) {
+        return Ok(false);
+    }
+    match map {
+        NdjsonDirectStreamMap::Value(value) => {
+            write_raw_json_projection_value_from_root_fields(writer, item, root_fields, spans, value)
+        }
+        NdjsonDirectStreamMap::Array(items) => {
+            writer.write_all(b"[")?;
+            for (idx, value) in items.iter().enumerate() {
+                if idx > 0 {
+                    writer.write_all(b",")?;
+                }
+                if !write_raw_json_projection_value_from_root_fields(
+                    writer,
+                    item,
+                    root_fields,
+                    spans,
+                    value,
+                )? {
+                    return Ok(false);
+                }
+            }
+            writer.write_all(b"]")?;
+            Ok(true)
+        }
+        NdjsonDirectStreamMap::Object(fields) => {
+            writer.write_all(b"{")?;
+            let mut wrote = false;
+            for field in fields {
+                if field.optional {
+                    let Some(is_null) = raw_json_projection_value_from_root_is_null_or_missing(
+                        item,
+                        root_fields,
+                        spans,
+                        &field.value,
+                    ) else {
+                        return Ok(false);
+                    };
+                    if is_null {
+                        continue;
+                    }
+                }
+                if wrote {
+                    writer.write_all(b",")?;
+                }
+                write_val_json(writer, &crate::data::value::Val::Str(field.key.clone()))?;
+                writer.write_all(b":")?;
+                if !write_raw_json_projection_value_from_root_fields(
+                    writer,
+                    item,
+                    root_fields,
+                    spans,
+                    &field.value,
+                )? {
+                    return Ok(false);
+                }
+                wrote = true;
+            }
+            writer.write_all(b"}")?;
+            Ok(true)
+        }
+    }
+}
+
+fn scan_raw_json_root_field_spans(
+    item: &[u8],
+    root_fields: &[&str],
+    spans: &mut Vec<Option<std::ops::Range<usize>>>,
+) -> bool {
+    spans.clear();
+    spans.resize(root_fields.len(), None);
+    let mut remaining = root_fields.len();
+    let visited = visit_root_object_fields(item, |key, value_start, value_end| {
+        for (idx, field) in root_fields.iter().enumerate() {
+            if spans[idx].is_none() && key == field.as_bytes() {
+                spans[idx] = Some(value_start..value_end);
+                remaining -= 1;
+                break;
+            }
+        }
+        remaining > 0
+    });
+    visited || remaining == 0
+}
+
+fn write_raw_json_projection_value_from_root_fields<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    value: &NdjsonDirectProjectionValue,
+) -> Result<bool, JetroEngineError> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps) => {
+            match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
+                RawFieldValue::Found(value) => writer.write_all(value)?,
+                RawFieldValue::Missing => writer.write_all(b"null")?,
+                RawFieldValue::Fallback => return Ok(false),
+            }
+        }
+        NdjsonDirectProjectionValue::ViewScalarCall {
+            steps,
+            call,
+            optional,
+        } => {
+            let value = match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
+                RawFieldValue::Found(value) => value,
+                RawFieldValue::Missing => {
+                    writer.write_all(b"null")?;
+                    return Ok(true);
+                }
+                RawFieldValue::Fallback => return Ok(false),
+            };
+            if *optional && is_json_null(value) {
+                writer.write_all(b"null")?;
+            } else {
+                write_raw_scalar_call(writer, value, call.method)?;
+            }
+        }
+        NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+    }
+    Ok(true)
+}
+
+fn raw_json_projection_value_from_root_is_null_or_missing(
+    item: &[u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    value: &NdjsonDirectProjectionValue,
+) -> Option<bool> {
+    match value {
+        NdjsonDirectProjectionValue::Path(steps)
+        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+            match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
+                RawFieldValue::Found(value) => Some(is_json_null(value)),
+                RawFieldValue::Missing => Some(true),
+                RawFieldValue::Fallback => None,
+            }
+        }
+        NdjsonDirectProjectionValue::Literal(value) => {
+            Some(matches!(value, crate::data::value::Val::Null))
+        }
+    }
+}
+
+fn raw_json_projection_value_from_root<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
+    let Some((PhysicalPathStep::Field(key), rest)) = steps.split_first() else {
+        return RawFieldValue::Fallback;
+    };
+    let Some(idx) = root_fields.iter().position(|field| *field == key.as_ref()) else {
+        return RawFieldValue::Fallback;
+    };
+    let Some(span) = spans.get(idx).and_then(Option::as_ref) else {
+        return RawFieldValue::Missing;
+    };
+    let value = &item[span.clone()];
+    if rest.is_empty() {
+        RawFieldValue::Found(value)
+    } else {
+        raw_json_path_value_precise(value, rest)
+    }
 }
 
 fn write_raw_json_stream_map<W: Write>(
