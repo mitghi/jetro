@@ -134,6 +134,11 @@
   labels now distinguish `sort_by(...).first()/last()` stream extrema from
   numeric reducers, making performance and routing regressions easier to pin
   to the correct executor family.
+- **Array-element demand uses root-field prefixes**. Direct byte paths for
+  `first`, `nth`, and `last` array element access now avoid computing an exact
+  root-field value span when the downstream array walker can stop at the
+  demanded element boundary. This improves `last()` and mixed root/stream
+  projections without adding query-shape-specific fusion.
 
 ### Builtin hardening
 
