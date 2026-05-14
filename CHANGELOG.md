@@ -39,6 +39,9 @@
 - **Builtin names and aliases are now collision-checked**. Registry tests prove
   every canonical builtin name and alias resolves back to exactly one
   `BuiltinMethod`, preventing silent lookup drift as the builtin catalog grows.
+- **Builtin spec metadata has baseline invariant checks**. Registry tests now
+  prove every builtin exposes a finite non-negative planner cost and that
+  numeric reducer metadata cannot drift away from numeric sink metadata.
 
 ## 0.5.9
 

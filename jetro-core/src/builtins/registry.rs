@@ -630,6 +630,7 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinSinkAccumulator,
     };
 
     #[test]
@@ -683,6 +684,27 @@ mod tests {
                 assert_eq!(by_name(name).and_then(BuiltinId::method), Some(method));
                 assert_eq!(BuiltinMethod::from_name(name), method);
             }
+        }
+    }
+
+    #[test]
+    fn registry_specs_preserve_basic_metadata_invariants() {
+        for (method, _, _) in all_method_entries() {
+            let spec = method.spec();
+            assert!(
+                spec.cost.is_finite() && spec.cost >= 0.0,
+                "{method:?} has invalid planner cost {}",
+                spec.cost
+            );
+
+            let numeric_sink = spec
+                .sink
+                .is_some_and(|sink| sink.accumulator == BuiltinSinkAccumulator::Numeric);
+            assert_eq!(
+                spec.numeric_reducer.is_some(),
+                numeric_sink,
+                "{method:?} numeric reducer metadata must match numeric sink metadata"
+            );
         }
     }
 
