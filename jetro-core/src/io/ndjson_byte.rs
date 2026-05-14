@@ -1410,6 +1410,21 @@ fn write_raw_json_stream_extreme_source<W: Write>(
     want_max: bool,
     value: &NdjsonDirectProjectionValue,
 ) -> Result<BytePlanWrite, JetroEngineError> {
+    let mut root_fields = RootFieldSet::new();
+    if collect_path_root_field(key_steps, &mut root_fields)
+        && collect_projection_root_field(value, &mut root_fields)
+    {
+        if let Some(()) = write_raw_json_stream_extreme_from_root_fields(
+            writer,
+            source,
+            key_steps,
+            want_max,
+            value,
+            &root_fields,
+        )? {
+            return Ok(BytePlanWrite::Done);
+        }
+    }
     let mut best_item = Vec::new();
     let mut best_key = Vec::new();
     let mut failed = false;
@@ -1449,6 +1464,92 @@ fn write_raw_json_stream_extreme_source<W: Write>(
     }
     write_raw_json_projection_value(writer, &best_item, value)?;
     Ok(BytePlanWrite::Done)
+}
+
+fn write_raw_json_stream_extreme_from_root_fields<W: Write>(
+    writer: &mut W,
+    source: &[u8],
+    key_steps: &[PhysicalPathStep],
+    want_max: bool,
+    value: &NdjsonDirectProjectionValue,
+    root_fields: &[&str],
+) -> Result<Option<()>, JetroEngineError> {
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return Ok(None);
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        writer.write_all(b"null")?;
+        return Ok(Some(()));
+    }
+    let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
+    let mut spans = RootFieldSpans::new();
+    let mut best_key = Vec::new();
+    let mut best_output = Vec::new();
+    loop {
+        pos = skip_json_ws(source, pos);
+        spans.clear();
+        let next = if let Some(ordinals) = ordinals.as_ref() {
+            scan_raw_json_object_field_spans_by_ordinals_at(
+                source,
+                pos,
+                root_fields,
+                ordinals,
+                &mut spans,
+            )
+        } else {
+            scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
+        };
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        let key_value = match raw_json_projection_value_from_root(source, root_fields, &spans, key_steps)
+        {
+            RawFieldValue::Found(value) => value,
+            RawFieldValue::Missing | RawFieldValue::Fallback => return Ok(None),
+        };
+        let Some(key_view) = raw_json_view(key_value) else {
+            return Ok(None);
+        };
+        let replace = if best_output.is_empty() {
+            true
+        } else {
+            let Some(best_view) = raw_json_view(&best_key) else {
+                return Ok(None);
+            };
+            let order = crate::util::json_cmp_vals(key_view, best_view);
+            (want_max && order.is_gt()) || (!want_max && order.is_lt())
+        };
+        if replace {
+            best_key.clear();
+            best_key.extend_from_slice(key_value);
+            best_output.clear();
+            if !write_raw_json_projection_value_from_root_fields(
+                &mut best_output,
+                source,
+                root_fields,
+                &spans,
+                value,
+            )? {
+                return Ok(None);
+            }
+        }
+        pos = skip_json_ws(source, next);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => {
+                if best_output.is_empty() {
+                    writer.write_all(b"null")?;
+                } else {
+                    writer.write_all(&best_output)?;
+                }
+                return Ok(Some(()));
+            }
+            _ => return Ok(None),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
