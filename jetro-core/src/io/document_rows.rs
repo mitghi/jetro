@@ -1,7 +1,6 @@
 use super::stream_exec::CompiledRowStream;
-use super::stream_plan::{
-    lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
-};
+use super::stream_plan::{lower_root_rows_query, RowStreamPlan, RowStreamSourceKind};
+use super::stream_source::{DocumentRowSource, ValueRowSource};
 use super::stream_types::RowStreamRowResult;
 use crate::data::value::Val;
 use crate::{EvalError, Jetro, JetroEngine};
@@ -30,33 +29,10 @@ fn run_document_rows(
     let mut out = Vec::new();
 
     let root = document.root_val_with(engine.keys())?;
-    match root {
-        Val::Arr(rows) => match plan.direction {
-            RowStreamDirection::Forward => {
-                for row in rows.iter().cloned() {
-                    if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
-                        break;
-                    }
-                }
-            }
-            RowStreamDirection::Reverse => {
-                for row in rows.iter().rev().cloned() {
-                    if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
-                        break;
-                    }
-                }
-            }
-        },
-        root => {
-            let mut rows = document_rows(root);
-            if plan.direction == RowStreamDirection::Reverse {
-                rows.reverse();
-            }
-            for row in rows {
-                if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
-                    break;
-                }
-            }
+    let mut source = DocumentRowSource::new(root, plan.direction);
+    while let Some(row) = source.next_row() {
+        if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
+            break;
         }
     }
 
@@ -85,13 +61,6 @@ fn apply_document_row(
         RowStreamRowResult::Stop => return Ok(true),
     }
     Ok(false)
-}
-
-fn document_rows(root: Val) -> Vec<Val> {
-    match root.into_vals() {
-        Ok(rows) => rows,
-        Err(root) => vec![root],
-    }
 }
 
 #[cfg(test)]
@@ -189,13 +158,10 @@ mod tests {
             {"id": 4}
         ]));
 
-        let (out, stats) = collect_document_rows_with_stats(
-            &engine,
-            &document,
-            "$.rows().take(2).map($.id)",
-        )
-        .unwrap()
-        .unwrap();
+        let (out, stats) =
+            collect_document_rows_with_stats(&engine, &document, "$.rows().take(2).map($.id)")
+                .unwrap()
+                .unwrap();
 
         assert_eq!(serde_json::Value::from(out), json!([1, 2]));
         assert_eq!(stats.rows_scanned, 2);
