@@ -21,6 +21,7 @@ memchr = "2"
 regex = "1.10"
 itoa = "1"
 ryu = "1"
+rayon = "1.10"
 simd-json = { version = "0.13", optional = true }
 jetro-experimental = "0.2"
 

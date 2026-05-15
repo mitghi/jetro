@@ -64,7 +64,7 @@ impl CompiledRowStream {
         let mut row = Some(row);
         let mut document = None;
         let mut value = None;
-        let mut vm = engine.lock_vm();
+        let mut vm = None;
         for stage in &mut self.stages {
             match stage {
                 CompiledRowStreamStage::Filter {
@@ -91,6 +91,7 @@ impl CompiledRowStream {
                         &mut document,
                         &mut value,
                     )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
                     let keep = vm
                         .execute_val_raw_fresh_root(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
@@ -125,6 +126,7 @@ impl CompiledRowStream {
                         &mut document,
                         &mut value,
                     )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
                     let key = vm
                         .execute_val_raw_fresh_root(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
@@ -166,6 +168,7 @@ impl CompiledRowStream {
                         &mut document,
                         &mut value,
                     )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
                     value = Some(
                         vm.execute_val_raw_fresh_root(program, current)
                             .map_err(|err| row_eval_error(line_no, err))?,

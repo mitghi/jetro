@@ -14,6 +14,7 @@ mod ndjson_frame;
 #[cfg(feature = "simd-json")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
+mod ndjson_parallel;
 mod ndjson_rev;
 #[cfg(feature = "simd-json")]
 mod ndjson_stream_cache;

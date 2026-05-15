@@ -1074,6 +1074,12 @@ fn collect_ndjson_rows_stream_file<P>(
 where
     P: AsRef<Path>,
 {
+    if let Some(value) =
+        super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+    {
+        return Ok(value);
+    }
+
     let mut executor = CompiledRowStream::new(plan);
     let mut out = Vec::new();
 
