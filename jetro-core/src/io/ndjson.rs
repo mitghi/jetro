@@ -1252,6 +1252,17 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if plan.demand.retained_limit == Some(1) {
+        if let Some(value) =
+            super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+        {
+            let mut writer = ndjson_writer_with_options(writer, options);
+            let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
+            writer.flush()?;
+            return Ok(emitted);
+        }
+    }
+
     let (emitted, _) = drive_ndjson_rows_stream_file_with_stats(
         engine,
         path,
