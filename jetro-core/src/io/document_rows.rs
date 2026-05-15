@@ -1,6 +1,6 @@
 use super::stream_exec::{CompiledRowStream, RowStreamRowResult};
 use super::stream_plan::{
-    lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
+    lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
 use crate::data::value::Val;
 use crate::{EvalError, Jetro, JetroEngine};
@@ -54,19 +54,8 @@ fn document_rows(root: Val) -> Vec<Val> {
 }
 
 fn document_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, EvalError> {
-    if !looks_like_root_rows_query(query) {
-        return Ok(None);
-    }
-    let Ok(expr) = crate::parse::parser::parse(query) else {
-        return Ok(None);
-    };
-    lower_root_rows_expr(&expr, RowStreamSourceKind::DocumentRows)
+    lower_root_rows_query(query, RowStreamSourceKind::DocumentRows)
         .map_err(|err| EvalError(err.to_string()))
-}
-
-fn looks_like_root_rows_query(query: &str) -> bool {
-    let query = query.trim_start();
-    query.starts_with("$.rows(") || query.starts_with("$.rows.")
 }
 
 #[cfg(test)]

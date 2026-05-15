@@ -132,6 +132,24 @@ pub(super) fn lower_root_rows_expr(
     Ok(Some(plan))
 }
 
+pub(super) fn lower_root_rows_query(
+    query: &str,
+    source: RowStreamSourceKind,
+) -> Result<Option<RowStreamPlan>, RowStreamPlanError> {
+    if !looks_like_root_rows_query(query) {
+        return Ok(None);
+    }
+    let Ok(expr) = crate::parse::parser::parse(query) else {
+        return Ok(None);
+    };
+    lower_root_rows_expr(&expr, source)
+}
+
+pub(super) fn looks_like_root_rows_query(query: &str) -> bool {
+    let query = query.trim_start();
+    query.starts_with("$.rows(") || query.starts_with("$.rows.")
+}
+
 fn root_rows_steps(expr: &Expr) -> Option<&[Step]> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -208,5 +226,13 @@ mod tests {
         assert!(matches!(plan.stages[0], RowStreamStage::DistinctBy(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(10)));
         assert!(matches!(plan.stages[2], RowStreamStage::Map(_)));
+    }
+
+    #[test]
+    fn root_rows_query_guard_is_specific() {
+        assert!(looks_like_root_rows_query("$.rows().take(1)"));
+        assert!(looks_like_root_rows_query("  $.rows().reverse()"));
+        assert!(!looks_like_root_rows_query("$.name"));
+        assert!(!looks_like_root_rows_query("$.items.rows().take(1)"));
     }
 }
