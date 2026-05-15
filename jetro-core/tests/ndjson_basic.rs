@@ -679,6 +679,33 @@ fn rows_stream_root_find_can_use_parallel_writer() {
 }
 
 #[test]
+fn rows_stream_root_take_can_use_parallel_writer() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-parallel-root-take");
+    std::fs::write(
+        &path,
+        b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            "$.rows().reverse().map($.id).take(3)",
+            &mut out,
+            NdjsonOptions::default()
+                .with_reverse_chunk_size(8)
+                .with_parallel_min_bytes(0),
+        )
+        .expect("root rows stream take should write retained rows");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 3);
+    assert_eq!(String::from_utf8(out).unwrap(), "4\n3\n2\n");
+}
+
+#[test]
 fn rows_stream_reverse_distinct_by_keeps_latest_rows() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-reverse-distinct");

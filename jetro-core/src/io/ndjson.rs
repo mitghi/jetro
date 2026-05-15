@@ -1252,15 +1252,10 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    if plan.demand.retained_limit == Some(1) {
-        if let Some(value) =
-            super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
-        {
-            let mut writer = ndjson_writer_with_options(writer, options);
-            let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
-            writer.flush()?;
-            return Ok(emitted);
-        }
+    if let Some(value) =
+        super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+    {
+        return write_collected_rows_stream(value, external_limit, options, writer);
     }
 
     let (emitted, _) = drive_ndjson_rows_stream_file_with_stats(
@@ -1271,6 +1266,35 @@ where
         options,
         writer,
     )?;
+    Ok(emitted)
+}
+
+fn write_collected_rows_stream<W: Write>(
+    value: Val,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError> {
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut emitted = 0usize;
+    match value {
+        Val::Arr(values) => {
+            for value in values.iter() {
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+                if write_val_line_with_options(&mut writer, value, options)? {
+                    emitted += 1;
+                }
+            }
+        }
+        value => {
+            if write_val_line_with_options(&mut writer, &value, options)? {
+                emitted += 1;
+            }
+        }
+    }
+    writer.flush()?;
     Ok(emitted)
 }
 
