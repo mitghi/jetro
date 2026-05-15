@@ -8,9 +8,16 @@ use crate::vm::opcode::Program;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 
 #[cfg(feature = "simd-json")]
-use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+use super::ndjson_byte::{
+    eval_ndjson_byte_predicate_row, raw_json_byte_path_value, RawFieldValue,
+};
 #[cfg(feature = "simd-json")]
-use super::ndjson_direct::{direct_tape_predicate_for_expr, NdjsonDirectPredicate};
+use super::ndjson_direct::{
+    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan,
+};
+#[cfg(feature = "simd-json")]
+use super::ndjson_distinct::raw_distinct_key_bytes;
 
 pub(super) enum RowStreamRowResult {
     Emit(Val),
@@ -81,7 +88,19 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::DistinctBy {
                     program,
                     seen,
+                    #[cfg(feature = "simd-json")]
+                    direct,
                 } => {
+                    #[cfg(feature = "simd-json")]
+                    if let (Some(plan), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                        if let Some(inserted) = insert_direct_distinct_key(seen, raw_row, plan) {
+                            if !inserted {
+                                return Ok(RowStreamRowResult::Skip);
+                            }
+                            continue;
+                        }
+                    }
+
                     let value = ensure_row_stream_value(
                         engine,
                         line_no,
@@ -147,7 +166,7 @@ impl CompiledRowStream {
                         return Ok(RowStreamRowResult::Skip);
                     }
                 }
-                CompiledRowStreamStage::DistinctBy { program, seen } => {
+                CompiledRowStreamStage::DistinctBy { program, seen, .. } => {
                     let key = vm.execute_val_raw_fresh_root(program, value.clone())?;
                     let key = distinct_key_bytes(&key)
                         .map_err(|err| EvalError(err.to_string()))?;
@@ -172,6 +191,28 @@ impl CompiledRowStream {
         }
         Ok(RowStreamRowResult::Emit(value))
     }
+}
+
+#[cfg(feature = "simd-json")]
+fn insert_direct_distinct_key(
+    seen: &mut AdaptiveDistinctKeys,
+    row: &[u8],
+    plan: &NdjsonDirectTapePlan,
+) -> Option<bool> {
+    const NULL_KEY: &[u8] = b"null";
+
+    let NdjsonDirectTapePlan::RootPath(steps) = plan else {
+        return None;
+    };
+    let key = match raw_json_byte_path_value(row, steps) {
+        RawFieldValue::Found(value) => raw_distinct_key_bytes(value)?,
+        RawFieldValue::Missing => std::borrow::Cow::Borrowed(NULL_KEY),
+        RawFieldValue::Fallback => return None,
+    };
+    Some(match key {
+        std::borrow::Cow::Borrowed(key) => seen.insert_slice(key),
+        std::borrow::Cow::Owned(key) => seen.insert(key),
+    })
 }
 
 fn ensure_row_stream_value(
@@ -208,6 +249,8 @@ enum CompiledRowStreamStage {
     DistinctBy {
         program: Program,
         seen: AdaptiveDistinctKeys,
+        #[cfg(feature = "simd-json")]
+        direct: Option<NdjsonDirectTapePlan>,
     },
     Take {
         limit: usize,
@@ -227,6 +270,8 @@ impl CompiledRowStreamStage {
             RowStreamStage::DistinctBy(expr) => Self::DistinctBy {
                 program: Compiler::compile(expr, "<ndjson-rows-distinct-by>"),
                 seen: AdaptiveDistinctKeys::default(),
+                #[cfg(feature = "simd-json")]
+                direct: direct_tape_plan_for_expr(expr),
             },
             RowStreamStage::Take(limit) => Self::Take {
                 limit: *limit,
