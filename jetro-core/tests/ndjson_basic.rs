@@ -1,4 +1,7 @@
-use jetro_core::io::{DistinctFrontFilterKind, NdjsonControl, NdjsonOptions, NdjsonSource};
+use jetro_core::io::{
+    DistinctFrontFilterKind, NdjsonControl, NdjsonOptions, NdjsonRowFrame, NdjsonSource,
+    NullPayload, PayloadSide,
+};
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
@@ -34,6 +37,48 @@ fn run_ndjson_writes_one_json_result_per_row() {
 
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(out).unwrap(), "2\n3\n");
+}
+
+#[test]
+fn run_ndjson_delimited_payload_skips_tombstones() {
+    let engine = JetroEngine::new();
+    let input = br#"key-a|{"id":"a","v":1}
+key-b|null
+key-c| {"id":"c","v":3}
+"#;
+    let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::AfterSeparator,
+        null_payload: NullPayload::Skip,
+    });
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_with_options(Cursor::new(input), "$.id", &mut out, options)
+        .expect("delimited payload rows should run");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"a\"\n\"c\"\n");
+}
+
+#[test]
+fn run_ndjson_delimited_payload_errors_on_missing_separator() {
+    let engine = JetroEngine::new();
+    let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::AfterSeparator,
+        null_payload: NullPayload::Skip,
+    });
+    let mut out = Vec::new();
+
+    let err = engine
+        .run_ndjson_with_options(Cursor::new(br#"{"id":"a"}"#), "$.id", &mut out, options)
+        .expect_err("missing payload separator should be reported");
+
+    assert!(err
+        .to_string()
+        .contains("missing payload separator byte 0x7c"));
+    assert!(out.is_empty());
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
@@ -76,6 +77,7 @@ pub struct NdjsonOptions {
     pub initial_buffer_capacity: usize,
     pub reader_buffer_capacity: usize,
     pub reverse_chunk_size: usize,
+    pub row_frame: NdjsonRowFrame,
 }
 
 impl Default for NdjsonOptions {
@@ -85,6 +87,7 @@ impl Default for NdjsonOptions {
             initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
             reader_buffer_capacity: DEFAULT_READER_BUFFER_CAPACITY,
             reverse_chunk_size: DEFAULT_REVERSE_CHUNK_SIZE,
+            row_frame: NdjsonRowFrame::JsonLine,
         }
     }
 }
@@ -109,6 +112,11 @@ impl NdjsonOptions {
         self.reverse_chunk_size = capacity;
         self
     }
+
+    pub fn with_row_frame(mut self, row_frame: NdjsonRowFrame) -> Self {
+        self.row_frame = row_frame;
+        self
+    }
 }
 
 /// Forward-only per-row NDJSON reader.
@@ -116,6 +124,7 @@ pub struct NdjsonPerRowDriver<R> {
     reader: R,
     line_no: u64,
     max_line_len: usize,
+    row_frame: NdjsonRowFrame,
 }
 
 impl<R: BufRead> NdjsonPerRowDriver<R> {
@@ -124,11 +133,23 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             reader,
             line_no: 0,
             max_line_len: DEFAULT_MAX_LINE_LEN,
+            row_frame: NdjsonRowFrame::JsonLine,
         }
+    }
+
+    pub fn with_options(mut self, options: NdjsonOptions) -> Self {
+        self.max_line_len = options.max_line_len;
+        self.row_frame = options.row_frame;
+        self
     }
 
     pub fn with_max_line_len(mut self, max_line_len: usize) -> Self {
         self.max_line_len = max_line_len;
+        self
+    }
+
+    pub fn with_row_frame(mut self, row_frame: NdjsonRowFrame) -> Self {
+        self.row_frame = row_frame;
         self
     }
 
@@ -167,7 +188,15 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
                 });
             }
 
-            return Ok(Some((self.line_no, &buf[start..end])));
+            match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
+                FramePayload::Data(range) => {
+                    return Ok(Some((
+                        self.line_no,
+                        &buf[start + range.start..start + range.end],
+                    )));
+                }
+                FramePayload::Skip => continue,
+            }
         }
     }
 
@@ -201,6 +230,15 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
                     len,
                     max: self.max_line_len,
                 });
+            }
+
+            let payload = match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
+                FramePayload::Data(range) => start + range.start..start + range.end,
+                FramePayload::Skip => continue,
+            };
+            if payload.start > 0 || payload.end < buf.len() {
+                buf.copy_within(payload.clone(), 0);
+                buf.truncate(payload.end - payload.start);
             }
 
             let capacity = buf.capacity();
@@ -942,7 +980,7 @@ where
     R: BufRead,
     F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
@@ -1005,7 +1043,7 @@ where
         )));
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut executor = CompiledRowStream::new(plan);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
@@ -1154,7 +1192,7 @@ where
         return drive_ndjson_tape_writer(engine, reader, &tape_plan, limit, options, writer);
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut executor = NdjsonRowExecutor::new(engine, query);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
@@ -1186,7 +1224,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
@@ -1231,7 +1269,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
@@ -1365,16 +1403,19 @@ where
             let keep_going = if start == end {
                 true
             } else {
-                let row = &row[start..end];
-                if row.len() > driver.max_line_len {
+                let trimmed = &row[start..end];
+                if trimmed.len() > driver.max_line_len {
                     return Err(RowError::LineTooLarge {
                         line_no,
-                        len: row.len(),
+                        len: trimmed.len(),
                         max: driver.max_line_len,
                     }
                     .into());
                 }
-                visit(line_no, row)?
+                match frame_payload(driver.row_frame, line_no, trimmed)? {
+                    FramePayload::Data(range) => visit(line_no, &trimmed[range])?,
+                    FramePayload::Skip => true,
+                }
             };
             driver.reader.consume(pos + 1);
             if !keep_going {
@@ -1401,8 +1442,16 @@ where
                 }
                 .into());
             }
-            if !visit(driver.line_no, &spill[start..end])? {
-                return Ok(());
+            match frame_payload(driver.row_frame, driver.line_no, &spill[start..end])? {
+                FramePayload::Data(range) => {
+                    if !visit(
+                        driver.line_no,
+                        &spill[start + range.start..start + range.end],
+                    )? {
+                        return Ok(());
+                    }
+                }
+                FramePayload::Skip => {}
             }
         }
     }
@@ -1421,7 +1470,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
@@ -1719,7 +1768,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
@@ -1789,7 +1838,7 @@ where
         return Ok(0);
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     #[cfg(feature = "simd-json")]
     let direct_predicate = direct_tape_predicate(engine, predicate);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
@@ -1845,7 +1894,7 @@ where
         );
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);

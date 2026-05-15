@@ -10,6 +10,7 @@ mod ndjson_byte;
 #[cfg(feature = "simd-json")]
 mod ndjson_direct;
 mod ndjson_distinct;
+mod ndjson_frame;
 #[cfg(feature = "simd-json")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
@@ -41,6 +42,7 @@ pub use ndjson::{
     run_ndjson_with_options, NdjsonControl, NdjsonOptions, NdjsonPerRowDriver,
 };
 pub use ndjson_distinct::DistinctFrontFilterKind;
+pub use ndjson_frame::{NdjsonRowFrame, NullPayload, PayloadSide};
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
@@ -65,6 +67,16 @@ pub enum RowError {
         line_no: u64,
         message: String,
     },
+    MissingPayloadSeparator {
+        line_no: u64,
+        separator: u8,
+    },
+    EmptyPayload {
+        line_no: u64,
+    },
+    NullPayload {
+        line_no: u64,
+    },
     LineTooLarge {
         line_no: u64,
         len: usize,
@@ -88,6 +100,16 @@ impl fmt::Display for RowError {
             Self::InvalidJsonMessage { line_no, message } => {
                 write!(f, "invalid JSON on NDJSON line {line_no}: {message}")
             }
+            Self::MissingPayloadSeparator { line_no, separator } => write!(
+                f,
+                "NDJSON line {line_no} is missing payload separator byte 0x{separator:02x}"
+            ),
+            Self::EmptyPayload { line_no } => {
+                write!(f, "NDJSON line {line_no} has an empty framed payload")
+            }
+            Self::NullPayload { line_no } => {
+                write!(f, "NDJSON line {line_no} has a null framed payload")
+            }
             Self::LineTooLarge { line_no, len, max } => write!(
                 f,
                 "NDJSON line {line_no} is too large: {len} bytes exceeds {max} byte limit"
@@ -102,6 +124,9 @@ impl std::error::Error for RowError {
             Self::Io(err) => Some(err),
             Self::InvalidJson { source, .. } => Some(source),
             Self::InvalidJsonMessage { .. } => None,
+            Self::MissingPayloadSeparator { .. } => None,
+            Self::EmptyPayload { .. } => None,
+            Self::NullPayload { .. } => None,
             Self::LineTooLarge { .. } => None,
         }
     }
