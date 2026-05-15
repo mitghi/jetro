@@ -1,6 +1,6 @@
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
-use crate::parse::ast::Expr;
+use crate::parse::ast::{Expr, Step};
 use crate::plan::physical::{plan_ast_with_context, PlanningContext};
 use crate::JetroEngine;
 use std::sync::Arc;
@@ -415,8 +415,30 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapePlan> {
+    if let Some(steps) = direct_root_path_expr(expr) {
+        return Some(NdjsonDirectTapePlan::RootPath(steps));
+    }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_plan_from_plan(&plan)
+}
+
+fn direct_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Root) {
+        return None;
+    }
+    steps
+        .iter()
+        .map(|step| match step {
+            Step::Field(key) | Step::OptField(key) => {
+                Some(PhysicalPathStep::Field(Arc::from(key.as_str())))
+            }
+            Step::Index(index) => Some(PhysicalPathStep::Index(*index)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
