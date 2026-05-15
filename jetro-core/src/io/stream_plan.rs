@@ -32,6 +32,7 @@ pub(super) struct RowStreamPlan {
     pub source: RowStreamSourceKind,
     pub direction: RowStreamDirection,
     pub stages: Vec<RowStreamStage>,
+    pub demand: RowStreamDemand,
 }
 
 impl RowStreamPlan {
@@ -40,8 +41,18 @@ impl RowStreamPlan {
             source,
             direction: RowStreamDirection::Forward,
             stages: Vec::new(),
+            demand: RowStreamDemand::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct RowStreamDemand {
+    pub retained_limit: Option<usize>,
+    pub predicate_count: usize,
+    pub key_count: usize,
+    pub projector_count: usize,
+    pub late_projection: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -129,7 +140,43 @@ pub(super) fn lower_root_rows_expr(
         }
     }
 
+    plan.demand = RowStreamDemand::from_plan(&plan);
     Ok(Some(plan))
+}
+
+impl RowStreamDemand {
+    fn from_plan(plan: &RowStreamPlan) -> Self {
+        let mut demand = RowStreamDemand::default();
+        let mut seen_take = None;
+        for stage in &plan.stages {
+            match stage {
+                RowStreamStage::Filter(_) => demand.predicate_count += 1,
+                RowStreamStage::DistinctBy(_) => demand.key_count += 1,
+                RowStreamStage::Take(n) => {
+                    seen_take.get_or_insert(*n);
+                }
+                RowStreamStage::Map(_) => demand.projector_count += 1,
+            }
+        }
+        demand.retained_limit = seen_take;
+        demand.late_projection = first_projector_is_after_row_selection(&plan.stages);
+        demand
+    }
+}
+
+fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
+    let Some(map_idx) = stages
+        .iter()
+        .position(|stage| matches!(stage, RowStreamStage::Map(_)))
+    else {
+        return false;
+    };
+    stages[..map_idx].iter().any(|stage| {
+        matches!(
+            stage,
+            RowStreamStage::Filter(_) | RowStreamStage::DistinctBy(_) | RowStreamStage::Take(_)
+        )
+    })
 }
 
 pub(super) fn lower_root_rows_query(
@@ -223,9 +270,25 @@ mod tests {
         assert_eq!(plan.source, RowStreamSourceKind::NdjsonRows);
         assert_eq!(plan.direction, RowStreamDirection::Reverse);
         assert_eq!(plan.stages.len(), 3);
+        assert_eq!(plan.demand.retained_limit, Some(10));
+        assert_eq!(plan.demand.key_count, 1);
+        assert_eq!(plan.demand.projector_count, 1);
+        assert!(plan.demand.late_projection);
         assert!(matches!(plan.stages[0], RowStreamStage::DistinctBy(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(10)));
         assert!(matches!(plan.stages[2], RowStreamStage::Map(_)));
+    }
+
+    #[test]
+    fn annotates_stream_demand_without_late_projection_before_selection() {
+        let expr = parse("$.rows().map($.v).take(2)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::DocumentRows)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.demand.retained_limit, Some(2));
+        assert_eq!(plan.demand.projector_count, 1);
+        assert!(!plan.demand.late_projection);
     }
 
     #[test]

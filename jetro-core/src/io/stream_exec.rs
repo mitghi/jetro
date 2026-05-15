@@ -29,10 +29,12 @@ pub(super) struct CompiledRowStream {
 
 impl CompiledRowStream {
     pub(super) fn new(plan: &RowStreamPlan) -> Self {
-        let stages: Vec<_> = plan.stages.iter().map(CompiledRowStreamStage::new).collect();
-        let exhausted = stages
+        let stages: Vec<_> = plan
+            .stages
             .iter()
-            .any(|stage| matches!(stage, CompiledRowStreamStage::Take { limit: 0, .. }));
+            .map(CompiledRowStreamStage::new)
+            .collect();
+        let exhausted = plan.demand.retained_limit == Some(0);
         Self {
             stages,
             exhausted,
@@ -200,8 +202,7 @@ impl CompiledRowStream {
                 }
                 CompiledRowStreamStage::DistinctBy { program, seen, .. } => {
                     let key = vm.execute_val_raw_fresh_root(program, value.clone())?;
-                    let key = distinct_key_bytes(&key)
-                        .map_err(|err| EvalError(err.to_string()))?;
+                    let key = distinct_key_bytes(&key).map_err(|err| EvalError(err.to_string()))?;
                     self.stats.fallback_key_rows += 1;
                     if !seen.insert(key) {
                         self.stats.duplicate_rows += 1;
