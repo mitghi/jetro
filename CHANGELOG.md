@@ -23,6 +23,26 @@
 
 ### NDJSON observability
 
+- **NDJSON can frame JSON payloads inside delimited records**. `NdjsonOptions`
+  now supports a row-framing mode for records such as `kafka-key|payload`,
+  selecting the payload before or after a separator byte before parsing or
+  direct byte execution. The default remains plain JSON-per-line.
+- **Delimited tombstones are handled before parsing**. Framed payload mode can
+  skip, keep, or reject literal `null` payloads; the Kafka-style default use
+  case skips tombstones before JSON parsing, query execution, distinct keys, or
+  `$.rows()` stream stages do any work.
+- **Payload framing is allocation-light on hot paths**. Borrowed/direct NDJSON
+  byte paths receive a payload slice into the existing line buffer, while owned
+  fallback paths compact the payload in-place in the reusable row buffer only
+  when the separator leaves a prefix or suffix to remove.
+- **Forward, reverse, and `$.rows()` streams share framing semantics**. Reverse
+  file iteration applies the same payload framer as forward iteration, and raw
+  `$.rows().take(n)` output writes the framed JSON payload rather than the
+  original `key|payload` record.
+- **Delimited payload framing has benchmark coverage**. The NDJSON benchmark
+  includes framed root projection and framed `$.rows().take(...).map(...)`
+  cases so the separator scan and tombstone skip cost can be tracked against
+  plain NDJSON.
 - **NDJSON can now opt into whole-stream semantics from the expression**.
   Root-level `$.rows()` switches `--ndjson` evaluation from row-local mode to
   one stream plan over all rows, so expressions such as

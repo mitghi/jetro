@@ -2,7 +2,10 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use jetro_core::{io::DistinctFrontFilterKind, JetroEngine};
+use jetro_core::io::{
+    DistinctFrontFilterKind, NdjsonOptions, NdjsonRowFrame, NullPayload, PayloadSide,
+};
+use jetro_core::JetroEngine;
 
 fn build_ndjson(rows: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows * 128);
@@ -36,6 +39,23 @@ fn bench_matches(engine: &JetroEngine, data: &[u8], label: &str, predicate: &str
     let rows = engine
         .run_ndjson_matches(Cursor::new(data), predicate, limit, std::io::sink())
         .expect("NDJSON match query should run");
+    let elapsed = start.elapsed();
+    let mb = data.len() as f64 / (1024.0 * 1024.0);
+    let mb_s = mb / elapsed.as_secs_f64();
+    println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
+}
+
+fn bench_with_options(
+    engine: &JetroEngine,
+    data: &[u8],
+    label: &str,
+    query: &str,
+    options: NdjsonOptions,
+) {
+    let start = Instant::now();
+    let rows = engine
+        .run_ndjson_with_options(Cursor::new(data), query, std::io::sink(), options)
+        .expect("NDJSON query with options should run");
     let elapsed = start.elapsed();
     let mb = data.len() as f64 / (1024.0 * 1024.0);
     let mb_s = mb / elapsed.as_secs_f64();
@@ -82,6 +102,26 @@ fn build_compacted_ndjson(rows: usize, keys: usize) -> Vec<u8> {
                 i % 2 == 0,
                 10_000usize.saturating_sub(i % 10_000),
                 i % 17
+            )
+            .as_bytes(),
+        );
+        out.push(b'\n');
+    }
+    out
+}
+
+fn build_framed_ndjson(rows: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows * 144);
+    for i in 0..rows {
+        if i % 11 == 0 {
+            out.extend_from_slice(format!("key-{i}|null\n").as_bytes());
+            continue;
+        }
+        out.extend_from_slice(
+            format!(
+                r#"key-{i}|{{"id":{i},"name":"user_{i}","active":{},"score":{}}}"#,
+                i % 3 == 0,
+                10_000usize.saturating_sub(i % 10_000)
             )
             .as_bytes(),
         );
@@ -234,6 +274,29 @@ fn main() {
         "match nested contains",
         r#"attributes.first().value.contains("_1")"#,
         rows,
+    );
+
+    let framed = build_framed_ndjson(rows);
+    let framed_options =
+        NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+            separator: b'|',
+            side: PayloadSide::AfterSeparator,
+            null_payload: NullPayload::Skip,
+        });
+    println!("\nDelimited payload framing:");
+    bench_with_options(
+        &engine,
+        &framed,
+        "framed root projection",
+        "$.name",
+        framed_options,
+    );
+    bench_with_options(
+        &engine,
+        &framed,
+        "framed rows take",
+        "$.rows().take(1000).map($.id)",
+        framed_options,
     );
 
     let high_dup = build_compacted_ndjson(rows, (rows / 100).max(1));
