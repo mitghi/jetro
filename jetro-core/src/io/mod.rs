@@ -4,6 +4,7 @@
 //! caller's [`crate::JetroEngine`] plan, VM, and tape execution caches.
 
 mod ndjson;
+mod document_rows;
 mod ndjson_distinct;
 #[cfg(feature = "simd-json")]
 mod ndjson_byte;
@@ -47,6 +48,7 @@ pub use ndjson_rev::{
 };
 pub use ndjson_distinct::DistinctFrontFilterKind;
 pub use source::NdjsonSource;
+pub(crate) use document_rows::collect_document_rows;
 use std::fmt;
 
 /// Error with enough row context for users to find malformed input quickly.

@@ -317,7 +317,11 @@ impl JetroEngine {
         document: &Jetro,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
+        let expr = expr.as_ref();
+        if let Some(rows) = io::collect_document_rows(self, document, expr)? {
+            return Ok(Value::from(rows));
+        }
+        let plan = self.cached_plan(expr, exec::router::planning_context(document));
         self.collect_prepared(document, &plan)
     }
 
