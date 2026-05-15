@@ -20,6 +20,7 @@ mod source;
 #[allow(dead_code)]
 mod stream_plan;
 mod stream_exec;
+mod stream_types;
 
 pub use ndjson::{
     collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options, collect_ndjson_matches,

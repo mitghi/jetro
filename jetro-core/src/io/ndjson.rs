@@ -2,7 +2,8 @@ use super::{NdjsonSource, RowError};
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
-use super::stream_exec::{CompiledRowStream, RowStreamRowResult};
+use super::stream_exec::CompiledRowStream;
+use super::stream_types::RowStreamRowResult;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;

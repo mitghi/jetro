@@ -1,6 +1,7 @@
 use super::ndjson::{parse_row, row_eval_error};
 use super::ndjson_distinct::{distinct_key_bytes, AdaptiveDistinctKeys};
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
+use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
@@ -19,13 +20,6 @@ use super::ndjson_direct::{
 };
 #[cfg(feature = "simd-json")]
 use super::ndjson_distinct::raw_distinct_key_bytes;
-
-pub(super) enum RowStreamRowResult {
-    Emit(Val),
-    EmitBytes(Vec<u8>),
-    Skip,
-    Stop,
-}
 
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
@@ -234,20 +228,6 @@ impl CompiledRowStream {
         self.stats.rows_emitted += 1;
         Ok(RowStreamRowResult::Emit(value))
     }
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct RowStreamStats {
-    pub rows_scanned: usize,
-    pub rows_emitted: usize,
-    pub rows_filtered: usize,
-    pub duplicate_rows: usize,
-    pub direct_filter_rows: usize,
-    pub fallback_filter_rows: usize,
-    pub direct_key_rows: usize,
-    pub fallback_key_rows: usize,
-    pub direct_project_rows: usize,
-    pub fallback_project_rows: usize,
 }
 
 #[cfg(feature = "simd-json")]
