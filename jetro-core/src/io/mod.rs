@@ -42,7 +42,7 @@ pub use ndjson::{
     run_ndjson_with_options, NdjsonControl, NdjsonOptions, NdjsonPerRowDriver,
 };
 pub use ndjson_distinct::DistinctFrontFilterKind;
-pub use ndjson_frame::{NdjsonRowFrame, NullPayload, PayloadSide};
+pub use ndjson_frame::{NdjsonRowFrame, NullPayload};
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,

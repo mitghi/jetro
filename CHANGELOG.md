@@ -25,8 +25,8 @@
 
 - **NDJSON can frame JSON payloads inside delimited records**. `NdjsonOptions`
   now supports a row-framing mode for records such as `kafka-key|payload`,
-  selecting the payload before or after a separator byte before parsing or
-  direct byte execution. The default remains plain JSON-per-line.
+  selecting the payload after a separator byte before parsing or direct byte
+  execution. The default remains plain JSON-per-line.
 - **Delimited tombstones are handled before parsing**. Framed payload mode can
   skip, keep, or reject literal `null` payloads; the Kafka-style default use
   case skips tombstones before JSON parsing, query execution, distinct keys, or

@@ -1,6 +1,6 @@
 use jetro_core::io::{
     DistinctFrontFilterKind, NdjsonControl, NdjsonOptions, NdjsonRowFrame, NdjsonSource,
-    NullPayload, PayloadSide,
+    NullPayload,
 };
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
@@ -48,7 +48,6 @@ key-c| {"id":"c","v":3}
 "#;
     let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
-        side: PayloadSide::AfterSeparator,
         null_payload: NullPayload::Skip,
     });
     let mut out = Vec::new();
@@ -66,7 +65,6 @@ fn run_ndjson_delimited_payload_skips_non_payload_records() {
     let engine = JetroEngine::new();
     let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
-        side: PayloadSide::AfterSeparator,
         null_payload: NullPayload::Skip,
     });
     let mut out = Vec::new();
@@ -91,12 +89,10 @@ fn run_ndjson_delimited_payload_can_keep_or_reject_null() {
     let engine = JetroEngine::new();
     let keep = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
-        side: PayloadSide::AfterSeparator,
         null_payload: NullPayload::Keep,
     });
     let reject = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
-        side: PayloadSide::AfterSeparator,
         null_payload: NullPayload::Error,
     });
     let mut kept = Vec::new();
@@ -113,29 +109,6 @@ fn run_ndjson_delimited_payload_can_keep_or_reject_null() {
     assert_eq!(String::from_utf8(kept).unwrap(), "null\n");
     assert!(err.to_string().contains("null framed payload"));
     assert!(rejected.is_empty());
-}
-
-#[test]
-fn run_ndjson_delimited_payload_can_read_before_separator() {
-    let engine = JetroEngine::new();
-    let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
-        separator: b'|',
-        side: PayloadSide::BeforeSeparator,
-        null_payload: NullPayload::Skip,
-    });
-    let mut out = Vec::new();
-
-    let rows = engine
-        .run_ndjson_with_options(
-            Cursor::new(br#"{"id":"left"}|ignored"#),
-            "$.id",
-            &mut out,
-            options,
-        )
-        .expect("payload before separator should run");
-
-    assert_eq!(rows, 1);
-    assert_eq!(String::from_utf8(out).unwrap(), "\"left\"\n");
 }
 
 #[test]
@@ -525,7 +498,6 @@ k3|{"id":3}
 "#;
     let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
-        side: PayloadSide::AfterSeparator,
         null_payload: NullPayload::Skip,
     });
     let mut out = Vec::new();
@@ -621,7 +593,6 @@ fn rows_stream_reverse_reads_delimited_payloads_and_skips_tombstones() {
         .with_reverse_chunk_size(5)
         .with_row_frame(NdjsonRowFrame::DelimitedPayload {
             separator: b'|',
-            side: PayloadSide::AfterSeparator,
             null_payload: NullPayload::Skip,
         });
     let mut out = Vec::new();

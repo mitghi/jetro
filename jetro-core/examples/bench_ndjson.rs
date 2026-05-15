@@ -2,9 +2,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use jetro_core::io::{
-    DistinctFrontFilterKind, NdjsonOptions, NdjsonRowFrame, NullPayload, PayloadSide,
-};
+use jetro_core::io::{DistinctFrontFilterKind, NdjsonOptions, NdjsonRowFrame, NullPayload};
 use jetro_core::JetroEngine;
 
 fn build_ndjson(rows: usize) -> Vec<u8> {
@@ -280,7 +278,6 @@ fn main() {
     let framed_options =
         NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
             separator: b'|',
-            side: PayloadSide::AfterSeparator,
             null_payload: NullPayload::Skip,
         });
     println!("\nDelimited payload framing:");

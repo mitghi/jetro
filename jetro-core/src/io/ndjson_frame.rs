@@ -7,7 +7,6 @@ pub enum NdjsonRowFrame {
     JsonLine,
     DelimitedPayload {
         separator: u8,
-        side: PayloadSide,
         null_payload: NullPayload,
     },
 }
@@ -16,12 +15,6 @@ impl Default for NdjsonRowFrame {
     fn default() -> Self {
         Self::JsonLine
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PayloadSide {
-    BeforeSeparator,
-    AfterSeparator,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,16 +38,11 @@ pub(super) fn frame_payload(
 ) -> Result<FramePayload, RowError> {
     let range = match frame {
         NdjsonRowFrame::JsonLine => 0..row.len(),
-        NdjsonRowFrame::DelimitedPayload {
-            separator, side, ..
-        } => {
+        NdjsonRowFrame::DelimitedPayload { separator, .. } => {
             let Some(sep) = memchr(separator, row) else {
                 return Ok(FramePayload::Skip);
             };
-            match side {
-                PayloadSide::BeforeSeparator => 0..sep,
-                PayloadSide::AfterSeparator => sep + 1..row.len(),
-            }
+            sep + 1..row.len()
         }
     };
     let range = trim_range(row, range);
@@ -110,7 +98,6 @@ mod tests {
     fn delimited_payload_skips_null() {
         let frame = NdjsonRowFrame::DelimitedPayload {
             separator: b'|',
-            side: PayloadSide::AfterSeparator,
             null_payload: NullPayload::Skip,
         };
 
