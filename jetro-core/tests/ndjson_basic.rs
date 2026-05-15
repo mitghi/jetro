@@ -82,6 +82,58 @@ fn run_ndjson_delimited_payload_errors_on_missing_separator() {
 }
 
 #[test]
+fn run_ndjson_delimited_payload_can_keep_or_reject_null() {
+    let engine = JetroEngine::new();
+    let keep = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::AfterSeparator,
+        null_payload: NullPayload::Keep,
+    });
+    let reject = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::AfterSeparator,
+        null_payload: NullPayload::Error,
+    });
+    let mut kept = Vec::new();
+    let mut rejected = Vec::new();
+
+    let rows = engine
+        .run_ndjson_with_options(Cursor::new(b"k|null\n"), "$", &mut kept, keep)
+        .expect("null payload should be valid when configured");
+    let err = engine
+        .run_ndjson_with_options(Cursor::new(b"k|null\n"), "$", &mut rejected, reject)
+        .expect_err("null payload should be rejected when configured");
+
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(kept).unwrap(), "null\n");
+    assert!(err.to_string().contains("null framed payload"));
+    assert!(rejected.is_empty());
+}
+
+#[test]
+fn run_ndjson_delimited_payload_can_read_before_separator() {
+    let engine = JetroEngine::new();
+    let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::BeforeSeparator,
+        null_payload: NullPayload::Skip,
+    });
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_with_options(
+            Cursor::new(br#"{"id":"left"}|ignored"#),
+            "$.id",
+            &mut out,
+            options,
+        )
+        .expect("payload before separator should run");
+
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"left\"\n");
+}
+
+#[test]
 fn run_ndjson_writes_scalar_results_directly() {
     let engine = JetroEngine::new();
     let input = b"{\"s\":\"a\\\"b\\\\c\\n\",\"b\":true,\"z\":null,\"f\":1.25}\n";
@@ -457,6 +509,28 @@ not-json
         String::from_utf8(out).unwrap(),
         "{\"id\":1,\"name\":\"Ada\"}\n{\"id\":2,\"name\":\"Bob\"}\n"
     );
+}
+
+#[test]
+fn rows_stream_take_writes_framed_payload_not_original_record() {
+    let engine = JetroEngine::new();
+    let input = br#"k1|{"id":1}
+k2|null
+k3|{"id":3}
+"#;
+    let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+        separator: b'|',
+        side: PayloadSide::AfterSeparator,
+        null_payload: NullPayload::Skip,
+    });
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_with_options(Cursor::new(input), "$.rows().take(2)", &mut out, options)
+        .expect("rows stream should write framed payloads");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "{\"id\":1}\n{\"id\":3}\n");
 }
 
 #[test]
