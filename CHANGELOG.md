@@ -48,6 +48,22 @@
   scanned rows, emitted rows, filtered rows, duplicate rows, and direct versus
   fallback stage usage, giving future explain/debug output a stable accounting
   source.
+- **Row-stream planning now carries explicit demand annotations**. Root
+  `$.rows()` plans record retained-row limits, predicate/key/projector needs,
+  and whether projection can legally run after row selection, so source
+  traversal and executor setup no longer have to rediscover those facts from
+  the stage list.
+- **Document row streaming avoids eager array cloning**. Regular JSON
+  `$.rows()` now iterates `Val::Arr` documents directly in forward or reverse
+  order, stops when the stream is exhausted, and only materializes non-`Arr`
+  columnar lanes when that fallback is required.
+- **Row-stream source and executor boundaries are cleaner**. Shared row result
+  and stats types moved out of the executor, and document row traversal now
+  lives behind a small source abstraction, keeping source access separate from
+  filter/distinct/take/map stage execution.
+- **Unsupported `$.rows()` chains fail before scanning input**. Unsupported
+  stream methods and non-method stream steps now have focused planner and API
+  regression tests for both NDJSON and regular JSON document execution.
 - **Reverse NDJSON has an exact stream-level `distinct_by` API**.
   `run_ndjson_rev_distinct_by(key, query, limit, writer)` scans newest-to-oldest,
   keeps only the first row seen for each key in that stream order, writes the
