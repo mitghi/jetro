@@ -442,6 +442,23 @@ fn rows_stream_reverse_requires_file_backed_ndjson() {
 }
 
 #[test]
+fn rows_stream_unsupported_method_errors_before_scanning_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"not-json
+"#;
+    let mut out = Vec::new();
+
+    let err = engine
+        .run_ndjson(Cursor::new(input), "$.rows().sort($.score)", &mut out)
+        .expect_err("unsupported rows stream methods should fail in planning");
+
+    assert!(err
+        .to_string()
+        .contains("unsupported rows() stream method sort()"));
+    assert!(out.is_empty());
+}
+
+#[test]
 fn rows_stream_reverse_take_map_runs_from_file_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-reverse");

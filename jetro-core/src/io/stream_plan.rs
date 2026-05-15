@@ -229,6 +229,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsupported_rows_stream_method() {
+        let expr = parse("$.rows().sort($.score)").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "unsupported rows() stream method sort()");
+    }
+
+    #[test]
+    fn rejects_non_method_rows_stream_step() {
+        let expr = parse("$.rows().name").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unsupported rows() stream step"));
+    }
+
+    #[test]
     fn root_rows_query_guard_is_specific() {
         assert!(looks_like_root_rows_query("$.rows().take(1)"));
         assert!(looks_like_root_rows_query("  $.rows().reverse()"));

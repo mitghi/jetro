@@ -1168,3 +1168,18 @@ fn document_rows_public_collect_value() {
 
     assert_eq!(out, serde_json::json!([1, 2]));
 }
+
+#[test]
+fn document_rows_unsupported_method_reports_planning_error() {
+    let engine = jetro_core::JetroEngine::new();
+    let err = engine
+        .collect_value(
+            serde_json::json!([{"id": "a", "score": 1}]),
+            "$.rows().sort($.score)",
+        )
+        .expect_err("unsupported document rows stream method should fail clearly");
+
+    assert!(err
+        .to_string()
+        .contains("unsupported rows() stream method sort()"));
+}
