@@ -9,7 +9,8 @@ use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
-    eval_ndjson_byte_predicate_row, raw_json_byte_path_value, RawFieldValue,
+    eval_ndjson_byte_predicate_row, raw_json_byte_path_value, tape_plan_can_write_byte_row,
+    write_ndjson_byte_tape_plan_row, BytePlanWrite, RawFieldValue,
 };
 #[cfg(feature = "simd-json")]
 use super::ndjson_direct::{
@@ -126,7 +127,18 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
-                CompiledRowStreamStage::Map { program } => {
+                CompiledRowStreamStage::Map {
+                    program,
+                    #[cfg(feature = "simd-json")]
+                    direct,
+                } => {
+                    #[cfg(feature = "simd-json")]
+                    if let Some(raw_row) = row.as_deref() {
+                        if let Some(bytes) = write_direct_map(raw_row, direct.as_ref())? {
+                            return Ok(RowStreamRowResult::EmitBytes(bytes));
+                        }
+                    }
+
                     let current = ensure_row_stream_value(
                         engine,
                         line_no,
@@ -184,7 +196,7 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
-                CompiledRowStreamStage::Map { program } => {
+                CompiledRowStreamStage::Map { program, .. } => {
                     value = vm.execute_val_raw_fresh_root(program, value)?;
                 }
             }
@@ -256,7 +268,11 @@ enum CompiledRowStreamStage {
         limit: usize,
         seen: usize,
     },
-    Map { program: Program },
+    Map {
+        program: Program,
+        #[cfg(feature = "simd-json")]
+        direct: Option<NdjsonDirectTapePlan>,
+    },
 }
 
 impl CompiledRowStreamStage {
@@ -279,7 +295,25 @@ impl CompiledRowStreamStage {
             },
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
+                #[cfg(feature = "simd-json")]
+                direct: direct_tape_plan_for_expr(expr).filter(tape_plan_can_write_byte_row),
             },
         }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn write_direct_map(
+    row: &[u8],
+    direct: Option<&NdjsonDirectTapePlan>,
+) -> Result<Option<Vec<u8>>, JetroEngineError> {
+    let Some(plan) = direct else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    let mut scratch = Vec::new();
+    match write_ndjson_byte_tape_plan_row(&mut out, row, plan, &mut scratch)? {
+        BytePlanWrite::Done => Ok(Some(out)),
+        BytePlanWrite::Fallback => Ok(None),
     }
 }
