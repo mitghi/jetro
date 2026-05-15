@@ -101,4 +101,37 @@ mod tests {
 
         assert_eq!(serde_json::Value::from(out), json!([1]));
     }
+
+    #[test]
+    fn document_rows_reverse_distinct_keeps_stream_order() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([
+            {"id": "a", "v": 1},
+            {"id": "b", "v": 2},
+            {"id": "a", "v": 3},
+            {"id": "c", "v": 4}
+        ]));
+
+        let out = collect_document_rows(
+            &engine,
+            &document,
+            "$.rows().reverse().distinct_by($.id).take(2).map($.v)",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), json!([4, 3]));
+    }
+
+    #[test]
+    fn document_rows_scalar_is_single_row() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!(7));
+
+        let out = collect_document_rows(&engine, &document, "$.rows().map(@ + 1)")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), json!([8]));
+    }
 }

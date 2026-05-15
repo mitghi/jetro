@@ -1151,3 +1151,20 @@ fn collect_values() {
     assert_eq!(run("[1,2].collect()", &json!({})), "[1,2]");
     assert_eq!(run("null.collect()", &json!({})), "[]");
 }
+
+#[test]
+fn document_rows_public_collect_value() {
+    let engine = jetro_core::JetroEngine::new();
+    let out = engine
+        .collect_value(
+            serde_json::json!([
+                {"id": "a", "v": 1},
+                {"id": "b", "v": 2},
+                {"id": "a", "v": 3}
+            ]),
+            "$.rows().distinct_by($.id).map($.v)",
+        )
+        .unwrap();
+
+    assert_eq!(out, serde_json::json!([1, 2]));
+}
