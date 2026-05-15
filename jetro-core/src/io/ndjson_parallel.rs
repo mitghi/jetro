@@ -1,4 +1,4 @@
-use super::ndjson::{parse_row, row_eval_error};
+use super::ndjson::{parse_row, row_eval_error, NdjsonParallelism};
 use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
@@ -10,7 +10,6 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-const MIN_PARALLEL_BYTES: u64 = 64 * 1024 * 1024;
 const TARGET_RANGES_PER_THREAD: usize = 4;
 
 pub(super) fn collect_rows_stream_file<P>(
@@ -25,8 +24,11 @@ where
     let Some(limit) = parallel_limit(plan) else {
         return Ok(None);
     };
+    if options.parallelism == NdjsonParallelism::Off {
+        return Ok(None);
+    }
     let metadata = std::fs::metadata(path.as_ref())?;
-    if metadata.len() < MIN_PARALLEL_BYTES || rayon::current_num_threads() <= 1 {
+    if metadata.len() < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
         return Ok(None);
     }
 
@@ -182,6 +184,8 @@ fn split_line_aligned_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
 mod tests {
     use super::*;
     use crate::io::stream_plan::{lower_root_rows_query, RowStreamSourceKind};
+    use crate::JetroEngine;
+    use serde_json::json;
 
     #[test]
     fn parallel_limit_uses_generic_demand_metadata() {
@@ -205,5 +209,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(&rows, &[8..15, 0..7]);
+    }
+
+    #[test]
+    fn forced_parallel_collects_reverse_first_match() {
+        let engine = JetroEngine::new();
+        let path = std::env::temp_dir().join(format!(
+            "jetro-parallel-{}-{}.ndjson",
+            std::process::id(),
+            "reverse-first"
+        ));
+        std::fs::write(
+            &path,
+            b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+        )
+        .unwrap();
+        let plan = lower_root_rows_query(
+            r#"$.rows().reverse().find($.name == "target").first()"#,
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        let value = collect_rows_stream_file(
+            &engine,
+            &path,
+            &plan,
+            super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("forced parallel path should run");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(serde_json::Value::from(value), json!({"id": 2, "name": "target"}));
     }
 }

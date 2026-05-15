@@ -80,8 +80,16 @@ pub struct NdjsonOptions {
     pub initial_buffer_capacity: usize,
     pub reader_buffer_capacity: usize,
     pub reverse_chunk_size: usize,
+    pub parallel_min_bytes: u64,
+    pub parallelism: NdjsonParallelism,
     pub row_frame: NdjsonRowFrame,
     pub null_output: NdjsonNullOutput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NdjsonParallelism {
+    Auto,
+    Off,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,6 +105,8 @@ impl Default for NdjsonOptions {
             initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
             reader_buffer_capacity: DEFAULT_READER_BUFFER_CAPACITY,
             reverse_chunk_size: DEFAULT_REVERSE_CHUNK_SIZE,
+            parallel_min_bytes: 64 * 1024 * 1024,
+            parallelism: NdjsonParallelism::Auto,
             row_frame: NdjsonRowFrame::JsonLine,
             null_output: NdjsonNullOutput::Skip,
         }
@@ -121,6 +131,16 @@ impl NdjsonOptions {
 
     pub fn with_reverse_chunk_size(mut self, capacity: usize) -> Self {
         self.reverse_chunk_size = capacity;
+        self
+    }
+
+    pub fn with_parallel_min_bytes(mut self, bytes: u64) -> Self {
+        self.parallel_min_bytes = bytes;
+        self
+    }
+
+    pub fn with_parallelism(mut self, parallelism: NdjsonParallelism) -> Self {
+        self.parallelism = parallelism;
         self
     }
 
