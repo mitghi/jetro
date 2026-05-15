@@ -516,6 +516,32 @@ fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
 }
 
 #[test]
+fn rows_stream_filter_distinct_take_projects_retained_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":"a","active":false,"v":1}
+{"id":"a","active":true,"v":2}
+{"id":"b","active":true,"v":3}
+{"id":"a","active":true,"v":4}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().filter($.active).distinct_by($.id).take(2).map({id: $.id, v: $.v})",
+            &mut out,
+        )
+        .expect("rows stream should stop after retained filtered distinct rows");
+
+    assert_eq!(rows, 2);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":\"a\",\"v\":2}\n{\"id\":\"b\",\"v\":3}\n"
+    );
+}
+
+#[test]
 fn run_ndjson_source_limit_dispatches_file_and_reader_inputs() {
     let engine = JetroEngine::new();
     let reader = NdjsonSource::reader(Cursor::new(b"{\"n\":1}\n{\"n\":2}\nnot-json\n".to_vec()));
