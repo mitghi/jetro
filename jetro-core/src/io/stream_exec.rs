@@ -30,6 +30,7 @@ pub(super) enum RowStreamRowResult {
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
     exhausted: bool,
+    stats: RowStreamStats,
 }
 
 impl CompiledRowStream {
@@ -38,11 +39,20 @@ impl CompiledRowStream {
         let exhausted = stages
             .iter()
             .any(|stage| matches!(stage, CompiledRowStreamStage::Take { limit: 0, .. }));
-        Self { stages, exhausted }
+        Self {
+            stages,
+            exhausted,
+            stats: RowStreamStats::default(),
+        }
     }
 
     pub(super) fn is_exhausted(&self) -> bool {
         self.exhausted
+    }
+
+    #[cfg(test)]
+    pub(super) fn stats(&self) -> &RowStreamStats {
+        &self.stats
     }
 
     pub(super) fn apply_owned_row(
@@ -51,6 +61,7 @@ impl CompiledRowStream {
         line_no: u64,
         row: Vec<u8>,
     ) -> Result<RowStreamRowResult, JetroEngineError> {
+        self.stats.rows_scanned += 1;
         let mut row = Some(row);
         let mut document = None;
         let mut value = None;
@@ -65,7 +76,9 @@ impl CompiledRowStream {
                     #[cfg(feature = "simd-json")]
                     if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+                            self.stats.direct_filter_rows += 1;
                             if !keep {
+                                self.stats.rows_filtered += 1;
                                 return Ok(RowStreamRowResult::Skip);
                             }
                             continue;
@@ -82,7 +95,9 @@ impl CompiledRowStream {
                     let keep = vm
                         .execute_val_raw_fresh_root(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
+                    self.stats.fallback_filter_rows += 1;
                     if !is_truthy(&keep) {
+                        self.stats.rows_filtered += 1;
                         return Ok(RowStreamRowResult::Skip);
                     }
                 }
@@ -95,7 +110,9 @@ impl CompiledRowStream {
                     #[cfg(feature = "simd-json")]
                     if let (Some(plan), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(inserted) = insert_direct_distinct_key(seen, raw_row, plan) {
+                            self.stats.direct_key_rows += 1;
                             if !inserted {
+                                self.stats.duplicate_rows += 1;
                                 return Ok(RowStreamRowResult::Skip);
                             }
                             continue;
@@ -113,7 +130,9 @@ impl CompiledRowStream {
                         .execute_val_raw_fresh_root(program, value.clone())
                         .map_err(|err| row_eval_error(line_no, err))?;
                     let key = distinct_key_bytes(&key)?;
+                    self.stats.fallback_key_rows += 1;
                     if !seen.insert(key) {
+                        self.stats.duplicate_rows += 1;
                         return Ok(RowStreamRowResult::Skip);
                     }
                 }
@@ -135,6 +154,8 @@ impl CompiledRowStream {
                     #[cfg(feature = "simd-json")]
                     if let Some(raw_row) = row.as_deref() {
                         if let Some(bytes) = write_direct_map(raw_row, direct.as_ref())? {
+                            self.stats.direct_project_rows += 1;
+                            self.stats.rows_emitted += 1;
                             return Ok(RowStreamRowResult::EmitBytes(bytes));
                         }
                     }
@@ -150,16 +171,19 @@ impl CompiledRowStream {
                         vm.execute_val_raw_fresh_root(program, current)
                             .map_err(|err| row_eval_error(line_no, err))?,
                     );
+                    self.stats.fallback_project_rows += 1;
                 }
             }
         }
 
         if value.is_none() {
             if let Some(row) = row {
+                self.stats.rows_emitted += 1;
                 return Ok(RowStreamRowResult::EmitBytes(row));
             }
         }
         let value = ensure_row_stream_value(engine, line_no, &mut row, &mut document, &mut value)?;
+        self.stats.rows_emitted += 1;
         Ok(RowStreamRowResult::Emit(value))
     }
 
@@ -169,12 +193,15 @@ impl CompiledRowStream {
         vm: &mut VM,
         row: Val,
     ) -> Result<RowStreamRowResult, EvalError> {
+        self.stats.rows_scanned += 1;
         let mut value = row;
         for stage in &mut self.stages {
             match stage {
                 CompiledRowStreamStage::Filter { program, .. } => {
                     let keep = vm.execute_val_raw_fresh_root(program, value.clone())?;
+                    self.stats.fallback_filter_rows += 1;
                     if !is_truthy(&keep) {
+                        self.stats.rows_filtered += 1;
                         return Ok(RowStreamRowResult::Skip);
                     }
                 }
@@ -182,7 +209,9 @@ impl CompiledRowStream {
                     let key = vm.execute_val_raw_fresh_root(program, value.clone())?;
                     let key = distinct_key_bytes(&key)
                         .map_err(|err| EvalError(err.to_string()))?;
+                    self.stats.fallback_key_rows += 1;
                     if !seen.insert(key) {
+                        self.stats.duplicate_rows += 1;
                         return Ok(RowStreamRowResult::Skip);
                     }
                 }
@@ -198,11 +227,27 @@ impl CompiledRowStream {
                 }
                 CompiledRowStreamStage::Map { program, .. } => {
                     value = vm.execute_val_raw_fresh_root(program, value)?;
+                    self.stats.fallback_project_rows += 1;
                 }
             }
         }
+        self.stats.rows_emitted += 1;
         Ok(RowStreamRowResult::Emit(value))
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct RowStreamStats {
+    pub rows_scanned: usize,
+    pub rows_emitted: usize,
+    pub rows_filtered: usize,
+    pub duplicate_rows: usize,
+    pub direct_filter_rows: usize,
+    pub fallback_filter_rows: usize,
+    pub direct_key_rows: usize,
+    pub fallback_key_rows: usize,
+    pub direct_project_rows: usize,
+    pub fallback_project_rows: usize,
 }
 
 #[cfg(feature = "simd-json")]
@@ -315,5 +360,51 @@ fn write_direct_map(
     match write_ndjson_byte_tape_plan_row(&mut out, row, plan, &mut scratch)? {
         BytePlanWrite::Done => Ok(Some(out)),
         BytePlanWrite::Fallback => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::stream_plan::{lower_root_rows_expr, RowStreamSourceKind};
+    use crate::parse::parser::parse;
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn stats_track_direct_and_fallback_stage_paths() {
+        let expr = parse("$.rows().filter($.active).distinct_by($.id).map($.id)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        let engine = JetroEngine::new();
+        let mut stream = CompiledRowStream::new(&plan);
+
+        assert!(matches!(
+            stream
+                .apply_owned_row(&engine, 1, br#"{"id":"a","active":false}"#.to_vec())
+                .unwrap(),
+            RowStreamRowResult::Skip
+        ));
+        assert!(matches!(
+            stream
+                .apply_owned_row(&engine, 2, br#"{"id":"a","active":true}"#.to_vec())
+                .unwrap(),
+            RowStreamRowResult::Emit(_) | RowStreamRowResult::EmitBytes(_)
+        ));
+        assert!(matches!(
+            stream
+                .apply_owned_row(&engine, 3, br#"{"id":"a","active":true}"#.to_vec())
+                .unwrap(),
+            RowStreamRowResult::Skip
+        ));
+
+        let stats = stream.stats();
+        assert_eq!(stats.rows_scanned, 3);
+        assert_eq!(stats.rows_filtered, 1);
+        assert_eq!(stats.duplicate_rows, 1);
+        assert_eq!(stats.rows_emitted, 1);
+        assert_eq!(stats.direct_filter_rows + stats.fallback_filter_rows, 3);
+        assert_eq!(stats.direct_key_rows + stats.fallback_key_rows, 2);
+        assert_eq!(stats.direct_project_rows + stats.fallback_project_rows, 1);
     }
 }
