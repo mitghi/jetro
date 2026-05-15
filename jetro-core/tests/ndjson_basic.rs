@@ -79,7 +79,11 @@ fn run_ndjson_writes_scalar_results_directly() {
 
     let mut lower_out = Vec::new();
     engine
-        .run_ndjson(Cursor::new(b"{\"s\":\"ADA\"}\n"), "$.s.lower()", &mut lower_out)
+        .run_ndjson(
+            Cursor::new(b"{\"s\":\"ADA\"}\n"),
+            "$.s.lower()",
+            &mut lower_out,
+        )
         .expect("byte scalar lower call should write");
     assert_eq!(String::from_utf8(lower_out).unwrap(), "\"ada\"\n");
 }
@@ -87,7 +91,8 @@ fn run_ndjson_writes_scalar_results_directly() {
 #[test]
 fn run_ndjson_writes_root_fields_from_byte_path() {
     let engine = JetroEngine::new();
-    let input = b"{\"id\":1,\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n{\"i\\u0064\":3,\"name\":\"Cat\"}\n";
+    let input =
+        b"{\"id\":1,\"name\":\"Ada\"}\n{\"name\":\"Bob\"}\n{\"i\\u0064\":3,\"name\":\"Cat\"}\n";
     let mut id_out = Vec::new();
 
     engine
@@ -556,6 +561,39 @@ not-json
         String::from_utf8(out).unwrap(),
         "{\"id\":\"a\",\"v\":2}\n{\"id\":\"b\",\"v\":3}\n"
     );
+}
+
+#[test]
+fn rows_stream_source_dispatch_matches_cli_file_mode() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-cli-dispatch");
+    std::fs::write(
+        &path,
+        b"{\"id\":\"old-a\",\"k\":\"a\",\"v\":1}\n{\"id\":\"new-b\",\"k\":\"b\",\"v\":2}\n{\"id\":\"new-a\",\"k\":\"a\",\"v\":3}\n",
+    )
+    .unwrap();
+    let mut row_local = Vec::new();
+    let mut stream = Vec::new();
+
+    let row_local_rows = engine
+        .run_ndjson_source(NdjsonSource::file(path.clone()), "$.id", &mut row_local)
+        .expect("file-backed NDJSON row-local query should still run per row");
+    let stream_rows = engine
+        .run_ndjson_source(
+            NdjsonSource::file(path.clone()),
+            "$.rows().reverse().distinct_by($.k).take(2).map($.id)",
+            &mut stream,
+        )
+        .expect("file-backed NDJSON rows() query should run as one stream");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(row_local_rows, 3);
+    assert_eq!(
+        String::from_utf8(row_local).unwrap(),
+        "\"old-a\"\n\"new-b\"\n\"new-a\"\n"
+    );
+    assert_eq!(stream_rows, 2);
+    assert_eq!(String::from_utf8(stream).unwrap(), "\"new-a\"\n\"new-b\"\n");
 }
 
 #[test]
