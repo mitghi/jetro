@@ -729,6 +729,62 @@ fn rows_stream_subquery_lifts_reverse_find_in_object_wrapper() {
 }
 
 #[test]
+fn rows_stream_subquery_lifts_reverse_find_in_if_wrapper() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-if");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#""hit" if $.rows().reverse().find($.name == "target").first().id == 2 else "miss""#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("rows stream subquery should lift from if condition");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"hit\"\n");
+}
+
+#[test]
+fn rows_stream_subquery_lifts_reverse_find_in_match_wrapper() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-match");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#"match $.rows().reverse().find($.name == "target").first() with {
+                {id: id, name: name} -> {id, name},
+                _ -> null
+            }"#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("rows stream subquery should lift from match scrutinee");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":2,\"name\":\"target\"}\n"
+    );
+}
+
+#[test]
 fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"ab","v":1}
