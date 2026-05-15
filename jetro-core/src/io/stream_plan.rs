@@ -116,6 +116,11 @@ pub(super) fn lower_root_rows_expr(
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Filter(expr));
             }
+            BuiltinMethod::Find | BuiltinMethod::FindFirst | BuiltinMethod::FindOne => {
+                let expr = single_expr_arg(name, args)?.clone();
+                plan.stages.push(RowStreamStage::Filter(expr));
+                plan.stages.push(RowStreamStage::Take(1));
+            }
             BuiltinMethod::UniqueBy => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::DistinctBy(expr));
@@ -277,6 +282,21 @@ mod tests {
         assert!(matches!(plan.stages[0], RowStreamStage::DistinctBy(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(10)));
         assert!(matches!(plan.stages[2], RowStreamStage::Map(_)));
+    }
+
+    #[test]
+    fn lowers_rows_find_to_filter_take_one() {
+        let expr = parse("$.rows().reverse().find($.name == \"Ada\")").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.direction, RowStreamDirection::Reverse);
+        assert_eq!(plan.stages.len(), 2);
+        assert_eq!(plan.demand.retained_limit, Some(1));
+        assert_eq!(plan.demand.predicate_count, 1);
+        assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
+        assert!(matches!(plan.stages[1], RowStreamStage::Take(1)));
     }
 
     #[test]
