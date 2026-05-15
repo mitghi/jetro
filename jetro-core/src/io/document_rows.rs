@@ -5,7 +5,6 @@ use super::stream_plan::{
 use super::stream_types::RowStreamRowResult;
 use crate::data::value::Val;
 use crate::{EvalError, Jetro, JetroEngine};
-use std::borrow::Cow;
 use std::sync::Arc;
 
 pub(crate) fn collect_document_rows(
@@ -17,41 +16,96 @@ pub(crate) fn collect_document_rows(
         return Ok(None);
     };
 
-    let root = document.root_val_with(engine.keys())?;
-    let mut rows = document_rows(root);
-    if plan.direction == RowStreamDirection::Reverse {
-        rows.reverse();
-    }
+    let (out, _) = run_document_rows(engine, document, &plan)?;
+    Ok(Some(out))
+}
 
+fn run_document_rows(
+    engine: &JetroEngine,
+    document: &Jetro,
+    plan: &RowStreamPlan,
+) -> Result<(Val, super::stream_types::RowStreamStats), EvalError> {
     let mut stream = CompiledRowStream::new(&plan);
     let mut vm = engine.lock_vm();
     let mut out = Vec::new();
-    for row in rows {
-        if stream.is_exhausted() {
-            break;
-        }
-        match stream.apply_val_row(&mut vm, row)? {
-            RowStreamRowResult::Emit(value) => out.push(value),
-            RowStreamRowResult::EmitBytes(bytes) => {
-                return Err(EvalError(format!(
-                    "internal rows() stream error: byte output in document mode ({} bytes)",
-                    bytes.len()
-                )));
+
+    let root = document.root_val_with(engine.keys())?;
+    match root {
+        Val::Arr(rows) => match plan.direction {
+            RowStreamDirection::Forward => {
+                for row in rows.iter().cloned() {
+                    if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
+                        break;
+                    }
+                }
             }
-            RowStreamRowResult::Skip => {}
-            RowStreamRowResult::Stop => break,
+            RowStreamDirection::Reverse => {
+                for row in rows.iter().rev().cloned() {
+                    if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
+                        break;
+                    }
+                }
+            }
+        },
+        root => {
+            let mut rows = document_rows(root);
+            if plan.direction == RowStreamDirection::Reverse {
+                rows.reverse();
+            }
+            for row in rows {
+                if apply_document_row(&mut stream, &mut vm, row, &mut out)? {
+                    break;
+                }
+            }
         }
     }
 
-    Ok(Some(Val::Arr(Arc::new(out))))
+    let stats = stream.stats().clone();
+    Ok((Val::Arr(Arc::new(out)), stats))
+}
+
+fn apply_document_row(
+    stream: &mut CompiledRowStream,
+    vm: &mut crate::VM,
+    row: Val,
+    out: &mut Vec<Val>,
+) -> Result<bool, EvalError> {
+    if stream.is_exhausted() {
+        return Ok(true);
+    }
+    match stream.apply_val_row(vm, row)? {
+        RowStreamRowResult::Emit(value) => out.push(value),
+        RowStreamRowResult::EmitBytes(bytes) => {
+            return Err(EvalError(format!(
+                "internal rows() stream error: byte output in document mode ({} bytes)",
+                bytes.len()
+            )));
+        }
+        RowStreamRowResult::Skip => {}
+        RowStreamRowResult::Stop => return Ok(true),
+    }
+    Ok(false)
 }
 
 fn document_rows(root: Val) -> Vec<Val> {
-    match root.as_vals() {
-        Some(Cow::Borrowed(rows)) => rows.to_vec(),
-        Some(Cow::Owned(rows)) => rows,
-        None => vec![root],
+    match root.into_vals() {
+        Ok(rows) => rows,
+        Err(root) => vec![root],
     }
+}
+
+#[cfg(test)]
+fn collect_document_rows_with_stats(
+    engine: &JetroEngine,
+    document: &Jetro,
+    query: &str,
+) -> Result<Option<(Val, super::stream_types::RowStreamStats)>, EvalError> {
+    let Some(plan) = document_rows_stream_plan(query)? else {
+        return Ok(None);
+    };
+
+    let (out, stats) = run_document_rows(engine, document, &plan)?;
+    Ok(Some((out, stats)))
 }
 
 fn document_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, EvalError> {
@@ -123,5 +177,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), json!([8]));
+    }
+
+    #[test]
+    fn document_rows_take_stops_without_scanning_full_array() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([
+            {"id": 1},
+            {"id": 2},
+            {"id": 3},
+            {"id": 4}
+        ]));
+
+        let (out, stats) = collect_document_rows_with_stats(
+            &engine,
+            &document,
+            "$.rows().take(2).map($.id)",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), json!([1, 2]));
+        assert_eq!(stats.rows_scanned, 2);
+        assert_eq!(stats.rows_emitted, 2);
     }
 }

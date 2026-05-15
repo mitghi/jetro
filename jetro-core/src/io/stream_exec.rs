@@ -44,7 +44,6 @@ impl CompiledRowStream {
         self.exhausted
     }
 
-    #[cfg(test)]
     pub(super) fn stats(&self) -> &RowStreamStats {
         &self.stats
     }
