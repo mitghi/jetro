@@ -53,6 +53,7 @@ pub(super) struct RowStreamDemand {
     pub key_count: usize,
     pub projector_count: usize,
     pub late_projection: bool,
+    pub parallel: RowStreamParallelism,
 }
 
 #[derive(Clone, Debug)]
@@ -61,6 +62,20 @@ pub(super) enum RowStreamStage {
     DistinctBy(Expr),
     Take(usize),
     Map(Expr),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum RowStreamParallelism {
+    #[default]
+    Sequential,
+    PartitionFilter {
+        retained_limit: Option<usize>,
+        direction: RowStreamDirection,
+    },
+    PartitionMap {
+        retained_limit: Option<usize>,
+        direction: RowStreamDirection,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -165,7 +180,35 @@ impl RowStreamDemand {
         }
         demand.retained_limit = seen_take;
         demand.late_projection = first_projector_is_after_row_selection(&plan.stages);
+        demand.parallel = classify_parallelism(plan, demand.retained_limit);
         demand
+    }
+}
+
+fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> RowStreamParallelism {
+    let mut saw_filter = false;
+    let mut saw_map = false;
+    for stage in &plan.stages {
+        match stage {
+            RowStreamStage::Filter(_) => saw_filter = true,
+            RowStreamStage::Map(_) => saw_map = true,
+            RowStreamStage::Take(_) => {}
+            RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
+        }
+    }
+
+    if saw_filter {
+        RowStreamParallelism::PartitionFilter {
+            retained_limit,
+            direction: plan.direction,
+        }
+    } else if saw_map {
+        RowStreamParallelism::PartitionMap {
+            retained_limit,
+            direction: plan.direction,
+        }
+    } else {
+        RowStreamParallelism::Sequential
     }
 }
 
@@ -279,6 +322,10 @@ mod tests {
         assert_eq!(plan.demand.key_count, 1);
         assert_eq!(plan.demand.projector_count, 1);
         assert!(plan.demand.late_projection);
+        assert!(matches!(
+            plan.demand.parallel,
+            RowStreamParallelism::Sequential
+        ));
         assert!(matches!(plan.stages[0], RowStreamStage::DistinctBy(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(10)));
         assert!(matches!(plan.stages[2], RowStreamStage::Map(_)));
@@ -295,6 +342,13 @@ mod tests {
         assert_eq!(plan.stages.len(), 2);
         assert_eq!(plan.demand.retained_limit, Some(1));
         assert_eq!(plan.demand.predicate_count, 1);
+        assert!(matches!(
+            plan.demand.parallel,
+            RowStreamParallelism::PartitionFilter {
+                retained_limit: Some(1),
+                direction: RowStreamDirection::Reverse,
+            }
+        ));
         assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(1)));
     }
