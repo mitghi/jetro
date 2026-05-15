@@ -30,15 +30,24 @@
   configure reverse traversal, retained-row early stop, de-duplication, and
   projection without extra CLI flags.
 - **`$.rows()` stream execution reuses existing stage machinery**. Supported
-  `filter` stages can use direct predicates, `distinct_by` uses the shared
-  adaptive distinct state and canonical key serialization, and unsupported
-  expressions fall back to the compiled VM over the row value, preserving
-  correctness without query-chain-specific kernels.
+  root-path `distinct_by` keys and final `map` projections use the shared
+  byte/tape direct paths, `distinct_by` uses the shared adaptive distinct state
+  and canonical key serialization, and unsupported expressions fall back to the
+  compiled VM over the row value, preserving correctness without
+  query-chain-specific kernels.
 - **Bounded row streams avoid unnecessary parsing**. `$.rows().take(n)` and
   direct-filtered retained rows can write original NDJSON row bytes directly;
   `first()` lowers to the same bounded stream stage as `take(1)`, and
   file-backed `reverse()` uses the reverse NDJSON driver while reader-backed
   reverse streams return a clear unsupported-source error.
+- **`$.rows()` also works for regular JSON documents**. Array documents stream
+  their elements, object/scalar documents behave as a single row, and the
+  collected result is returned as a JSON array using the same stream stage
+  executor as NDJSON.
+- **Row-stream execution tracks internal path stats**. The executor now records
+  scanned rows, emitted rows, filtered rows, duplicate rows, and direct versus
+  fallback stage usage, giving future explain/debug output a stable accounting
+  source.
 - **Reverse NDJSON has an exact stream-level `distinct_by` API**.
   `run_ndjson_rev_distinct_by(key, query, limit, writer)` scans newest-to-oldest,
   keeps only the first row seen for each key in that stream order, writes the
