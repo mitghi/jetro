@@ -785,6 +785,29 @@ fn rows_stream_subquery_lifts_reverse_find_in_match_wrapper() {
 }
 
 #[test]
+fn rows_stream_subquery_rejects_multiple_streams() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-multiple");
+    std::fs::write(&path, b"{\"id\":1}\n{\"id\":2}\n").unwrap();
+    let mut out = Vec::new();
+
+    let err = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#"{a: $.rows().take(1), b: $.rows().reverse().take(1)}"#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect_err("multiple rows streams should be rejected");
+
+    let _ = std::fs::remove_file(&path);
+    assert!(err
+        .to_string()
+        .contains("multiple $.rows() stream subqueries are not supported"));
+    assert!(out.is_empty());
+}
+
+#[test]
 fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"ab","v":1}
