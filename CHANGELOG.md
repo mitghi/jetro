@@ -61,6 +61,19 @@
   and stats types moved out of the executor, and document row traversal now
   lives behind a small source abstraction, keeping source access separate from
   filter/distinct/take/map stage execution.
+- **Row-stream stats identify source and direction**. Internal stats now carry
+  the planned row source and traversal direction alongside counters, so future
+  explain/debug output can attribute direct/fallback behavior without
+  re-inspecting the stream plan.
+- **Expression-level `$.rows()` has benchmark coverage**. The NDJSON core
+  benchmark now includes reader-backed take/projection and
+  filter/distinct/take streams, plus file-backed reverse take, reverse
+  distinct/take, and fallback-key cases to compare expression-driven streaming
+  against the older direct APIs.
+- **CLI-equivalent file dispatch has regression coverage**. Core tests now
+  prove that file-backed `run_ndjson_source` keeps ordinary `--ndjson '$.id'`
+  row-local while root `$.rows().reverse().distinct_by(...).take(...)` is
+  planned as one whole-file stream through the same API used by jetrocli.
 - **Unsupported `$.rows()` chains fail before scanning input**. Unsupported
   stream methods and non-method stream steps now have focused planner and API
   regression tests for both NDJSON and regular JSON document execution.
