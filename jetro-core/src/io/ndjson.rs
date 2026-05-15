@@ -3559,6 +3559,8 @@ not-json
 
         assert_eq!(emitted, 2);
         assert_eq!(String::from_utf8(out).unwrap(), "\"a\"\n\"b\"\n");
+        assert_eq!(stats.source, super::RowStreamSourceKind::NdjsonRows);
+        assert_eq!(stats.direction, super::RowStreamDirection::Forward);
         assert_eq!(stats.rows_scanned, 3);
         assert_eq!(stats.rows_filtered, 1);
         assert_eq!(stats.rows_emitted, 2);

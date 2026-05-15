@@ -164,6 +164,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(serde_json::Value::from(out), json!([1, 2]));
+        assert_eq!(stats.source, RowStreamSourceKind::DocumentRows);
         assert_eq!(stats.rows_scanned, 2);
         assert_eq!(stats.rows_emitted, 2);
     }

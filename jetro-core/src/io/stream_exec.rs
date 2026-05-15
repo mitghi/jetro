@@ -38,7 +38,11 @@ impl CompiledRowStream {
         Self {
             stages,
             exhausted,
-            stats: RowStreamStats::default(),
+            stats: RowStreamStats {
+                source: plan.source,
+                direction: plan.direction,
+                ..RowStreamStats::default()
+            },
         }
     }
 
