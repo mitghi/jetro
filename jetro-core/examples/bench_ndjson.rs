@@ -42,6 +42,34 @@ fn bench_matches(engine: &JetroEngine, data: &[u8], label: &str, predicate: &str
     println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
 }
 
+fn bench_rows_stream_reader(engine: &JetroEngine, data: &[u8], label: &str, query: &str) {
+    let start = Instant::now();
+    let rows = engine
+        .run_ndjson(Cursor::new(data), query, std::io::sink())
+        .expect("NDJSON rows() stream query should run");
+    let elapsed = start.elapsed();
+    let mb = data.len() as f64 / (1024.0 * 1024.0);
+    let mb_s = mb / elapsed.as_secs_f64();
+    println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
+}
+
+fn bench_rows_stream_file(
+    engine: &JetroEngine,
+    path: &Path,
+    bytes: usize,
+    label: &str,
+    query: &str,
+) {
+    let start = Instant::now();
+    let rows = engine
+        .run_ndjson_file(path, query, std::io::sink())
+        .expect("file-backed NDJSON rows() stream query should run");
+    let elapsed = start.elapsed();
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let mb_s = mb / elapsed.as_secs_f64();
+    println!("{label:<36} {rows:>8} rows {elapsed:>10.3?} {mb_s:>8.1} MiB/s");
+}
+
 fn build_compacted_ndjson(rows: usize, keys: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(rows * 96);
     let keys = keys.max(1);
@@ -221,6 +249,40 @@ fn main() {
         "id",
         r#"{id: id, version: version}"#,
         rows,
+    );
+    println!("\nExpression-level rows() streams:");
+    bench_rows_stream_reader(
+        &engine,
+        &data,
+        "rows take+project",
+        "$.rows().take(1000).map($.name)",
+    );
+    bench_rows_stream_reader(
+        &engine,
+        &data,
+        "rows filter+distinct+take",
+        "$.rows().filter($.active == true).distinct_by($.id).take(1000).map({id: $.id, name: $.name})",
+    );
+    bench_rows_stream_file(
+        &engine,
+        &high_dup_path,
+        high_dup.len(),
+        "rows reverse+take",
+        "$.rows().reverse().take(1000).map($.id)",
+    );
+    bench_rows_stream_file(
+        &engine,
+        &high_dup_path,
+        high_dup.len(),
+        "rows reverse+distinct+take",
+        "$.rows().reverse().distinct_by($.id).take(1000).map({id: $.id, version: $.version})",
+    );
+    bench_rows_stream_file(
+        &engine,
+        &high_dup_path,
+        high_dup.len(),
+        "rows fallback key",
+        "$.rows().reverse().distinct_by($.name.upper()).take(1000).map($.payload.score)",
     );
     bench_rev_distinct(
         &engine,
