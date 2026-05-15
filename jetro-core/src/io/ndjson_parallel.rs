@@ -243,4 +243,76 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(serde_json::Value::from(value), json!({"id": 2, "name": "target"}));
     }
+
+    #[test]
+    fn forced_parallel_merges_forward_filter_take() {
+        let engine = JetroEngine::new();
+        let path = std::env::temp_dir().join(format!(
+            "jetro-parallel-{}-{}.ndjson",
+            std::process::id(),
+            "filter-take"
+        ));
+        std::fs::write(
+            &path,
+            b"{\"id\":1,\"active\":false}\n{\"id\":2,\"active\":true}\n{\"id\":3,\"active\":true}\n{\"id\":4,\"active\":true}\n",
+        )
+        .unwrap();
+        let plan = lower_root_rows_query(
+            "$.rows().filter($.active).take(2)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        let value = collect_rows_stream_file(
+            &engine,
+            &path,
+            &plan,
+            super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("forced parallel path should run");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            serde_json::Value::from(value),
+            json!([
+                {"id": 2, "active": true},
+                {"id": 3, "active": true}
+            ])
+        );
+    }
+
+    #[test]
+    fn forced_parallel_merges_reverse_map_take() {
+        let engine = JetroEngine::new();
+        let path = std::env::temp_dir().join(format!(
+            "jetro-parallel-{}-{}.ndjson",
+            std::process::id(),
+            "map-take"
+        ));
+        std::fs::write(
+            &path,
+            b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n",
+        )
+        .unwrap();
+        let plan = lower_root_rows_query(
+            "$.rows().reverse().map($.id).take(3)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        let value = collect_rows_stream_file(
+            &engine,
+            &path,
+            &plan,
+            super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("forced parallel path should run");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(serde_json::Value::from(value), json!([4, 3, 2]));
+    }
 }
