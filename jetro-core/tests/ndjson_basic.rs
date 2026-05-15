@@ -62,7 +62,7 @@ key-c| {"id":"c","v":3}
 }
 
 #[test]
-fn run_ndjson_delimited_payload_errors_on_missing_separator() {
+fn run_ndjson_delimited_payload_skips_non_payload_records() {
     let engine = JetroEngine::new();
     let options = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
@@ -71,14 +71,19 @@ fn run_ndjson_delimited_payload_errors_on_missing_separator() {
     });
     let mut out = Vec::new();
 
-    let err = engine
-        .run_ndjson_with_options(Cursor::new(br#"{"id":"a"}"#), "$.id", &mut out, options)
-        .expect_err("missing payload separator should be reported");
+    let rows = engine
+        .run_ndjson_with_options(
+            Cursor::new(
+                b"missing-separator\nk-empty|\nk-null|null\nk-bad|not-json\nk-ok|{\"id\":\"ok\"}\n",
+            ),
+            "$.id",
+            &mut out,
+            options,
+        )
+        .expect("non-payload records should be skipped before parsing");
 
-    assert!(err
-        .to_string()
-        .contains("missing payload separator byte 0x7c"));
-    assert!(out.is_empty());
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"ok\"\n");
 }
 
 #[test]

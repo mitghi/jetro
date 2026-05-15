@@ -67,10 +67,6 @@ pub enum RowError {
         line_no: u64,
         message: String,
     },
-    MissingPayloadSeparator {
-        line_no: u64,
-        separator: u8,
-    },
     EmptyPayload {
         line_no: u64,
     },
@@ -100,10 +96,6 @@ impl fmt::Display for RowError {
             Self::InvalidJsonMessage { line_no, message } => {
                 write!(f, "invalid JSON on NDJSON line {line_no}: {message}")
             }
-            Self::MissingPayloadSeparator { line_no, separator } => write!(
-                f,
-                "NDJSON line {line_no} is missing payload separator byte 0x{separator:02x}"
-            ),
             Self::EmptyPayload { line_no } => {
                 write!(f, "NDJSON line {line_no} has an empty framed payload")
             }
@@ -124,7 +116,6 @@ impl std::error::Error for RowError {
             Self::Io(err) => Some(err),
             Self::InvalidJson { source, .. } => Some(source),
             Self::InvalidJsonMessage { .. } => None,
-            Self::MissingPayloadSeparator { .. } => None,
             Self::EmptyPayload { .. } => None,
             Self::NullPayload { .. } => None,
             Self::LineTooLarge { .. } => None,

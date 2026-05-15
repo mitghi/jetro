@@ -49,7 +49,7 @@ pub(super) fn frame_payload(
             separator, side, ..
         } => {
             let Some(sep) = memchr(separator, row) else {
-                return Err(RowError::MissingPayloadSeparator { line_no, separator });
+                return Ok(FramePayload::Skip);
             };
             match side {
                 PayloadSide::BeforeSeparator => 0..sep,
@@ -59,7 +59,10 @@ pub(super) fn frame_payload(
     };
     let range = trim_range(row, range);
     if range.is_empty() {
-        return Err(RowError::EmptyPayload { line_no });
+        return match frame {
+            NdjsonRowFrame::JsonLine => Err(RowError::EmptyPayload { line_no }),
+            NdjsonRowFrame::DelimitedPayload { .. } => Ok(FramePayload::Skip),
+        };
     }
 
     if let NdjsonRowFrame::DelimitedPayload { null_payload, .. } = frame {
@@ -70,9 +73,20 @@ pub(super) fn frame_payload(
                 NullPayload::Error => Err(RowError::NullPayload { line_no }),
             };
         }
+        if !payload_starts_like_json(&row[range.clone()]) {
+            return Ok(FramePayload::Skip);
+        }
     }
 
     Ok(FramePayload::Data(range))
+}
+
+#[inline]
+fn payload_starts_like_json(payload: &[u8]) -> bool {
+    matches!(
+        payload[0],
+        b'{' | b'[' | b'"' | b't' | b'f' | b'-' | b'0'..=b'9'
+    )
 }
 
 #[inline]
@@ -107,6 +121,15 @@ mod tests {
         assert_eq!(
             frame_payload(frame, 2, br#"k| {"id":1} "#).unwrap(),
             FramePayload::Data(3..11)
+        );
+        assert_eq!(frame_payload(frame, 3, b"k|").unwrap(), FramePayload::Skip);
+        assert_eq!(
+            frame_payload(frame, 4, b"no-separator").unwrap(),
+            FramePayload::Skip
+        );
+        assert_eq!(
+            frame_payload(frame, 5, b"k|not-json").unwrap(),
+            FramePayload::Skip
         );
     }
 }
