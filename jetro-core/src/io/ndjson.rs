@@ -3,8 +3,11 @@ use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
+use super::stream_subquery::{lower_single_rows_subquery, RowStreamSubqueryPlan, STREAM_BINDING};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
+use crate::compile::compiler::Compiler;
+use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
@@ -661,6 +664,9 @@ where
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_file(engine, path, &plan, None, options, writer);
     }
+    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
+        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
+    }
 
     let file = File::open(path)?;
     run_ndjson_with_options(
@@ -685,6 +691,11 @@ where
 {
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer);
+    }
+    if ndjson_rows_subquery_plan(query)?.is_some() {
+        return Err(JetroEngineError::Eval(EvalError(
+            "$.rows() stream subqueries require a file-backed NDJSON source".into(),
+        )));
     }
 
     drive_ndjson_writer(engine, reader, query, None, options, writer)
@@ -773,6 +784,9 @@ where
     }
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_file(engine, path, &plan, Some(limit), options, writer);
+    }
+    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
+        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
     }
 
     let file = File::open(path)?;
@@ -1013,6 +1027,122 @@ where
 fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
     lower_root_rows_query(query, RowStreamSourceKind::NdjsonRows)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn ndjson_rows_subquery_plan(
+    query: &str,
+) -> Result<Option<RowStreamSubqueryPlan>, JetroEngineError> {
+    if !query.contains("$.rows") {
+        return Ok(None);
+    }
+    let expr = crate::parse::parser::parse(query)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))?;
+    lower_single_rows_subquery(&expr, RowStreamSourceKind::NdjsonRows)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn drive_ndjson_rows_subquery_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamSubqueryPlan,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let stream_value = collect_ndjson_rows_stream_file(engine, path, &plan.stream, options)?;
+    let wrapper = Compiler::compile(&plan.wrapper, "<ndjson-rows-wrapper>");
+    let env = Env::new(Val::Null).with_var(STREAM_BINDING, stream_value);
+    let value = engine
+        .lock_vm()
+        .exec_in_env(&wrapper, &env)
+        .map_err(JetroEngineError::Eval)?;
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
+    writer.flush()?;
+    Ok(emitted)
+}
+
+fn collect_ndjson_rows_stream_file<P>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+) -> Result<Val, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    let mut executor = CompiledRowStream::new(plan);
+    let mut out = Vec::new();
+
+    if plan.direction == RowStreamDirection::Forward {
+        let file = File::open(path)?;
+        let mut driver = NdjsonPerRowDriver::new(std::io::BufReader::with_capacity(
+            options.reader_buffer_capacity,
+            file,
+        ))
+        .with_options(options);
+        let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+        while !executor.is_exhausted() {
+            let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
+                break;
+            };
+            if collect_row_stream_result(
+                engine,
+                line_no,
+                executor.apply_owned_row(engine, line_no, row)?,
+                &mut out,
+            )? || executor.is_exhausted()
+            {
+                break;
+            }
+        }
+    } else {
+        let mut driver = super::ndjson_rev::NdjsonReverseFileDriver::with_options(path, options)?;
+        while !executor.is_exhausted() {
+            let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
+                break;
+            };
+            if collect_row_stream_result(
+                engine,
+                line_no,
+                executor.apply_owned_row(engine, line_no, row)?,
+                &mut out,
+            )? || executor.is_exhausted()
+            {
+                break;
+            }
+        }
+    }
+
+    if plan.demand.retained_limit == Some(1) {
+        Ok(out.into_iter().next().unwrap_or(Val::Null))
+    } else {
+        Ok(Val::Arr(std::sync::Arc::new(out)))
+    }
+}
+
+fn collect_row_stream_result(
+    engine: &JetroEngine,
+    line_no: u64,
+    result: RowStreamRowResult,
+    out: &mut Vec<Val>,
+) -> Result<bool, JetroEngineError> {
+    match result {
+        RowStreamRowResult::Emit(value) => out.push(value),
+        RowStreamRowResult::EmitBytes(bytes) => {
+            let document = parse_row(engine, line_no, bytes)?;
+            let value = document
+                .root_val_with(engine.keys())
+                .map_err(|err| row_eval_error(line_no, err))?;
+            out.push(value);
+        }
+        RowStreamRowResult::Skip => {}
+        RowStreamRowResult::Stop => return Ok(true),
+    }
+    Ok(false)
 }
 
 fn drive_ndjson_rows_stream_reader<R, W>(

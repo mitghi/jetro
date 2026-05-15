@@ -22,6 +22,7 @@ mod stream_exec;
 #[allow(dead_code)]
 mod stream_plan;
 mod stream_source;
+mod stream_subquery;
 mod stream_types;
 
 pub(crate) use document_rows::collect_document_rows;

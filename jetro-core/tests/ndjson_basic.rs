@@ -676,6 +676,59 @@ fn rows_stream_reverse_distinct_by_keeps_latest_rows() {
 }
 
 #[test]
+fn rows_stream_subquery_lifts_reverse_find_in_let_wrapper() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-let");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#"let a = $.rows().reverse().find($.name == "target").first() in {id: a.id, name: a.name}"#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("rows stream subquery should run once and bind into wrapper");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":2,\"name\":\"target\"}\n"
+    );
+}
+
+#[test]
+fn rows_stream_subquery_lifts_reverse_find_in_object_wrapper() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-object");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#"{hit: $.rows().reverse().find($.name == "target").first().id}"#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("rows stream subquery should bind inside object wrapper");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "{\"hit\":2}\n");
+}
+
+#[test]
 fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"ab","v":1}
