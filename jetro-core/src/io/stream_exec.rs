@@ -5,7 +5,7 @@ use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
 use crate::vm::opcode::Program;
-use crate::{EvalError, Jetro, JetroEngine, JetroEngineError};
+use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::eval_ndjson_byte_predicate_row;
@@ -129,6 +129,47 @@ impl CompiledRowStream {
             }
         }
         let value = ensure_row_stream_value(engine, line_no, &mut row, &mut document, &mut value)?;
+        Ok(RowStreamRowResult::Emit(value))
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn apply_val_row(
+        &mut self,
+        vm: &mut VM,
+        row: Val,
+    ) -> Result<RowStreamRowResult, EvalError> {
+        let mut value = row;
+        for stage in &mut self.stages {
+            match stage {
+                CompiledRowStreamStage::Filter { program, .. } => {
+                    let keep = vm.execute_val_raw_fresh_root(program, value.clone())?;
+                    if !is_truthy(&keep) {
+                        return Ok(RowStreamRowResult::Skip);
+                    }
+                }
+                CompiledRowStreamStage::DistinctBy { program, seen } => {
+                    let key = vm.execute_val_raw_fresh_root(program, value.clone())?;
+                    let key = distinct_key_bytes(&key)
+                        .map_err(|err| EvalError(err.to_string()))?;
+                    if !seen.insert(key) {
+                        return Ok(RowStreamRowResult::Skip);
+                    }
+                }
+                CompiledRowStreamStage::Take { limit, seen } => {
+                    if *seen >= *limit {
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    *seen += 1;
+                    if *seen >= *limit {
+                        self.exhausted = true;
+                    }
+                }
+                CompiledRowStreamStage::Map { program } => {
+                    value = vm.execute_val_raw_fresh_root(program, value)?;
+                }
+            }
+        }
         Ok(RowStreamRowResult::Emit(value))
     }
 }
