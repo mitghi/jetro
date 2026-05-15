@@ -1,6 +1,6 @@
 use jetro_core::io::{
-    DistinctFrontFilterKind, NdjsonControl, NdjsonOptions, NdjsonRowFrame, NdjsonSource,
-    NullPayload,
+    DistinctFrontFilterKind, NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonRowFrame,
+    NdjsonSource, NullPayload,
 };
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
@@ -37,6 +37,45 @@ fn run_ndjson_writes_one_json_result_per_row() {
 
     assert_eq!(rows, 2);
     assert_eq!(String::from_utf8(out).unwrap(), "2\n3\n");
+}
+
+#[test]
+fn run_ndjson_skips_null_results_by_default() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+{"missing":true}
+{"id":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(Cursor::new(input), "$.id", &mut out)
+        .expect("ndjson query should run");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+}
+
+#[test]
+fn run_ndjson_can_emit_null_results_when_configured() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+{"missing":true}
+{"id":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_with_options(
+            Cursor::new(input),
+            "$.id",
+            &mut out,
+            NdjsonOptions::default().with_null_output(NdjsonNullOutput::Emit),
+        )
+        .expect("ndjson query should run");
+
+    assert_eq!(rows, 3);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\nnull\n3\n");
 }
 
 #[test]
@@ -87,10 +126,12 @@ fn run_ndjson_delimited_payload_skips_non_payload_records() {
 #[test]
 fn run_ndjson_delimited_payload_can_keep_or_reject_null() {
     let engine = JetroEngine::new();
-    let keep = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
-        separator: b'|',
-        null_payload: NullPayload::Keep,
-    });
+    let keep = NdjsonOptions::default()
+        .with_row_frame(NdjsonRowFrame::DelimitedPayload {
+            separator: b'|',
+            null_payload: NullPayload::Keep,
+        })
+        .with_null_output(NdjsonNullOutput::Emit);
     let reject = NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
         separator: b'|',
         null_payload: NullPayload::Error,
@@ -135,7 +176,7 @@ fn run_ndjson_writes_scalar_results_directly() {
     engine
         .run_ndjson(Cursor::new(input), "z", &mut null_out)
         .expect("null scalar should write");
-    assert_eq!(String::from_utf8(null_out).unwrap(), "null\n");
+    assert_eq!(String::from_utf8(null_out).unwrap(), "");
 
     let mut float_out = Vec::new();
     engine
@@ -174,7 +215,7 @@ fn run_ndjson_writes_root_fields_from_byte_path() {
         .run_ndjson(Cursor::new(input), "$.id", &mut id_out)
         .expect("root field should write");
 
-    assert_eq!(String::from_utf8(id_out).unwrap(), "1\nnull\n3\n");
+    assert_eq!(String::from_utf8(id_out).unwrap(), "1\n3\n");
 }
 
 #[test]
@@ -800,7 +841,7 @@ fn run_ndjson_matches_writes_raw_matching_rows() {
     assert_eq!(rows, 1);
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        " { \"name\" : \"Ada\" , \"score\" : 10 }\n"
+        "{ \"name\" : \"Ada\" , \"score\" : 10 }\n"
     );
 }
 
@@ -1394,7 +1435,7 @@ fn reverse_match_writer_preserves_raw_matching_rows() {
     assert_eq!(rows, 2);
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        " { \"name\" : \"Cid\" , \"active\" : true }\n { \"name\" : \"Ada\" , \"active\" : true }\n"
+        "{ \"name\" : \"Cid\" , \"active\" : true }\n{ \"name\" : \"Ada\" , \"active\" : true }\n"
     );
 }
 

@@ -290,12 +290,15 @@ where
     }
 
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
-    let count = drive_rev(engine, path, query, options, |value| {
-        super::ndjson::write_val_line(&mut writer, &value)?;
+    let mut emitted = 0usize;
+    drive_rev(engine, path, query, options, |value| {
+        if super::ndjson::write_val_line_with_options(&mut writer, &value, options)? {
+            emitted += 1;
+        }
         Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     writer.flush()?;
-    Ok(count)
+    Ok(emitted)
 }
 
 pub fn run_ndjson_rev_limit<P, W>(
@@ -342,17 +345,19 @@ where
 
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
-    let count = drive_rev(engine, path, query, options, |value| {
-        super::ndjson::write_val_line(&mut writer, &value)?;
-        emitted += 1;
-        Ok(if emitted >= limit {
+    drive_rev(engine, path, query, options, |value| {
+        let wrote = super::ndjson::write_val_line_with_options(&mut writer, &value, options)?;
+        if wrote {
+            emitted += 1;
+        }
+        Ok(if wrote && emitted >= limit {
             super::ndjson::NdjsonControl::Stop
         } else {
             super::ndjson::NdjsonControl::Continue
         })
     })?;
     writer.flush()?;
-    Ok(count)
+    Ok(emitted)
 }
 
 pub fn run_ndjson_rev_distinct_by<P, W>(
@@ -450,6 +455,8 @@ where
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     #[cfg(feature = "simd-json")]
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
+    #[cfg(feature = "simd-json")]
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut seen = AdaptiveDistinctKeys::default();
     let mut stats = NdjsonRevDistinctStats::default();
 
@@ -493,11 +500,17 @@ where
         #[cfg(feature = "simd-json")]
         if let (Some(plan), Some(row)) = (direct_value_plan.as_ref(), row.as_deref()) {
             byte_scratch.clear();
-            match write_ndjson_byte_tape_plan_row(&mut writer, row, plan, &mut byte_scratch)? {
+            out.clear();
+            match write_ndjson_byte_tape_plan_row(&mut out, row, plan, &mut byte_scratch)? {
                 BytePlanWrite::Done => {
-                    writer.write_all(b"\n")?;
-                    stats.direct_value_rows += 1;
-                    stats.emitted += 1;
+                    if super::ndjson::write_json_bytes_line_with_options(
+                        &mut writer,
+                        &out,
+                        options,
+                    )? {
+                        stats.direct_value_rows += 1;
+                        stats.emitted += 1;
+                    }
                     if stats.emitted >= limit {
                         break;
                     }
@@ -517,9 +530,10 @@ where
         let vm = vm.get_or_insert_with(|| engine.lock_vm());
         let value = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
             .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
-        super::ndjson::write_val_line(&mut writer, &value)?;
-        stats.fallback_value_rows += 1;
-        stats.emitted += 1;
+        if super::ndjson::write_val_line_with_options(&mut writer, &value, options)? {
+            stats.fallback_value_rows += 1;
+            stats.emitted += 1;
+        }
         if stats.emitted >= limit {
             break;
         }
@@ -612,19 +626,22 @@ where
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut runner = super::ndjson::NdjsonTapeWriterRunner::new(engine, plan);
     let mut count = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        out.clear();
         scratch.parse_slice(&row).map_err(|message| {
             super::ndjson::row_parse_error(
                 reverse_row_no,
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        runner.write_row(&scratch, &mut writer)?;
-        writer.write_all(b"\n")?;
-        count += 1;
+        runner.write_row(&scratch, &mut out)?;
+        if super::ndjson::write_json_bytes_line_with_options(&mut writer, &out, options)? {
+            count += 1;
+        }
         if limit.is_some_and(|limit| count >= limit) {
             break;
         }
