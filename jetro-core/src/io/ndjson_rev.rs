@@ -1,3 +1,7 @@
+use super::ndjson_distinct::{
+    distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
+};
+use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::RowError;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
@@ -8,9 +12,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use super::ndjson_distinct::{
-    distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
-};
 
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
@@ -29,6 +30,7 @@ pub struct NdjsonReverseFileDriver {
     pos: u64,
     chunk_size: usize,
     max_line_len: usize,
+    row_frame: NdjsonRowFrame,
     carry: Vec<u8>,
     pending: VecDeque<Vec<u8>>,
     finished_head: bool,
@@ -58,6 +60,7 @@ impl NdjsonReverseFileDriver {
             pos,
             chunk_size: options.reverse_chunk_size.max(1),
             max_line_len: options.max_line_len,
+            row_frame: options.row_frame,
             carry: Vec::new(),
             pending: VecDeque::new(),
             finished_head: false,
@@ -71,9 +74,12 @@ impl NdjsonReverseFileDriver {
 
     pub fn next_line_with_reverse_no(&mut self) -> Result<Option<(u64, Vec<u8>)>, RowError> {
         loop {
-            if let Some(line) = self.pending.pop_front() {
+            if let Some(mut line) = self.pending.pop_front() {
                 self.reverse_line_no += 1;
-                return Ok(Some((self.reverse_line_no, line)));
+                if let Some(line) = self.frame_line(self.reverse_line_no, &mut line)? {
+                    return Ok(Some((self.reverse_line_no, line)));
+                }
+                continue;
             }
 
             if self.pos == 0 {
@@ -86,7 +92,9 @@ impl NdjsonReverseFileDriver {
                 self.check_line_len(line.len())?;
                 if line.iter().any(|b| !b.is_ascii_whitespace()) {
                     self.reverse_line_no += 1;
-                    return Ok(Some((self.reverse_line_no, line)));
+                    if let Some(line) = self.frame_line(self.reverse_line_no, &mut line)? {
+                        return Ok(Some((self.reverse_line_no, line)));
+                    }
                 }
                 return Ok(None);
             }
@@ -118,6 +126,19 @@ impl NdjsonReverseFileDriver {
                 self.check_line_len(next.len())?;
                 self.carry = next;
             }
+        }
+    }
+
+    fn frame_line(&self, line_no: u64, line: &mut Vec<u8>) -> Result<Option<Vec<u8>>, RowError> {
+        match frame_payload(self.row_frame, line_no, line)? {
+            FramePayload::Data(range) => {
+                if range.start > 0 || range.end < line.len() {
+                    line.copy_within(range.clone(), 0);
+                    line.truncate(range.end - range.start);
+                }
+                Ok(Some(std::mem::take(line)))
+            }
+            FramePayload::Skip => Ok(None),
         }
     }
 
@@ -438,9 +459,10 @@ where
         let mut document = None;
 
         #[cfg(feature = "simd-json")]
-        let direct_key = direct_key_plan
-            .as_ref()
-            .and_then(|plan| row.as_deref().and_then(|row| distinct_key_direct(row, plan)));
+        let direct_key = direct_key_plan.as_ref().and_then(|plan| {
+            row.as_deref()
+                .and_then(|row| distinct_key_direct(row, plan))
+        });
         #[cfg(not(feature = "simd-json"))]
         let direct_key = None;
 
@@ -452,8 +474,7 @@ where
             }
         } else {
             stats.fallback_key_rows += 1;
-            let parsed =
-                super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
+            let parsed = super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
             let plan = key_plan.get_or_insert_with(|| {
                 engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes())
             });

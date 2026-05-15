@@ -534,6 +534,29 @@ fn rows_stream_reverse_take_map_runs_from_file_tail() {
 }
 
 #[test]
+fn rows_stream_reverse_reads_delimited_payloads_and_skips_tombstones() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-reverse-framed");
+    std::fs::write(&path, b"k0|null\nk1|{\"id\":1}\nk2|null\nk3|{\"id\":3}\n").unwrap();
+    let options = NdjsonOptions::default()
+        .with_reverse_chunk_size(5)
+        .with_row_frame(NdjsonRowFrame::DelimitedPayload {
+            separator: b'|',
+            side: PayloadSide::AfterSeparator,
+            null_payload: NullPayload::Skip,
+        });
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(&path, "$.rows().reverse().take(2)", &mut out, options)
+        .expect("reverse rows stream should run on framed payloads");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "{\"id\":3}\n{\"id\":1}\n");
+}
+
+#[test]
 fn rows_stream_reverse_distinct_by_keeps_latest_rows() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-reverse-distinct");
