@@ -424,4 +424,38 @@ mod tests {
         assert_eq!(result.stats.rows_filtered, 1);
         assert!(result.stats.direct_project_rows + result.stats.fallback_project_rows >= 2);
     }
+
+    #[test]
+    fn parallel_policy_off_disables_partition_collection() {
+        let engine = JetroEngine::new();
+        let path = std::env::temp_dir().join(format!(
+            "jetro-parallel-{}-{}.ndjson",
+            std::process::id(),
+            "off"
+        ));
+        std::fs::write(
+            &path,
+            b"{\"id\":1,\"active\":false}\n{\"id\":2,\"active\":true}\n{\"id\":3,\"active\":true}\n",
+        )
+        .unwrap();
+        let plan = lower_root_rows_query(
+            "$.rows().filter($.active).take(1)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        let value = collect_rows_stream_file(
+            &engine,
+            &path,
+            &plan,
+            super::super::ndjson::NdjsonOptions::default()
+                .with_parallel_min_bytes(0)
+                .with_parallelism(super::super::ndjson::NdjsonParallelism::Off),
+        )
+        .unwrap();
+
+        let _ = std::fs::remove_file(&path);
+        assert!(value.is_none());
+    }
 }
