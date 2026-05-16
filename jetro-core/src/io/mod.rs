@@ -22,6 +22,7 @@ mod ndjson_stream_cache;
 mod source;
 mod stream_direct;
 mod stream_exec;
+mod stream_fanout;
 #[allow(dead_code)]
 mod stream_plan;
 mod stream_source;

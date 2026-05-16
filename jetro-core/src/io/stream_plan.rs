@@ -44,6 +44,10 @@ impl RowStreamPlan {
             demand: RowStreamDemand::default(),
         }
     }
+
+    pub(super) fn refresh_demand(&mut self) {
+        self.demand = RowStreamDemand::from_plan(self);
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

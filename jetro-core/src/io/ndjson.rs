@@ -1,5 +1,6 @@
 use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::stream_exec::CompiledRowStream;
+use super::stream_fanout::{drive_ndjson_rows_fanout_file, lower_rows_fanout_query};
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
@@ -684,6 +685,9 @@ where
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_file(engine, path, &plan, None, options, writer);
     }
+    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
+        return drive_ndjson_rows_fanout_file(engine, path, &plan, options, writer);
+    }
     if let Some(plan) = ndjson_rows_subquery_plan(query)? {
         return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
     }
@@ -804,6 +808,9 @@ where
     }
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_file(engine, path, &plan, Some(limit), options, writer);
+    }
+    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
+        return drive_ndjson_rows_fanout_file(engine, path, &plan, options, writer);
     }
     if let Some(plan) = ndjson_rows_subquery_plan(query)? {
         return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
@@ -1061,6 +1068,15 @@ fn ndjson_rows_subquery_plan(
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
+fn ndjson_rows_fanout_plan(
+    query: &str,
+) -> Result<Option<super::stream_fanout::RowStreamFanoutPlan>, JetroEngineError> {
+    if !query.contains("$.rows") {
+        return Ok(None);
+    }
+    lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+}
+
 fn drive_ndjson_rows_subquery_file<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -1150,7 +1166,7 @@ where
     }
 }
 
-fn collect_row_stream_result(
+pub(super) fn collect_row_stream_result(
     engine: &JetroEngine,
     line_no: u64,
     result: RowStreamRowResult,
