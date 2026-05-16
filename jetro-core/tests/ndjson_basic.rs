@@ -969,6 +969,36 @@ not-json
 }
 
 #[test]
+fn rows_stream_direct_and_fallback_distinct_keys_match() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"v":"a"}
+{"id":2,"v":"b"}
+{"id":1,"v":"c"}
+{"id":3,"v":"d"}
+"#;
+    let mut direct = Vec::new();
+    let mut fallback = Vec::new();
+
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().distinct_by($.id).map($.v)",
+            &mut direct,
+        )
+        .expect("direct key rows stream should run");
+    engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().distinct_by($.id + 0).map($.v)",
+            &mut fallback,
+        )
+        .expect("fallback key rows stream should run");
+
+    assert_eq!(String::from_utf8(direct.clone()).unwrap(), "\"a\"\n\"b\"\n\"d\"\n");
+    assert_eq!(direct, fallback);
+}
+
+#[test]
 fn rows_stream_source_dispatch_matches_cli_file_mode() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-cli-dispatch");
