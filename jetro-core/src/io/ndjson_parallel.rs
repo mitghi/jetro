@@ -25,6 +25,7 @@ where
     Ok(collect_rows_stream_file_with_stats(engine, path, plan, options)?.map(|result| result.value))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct ParallelRowsResult {
     pub(super) value: Val,
     pub(super) stats: RowStreamStats,

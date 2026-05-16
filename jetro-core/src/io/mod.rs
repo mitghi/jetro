@@ -20,6 +20,7 @@ mod ndjson_rev;
 #[cfg(feature = "simd-json")]
 mod ndjson_stream_cache;
 mod source;
+mod stream_direct;
 mod stream_exec;
 #[allow(dead_code)]
 mod stream_plan;

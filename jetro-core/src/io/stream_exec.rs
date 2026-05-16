@@ -9,17 +9,14 @@ use crate::vm::opcode::Program;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 
 #[cfg(feature = "simd-json")]
-use super::ndjson_byte::{
-    eval_ndjson_byte_predicate_row, raw_json_byte_path_value, tape_plan_can_write_byte_row,
-    write_ndjson_byte_tape_plan_row, BytePlanWrite, RawFieldValue,
-};
+use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+#[cfg(feature = "simd-json")]
+use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, write_direct_map};
 #[cfg(feature = "simd-json")]
 use super::ndjson_direct::{
     direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
     NdjsonDirectTapePlan,
 };
-#[cfg(feature = "simd-json")]
-use super::ndjson_distinct::raw_distinct_key_bytes;
 
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
@@ -237,28 +234,6 @@ impl CompiledRowStream {
     }
 }
 
-#[cfg(feature = "simd-json")]
-fn insert_direct_distinct_key(
-    seen: &mut AdaptiveDistinctKeys,
-    row: &[u8],
-    plan: &NdjsonDirectTapePlan,
-) -> Option<bool> {
-    const NULL_KEY: &[u8] = b"null";
-
-    let NdjsonDirectTapePlan::RootPath(steps) = plan else {
-        return None;
-    };
-    let key = match raw_json_byte_path_value(row, steps) {
-        RawFieldValue::Found(value) => raw_distinct_key_bytes(value)?,
-        RawFieldValue::Missing => std::borrow::Cow::Borrowed(NULL_KEY),
-        RawFieldValue::Fallback => return None,
-    };
-    Some(match key {
-        std::borrow::Cow::Borrowed(key) => seen.insert_slice(key),
-        std::borrow::Cow::Owned(key) => seen.insert(key),
-    })
-}
-
 fn ensure_row_stream_value(
     engine: &JetroEngine,
     line_no: u64,
@@ -328,25 +303,9 @@ impl CompiledRowStreamStage {
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
                 #[cfg(feature = "simd-json")]
-                direct: direct_tape_plan_for_expr(expr).filter(tape_plan_can_write_byte_row),
+                direct: direct_tape_plan_for_expr(expr).filter(direct_map_can_write),
             },
         }
-    }
-}
-
-#[cfg(feature = "simd-json")]
-fn write_direct_map(
-    row: &[u8],
-    direct: Option<&NdjsonDirectTapePlan>,
-) -> Result<Option<Vec<u8>>, JetroEngineError> {
-    let Some(plan) = direct else {
-        return Ok(None);
-    };
-    let mut out = Vec::new();
-    let mut scratch = Vec::new();
-    match write_ndjson_byte_tape_plan_row(&mut out, row, plan, &mut scratch)? {
-        BytePlanWrite::Done => Ok(Some(out)),
-        BytePlanWrite::Fallback => Ok(None),
     }
 }
 
