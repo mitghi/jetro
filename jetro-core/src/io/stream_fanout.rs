@@ -155,7 +155,7 @@ fn normalize_step(step: Step) -> Step {
 
 fn normalize_bare_ident_predicate(expr: Expr) -> Expr {
     match expr {
-        Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name)]),
+        Expr::Ident(name) => Expr::Chain(Box::new(Expr::Root), vec![Step::Field(name)]),
         Expr::BinOp(left, op, right) => Expr::BinOp(
             Box::new(normalize_bare_ident_predicate(*left)),
             op,
@@ -282,11 +282,16 @@ fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
 
 #[cfg(feature = "simd-json")]
 fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPredicate> {
-    match plan.stages.as_slice() {
-        [RowStreamStage::Filter(expr), RowStreamStage::Take(1)] => {
-            direct_tape_predicate_for_expr(expr)
-        }
-        _ => None,
+    let [RowStreamStage::Filter(expr), rest @ ..] = plan.stages.as_slice() else {
+        return None;
+    };
+    if rest
+        .iter()
+        .all(|stage| matches!(stage, RowStreamStage::Take(1)))
+    {
+        direct_tape_predicate_for_expr(expr)
+    } else {
+        None
     }
 }
 
@@ -452,6 +457,8 @@ mod tests {
             .expect("fanout plan");
         assert_eq!(plan.source.direction, RowStreamDirection::Reverse);
         assert_eq!(plan.consumers.len(), 2);
+        #[cfg(feature = "simd-json")]
+        assert!(direct_first_match_cmp(&plan.consumers[0].stream).is_some());
     }
 
     #[test]
