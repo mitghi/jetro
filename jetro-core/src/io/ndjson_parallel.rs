@@ -1,3 +1,4 @@
+use super::mapped_bytes::MappedBytes;
 use super::ndjson::{parse_row, row_eval_error, NdjsonParallelism};
 use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
@@ -32,8 +33,8 @@ where
         return Ok(None);
     }
 
-    let bytes = Arc::<[u8]>::from(std::fs::read(path.as_ref())?);
-    let ranges = split_line_aligned_ranges(&bytes);
+    let bytes = Arc::new(MappedBytes::open(path.as_ref())?);
+    let ranges = split_line_aligned_ranges(bytes.as_slice());
     if ranges.len() <= 1 {
         return Ok(None);
     }
@@ -84,7 +85,7 @@ struct PartitionOutput {
 
 fn scan_partition(
     engine: &JetroEngine,
-    bytes: Arc<[u8]>,
+    bytes: Arc<MappedBytes>,
     range: Range<usize>,
     plan: &RowStreamPlan,
     options: super::ndjson::NdjsonOptions,
@@ -92,13 +93,14 @@ fn scan_partition(
     let ordinal = range.start;
     let mut stream = CompiledRowStream::new(plan);
     let mut values = Vec::new();
-    let lines = collect_line_ranges(&bytes, range, plan.direction, options)?;
+    let bytes = bytes.as_slice();
+    let lines = collect_line_ranges(bytes, range, plan.direction, options)?;
 
     for row_range in lines {
         if stream.is_exhausted() {
             break;
         }
-        let row = bytes[row_range.clone()].to_vec();
+        let row = bytes[row_range].to_vec();
         let result = stream.apply_owned_row(engine, 1, row)?;
         if collect_result(engine, result, &mut values)? {
             break;
