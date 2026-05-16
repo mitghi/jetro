@@ -29,7 +29,8 @@ impl CompiledRowStream {
         let stages: Vec<_> = plan
             .stages
             .iter()
-            .map(CompiledRowStreamStage::new)
+            .enumerate()
+            .map(|(idx, stage)| CompiledRowStreamStage::new(stage, idx + 1 == plan.stages.len()))
             .collect();
         let exhausted = plan.demand.retained_limit == Some(0);
         Self {
@@ -283,7 +284,7 @@ enum CompiledRowStreamStage {
 }
 
 impl CompiledRowStreamStage {
-    fn new(stage: &RowStreamStage) -> Self {
+    fn new(stage: &RowStreamStage, is_last: bool) -> Self {
         match stage {
             RowStreamStage::Filter(expr) => Self::Filter {
                 program: Compiler::compile(expr, "<ndjson-rows-filter>"),
@@ -303,7 +304,9 @@ impl CompiledRowStreamStage {
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
                 #[cfg(feature = "simd-json")]
-                direct: direct_tape_plan_for_expr(expr).filter(direct_map_can_write),
+                direct: is_last
+                    .then(|| direct_tape_plan_for_expr(expr).filter(direct_map_can_write))
+                    .flatten(),
             },
         }
     }
