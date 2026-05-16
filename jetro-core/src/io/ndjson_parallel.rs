@@ -3,7 +3,7 @@ use super::ndjson::{parse_row, row_eval_error, NdjsonParallelism};
 use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
-use super::stream_types::RowStreamRowResult;
+use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use crate::data::value::Val;
 use crate::{JetroEngine, JetroEngineError};
 use rayon::prelude::*;
@@ -19,6 +19,23 @@ pub(super) fn collect_rows_stream_file<P>(
     plan: &RowStreamPlan,
     options: super::ndjson::NdjsonOptions,
 ) -> Result<Option<Val>, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    Ok(collect_rows_stream_file_with_stats(engine, path, plan, options)?.map(|result| result.value))
+}
+
+pub(super) struct ParallelRowsResult {
+    pub(super) value: Val,
+    pub(super) stats: RowStreamStats,
+}
+
+pub(super) fn collect_rows_stream_file_with_stats<P>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<Option<ParallelRowsResult>, JetroEngineError>
 where
     P: AsRef<Path>,
 {
@@ -49,7 +66,14 @@ where
     }
 
     let mut out = Vec::new();
+    let mut stats = RowStreamStats {
+        source: plan.source,
+        direction: plan.direction,
+        parallel_partitions: parts.len(),
+        ..RowStreamStats::default()
+    };
     for mut part in parts {
+        stats.merge_partition(&part.stats);
         out.append(&mut part.values);
         if out.len() >= limit {
             out.truncate(limit);
@@ -57,11 +81,12 @@ where
         }
     }
 
-    Ok(Some(if limit == 1 {
+    let value = if limit == 1 {
         out.into_iter().next().unwrap_or(Val::Null)
     } else {
         Val::Arr(Arc::new(out))
-    }))
+    };
+    Ok(Some(ParallelRowsResult { value, stats }))
 }
 
 fn parallel_limit(plan: &RowStreamPlan) -> Option<usize> {
@@ -81,6 +106,7 @@ fn parallel_limit(plan: &RowStreamPlan) -> Option<usize> {
 struct PartitionOutput {
     ordinal: usize,
     values: Vec<Val>,
+    stats: RowStreamStats,
 }
 
 fn scan_partition(
@@ -107,7 +133,11 @@ fn scan_partition(
         }
     }
 
-    Ok(PartitionOutput { ordinal, values })
+    Ok(PartitionOutput {
+        ordinal,
+        values,
+        stats: stream.stats().clone(),
+    })
 }
 
 fn collect_result(
@@ -316,5 +346,46 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         assert_eq!(serde_json::Value::from(value), json!([4, 3, 2]));
+    }
+
+    #[test]
+    fn forced_parallel_reports_partition_stats() {
+        let engine = JetroEngine::new();
+        let path = std::env::temp_dir().join(format!(
+            "jetro-parallel-{}-{}.ndjson",
+            std::process::id(),
+            "stats"
+        ));
+        std::fs::write(
+            &path,
+            b"{\"id\":1,\"active\":false}\n{\"id\":2,\"active\":true}\n{\"id\":3,\"active\":true}\n{\"id\":4,\"active\":true}\n",
+        )
+        .unwrap();
+        let plan = lower_root_rows_query(
+            "$.rows().filter($.active).map($.id).take(2)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = collect_rows_stream_file_with_stats(
+            &engine,
+            &path,
+            &plan,
+            super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("forced parallel path should run");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(serde_json::Value::from(result.value), json!([2, 3]));
+        assert!(result.stats.parallel_partitions > 1);
+        assert!(result.stats.rows_scanned >= 3);
+        assert_eq!(
+            result.stats.direct_filter_rows + result.stats.fallback_filter_rows,
+            result.stats.rows_scanned
+        );
+        assert_eq!(result.stats.rows_filtered, 1);
+        assert!(result.stats.direct_project_rows + result.stats.fallback_project_rows >= 2);
     }
 }

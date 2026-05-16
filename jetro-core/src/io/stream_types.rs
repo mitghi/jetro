@@ -22,6 +22,7 @@ pub(super) struct RowStreamStats {
     pub fallback_key_rows: usize,
     pub direct_project_rows: usize,
     pub fallback_project_rows: usize,
+    pub parallel_partitions: usize,
 }
 
 impl Default for RowStreamStats {
@@ -39,6 +40,22 @@ impl Default for RowStreamStats {
             fallback_key_rows: 0,
             direct_project_rows: 0,
             fallback_project_rows: 0,
+            parallel_partitions: 0,
         }
+    }
+}
+
+impl RowStreamStats {
+    pub(super) fn merge_partition(&mut self, part: &Self) {
+        self.rows_scanned += part.rows_scanned;
+        self.rows_emitted += part.rows_emitted;
+        self.rows_filtered += part.rows_filtered;
+        self.duplicate_rows += part.duplicate_rows;
+        self.direct_filter_rows += part.direct_filter_rows;
+        self.fallback_filter_rows += part.fallback_filter_rows;
+        self.direct_key_rows += part.direct_key_rows;
+        self.fallback_key_rows += part.fallback_key_rows;
+        self.direct_project_rows += part.direct_project_rows;
+        self.fallback_project_rows += part.fallback_project_rows;
     }
 }
