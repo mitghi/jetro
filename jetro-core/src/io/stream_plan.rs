@@ -371,6 +371,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rows_stream_wrong_arity_before_execution() {
+        let expr = parse("$.rows().reverse(1)").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "rows() stream method reverse() expects 0 arguments, got 1");
+    }
+
+    #[test]
+    fn rejects_rows_stream_dynamic_take_before_execution() {
+        let expr = parse("$.rows().take($.limit)").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            err,
+            "rows() stream method take() expects a literal non-negative integer"
+        );
+    }
+
+    #[test]
     fn rejects_non_method_rows_stream_step() {
         let expr = parse("$.rows().name").unwrap();
         let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
