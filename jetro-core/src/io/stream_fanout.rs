@@ -118,7 +118,7 @@ fn rewrite_rows_fanout_body(
     builder: &mut FanoutBuilder,
     next_id: &mut usize,
 ) -> Result<Option<Expr>, RowStreamPlanError> {
-    if let Some(stream) = lower_root_rows_expr(expr, builder.source_kind)? {
+    if let Some(stream) = lower_fanout_rows_expr(expr, builder.source_kind)? {
         let binding = format!("__jetro_rows_fanout_{}", *next_id);
         *next_id += 1;
         if !builder.push_stream(binding.clone(), stream) {
@@ -186,6 +186,24 @@ fn rewrite_rows_fanout_body(
             Ok(Some(Expr::Array(out)))
         }
         _ => Ok(Some(expr.clone())),
+    }
+}
+
+fn lower_fanout_rows_expr(
+    expr: &Expr,
+    source_kind: RowStreamSourceKind,
+) -> Result<Option<RowStreamPlan>, RowStreamPlanError> {
+    let normalized = normalize_rows_stream_expr(expr);
+    lower_root_rows_expr(&normalized, source_kind)
+}
+
+fn normalize_rows_stream_expr(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Chain(base, steps) => Expr::Chain(
+            base.clone(),
+            steps.iter().cloned().map(normalize_step).collect(),
+        ),
+        _ => expr.clone(),
     }
 }
 
@@ -666,7 +684,7 @@ mod tests {
                 r#"{"name":"Ada","version":2}"#,
             ],
         );
-        let query = r#"{user_a: $.rows().reverse().find($.name == "Ada").first(), user_b: $.rows().reverse().find($.name == "Bob").first()}"#;
+        let query = r#"{user_a: $.rows().reverse().find(name == "Ada").first(), user_b: $.rows().reverse().find(name == "Bob").first()}"#;
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
