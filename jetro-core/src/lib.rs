@@ -1297,25 +1297,6 @@ impl Jetro {
         }
     }
 
-    /// Build a `Jetro` handle around an already parsed tape. This is used by
-    /// NDJSON row execution, where the row buffer is already owned and can be
-    /// consumed directly by simd-json instead of first being copied into
-    /// `raw_bytes` and copied again by `lazy_tape`.
-    #[cfg(feature = "simd-json")]
-    pub(crate) fn from_tape_data(tape: Arc<crate::data::tape::TapeData>) -> Self {
-        let tape_cell = OnceCell::new();
-        let _ = tape_cell.set(Ok(tape));
-        Self {
-            document: Value::Null,
-            root_val: OnceCell::new(),
-            objvec_cache: Default::default(),
-            raw_bytes: None,
-            tape: tape_cell,
-            structural_index: OnceCell::new(),
-            vm: RefCell::new(VM::new()),
-        }
-    }
-
     /// Like [`Jetro::root_val`] but interns object keys through `keys` instead of the
     /// process-wide default. Used by [`JetroEngine::parse_bytes`] to materialise the
     /// `Val` tree once at parse time so subsequent `collect` calls find a populated

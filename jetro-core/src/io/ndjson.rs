@@ -2159,40 +2159,6 @@ impl<'a> NdjsonRowExecutor<'a> {
         self.eval_document(line_no, &document)
     }
 
-    pub(super) fn write_owned_row<W: Write>(
-        &mut self,
-        line_no: u64,
-        row: Vec<u8>,
-        writer: &mut W,
-    ) -> Result<(), JetroEngineError> {
-        let document = self.parse_owned_result_row(line_no, row)?;
-        self.write_document_result(line_no, &document, writer)
-    }
-
-    fn parse_owned_result_row(
-        &self,
-        line_no: u64,
-        row: Vec<u8>,
-    ) -> Result<Jetro, JetroEngineError> {
-        #[cfg(feature = "simd-json")]
-        {
-            crate::data::tape::TapeData::parse(row)
-                .map(Jetro::from_tape_data)
-                .map_err(|message| {
-                    row_parse_error(
-                        line_no,
-                        JetroEngineError::Eval(crate::EvalError(format!(
-                            "Invalid JSON: {message}"
-                        ))),
-                    )
-                })
-        }
-        #[cfg(not(feature = "simd-json"))]
-        {
-            self.parse_owned_row(line_no, row)
-        }
-    }
-
     pub(super) fn parse_owned_row(
         &self,
         line_no: u64,
@@ -2208,56 +2174,6 @@ impl<'a> NdjsonRowExecutor<'a> {
     ) -> Result<Val, JetroEngineError> {
         crate::exec::router::collect_plan_val_with_vm(document, &self.plan, &mut self.vm)
             .map_err(|err| row_eval_error(line_no, err))
-    }
-
-    pub(super) fn write_document_result<W: Write>(
-        &mut self,
-        line_no: u64,
-        document: &Jetro,
-        writer: &mut W,
-    ) -> Result<(), JetroEngineError> {
-        if self.try_write_tape_result(line_no, document, writer)? {
-            return Ok(());
-        }
-        let value = self.eval_document(line_no, document)?;
-        write_val_line(writer, &value)
-    }
-
-    fn try_write_tape_result<W: Write>(
-        &self,
-        line_no: u64,
-        document: &Jetro,
-        writer: &mut W,
-    ) -> Result<bool, JetroEngineError> {
-        #[cfg(feature = "simd-json")]
-        {
-            use crate::ir::physical::{PlanNode, QueryRoot};
-
-            let QueryRoot::Node(root) = self.plan.root() else {
-                return Ok(false);
-            };
-            let PlanNode::RootPath(steps) = self.plan.node(*root) else {
-                return Ok(false);
-            };
-            let Some(tape) = document
-                .lazy_tape()
-                .map_err(|err| row_eval_error(line_no, err))?
-            else {
-                return Ok(false);
-            };
-            if let Some(idx) = json_tape_path_index(tape.as_ref(), steps) {
-                write_json_tape_at(writer, tape.as_ref(), idx)?;
-            } else {
-                writer.write_all(b"null")?;
-            }
-            writer.write_all(b"\n")?;
-            Ok(true)
-        }
-        #[cfg(not(feature = "simd-json"))]
-        {
-            let _ = (line_no, document, writer);
-            Ok(false)
-        }
     }
 
     pub(super) fn engine(&self) -> &'a JetroEngine {
