@@ -1,5 +1,5 @@
 use super::mapped_bytes::MappedBytes;
-use super::ndjson::{parse_row, row_eval_error, NdjsonParallelism};
+use super::ndjson::{parse_row, row_eval_error, NdjsonOptions, NdjsonParallelism};
 use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
@@ -17,7 +17,7 @@ pub(super) fn collect_rows_stream_file<P>(
     engine: &JetroEngine,
     path: P,
     plan: &RowStreamPlan,
-    options: super::ndjson::NdjsonOptions,
+    options: NdjsonOptions,
 ) -> Result<Option<Val>, JetroEngineError>
 where
     P: AsRef<Path>,
@@ -35,21 +35,15 @@ pub(super) fn collect_rows_stream_file_with_stats<P>(
     engine: &JetroEngine,
     path: P,
     plan: &RowStreamPlan,
-    options: super::ndjson::NdjsonOptions,
+    options: NdjsonOptions,
 ) -> Result<Option<ParallelRowsResult>, JetroEngineError>
 where
     P: AsRef<Path>,
 {
-    let Some(limit) = parallel_limit(plan) else {
+    let metadata = std::fs::metadata(path.as_ref())?;
+    let Some(limit) = parallel_collection_limit(plan, options, metadata.len()) else {
         return Ok(None);
     };
-    if options.parallelism == NdjsonParallelism::Off {
-        return Ok(None);
-    }
-    let metadata = std::fs::metadata(path.as_ref())?;
-    if metadata.len() < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
-        return Ok(None);
-    }
 
     let bytes = Arc::new(MappedBytes::open(path.as_ref())?);
     let ranges = split_line_aligned_ranges(bytes.as_slice());
@@ -104,6 +98,20 @@ fn parallel_limit(plan: &RowStreamPlan) -> Option<usize> {
     }
 }
 
+fn parallel_collection_limit(
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+    file_len: u64,
+) -> Option<usize> {
+    if options.parallelism == NdjsonParallelism::Off {
+        return None;
+    }
+    if file_len < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
+        return None;
+    }
+    parallel_limit(plan)
+}
+
 struct PartitionOutput {
     ordinal: usize,
     values: Vec<Val>,
@@ -115,7 +123,7 @@ fn scan_partition(
     bytes: Arc<MappedBytes>,
     range: Range<usize>,
     plan: &RowStreamPlan,
-    options: super::ndjson::NdjsonOptions,
+    options: NdjsonOptions,
 ) -> Result<PartitionOutput, JetroEngineError> {
     let ordinal = range.start;
     let mut stream = CompiledRowStream::new(plan);
@@ -150,7 +158,7 @@ fn scan_forward_partition_rows(
     range: Range<usize>,
     stream: &mut CompiledRowStream,
     values: &mut Vec<Val>,
-    options: super::ndjson::NdjsonOptions,
+    options: NdjsonOptions,
 ) -> Result<(), JetroEngineError> {
     let mut cursor = range.start;
     while cursor < range.end && !stream.is_exhausted() {
@@ -201,7 +209,7 @@ fn collect_line_ranges(
     bytes: &[u8],
     range: Range<usize>,
     direction: RowStreamDirection,
-    options: super::ndjson::NdjsonOptions,
+    options: NdjsonOptions,
 ) -> Result<Vec<Range<usize>>, JetroEngineError> {
     let mut rows = Vec::new();
     let mut cursor = range.start;
