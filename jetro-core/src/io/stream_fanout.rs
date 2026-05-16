@@ -11,10 +11,11 @@ use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
     RowStreamSourceKind, RowStreamStage,
 };
+use crate::compile::compiler::Compiler;
+use crate::data::context::Env;
 use crate::data::value::Val;
-use crate::parse::ast::{Arg, Expr, ObjField, Step};
+use crate::parse::ast::{Arg, Expr, Step};
 use crate::{EvalError, JetroEngine, JetroEngineError};
-use indexmap::IndexMap;
 use std::io::Write;
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ use std::sync::Arc;
 pub(super) struct RowStreamFanoutPlan {
     pub source: RowStreamPlan,
     consumers: Vec<RowStreamFanoutConsumer>,
-    outputs: Vec<RowStreamFanoutOutput>,
+    body: Expr,
 }
 
 #[derive(Clone, Debug)]
@@ -30,12 +31,6 @@ struct RowStreamFanoutConsumer {
     binding: String,
     stream: RowStreamPlan,
     scalar: bool,
-}
-
-#[derive(Clone, Debug)]
-struct RowStreamFanoutOutput {
-    key: String,
-    binding: String,
 }
 
 pub(super) fn lower_rows_fanout_query(
@@ -91,15 +86,10 @@ fn lower_rows_fanout_expr(
         return Ok(None);
     }
 
-    let outputs = lower_output_object(body, &consumers)?;
-    if outputs.is_empty() {
-        return Ok(None);
-    }
-
     Ok(Some(RowStreamFanoutPlan {
         source,
         consumers,
-        outputs,
+        body: body.clone(),
     }))
 }
 
@@ -177,45 +167,6 @@ fn normalize_bare_ident_predicate(expr: Expr) -> Expr {
     }
 }
 
-fn lower_output_object(
-    body: &Expr,
-    consumers: &[RowStreamFanoutConsumer],
-) -> Result<Vec<RowStreamFanoutOutput>, RowStreamPlanError> {
-    let Expr::Object(fields) = body else {
-        return Err(RowStreamPlanError::new(
-            "$.rows() fanout currently requires an object result",
-        ));
-    };
-    let mut out = Vec::new();
-    for field in fields {
-        match field {
-            ObjField::Short(name) if consumers.iter().any(|consumer| consumer.binding == *name) => {
-                out.push(RowStreamFanoutOutput {
-                    key: name.clone(),
-                    binding: name.clone(),
-                });
-            }
-            ObjField::Kv {
-                key,
-                val: Expr::Ident(name),
-                optional: false,
-                cond: None,
-            } if consumers.iter().any(|consumer| consumer.binding == *name) => {
-                out.push(RowStreamFanoutOutput {
-                    key: key.clone(),
-                    binding: name.clone(),
-                });
-            }
-            _ => {
-                return Err(RowStreamPlanError::new(
-                    "$.rows() fanout object fields must reference stream consumer bindings",
-                ));
-            }
-        }
-    }
-    Ok(out)
-}
-
 pub(super) fn drive_ndjson_rows_fanout_file<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -281,24 +232,20 @@ where
         }
     }
 
-    let mut by_name = IndexMap::new();
+    let mut env = Env::new(Val::Null);
     for consumer in consumers {
         let value = if consumer.scalar {
             consumer.values.into_iter().next().unwrap_or(Val::Null)
         } else {
             Val::Arr(Arc::new(consumer.values))
         };
-        by_name.insert(consumer.binding, value);
+        env = env.with_var(&consumer.binding, value);
     }
-
-    let mut object = IndexMap::with_capacity(plan.outputs.len());
-    for output in &plan.outputs {
-        object.insert(
-            Val::key(&output.key),
-            by_name.get(&output.binding).cloned().unwrap_or(Val::Null),
-        );
-    }
-    Ok(Val::obj(object))
+    let body = Compiler::compile(&plan.body, "<ndjson-rows-fanout-body>");
+    engine
+        .lock_vm()
+        .exec_in_env(&body, &env)
+        .map_err(JetroEngineError::Eval)
 }
 
 struct RunningConsumer {
@@ -405,7 +352,6 @@ mod tests {
             .expect("fanout plan");
         assert_eq!(plan.source.direction, RowStreamDirection::Reverse);
         assert_eq!(plan.consumers.len(), 2);
-        assert_eq!(plan.outputs.len(), 2);
     }
 
     #[test]
@@ -435,5 +381,31 @@ mod tests {
             got.trim(),
             r#"{"user_a":{"name":"Ada","version":2},"user_b":{"name":"Bob","version":1}}"#
         );
+    }
+
+    #[test]
+    fn executes_fanout_with_shaped_body() {
+        let path = temp_ndjson(
+            "body",
+            &[
+                r#"{"name":"Ada","version":1}"#,
+                r#"{"name":"Bob","version":1}"#,
+                r#"{"name":"Ada","version":2}"#,
+            ],
+        );
+        let query = r#"let stream = $.rows().reverse(), user_a = stream.find(name == "Ada").first(), user_b = stream.find(name == "Bob").first() in {latest: user_a.version, pair: [user_a.name, user_b.name]}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(got.trim(), r#"{"latest":2,"pair":["Ada","Bob"]}"#);
     }
 }
