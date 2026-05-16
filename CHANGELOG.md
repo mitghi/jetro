@@ -68,6 +68,24 @@
   scanned rows, emitted rows, filtered rows, duplicate rows, and direct versus
   fallback stage usage, giving future explain/debug output a stable accounting
   source.
+- **File-backed row streams can use mapped partition input**. Eligible
+  `$.rows().filter(...).take(...)` plans now scan line-aligned file partitions
+  over a mapped byte source instead of copying the whole file into an owned
+  buffer before Rayon execution; platforms without mmap support retain the
+  existing read fallback.
+- **Rows-stream parallelism is policy-driven, not shape-fused**. Partition
+  execution is selected from stream demand metadata, source direction, retained
+  limit, file size, and `NdjsonParallelism`; map-only retained streams remain
+  sequential because they can stop cheaply without scanning unrelated
+  partitions.
+- **Rows-stream partition stats are merged internally**. The partition executor
+  now merges per-partition scan/filter/project counters and records partition
+  count, giving tests and future explain output a direct proof of which generic
+  execution path ran.
+- **Non-terminal direct maps now preserve downstream stages**. Byte-writing
+  direct projection is enabled only for terminal `map` stages; a chain such as
+  `$.rows().reverse().map($.id).take(3)` now routes through the value path for
+  the map so `take` still observes and bounds the stream correctly.
 - **Row-stream planning now carries explicit demand annotations**. Root
   `$.rows()` plans record retained-row limits, predicate/key/projector needs,
   and whether projection can legally run after row selection, so source
