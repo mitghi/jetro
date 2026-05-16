@@ -111,10 +111,8 @@ fn lower_object_rows_fanout_expr(
     let Expr::Object(fields) = expr else {
         return Ok(None);
     };
-    let mut consumers = Vec::new();
+    let mut builder = FanoutBuilder::new(source_kind);
     let mut rewritten = Vec::with_capacity(fields.len());
-    let mut source = None;
-    let mut saw_stream = false;
 
     for (idx, field) in fields.iter().enumerate() {
         match field {
@@ -125,22 +123,10 @@ fn lower_object_rows_fanout_expr(
                 cond: None,
             } => {
                 if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
-                    saw_stream = true;
-                    let base = source.get_or_insert_with(|| RowStreamPlan {
-                        source: source_kind,
-                        direction: stream.direction,
-                        stages: Vec::new(),
-                        demand: Default::default(),
-                    });
-                    if base.direction != stream.direction {
+                    let binding = format!("__jetro_rows_fanout_{idx}");
+                    if !builder.push_stream(binding.clone(), stream) {
                         return Ok(None);
                     }
-                    let binding = format!("__jetro_rows_fanout_{idx}");
-                    consumers.push(RowStreamFanoutConsumer {
-                        binding: binding.clone(),
-                        scalar: stream.demand.retained_limit == Some(1),
-                        stream,
-                    });
                     rewritten.push(ObjField::Kv {
                         key: key.clone(),
                         val: Expr::Ident(binding),
@@ -155,14 +141,7 @@ fn lower_object_rows_fanout_expr(
         }
     }
 
-    if !saw_stream || consumers.len() < 2 {
-        return Ok(None);
-    }
-    Ok(Some(RowStreamFanoutPlan {
-        source: source.expect("fanout source"),
-        consumers,
-        body: Expr::Object(rewritten),
-    }))
+    Ok(builder.finish(Expr::Object(rewritten)))
 }
 
 fn lower_array_rows_fanout_expr(
@@ -172,31 +151,17 @@ fn lower_array_rows_fanout_expr(
     let Expr::Array(items) = expr else {
         return Ok(None);
     };
-    let mut consumers = Vec::new();
+    let mut builder = FanoutBuilder::new(source_kind);
     let mut rewritten = Vec::with_capacity(items.len());
-    let mut source = None;
-    let mut saw_stream = false;
 
     for (idx, item) in items.iter().enumerate() {
         match item {
             ArrayElem::Expr(val) => {
                 if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
-                    saw_stream = true;
-                    let base = source.get_or_insert_with(|| RowStreamPlan {
-                        source: source_kind,
-                        direction: stream.direction,
-                        stages: Vec::new(),
-                        demand: Default::default(),
-                    });
-                    if base.direction != stream.direction {
+                    let binding = format!("__jetro_rows_fanout_{idx}");
+                    if !builder.push_stream(binding.clone(), stream) {
                         return Ok(None);
                     }
-                    let binding = format!("__jetro_rows_fanout_{idx}");
-                    consumers.push(RowStreamFanoutConsumer {
-                        binding: binding.clone(),
-                        scalar: stream.demand.retained_limit == Some(1),
-                        stream,
-                    });
                     rewritten.push(ArrayElem::Expr(Expr::Ident(binding)));
                 } else {
                     rewritten.push(item.clone());
@@ -206,14 +171,52 @@ fn lower_array_rows_fanout_expr(
         }
     }
 
-    if !saw_stream || consumers.len() < 2 {
-        return Ok(None);
+    Ok(builder.finish(Expr::Array(rewritten)))
+}
+
+struct FanoutBuilder {
+    source_kind: RowStreamSourceKind,
+    source: Option<RowStreamPlan>,
+    consumers: Vec<RowStreamFanoutConsumer>,
+}
+
+impl FanoutBuilder {
+    fn new(source_kind: RowStreamSourceKind) -> Self {
+        Self {
+            source_kind,
+            source: None,
+            consumers: Vec::new(),
+        }
     }
-    Ok(Some(RowStreamFanoutPlan {
-        source: source.expect("fanout source"),
-        consumers,
-        body: Expr::Array(rewritten),
-    }))
+
+    fn push_stream(&mut self, binding: String, stream: RowStreamPlan) -> bool {
+        let base = self.source.get_or_insert_with(|| RowStreamPlan {
+            source: self.source_kind,
+            direction: stream.direction,
+            stages: Vec::new(),
+            demand: Default::default(),
+        });
+        if base.direction != stream.direction {
+            return false;
+        }
+        self.consumers.push(RowStreamFanoutConsumer {
+            binding,
+            scalar: stream.demand.retained_limit == Some(1),
+            stream,
+        });
+        true
+    }
+
+    fn finish(self, body: Expr) -> Option<RowStreamFanoutPlan> {
+        if self.consumers.len() < 2 {
+            return None;
+        }
+        Some(RowStreamFanoutPlan {
+            source: self.source.expect("fanout source"),
+            consumers: self.consumers,
+            body,
+        })
+    }
 }
 
 fn collect_let_chain<'a>(expr: &'a Expr, bindings: &mut Vec<(String, &'a Expr)>) -> &'a Expr {
