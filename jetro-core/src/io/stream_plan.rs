@@ -187,11 +187,10 @@ impl RowStreamDemand {
 
 fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> RowStreamParallelism {
     let mut saw_filter = false;
-    let mut saw_map = false;
     for stage in &plan.stages {
         match stage {
             RowStreamStage::Filter(_) => saw_filter = true,
-            RowStreamStage::Map(_) => saw_map = true,
+            RowStreamStage::Map(_) => {}
             RowStreamStage::Take(_) => {}
             RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
         }
@@ -199,11 +198,6 @@ fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> 
 
     if saw_filter {
         RowStreamParallelism::PartitionFilter {
-            retained_limit,
-            direction: plan.direction,
-        }
-    } else if saw_map {
-        RowStreamParallelism::PartitionMap {
             retained_limit,
             direction: plan.direction,
         }
@@ -363,6 +357,7 @@ mod tests {
         assert_eq!(plan.demand.retained_limit, Some(2));
         assert_eq!(plan.demand.projector_count, 1);
         assert!(!plan.demand.late_projection);
+        assert_eq!(plan.demand.parallel, RowStreamParallelism::Sequential);
     }
 
     #[test]

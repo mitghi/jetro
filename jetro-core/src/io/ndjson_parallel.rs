@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_parallel_merges_reverse_map_take() {
+    fn retained_map_take_stays_sequential() {
         let engine = JetroEngine::new();
         let path = std::env::temp_dir().join(format!(
             "jetro-parallel-{}-{}.ndjson",
@@ -341,11 +341,10 @@ mod tests {
             &plan,
             super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
         )
-        .unwrap()
-        .expect("forced parallel path should run");
+        .unwrap();
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(serde_json::Value::from(value), json!([4, 3, 2]));
+        assert!(value.is_none());
     }
 
     #[test]
