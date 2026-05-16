@@ -843,6 +843,31 @@ fn rows_stream_subquery_lifts_reverse_find_in_match_wrapper() {
 }
 
 #[test]
+fn rows_stream_subquery_lifts_reverse_find_in_fstring_wrapper() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-subquery-fstring");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"name\":\"old\"}\n{\"id\":2,\"name\":\"target\"}\n{\"id\":3,\"name\":\"new\"}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            r#"f"hit {$.rows().reverse().find($.name == 'target').first().id}""#,
+            &mut out,
+            NdjsonOptions::default().with_reverse_chunk_size(8),
+        )
+        .expect("rows stream subquery should lift from f-string interpolation");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(out).unwrap(), "\"hit 2\"\n");
+}
+
+#[test]
 fn rows_stream_subquery_rejects_multiple_streams() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-subquery-multiple");
