@@ -121,16 +121,19 @@ fn scan_partition(
     let mut stream = CompiledRowStream::new(plan);
     let mut values = Vec::new();
     let bytes = bytes.as_slice();
-    let lines = collect_line_ranges(bytes, range, plan.direction, options)?;
-
-    for row_range in lines {
-        if stream.is_exhausted() {
-            break;
-        }
-        let row = bytes[row_range].to_vec();
-        let result = stream.apply_owned_row(engine, 1, row)?;
-        if collect_result(engine, result, &mut values)? {
-            break;
+    if plan.direction == RowStreamDirection::Forward {
+        scan_forward_partition_rows(engine, bytes, range, &mut stream, &mut values, options)?;
+    } else {
+        let lines = collect_line_ranges(bytes, range, plan.direction, options)?;
+        for row_range in lines {
+            if stream.is_exhausted() {
+                break;
+            }
+            let row = bytes[row_range].to_vec();
+            let result = stream.apply_owned_row(engine, 1, row)?;
+            if collect_result(engine, result, &mut values)? {
+                break;
+            }
         }
     }
 
@@ -139,6 +142,39 @@ fn scan_partition(
         values,
         stats: stream.stats().clone(),
     })
+}
+
+fn scan_forward_partition_rows(
+    engine: &JetroEngine,
+    bytes: &[u8],
+    range: Range<usize>,
+    stream: &mut CompiledRowStream,
+    values: &mut Vec<Val>,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<(), JetroEngineError> {
+    let mut cursor = range.start;
+    while cursor < range.end && !stream.is_exhausted() {
+        let start = cursor;
+        let rel_end = memchr::memchr(b'\n', &bytes[cursor..range.end]);
+        let mut end = rel_end.map_or(range.end, |pos| cursor + pos);
+        cursor = rel_end.map_or(range.end, |pos| cursor + pos + 1);
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        if bytes[start..end].iter().all(|b| b.is_ascii_whitespace()) {
+            continue;
+        }
+        let row_range = match frame_payload(options.row_frame, 1, &bytes[start..end])? {
+            FramePayload::Data(payload) => start + payload.start..start + payload.end,
+            FramePayload::Skip => continue,
+        };
+        let row = bytes[row_range].to_vec();
+        let result = stream.apply_owned_row(engine, 1, row)?;
+        if collect_result(engine, result, values)? {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn collect_result(
