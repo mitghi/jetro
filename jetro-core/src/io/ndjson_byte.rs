@@ -3588,7 +3588,10 @@ fn eval_raw_predicate_scalar<'a>(
     }
 }
 
-fn raw_json_path_view<'a>(row: &'a [u8], steps: &[PhysicalPathStep]) -> Option<JsonView<'a>> {
+pub(super) fn raw_json_path_view<'a>(
+    row: &'a [u8],
+    steps: &[PhysicalPathStep],
+) -> Option<JsonView<'a>> {
     raw_json_path_value(row, steps).and_then(raw_json_view)
 }
 

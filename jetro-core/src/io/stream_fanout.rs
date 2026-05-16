@@ -3,9 +3,11 @@ use super::ndjson::{
     write_val_line_with_options, NdjsonOptions,
 };
 #[cfg(feature = "simd-json")]
-use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+use super::ndjson_byte::{eval_ndjson_byte_predicate_row, raw_json_path_view};
 #[cfg(feature = "simd-json")]
-use super::ndjson_direct::{direct_tape_predicate_for_expr, NdjsonDirectPredicate};
+use super::ndjson_direct::{
+    direct_tape_predicate_for_expr, NdjsonDirectPredicate, NdjsonPhysicalPath,
+};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
@@ -14,7 +16,9 @@ use super::stream_plan::{
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
-use crate::parse::ast::{Arg, Expr, Step};
+use crate::ir::physical::PhysicalPathStep;
+use crate::parse::ast::{Arg, BinOp, Expr, Step};
+use crate::util::{json_cmp_binop, JsonView};
 use crate::{EvalError, JetroEngine, JetroEngineError};
 use std::io::Write;
 use std::sync::Arc;
@@ -202,6 +206,8 @@ where
             scalar: consumer.scalar,
             #[cfg(feature = "simd-json")]
             direct_first_predicate: direct_first_match_predicate(&consumer.stream),
+            #[cfg(feature = "simd-json")]
+            direct_cmp: direct_first_match_cmp(&consumer.stream),
             done: false,
             stream: CompiledRowStream::new(&consumer.stream),
             values: Vec::new(),
@@ -253,9 +259,19 @@ struct RunningConsumer {
     scalar: bool,
     #[cfg(feature = "simd-json")]
     direct_first_predicate: Option<NdjsonDirectPredicate>,
+    #[cfg(feature = "simd-json")]
+    direct_cmp: Option<DirectCmp>,
     done: bool,
     stream: CompiledRowStream,
     values: Vec<Val>,
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone)]
+struct DirectCmp {
+    steps: NdjsonPhysicalPath,
+    op: BinOp,
+    lit: Val,
 }
 
 fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
@@ -274,6 +290,38 @@ fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPred
     }
 }
 
+#[cfg(feature = "simd-json")]
+fn direct_first_match_cmp(plan: &RowStreamPlan) -> Option<DirectCmp> {
+    let predicate = direct_first_match_predicate(plan)?;
+    direct_cmp_from_predicate(&predicate)
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
+    match predicate {
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Eq => {
+            match (lhs.as_ref(), rhs.as_ref()) {
+                (NdjsonDirectPredicate::Path(steps), NdjsonDirectPredicate::Literal(lit)) => {
+                    Some(DirectCmp {
+                        steps: steps.clone(),
+                        op: *op,
+                        lit: lit.clone(),
+                    })
+                }
+                (NdjsonDirectPredicate::Literal(lit), NdjsonDirectPredicate::Path(steps)) => {
+                    Some(DirectCmp {
+                        steps: steps.clone(),
+                        op: *op,
+                        lit: lit.clone(),
+                    })
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn apply_fanout_row(
     engine: &JetroEngine,
     line_no: u64,
@@ -281,9 +329,30 @@ fn apply_fanout_row(
     consumers: &mut [RunningConsumer],
 ) -> Result<(), JetroEngineError> {
     let mut matched_value = None;
+    #[cfg(feature = "simd-json")]
+    let shared_view = shared_cmp_path(consumers).and_then(|steps| {
+        raw_json_path_view(&row, steps).map(|view| (steps.to_vec(), view))
+    });
     for consumer in consumers {
         if consumer.done || consumer.stream.is_exhausted() {
             continue;
+        }
+        #[cfg(feature = "simd-json")]
+        if let (Some((steps, view)), Some(cmp)) = (shared_view.as_ref(), consumer.direct_cmp.as_ref())
+        {
+            if same_path(steps, &cmp.steps) {
+                if !json_cmp_binop(*view, cmp.op, JsonView::from_val(&cmp.lit)) {
+                    continue;
+                }
+                if matched_value.is_none() {
+                    matched_value = Some(row_to_val(engine, line_no, row.clone())?);
+                }
+                consumer
+                    .values
+                    .push(matched_value.as_ref().expect("matched value").clone());
+                consumer.done = true;
+                continue;
+            }
         }
         #[cfg(feature = "simd-json")]
         if let Some(predicate) = consumer.direct_first_predicate.as_ref() {
@@ -317,6 +386,37 @@ fn apply_fanout_row(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn shared_cmp_path(consumers: &[RunningConsumer]) -> Option<&[PhysicalPathStep]> {
+    let mut shared = None;
+    let mut count = 0usize;
+    for consumer in consumers {
+        if consumer.done || consumer.stream.is_exhausted() {
+            continue;
+        }
+        let Some(cmp) = consumer.direct_cmp.as_ref() else {
+            continue;
+        };
+        count += 1;
+        match shared {
+            None => shared = Some(cmp.steps.as_slice()),
+            Some(path) if same_path(path, &cmp.steps) => {}
+            Some(_) => return None,
+        }
+    }
+    (count > 1).then_some(shared?) 
+}
+
+#[cfg(feature = "simd-json")]
+fn same_path(a: &[PhysicalPathStep], b: &[PhysicalPathStep]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| match (a, b) {
+            (PhysicalPathStep::Field(a), PhysicalPathStep::Field(b)) => a == b,
+            (PhysicalPathStep::Index(a), PhysicalPathStep::Index(b)) => a == b,
+            _ => false,
+        })
 }
 
 fn row_to_val(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Val, JetroEngineError> {
