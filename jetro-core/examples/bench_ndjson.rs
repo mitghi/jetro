@@ -296,6 +296,7 @@ fn main() {
         framed_options,
     );
 
+    let data_path = write_temp_ndjson("rows", &data);
     let high_dup = build_compacted_ndjson(rows, (rows / 100).max(1));
     let low_dup = build_compacted_ndjson(rows, rows);
     let high_dup_path = write_temp_ndjson("high-dup", &high_dup);
@@ -329,6 +330,13 @@ fn main() {
         high_dup.len(),
         "rows reverse+take",
         "$.rows().reverse().take(1000).map($.id)",
+    );
+    bench_rows_stream_file(
+        &engine,
+        &data_path,
+        data.len(),
+        "rows filter+take file",
+        "$.rows().filter($.score > 9900).take(1000).map({id: $.id, score: $.score})",
     );
     bench_rows_stream_file(
         &engine,
@@ -371,6 +379,7 @@ fn main() {
         "payload.score",
         rows,
     );
+    let _ = std::fs::remove_file(data_path);
     let _ = std::fs::remove_file(high_dup_path);
     let _ = std::fs::remove_file(low_dup_path);
 }
