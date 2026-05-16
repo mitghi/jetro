@@ -648,6 +648,37 @@ fn rows_stream_reverse_reads_delimited_payloads_and_skips_tombstones() {
 }
 
 #[test]
+fn rows_stream_parallel_reads_delimited_payloads_and_skips_tombstones() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rows-parallel-framed");
+    std::fs::write(
+        &path,
+        b"k0|null\nk1|{\"id\":1,\"active\":false}\nk2|{\"id\":2,\"active\":true}\nk3|null\nk4|{\"id\":3,\"active\":true}\n",
+    )
+    .unwrap();
+    let options = NdjsonOptions::default()
+        .with_row_frame(NdjsonRowFrame::DelimitedPayload {
+            separator: b'|',
+            null_payload: NullPayload::Skip,
+        })
+        .with_parallel_min_bytes(0);
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson_file_with_options(
+            &path,
+            "$.rows().filter($.active).take(2).map($.id)",
+            &mut out,
+            options,
+        )
+        .expect("parallel rows stream should run on framed payloads");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "2\n3\n");
+}
+
+#[test]
 fn rows_stream_root_find_can_use_parallel_writer() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-root-find");
