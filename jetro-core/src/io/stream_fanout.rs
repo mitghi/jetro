@@ -54,10 +54,7 @@ fn lower_rows_fanout_expr(
     expr: &Expr,
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
-    if let Some(plan) = lower_object_rows_fanout_expr(expr, source_kind)? {
-        return Ok(Some(plan));
-    }
-    if let Some(plan) = lower_array_rows_fanout_expr(expr, source_kind)? {
+    if let Some(plan) = lower_shape_rows_fanout_expr(expr, source_kind)? {
         return Ok(Some(plan));
     }
 
@@ -104,80 +101,99 @@ fn lower_rows_fanout_expr(
     }))
 }
 
-fn lower_object_rows_fanout_expr(
+fn lower_shape_rows_fanout_expr(
     expr: &Expr,
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
-    let Expr::Object(fields) = expr else {
+    let mut builder = FanoutBuilder::new(source_kind);
+    let mut next_id = 0usize;
+    let Some(body) = rewrite_rows_fanout_body(expr, &mut builder, &mut next_id)? else {
         return Ok(None);
     };
-    let mut builder = FanoutBuilder::new(source_kind);
-    let mut rewritten = Vec::with_capacity(fields.len());
-
-    for (idx, field) in fields.iter().enumerate() {
-        match field {
-            ObjField::Kv {
-                key,
-                val,
-                optional: false,
-                cond: None,
-            } => {
-                if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
-                    let binding = format!("__jetro_rows_fanout_{idx}");
-                    if !builder.push_stream(binding.clone(), stream) {
-                        return Ok(None);
-                    }
-                    rewritten.push(ObjField::Kv {
-                        key: key.clone(),
-                        val: Expr::Ident(binding),
-                        optional: false,
-                        cond: None,
-                    });
-                } else {
-                    rewritten.push(field.clone());
-                }
-            }
-            _ => rewritten.push(field.clone()),
-        }
-    }
-
-    Ok(builder.finish(Expr::Object(rewritten)))
+    Ok(builder.finish(body))
 }
 
-fn lower_array_rows_fanout_expr(
+fn rewrite_rows_fanout_body(
     expr: &Expr,
-    source_kind: RowStreamSourceKind,
-) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
-    let Expr::Array(items) = expr else {
-        return Ok(None);
-    };
-    let mut builder = FanoutBuilder::new(source_kind);
-    let mut rewritten = Vec::with_capacity(items.len());
-
-    for (idx, item) in items.iter().enumerate() {
-        match item {
-            ArrayElem::Expr(val) => {
-                if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
-                    let binding = format!("__jetro_rows_fanout_{idx}");
-                    if !builder.push_stream(binding.clone(), stream) {
-                        return Ok(None);
-                    }
-                    rewritten.push(ArrayElem::Expr(Expr::Ident(binding)));
-                } else {
-                    rewritten.push(item.clone());
-                }
-            }
-            _ => rewritten.push(item.clone()),
+    builder: &mut FanoutBuilder,
+    next_id: &mut usize,
+) -> Result<Option<Expr>, RowStreamPlanError> {
+    if let Some(stream) = lower_root_rows_expr(expr, builder.source_kind)? {
+        let binding = format!("__jetro_rows_fanout_{}", *next_id);
+        *next_id += 1;
+        if !builder.push_stream(binding.clone(), stream) {
+            return Ok(None);
         }
+        return Ok(Some(Expr::Ident(binding)));
     }
 
-    Ok(builder.finish(Expr::Array(rewritten)))
+    match expr {
+        Expr::Object(fields) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for field in fields {
+                out.push(match field {
+                    ObjField::Kv {
+                        key,
+                        val,
+                        optional,
+                        cond,
+                    } => ObjField::Kv {
+                        key: key.clone(),
+                        val: rewrite_rows_fanout_body(val, builder, next_id)?
+                            .unwrap_or_else(|| val.clone()),
+                        optional: *optional,
+                        cond: match cond {
+                            Some(cond) => Some(
+                                rewrite_rows_fanout_body(cond, builder, next_id)?
+                                    .unwrap_or_else(|| cond.clone()),
+                            ),
+                            None => None,
+                        },
+                    },
+                    ObjField::Dynamic { key, val } => ObjField::Dynamic {
+                        key: rewrite_rows_fanout_body(key, builder, next_id)?
+                            .unwrap_or_else(|| key.clone()),
+                        val: rewrite_rows_fanout_body(val, builder, next_id)?
+                            .unwrap_or_else(|| val.clone()),
+                    },
+                    ObjField::Spread(value) => ObjField::Spread(
+                        rewrite_rows_fanout_body(value, builder, next_id)?
+                            .unwrap_or_else(|| value.clone()),
+                    ),
+                    ObjField::SpreadDeep(value) => ObjField::SpreadDeep(
+                        rewrite_rows_fanout_body(value, builder, next_id)?
+                            .unwrap_or_else(|| value.clone()),
+                    ),
+                    ObjField::Short(name) => ObjField::Short(name.clone()),
+                });
+            }
+            Ok(Some(Expr::Object(out)))
+        }
+        Expr::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(match item {
+                    ArrayElem::Expr(value) => ArrayElem::Expr(
+                        rewrite_rows_fanout_body(value, builder, next_id)?
+                            .unwrap_or_else(|| value.clone()),
+                    ),
+                    ArrayElem::Spread(value) => ArrayElem::Spread(
+                        rewrite_rows_fanout_body(value, builder, next_id)?
+                            .unwrap_or_else(|| value.clone()),
+                    ),
+                });
+            }
+            Ok(Some(Expr::Array(out)))
+        }
+        _ => Ok(Some(expr.clone())),
+    }
 }
 
 struct FanoutBuilder {
     source_kind: RowStreamSourceKind,
     source: Option<RowStreamPlan>,
     consumers: Vec<RowStreamFanoutConsumer>,
+    abandoned: bool,
 }
 
 impl FanoutBuilder {
@@ -186,6 +202,7 @@ impl FanoutBuilder {
             source_kind,
             source: None,
             consumers: Vec::new(),
+            abandoned: false,
         }
     }
 
@@ -197,6 +214,7 @@ impl FanoutBuilder {
             demand: Default::default(),
         });
         if base.direction != stream.direction {
+            self.abandoned = true;
             return false;
         }
         self.consumers.push(RowStreamFanoutConsumer {
@@ -208,7 +226,7 @@ impl FanoutBuilder {
     }
 
     fn finish(self, body: Expr) -> Option<RowStreamFanoutPlan> {
-        if self.consumers.len() < 2 {
+        if self.abandoned || self.consumers.len() < 2 {
             return None;
         }
         Some(RowStreamFanoutPlan {
@@ -693,6 +711,35 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"[{"name":"Ada","version":2},{"name":"Bob","version":1}]"#
+        );
+    }
+
+    #[test]
+    fn executes_nested_shape_rows_subqueries_as_fanout() {
+        let path = temp_ndjson(
+            "nested",
+            &[
+                r#"{"name":"Ada","version":1}"#,
+                r#"{"name":"Bob","version":1}"#,
+                r#"{"name":"Ada","version":2}"#,
+            ],
+        );
+        let query = r#"{users: {a: $.rows().reverse().find($.name == "Ada").first(), b: $.rows().reverse().find($.name == "Bob").first()}}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"users":{"a":{"name":"Ada","version":2},"b":{"name":"Bob","version":1}}}"#
         );
     }
 }
