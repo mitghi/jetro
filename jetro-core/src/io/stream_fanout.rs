@@ -17,7 +17,7 @@ use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
-use crate::parse::ast::{Arg, BinOp, Expr, ObjField, Step};
+use crate::parse::ast::{Arg, ArrayElem, BinOp, Expr, ObjField, Step};
 use crate::util::{json_cmp_binop, JsonView};
 use crate::{EvalError, JetroEngine, JetroEngineError};
 use std::io::Write;
@@ -55,6 +55,9 @@ fn lower_rows_fanout_expr(
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
     if let Some(plan) = lower_object_rows_fanout_expr(expr, source_kind)? {
+        return Ok(Some(plan));
+    }
+    if let Some(plan) = lower_array_rows_fanout_expr(expr, source_kind)? {
         return Ok(Some(plan));
     }
 
@@ -159,6 +162,57 @@ fn lower_object_rows_fanout_expr(
         source: source.expect("fanout source"),
         consumers,
         body: Expr::Object(rewritten),
+    }))
+}
+
+fn lower_array_rows_fanout_expr(
+    expr: &Expr,
+    source_kind: RowStreamSourceKind,
+) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
+    let Expr::Array(items) = expr else {
+        return Ok(None);
+    };
+    let mut consumers = Vec::new();
+    let mut rewritten = Vec::with_capacity(items.len());
+    let mut source = None;
+    let mut saw_stream = false;
+
+    for (idx, item) in items.iter().enumerate() {
+        match item {
+            ArrayElem::Expr(val) => {
+                if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
+                    saw_stream = true;
+                    let base = source.get_or_insert_with(|| RowStreamPlan {
+                        source: source_kind,
+                        direction: stream.direction,
+                        stages: Vec::new(),
+                        demand: Default::default(),
+                    });
+                    if base.direction != stream.direction {
+                        return Ok(None);
+                    }
+                    let binding = format!("__jetro_rows_fanout_{idx}");
+                    consumers.push(RowStreamFanoutConsumer {
+                        binding: binding.clone(),
+                        scalar: stream.demand.retained_limit == Some(1),
+                        stream,
+                    });
+                    rewritten.push(ArrayElem::Expr(Expr::Ident(binding)));
+                } else {
+                    rewritten.push(item.clone());
+                }
+            }
+            _ => rewritten.push(item.clone()),
+        }
+    }
+
+    if !saw_stream || consumers.len() < 2 {
+        return Ok(None);
+    }
+    Ok(Some(RowStreamFanoutPlan {
+        source: source.expect("fanout source"),
+        consumers,
+        body: Expr::Array(rewritten),
     }))
 }
 
@@ -607,6 +661,35 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"user_a":{"name":"Ada","version":2},"user_b":{"name":"Bob","version":1}}"#
+        );
+    }
+
+    #[test]
+    fn executes_array_rows_subqueries_as_fanout() {
+        let path = temp_ndjson(
+            "array",
+            &[
+                r#"{"name":"Ada","version":1}"#,
+                r#"{"name":"Bob","version":1}"#,
+                r#"{"name":"Ada","version":2}"#,
+            ],
+        );
+        let query = r#"[$.rows().reverse().find($.name == "Ada").first(), $.rows().reverse().find($.name == "Bob").first()]"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"[{"name":"Ada","version":2},{"name":"Bob","version":1}]"#
         );
     }
 }
