@@ -17,7 +17,7 @@ use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
-use crate::parse::ast::{Arg, BinOp, Expr, Step};
+use crate::parse::ast::{Arg, BinOp, Expr, ObjField, Step};
 use crate::util::{json_cmp_binop, JsonView};
 use crate::{EvalError, JetroEngine, JetroEngineError};
 use std::io::Write;
@@ -54,6 +54,10 @@ fn lower_rows_fanout_expr(
     expr: &Expr,
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
+    if let Some(plan) = lower_object_rows_fanout_expr(expr, source_kind)? {
+        return Ok(Some(plan));
+    }
+
     let mut bindings = Vec::new();
     let body = collect_let_chain(expr, &mut bindings);
     if bindings.len() < 2 {
@@ -94,6 +98,67 @@ fn lower_rows_fanout_expr(
         source,
         consumers,
         body: body.clone(),
+    }))
+}
+
+fn lower_object_rows_fanout_expr(
+    expr: &Expr,
+    source_kind: RowStreamSourceKind,
+) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
+    let Expr::Object(fields) = expr else {
+        return Ok(None);
+    };
+    let mut consumers = Vec::new();
+    let mut rewritten = Vec::with_capacity(fields.len());
+    let mut source = None;
+    let mut saw_stream = false;
+
+    for (idx, field) in fields.iter().enumerate() {
+        match field {
+            ObjField::Kv {
+                key,
+                val,
+                optional: false,
+                cond: None,
+            } => {
+                if let Some(stream) = lower_root_rows_expr(val, source_kind)? {
+                    saw_stream = true;
+                    let base = source.get_or_insert_with(|| RowStreamPlan {
+                        source: source_kind,
+                        direction: stream.direction,
+                        stages: Vec::new(),
+                        demand: Default::default(),
+                    });
+                    if base.direction != stream.direction {
+                        return Ok(None);
+                    }
+                    let binding = format!("__jetro_rows_fanout_{idx}");
+                    consumers.push(RowStreamFanoutConsumer {
+                        binding: binding.clone(),
+                        scalar: stream.demand.retained_limit == Some(1),
+                        stream,
+                    });
+                    rewritten.push(ObjField::Kv {
+                        key: key.clone(),
+                        val: Expr::Ident(binding),
+                        optional: false,
+                        cond: None,
+                    });
+                } else {
+                    rewritten.push(field.clone());
+                }
+            }
+            _ => rewritten.push(field.clone()),
+        }
+    }
+
+    if !saw_stream || consumers.len() < 2 {
+        return Ok(None);
+    }
+    Ok(Some(RowStreamFanoutPlan {
+        source: source.expect("fanout source"),
+        consumers,
+        body: Expr::Object(rewritten),
     }))
 }
 
@@ -514,5 +579,34 @@ mod tests {
         std::fs::remove_file(path).ok();
         let got = String::from_utf8(out).unwrap();
         assert_eq!(got.trim(), r#"{"latest":2,"pair":["Ada","Bob"]}"#);
+    }
+
+    #[test]
+    fn executes_object_rows_subqueries_as_fanout() {
+        let path = temp_ndjson(
+            "object",
+            &[
+                r#"{"name":"Ada","version":1}"#,
+                r#"{"name":"Bob","version":1}"#,
+                r#"{"name":"Ada","version":2}"#,
+            ],
+        );
+        let query = r#"{user_a: $.rows().reverse().find($.name == "Ada").first(), user_b: $.rows().reverse().find($.name == "Bob").first()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"user_a":{"name":"Ada","version":2},"user_b":{"name":"Bob","version":1}}"#
+        );
     }
 }
