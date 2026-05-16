@@ -1,10 +1,15 @@
 use super::ndjson::{
-    collect_row_stream_result, ndjson_writer_with_options, write_val_line_with_options,
-    NdjsonOptions,
+    collect_row_stream_result, ndjson_writer_with_options, parse_row, row_eval_error,
+    write_val_line_with_options, NdjsonOptions,
 };
+#[cfg(feature = "simd-json")]
+use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+#[cfg(feature = "simd-json")]
+use super::ndjson_direct::{direct_tape_predicate_for_expr, NdjsonDirectPredicate};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{
-    lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError, RowStreamSourceKind,
+    lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
+    RowStreamSourceKind, RowStreamStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::{Arg, Expr, ObjField, Step};
@@ -244,6 +249,9 @@ where
         .map(|consumer| RunningConsumer {
             binding: consumer.binding.clone(),
             scalar: consumer.scalar,
+            #[cfg(feature = "simd-json")]
+            direct_first_predicate: direct_first_match_predicate(&consumer.stream),
+            done: false,
             stream: CompiledRowStream::new(&consumer.stream),
             values: Vec::new(),
         })
@@ -296,12 +304,27 @@ where
 struct RunningConsumer {
     binding: String,
     scalar: bool,
+    #[cfg(feature = "simd-json")]
+    direct_first_predicate: Option<NdjsonDirectPredicate>,
+    done: bool,
     stream: CompiledRowStream,
     values: Vec<Val>,
 }
 
 fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
-    consumers.iter().all(|consumer| consumer.stream.is_exhausted())
+    consumers
+        .iter()
+        .all(|consumer| consumer.done || consumer.stream.is_exhausted())
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPredicate> {
+    match plan.stages.as_slice() {
+        [RowStreamStage::Filter(expr), RowStreamStage::Take(1)] => {
+            direct_tape_predicate_for_expr(expr)
+        }
+        _ => None,
+    }
 }
 
 fn apply_fanout_row(
@@ -310,9 +333,27 @@ fn apply_fanout_row(
     row: Vec<u8>,
     consumers: &mut [RunningConsumer],
 ) -> Result<(), JetroEngineError> {
+    let mut matched_value = None;
     for consumer in consumers {
-        if consumer.stream.is_exhausted() {
+        if consumer.done || consumer.stream.is_exhausted() {
             continue;
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(predicate) = consumer.direct_first_predicate.as_ref() {
+            match eval_ndjson_byte_predicate_row(&row, predicate)? {
+                Some(false) => continue,
+                Some(true) => {
+                    if matched_value.is_none() {
+                        matched_value = Some(row_to_val(engine, line_no, row.clone())?);
+                    }
+                    consumer
+                        .values
+                        .push(matched_value.as_ref().expect("matched value").clone());
+                    consumer.done = true;
+                    continue;
+                }
+                None => {}
+            }
         }
         let mut values = Vec::new();
         let stop = collect_row_stream_result(
@@ -329,6 +370,13 @@ fn apply_fanout_row(
         }
     }
     Ok(())
+}
+
+fn row_to_val(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Val, JetroEngineError> {
+    let document = parse_row(engine, line_no, row)?;
+    document
+        .root_val_with(engine.keys())
+        .map_err(|err| row_eval_error(line_no, err))
 }
 
 #[cfg(test)]
