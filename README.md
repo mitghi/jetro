@@ -55,6 +55,13 @@ let report = jetro.collect(r#"
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+## Install
+
+```toml
+[dependencies]
+jetro = "0.5.10"
+```
+
 ## Why Jetro?
 
 - **Expressive, Compact and Familiar**  
@@ -146,13 +153,6 @@ Reproduce:
 ```bash
 cargo run -p jetro-core --release --example bench_cold
 (cd bench/go && go run .)
-```
-
-## Install
-
-```toml
-[dependencies]
-jetro = "0.5.9"
 ```
 
 ## API

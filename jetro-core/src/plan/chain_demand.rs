@@ -122,10 +122,12 @@ impl DemandOperator for ChainOp {
                         PullDemand::FirstInput(n) | PullDemand::UntilOutput(n) => {
                             PullDemand::UntilOutput(n)
                         }
+                        PullDemand::LastInput(n) => PullDemand::LastInput(n),
+                        PullDemand::NthInput(_) => PullDemand::All,
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order,
+                    order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
                 // Transform match is 1:1, so demand passes through.
                 MatchRole::Transform => downstream,
@@ -136,7 +138,7 @@ impl DemandOperator for ChainOp {
                         other => other,
                     },
                     value: downstream.value,
-                    order: downstream.order,
+                    order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
             },
             ChainOp::Builtin { id, demand_arg } => {
@@ -253,10 +255,22 @@ mod tests {
     }
 
     #[test]
-    fn filter_last_requests_reverse_until_output() {
+    fn filter_last_requests_reverse_selective_demand() {
         let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
+    fn predicate_nth_requests_ordered_full_scan() {
+        let ops = [
+            match_op(MatchRole::Predicate),
+            op_usize(BuiltinMethod::Nth, 2),
+        ];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
     }
@@ -394,6 +408,7 @@ mod tests {
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
     }
 
     #[test]
@@ -454,6 +469,7 @@ mod tests {
             let demand = source_demand(&ops, Demand::RESULT);
             assert_eq!(demand.pull, PullDemand::All, "{method:?}");
             assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
         }
     }
 

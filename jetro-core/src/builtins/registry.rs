@@ -184,7 +184,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 }
             },
             value: downstream.value.merge(ValueNeed::Predicate),
-            order: downstream.order,
+            order: downstream.order || pull_is_positional(downstream.pull),
         },
         BuiltinDemandLaw::TakeWhile => Demand {
             pull: match downstream.pull {
@@ -210,7 +210,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 }
             },
             value: downstream.value.merge(ValueNeed::Whole),
-            order: downstream.order,
+            order: downstream.order || pull_is_positional(downstream.pull),
         },
         BuiltinDemandLaw::MapLike => Demand {
             value: downstream.value.merge(ValueNeed::Whole),
@@ -220,7 +220,10 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value.merge(ValueNeed::Whole),
             ..downstream
         },
-        BuiltinDemandLaw::FlatMapLike => Demand::all(ValueNeed::Whole),
+        BuiltinDemandLaw::FlatMapLike => Demand {
+            order: downstream.order || pull_is_positional(downstream.pull),
+            ..Demand::all(ValueNeed::Whole)
+        },
         BuiltinDemandLaw::Take => match arg {
             BuiltinDemandArg::Usize(n) => Demand {
                 pull: downstream.pull.cap_inputs(n),
@@ -327,6 +330,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             order: downstream.order,
         },
     }
+}
+
+#[inline(always)]
+fn pull_is_positional(pull: PullDemand) -> bool {
+    !matches!(pull, PullDemand::All)
 }
 
 /// Convert builtin terminal-sink metadata into the shared planner demand model.
@@ -630,6 +638,7 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator,
     };
 
     #[test]
@@ -665,7 +674,52 @@ mod tests {
         assert_eq!(BuiltinMethod::from_name("group_by"), BuiltinMethod::GroupBy);
         assert_eq!(BuiltinMethod::from_name("exists"), BuiltinMethod::Any);
         assert_eq!(BuiltinMethod::from_name("distinct"), BuiltinMethod::Unique);
+        assert_eq!(
+            BuiltinMethod::from_name("distinct_by"),
+            BuiltinMethod::UniqueBy
+        );
+        assert_eq!(BuiltinMethod::from_name("rows"), BuiltinMethod::Rows);
+        assert!(BuiltinMethod::Rows.spec().stream_source);
         assert_eq!(BuiltinMethod::from_name("lstrip"), BuiltinMethod::TrimLeft);
+    }
+
+    #[test]
+    fn registry_names_and_aliases_are_unambiguous() {
+        use std::collections::BTreeMap;
+
+        let mut seen = BTreeMap::new();
+        for (method, canonical, aliases) in all_method_entries() {
+            for name in std::iter::once(canonical).chain(aliases.iter().copied()) {
+                if let Some(existing) = seen.insert(name, method) {
+                    panic!(
+                        "builtin name/alias {name:?} is registered for both {existing:?} and {method:?}"
+                    );
+                }
+                assert_eq!(by_name(name).and_then(BuiltinId::method), Some(method));
+                assert_eq!(BuiltinMethod::from_name(name), method);
+            }
+        }
+    }
+
+    #[test]
+    fn registry_specs_preserve_basic_metadata_invariants() {
+        for (method, _, _) in all_method_entries() {
+            let spec = method.spec();
+            assert!(
+                spec.cost.is_finite() && spec.cost >= 0.0,
+                "{method:?} has invalid planner cost {}",
+                spec.cost
+            );
+
+            let numeric_sink = spec
+                .sink
+                .is_some_and(|sink| sink.accumulator == BuiltinSinkAccumulator::Numeric);
+            assert_eq!(
+                spec.numeric_reducer.is_some(),
+                numeric_sink,
+                "{method:?} numeric reducer metadata must match numeric sink metadata"
+            );
+        }
     }
 
     #[test]
@@ -713,7 +767,7 @@ mod tests {
         let demand = propagate_demand(remove, BuiltinDemandArg::None, downstream);
         assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
-        assert!(!demand.order);
+        assert!(demand.order);
 
         let downstream = Demand {
             pull: PullDemand::NthInput(4),
@@ -747,6 +801,17 @@ mod tests {
         };
         let demand = propagate_demand(unique, BuiltinDemandArg::None, downstream);
         assert_eq!(demand.pull, PullDemand::UntilOutput(2));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let flat_map = BuiltinId::from_method(BuiltinMethod::FlatMap);
+        let downstream = Demand {
+            pull: PullDemand::FirstInput(1),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+        let demand = propagate_demand(flat_map, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
 
@@ -868,6 +933,56 @@ mod tests {
     }
 
     #[test]
+    fn registry_sink_demands_match_all_sink_accumulators() {
+        for (method, _, _) in all_method_entries() {
+            let Some(sink) = method.spec().sink else {
+                continue;
+            };
+            let demand = sink_demand(sink);
+            match sink.accumulator {
+                BuiltinSinkAccumulator::Count => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::CountOnly, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::Numeric => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Numeric, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::ApproxDistinct => {
+                    assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                    assert_eq!(demand.pull, PullDemand::FirstInput(1), "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(!demand.order, "{method:?}");
+                }
+                BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                    assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+                    assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+                    assert!(demand.order, "{method:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registry_logical_shapes_participate_in_demand_model() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if logical_shape(id).is_some() {
+                assert!(
+                    participates_in_demand(id),
+                    "{method:?} has logical pipeline shape but no demand metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_marks_one_to_one_element_demands() {
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
@@ -927,6 +1042,33 @@ mod tests {
                 !demand_is_conservative_barrier(BuiltinId::from_method(method)),
                 "{method:?}"
             );
+        }
+    }
+
+    #[test]
+    fn registry_preserves_order_for_positional_selective_and_expanding_demands() {
+        let positional = Demand {
+            pull: PullDemand::FirstInput(1),
+            value: ValueNeed::Whole,
+            order: false,
+        };
+
+        for method in [
+            BuiltinMethod::Filter,
+            BuiltinMethod::Remove,
+            BuiltinMethod::Compact,
+            BuiltinMethod::Unique,
+            BuiltinMethod::UniqueBy,
+            BuiltinMethod::FlatMap,
+            BuiltinMethod::Flatten,
+            BuiltinMethod::Explode,
+        ] {
+            let demand = propagate_demand(
+                BuiltinId::from_method(method),
+                BuiltinDemandArg::None,
+                positional,
+            );
+            assert!(demand.order, "{method:?}");
         }
     }
 

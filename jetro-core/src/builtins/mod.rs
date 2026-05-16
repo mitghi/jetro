@@ -41,6 +41,8 @@ pub enum BuiltinMethod {
     ToJson,
     /// Parses a JSON string back to a value.
     FromJson,
+    /// Lifts the current input source into a row stream.
+    Rows,
 
     // ── Numeric aggregates ─────────────────────────────────────────────────
     /// Sums all numeric elements; accepts an optional projection lambda.
@@ -429,7 +431,7 @@ macro_rules! for_each_builtin {
             ParseFloat, ParseInt, Partition, PascalCase, PctChange, Pick, Pivot, Prepend,
             Rec, ReCaptures, ReCapturesAll, ReMatch, ReMatchAll, ReMatchFirst, Remove,
             Rename, Repeat, Replace, ReplaceAll, ReReplace, ReReplaceAll, ReSplit, Reverse,
-            ReverseStr, RollingAvg, RollingMax, RollingMin, RollingSum, Round, Scan, Schema,
+            ReverseStr, RollingAvg, RollingMax, RollingMin, RollingSum, Round, Rows, Scan, Schema,
             Set, SetPath, Skip, Slice, SnakeCase, Sort, Split, StartsWith, StripPrefix,
             StripSuffix, Sum, Take, TakeWhile, TitleCase, ToBase64, ToBool, ToCsv, ToJson,
             ToNumber, ToPairs, ToString, ToTsv, TracePath, TransformKeys, TransformValues,
@@ -664,6 +666,9 @@ pub struct BuiltinSpec {
     /// methods whose pipeline-streaming behavior is the desired semantic on
     /// path receivers (e.g. per-element serialization).
     pub never_unwrap: bool,
+    /// Marks this method as a source-lifting stream boundary. Such methods are
+    /// planned by source/stream planners instead of normal row-local dispatch.
+    pub stream_source: bool,
 }
 
 /// How a builtin transforms downstream demand into the demand it places on
@@ -1202,6 +1207,7 @@ impl BuiltinSpec {
             lowering: None,
             is_element: false,
             never_unwrap: false,
+            stream_source: false,
         }
     }
 
@@ -1377,6 +1383,12 @@ impl BuiltinSpec {
     #[allow(dead_code)]
     fn never_unwrap(mut self) -> Self {
         self.never_unwrap = true;
+        self
+    }
+
+    /// Marks this builtin as a stream source boundary.
+    fn stream_source(mut self) -> Self {
+        self.stream_source = true;
         self
     }
 }

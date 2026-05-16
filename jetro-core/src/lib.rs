@@ -317,7 +317,11 @@ impl JetroEngine {
         document: &Jetro,
         expr: S,
     ) -> std::result::Result<Value, EvalError> {
-        let plan = self.cached_plan(expr.as_ref(), exec::router::planning_context(document));
+        let expr = expr.as_ref();
+        if let Some(rows) = io::collect_document_rows(self, document, expr)? {
+            return Ok(Value::from(rows));
+        }
+        let plan = self.cached_plan(expr, exec::router::planning_context(document));
         self.collect_prepared(document, &plan)
     }
 
@@ -559,6 +563,81 @@ impl JetroEngine {
         W: std::io::Write,
     {
         io::run_ndjson_rev_limit_with_options(self, path, query, limit, writer, options)
+    }
+
+    /// Read an NDJSON file from tail to head, keep only the first row seen for
+    /// each `key_query` result in that reverse stream order, write `query` for
+    /// retained rows, and stop after `limit` retained rows.
+    pub fn run_ndjson_rev_distinct_by<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by(self, path, key_query, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by`] with explicit NDJSON
+    /// reader options.
+    pub fn run_ndjson_rev_distinct_by_with_options<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<usize, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_options(
+            self, path, key_query, query, limit, writer, options,
+        )
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by`], returning execution
+    /// counters for path-selection and duplicate-drop observability.
+    pub fn run_ndjson_rev_distinct_by_with_stats<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonRevDistinctStats, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_stats(self, path, key_query, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by_with_stats`] with explicit
+    /// NDJSON reader options.
+    pub fn run_ndjson_rev_distinct_by_with_stats_and_options<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonRevDistinctStats, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_stats_and_options(
+            self, path, key_query, query, limit, writer, options,
+        )
     }
 
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
@@ -1213,25 +1292,6 @@ impl Jetro {
             objvec_cache: Default::default(),
             raw_bytes: None,
             tape: OnceCell::new(),
-            structural_index: OnceCell::new(),
-            vm: RefCell::new(VM::new()),
-        }
-    }
-
-    /// Build a `Jetro` handle around an already parsed tape. This is used by
-    /// NDJSON row execution, where the row buffer is already owned and can be
-    /// consumed directly by simd-json instead of first being copied into
-    /// `raw_bytes` and copied again by `lazy_tape`.
-    #[cfg(feature = "simd-json")]
-    pub(crate) fn from_tape_data(tape: Arc<crate::data::tape::TapeData>) -> Self {
-        let tape_cell = OnceCell::new();
-        let _ = tape_cell.set(Ok(tape));
-        Self {
-            document: Value::Null,
-            root_val: OnceCell::new(),
-            objvec_cache: Default::default(),
-            raw_bytes: None,
-            tape: tape_cell,
             structural_index: OnceCell::new(),
             vm: RefCell::new(VM::new()),
         }

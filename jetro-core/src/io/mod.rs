@@ -3,14 +3,32 @@
 //! NDJSON adapters evaluate each non-empty row independently while reusing the
 //! caller's [`crate::JetroEngine`] plan, VM, and tape execution caches.
 
+mod document_rows;
+mod mapped_bytes;
 mod ndjson;
 #[cfg(feature = "simd-json")]
 mod ndjson_byte;
 #[cfg(feature = "simd-json")]
 mod ndjson_direct;
+mod ndjson_distinct;
+mod ndjson_frame;
+#[cfg(feature = "simd-json")]
+#[cfg_attr(not(test), allow(dead_code))]
+mod ndjson_hint;
+mod ndjson_parallel;
 mod ndjson_rev;
+#[cfg(feature = "simd-json")]
+mod ndjson_stream_cache;
 mod source;
+mod stream_direct;
+mod stream_exec;
+#[allow(dead_code)]
+mod stream_plan;
+mod stream_source;
+mod stream_subquery;
+mod stream_types;
 
+pub(crate) use document_rows::collect_document_rows;
 pub use ndjson::{
     collect_ndjson, collect_ndjson_file, collect_ndjson_file_with_options, collect_ndjson_matches,
     collect_ndjson_matches_file, collect_ndjson_matches_file_with_options,
@@ -25,13 +43,18 @@ pub use ndjson::{
     run_ndjson_matches_file_with_options, run_ndjson_matches_source,
     run_ndjson_matches_source_with_options, run_ndjson_matches_with_options, run_ndjson_source,
     run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
-    run_ndjson_with_options, NdjsonControl, NdjsonOptions, NdjsonPerRowDriver,
+    run_ndjson_with_options, NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonParallelism,
+    NdjsonPerRowDriver,
 };
+pub use ndjson_distinct::DistinctFrontFilterKind;
+pub use ndjson_frame::{NdjsonRowFrame, NullPayload};
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
-    run_ndjson_rev, run_ndjson_rev_limit, run_ndjson_rev_limit_with_options,
-    run_ndjson_rev_matches, run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options,
+    run_ndjson_rev, run_ndjson_rev_distinct_by, run_ndjson_rev_distinct_by_with_options,
+    run_ndjson_rev_distinct_by_with_stats, run_ndjson_rev_distinct_by_with_stats_and_options,
+    run_ndjson_rev_limit, run_ndjson_rev_limit_with_options, run_ndjson_rev_matches,
+    run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonRevDistinctStats,
     NdjsonReverseFileDriver,
 };
 pub use source::NdjsonSource;
@@ -48,6 +71,12 @@ pub enum RowError {
     InvalidJsonMessage {
         line_no: u64,
         message: String,
+    },
+    EmptyPayload {
+        line_no: u64,
+    },
+    NullPayload {
+        line_no: u64,
     },
     LineTooLarge {
         line_no: u64,
@@ -72,6 +101,12 @@ impl fmt::Display for RowError {
             Self::InvalidJsonMessage { line_no, message } => {
                 write!(f, "invalid JSON on NDJSON line {line_no}: {message}")
             }
+            Self::EmptyPayload { line_no } => {
+                write!(f, "NDJSON line {line_no} has an empty framed payload")
+            }
+            Self::NullPayload { line_no } => {
+                write!(f, "NDJSON line {line_no} has a null framed payload")
+            }
             Self::LineTooLarge { line_no, len, max } => write!(
                 f,
                 "NDJSON line {line_no} is too large: {len} bytes exceeds {max} byte limit"
@@ -86,6 +121,8 @@ impl std::error::Error for RowError {
             Self::Io(err) => Some(err),
             Self::InvalidJson { source, .. } => Some(source),
             Self::InvalidJsonMessage { .. } => None,
+            Self::EmptyPayload { .. } => None,
+            Self::NullPayload { .. } => None,
             Self::LineTooLarge { .. } => None,
         }
     }

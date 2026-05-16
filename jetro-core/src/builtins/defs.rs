@@ -1527,6 +1527,7 @@ pub(crate) struct UniqueBy;
 impl Builtin for UniqueBy {
     const METHOD: BuiltinMethod = BuiltinMethod::UniqueBy;
     const NAME: &'static str = "unique_by";
+    const ALIASES: &'static [&'static str] = &["distinct_by"];
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
     }
@@ -2739,6 +2740,25 @@ impl Builtin for Unknown {
             pure: false,
             ..BuiltinSpec::new(BuiltinCategory::Unknown, BuiltinCardinality::OneToOne)
         }
+    }
+}
+
+/// `rows()` — source-lifting marker used by stream planners.
+///
+/// Runtime row-local dispatch intentionally leaves the receiver unchanged; the
+/// planner is responsible for recognizing root `$.rows()` as a stream boundary.
+pub(crate) struct Rows;
+impl Builtin for Rows {
+    const METHOD: BuiltinMethod = BuiltinMethod::Rows;
+    const NAME: &'static str = "rows";
+    fn spec() -> BuiltinSpec {
+        BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+            .stream_source()
+            .never_unwrap()
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        Some(recv.clone())
     }
 }
 

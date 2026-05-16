@@ -1,12 +1,23 @@
+use super::ndjson_distinct::{
+    distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
+};
+use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::RowError;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
 use memchr::memrchr;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+#[cfg(feature = "simd-json")]
+use super::ndjson_byte::{
+    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
+    BytePlanWrite, RawFieldValue,
+};
 
 /// Reverse NDJSON line reader over a seekable file.
 ///
@@ -19,6 +30,7 @@ pub struct NdjsonReverseFileDriver {
     pos: u64,
     chunk_size: usize,
     max_line_len: usize,
+    row_frame: NdjsonRowFrame,
     carry: Vec<u8>,
     pending: VecDeque<Vec<u8>>,
     finished_head: bool,
@@ -48,6 +60,7 @@ impl NdjsonReverseFileDriver {
             pos,
             chunk_size: options.reverse_chunk_size.max(1),
             max_line_len: options.max_line_len,
+            row_frame: options.row_frame,
             carry: Vec::new(),
             pending: VecDeque::new(),
             finished_head: false,
@@ -61,9 +74,12 @@ impl NdjsonReverseFileDriver {
 
     pub fn next_line_with_reverse_no(&mut self) -> Result<Option<(u64, Vec<u8>)>, RowError> {
         loop {
-            if let Some(line) = self.pending.pop_front() {
+            if let Some(mut line) = self.pending.pop_front() {
                 self.reverse_line_no += 1;
-                return Ok(Some((self.reverse_line_no, line)));
+                if let Some(line) = self.frame_line(self.reverse_line_no, &mut line)? {
+                    return Ok(Some((self.reverse_line_no, line)));
+                }
+                continue;
             }
 
             if self.pos == 0 {
@@ -76,7 +92,9 @@ impl NdjsonReverseFileDriver {
                 self.check_line_len(line.len())?;
                 if line.iter().any(|b| !b.is_ascii_whitespace()) {
                     self.reverse_line_no += 1;
-                    return Ok(Some((self.reverse_line_no, line)));
+                    if let Some(line) = self.frame_line(self.reverse_line_no, &mut line)? {
+                        return Ok(Some((self.reverse_line_no, line)));
+                    }
                 }
                 return Ok(None);
             }
@@ -108,6 +126,19 @@ impl NdjsonReverseFileDriver {
                 self.check_line_len(next.len())?;
                 self.carry = next;
             }
+        }
+    }
+
+    fn frame_line(&self, line_no: u64, line: &mut Vec<u8>) -> Result<Option<Vec<u8>>, RowError> {
+        match frame_payload(self.row_frame, line_no, line)? {
+            FramePayload::Data(range) => {
+                if range.start > 0 || range.end < line.len() {
+                    line.copy_within(range.clone(), 0);
+                    line.truncate(range.end - range.start);
+                }
+                Ok(Some(std::mem::take(line)))
+            }
+            FramePayload::Skip => Ok(None),
         }
     }
 
@@ -259,12 +290,15 @@ where
     }
 
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
-    let count = drive_rev(engine, path, query, options, |value| {
-        super::ndjson::write_val_line(&mut writer, &value)?;
+    let mut emitted = 0usize;
+    drive_rev(engine, path, query, options, |value| {
+        if super::ndjson::write_val_line_with_options(&mut writer, &value, options)? {
+            emitted += 1;
+        }
         Ok(super::ndjson::NdjsonControl::Continue)
     })?;
     writer.flush()?;
-    Ok(count)
+    Ok(emitted)
 }
 
 pub fn run_ndjson_rev_limit<P, W>(
@@ -311,17 +345,232 @@ where
 
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
-    let count = drive_rev(engine, path, query, options, |value| {
-        super::ndjson::write_val_line(&mut writer, &value)?;
-        emitted += 1;
-        Ok(if emitted >= limit {
+    drive_rev(engine, path, query, options, |value| {
+        let wrote = super::ndjson::write_val_line_with_options(&mut writer, &value, options)?;
+        if wrote {
+            emitted += 1;
+        }
+        Ok(if wrote && emitted >= limit {
             super::ndjson::NdjsonControl::Stop
         } else {
             super::ndjson::NdjsonControl::Continue
         })
     })?;
     writer.flush()?;
-    Ok(count)
+    Ok(emitted)
+}
+
+pub fn run_ndjson_rev_distinct_by<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine, path, key_query, query, limit, writer, options,
+    )
+    .map(|stats| stats.emitted)
+}
+
+pub fn run_ndjson_rev_distinct_by_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonRevDistinctStats, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_stats_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonRevDistinctStats, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok(NdjsonRevDistinctStats::default());
+    }
+
+    #[cfg(feature = "simd-json")]
+    let direct_key_plan = super::ndjson::direct_tape_plan(engine, key_query);
+    #[cfg(feature = "simd-json")]
+    let direct_value_plan = super::ndjson::direct_tape_plan(engine, query)
+        .filter(|plan| tape_plan_can_write_byte_row(plan));
+
+    let mut key_plan = None;
+    let mut value_plan = None;
+    let mut vm = None;
+    let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
+    #[cfg(feature = "simd-json")]
+    let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
+    #[cfg(feature = "simd-json")]
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut seen = AdaptiveDistinctKeys::default();
+    let mut stats = NdjsonRevDistinctStats::default();
+
+    while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
+        let mut row = Some(row);
+        let mut document = None;
+
+        #[cfg(feature = "simd-json")]
+        let direct_key = direct_key_plan.as_ref().and_then(|plan| {
+            row.as_deref()
+                .and_then(|row| distinct_key_direct(row, plan))
+        });
+        #[cfg(not(feature = "simd-json"))]
+        let direct_key = None;
+
+        let inserted = if let Some(key) = direct_key {
+            stats.direct_key_rows += 1;
+            match key {
+                Cow::Borrowed(key) => seen.insert_slice(key),
+                Cow::Owned(key) => seen.insert(key),
+            }
+        } else {
+            stats.fallback_key_rows += 1;
+            let parsed = super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?;
+            let plan = key_plan.get_or_insert_with(|| {
+                engine.cached_plan(key_query, crate::plan::physical::PlanningContext::bytes())
+            });
+            let vm = vm.get_or_insert_with(|| engine.lock_vm());
+            let key = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
+                .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+            let key = distinct_key_bytes(&key)?;
+            document = Some(parsed);
+            seen.insert(key)
+        };
+        if !inserted {
+            stats.duplicate_rows += 1;
+            continue;
+        }
+
+        #[cfg(feature = "simd-json")]
+        if let (Some(plan), Some(row)) = (direct_value_plan.as_ref(), row.as_deref()) {
+            byte_scratch.clear();
+            out.clear();
+            match write_ndjson_byte_tape_plan_row(&mut out, row, plan, &mut byte_scratch)? {
+                BytePlanWrite::Done => {
+                    if super::ndjson::write_json_bytes_line_with_options(
+                        &mut writer,
+                        &out,
+                        options,
+                    )? {
+                        stats.direct_value_rows += 1;
+                        stats.emitted += 1;
+                    }
+                    if stats.emitted >= limit {
+                        break;
+                    }
+                    continue;
+                }
+                BytePlanWrite::Fallback => {}
+            }
+        }
+
+        let parsed = match document {
+            Some(document) => document,
+            None => super::ndjson::parse_row(engine, reverse_row_no, row.take().unwrap())?,
+        };
+        let plan = value_plan.get_or_insert_with(|| {
+            engine.cached_plan(query, crate::plan::physical::PlanningContext::bytes())
+        });
+        let vm = vm.get_or_insert_with(|| engine.lock_vm());
+        let value = crate::exec::router::collect_plan_val_with_vm(&parsed, plan, vm)
+            .map_err(|err| super::ndjson::row_eval_error(reverse_row_no, err))?;
+        if super::ndjson::write_val_line_with_options(&mut writer, &value, options)? {
+            stats.fallback_value_rows += 1;
+            stats.emitted += 1;
+        }
+        if stats.emitted >= limit {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    stats.front_filter = seen.front_kind();
+    Ok(stats)
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NdjsonRevDistinctStats {
+    pub rows_scanned: usize,
+    pub emitted: usize,
+    pub duplicate_rows: usize,
+    pub direct_key_rows: usize,
+    pub fallback_key_rows: usize,
+    pub direct_value_rows: usize,
+    pub fallback_value_rows: usize,
+    pub front_filter: DistinctFrontFilterKind,
+}
+
+#[cfg(feature = "simd-json")]
+fn distinct_key_direct<'a>(
+    row: &'a [u8],
+    plan: &super::ndjson::NdjsonDirectTapePlan,
+) -> Option<Cow<'a, [u8]>> {
+    const NULL_KEY: &[u8] = b"null";
+
+    let super::ndjson::NdjsonDirectTapePlan::RootPath(steps) = plan else {
+        return None;
+    };
+    match raw_json_byte_path_value(row, steps) {
+        RawFieldValue::Found(value) => raw_distinct_key_bytes(value),
+        RawFieldValue::Missing => Some(Cow::Borrowed(NULL_KEY)),
+        RawFieldValue::Fallback => None,
+    }
 }
 
 pub fn run_ndjson_rev_matches<P, W>(
@@ -377,19 +626,22 @@ where
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut runner = super::ndjson::NdjsonTapeWriterRunner::new(engine, plan);
     let mut count = 0usize;
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        out.clear();
         scratch.parse_slice(&row).map_err(|message| {
             super::ndjson::row_parse_error(
                 reverse_row_no,
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        runner.write_row(&scratch, &mut writer)?;
-        writer.write_all(b"\n")?;
-        count += 1;
+        runner.write_row(&scratch, &mut out)?;
+        if super::ndjson::write_json_bytes_line_with_options(&mut writer, &out, options)? {
+            count += 1;
+        }
         if limit.is_some_and(|limit| count >= limit) {
             break;
         }
@@ -642,6 +894,32 @@ mod tests {
             "[[\"b\",2]]\n[[\"a\",1]]\n"
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "simd-json")]
+    #[test]
+    fn direct_distinct_key_classifier_rejects_escaped_strings() {
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#""plain""#).as_deref(),
+            Some(br#""plain""#.as_slice())
+        );
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#""a\u0062""#).as_deref(),
+            Some(br#""ab""#.as_slice())
+        );
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#"{"k":"v"}"#).as_deref(),
+            Some(br#"{"k":"v"}"#.as_slice())
+        );
+        assert_eq!(
+            super::raw_distinct_key_bytes(b"123").as_deref(),
+            Some(b"123".as_slice())
+        );
+        assert_eq!(
+            super::raw_distinct_key_bytes(br#"{"a" : 1,"b":"x\u0079"}"#).as_deref(),
+            Some(br#"{"a":1,"b":"xy"}"#.as_slice())
+        );
+        assert_eq!(super::raw_distinct_key_bytes(b"1.0"), None);
     }
 
     fn temp_path(name: &str) -> PathBuf {

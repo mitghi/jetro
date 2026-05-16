@@ -1,8 +1,17 @@
+use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
+use super::stream_exec::CompiledRowStream;
+use super::stream_plan::{
+    lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
+};
+use super::stream_subquery::{lower_single_rows_subquery, RowStreamSubqueryPlan, STREAM_BINDING};
+use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
+use crate::compile::compiler::Compiler;
+use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
-use crate::{Jetro, JetroEngine, JetroEngineError, VM};
+use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 use memchr::memchr;
 use serde_json::Value;
 use std::fs::File;
@@ -13,11 +22,13 @@ use std::sync::MutexGuard;
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, tape_plan_can_write_byte_row, write_ndjson_byte_plan_row,
-    write_ndjson_byte_tape_plan_row, BytePlanWrite,
+    write_ndjson_byte_tape_plan_row, write_ndjson_hinted_tape_plan_row, BytePlanWrite,
 };
 #[cfg(test)]
 #[cfg(feature = "simd-json")]
-pub(super) use super::ndjson_direct::direct_byte_plan;
+pub(super) use super::ndjson_direct::{
+    direct_byte_plan, direct_writer_plan_kind, NdjsonDirectPlanKind,
+};
 #[cfg(feature = "simd-json")]
 pub(super) use super::ndjson_direct::{
     direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
@@ -25,11 +36,42 @@ pub(super) use super::ndjson_direct::{
     NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
     NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
+#[cfg(feature = "simd-json")]
+use super::ndjson_hint::{
+    NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
+};
+#[cfg(feature = "simd-json")]
+use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
+
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NdjsonWriterPathKind {
+    ByteExpr,
+    ByteWritableTape,
+    Tape,
+}
+
+#[cfg(test)]
+#[cfg(feature = "simd-json")]
+pub(super) fn direct_writer_path_kind(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<NdjsonWriterPathKind> {
+    let (byte, tape) = direct_writer_plans(engine, query)?;
+    if byte.is_some() {
+        return Some(NdjsonWriterPathKind::ByteExpr);
+    }
+    if tape_plan_can_write_byte_row(&tape) {
+        return Some(NdjsonWriterPathKind::ByteWritableTape);
+    }
+    Some(NdjsonWriterPathKind::Tape)
+}
 
 /// Configuration for per-row NDJSON execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +80,22 @@ pub struct NdjsonOptions {
     pub initial_buffer_capacity: usize,
     pub reader_buffer_capacity: usize,
     pub reverse_chunk_size: usize,
+    pub parallel_min_bytes: u64,
+    pub parallelism: NdjsonParallelism,
+    pub row_frame: NdjsonRowFrame,
+    pub null_output: NdjsonNullOutput,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NdjsonParallelism {
+    Auto,
+    Off,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NdjsonNullOutput {
+    Skip,
+    Emit,
 }
 
 impl Default for NdjsonOptions {
@@ -47,6 +105,10 @@ impl Default for NdjsonOptions {
             initial_buffer_capacity: DEFAULT_LINE_BUFFER_CAPACITY,
             reader_buffer_capacity: DEFAULT_READER_BUFFER_CAPACITY,
             reverse_chunk_size: DEFAULT_REVERSE_CHUNK_SIZE,
+            parallel_min_bytes: 64 * 1024 * 1024,
+            parallelism: NdjsonParallelism::Auto,
+            row_frame: NdjsonRowFrame::JsonLine,
+            null_output: NdjsonNullOutput::Skip,
         }
     }
 }
@@ -71,6 +133,26 @@ impl NdjsonOptions {
         self.reverse_chunk_size = capacity;
         self
     }
+
+    pub fn with_parallel_min_bytes(mut self, bytes: u64) -> Self {
+        self.parallel_min_bytes = bytes;
+        self
+    }
+
+    pub fn with_parallelism(mut self, parallelism: NdjsonParallelism) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
+    pub fn with_row_frame(mut self, row_frame: NdjsonRowFrame) -> Self {
+        self.row_frame = row_frame;
+        self
+    }
+
+    pub fn with_null_output(mut self, null_output: NdjsonNullOutput) -> Self {
+        self.null_output = null_output;
+        self
+    }
 }
 
 /// Forward-only per-row NDJSON reader.
@@ -78,6 +160,7 @@ pub struct NdjsonPerRowDriver<R> {
     reader: R,
     line_no: u64,
     max_line_len: usize,
+    row_frame: NdjsonRowFrame,
 }
 
 impl<R: BufRead> NdjsonPerRowDriver<R> {
@@ -86,11 +169,23 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
             reader,
             line_no: 0,
             max_line_len: DEFAULT_MAX_LINE_LEN,
+            row_frame: NdjsonRowFrame::JsonLine,
         }
+    }
+
+    pub fn with_options(mut self, options: NdjsonOptions) -> Self {
+        self.max_line_len = options.max_line_len;
+        self.row_frame = options.row_frame;
+        self
     }
 
     pub fn with_max_line_len(mut self, max_line_len: usize) -> Self {
         self.max_line_len = max_line_len;
+        self
+    }
+
+    pub fn with_row_frame(mut self, row_frame: NdjsonRowFrame) -> Self {
+        self.row_frame = row_frame;
         self
     }
 
@@ -129,7 +224,15 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
                 });
             }
 
-            return Ok(Some((self.line_no, &buf[start..end])));
+            match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
+                FramePayload::Data(range) => {
+                    return Ok(Some((
+                        self.line_no,
+                        &buf[start + range.start..start + range.end],
+                    )));
+                }
+                FramePayload::Skip => continue,
+            }
         }
     }
 
@@ -163,6 +266,15 @@ impl<R: BufRead> NdjsonPerRowDriver<R> {
                     len,
                     max: self.max_line_len,
                 });
+            }
+
+            let payload = match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
+                FramePayload::Data(range) => start + range.start..start + range.end,
+                FramePayload::Skip => continue,
+            };
+            if payload.start > 0 || payload.end < buf.len() {
+                buf.copy_within(payload.clone(), 0);
+                buf.truncate(payload.end - payload.start);
             }
 
             let capacity = buf.capacity();
@@ -554,15 +666,8 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let file = File::open(path)?;
     let options = NdjsonOptions::default();
-    run_ndjson_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        writer,
-        options,
-    )
+    run_ndjson_file_with_options(engine, path, query, writer, options)
 }
 
 pub fn run_ndjson_file_with_options<P, W>(
@@ -576,6 +681,13 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_file(engine, path, &plan, None, options, writer);
+    }
+    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
+        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
+    }
+
     let file = File::open(path)?;
     run_ndjson_with_options(
         engine,
@@ -597,6 +709,15 @@ where
     R: BufRead,
     W: Write,
 {
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer);
+    }
+    if ndjson_rows_subquery_plan(query)?.is_some() {
+        return Err(JetroEngineError::Eval(EvalError(
+            "$.rows() stream subqueries require a file-backed NDJSON source".into(),
+        )));
+    }
+
     drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
 
@@ -637,6 +758,17 @@ where
         return Ok(0);
     }
 
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_reader(
+            engine,
+            reader,
+            &plan,
+            Some(limit),
+            options,
+            writer,
+        );
+    }
+
     drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
 }
 
@@ -651,16 +783,8 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let file = File::open(path)?;
     let options = NdjsonOptions::default();
-    run_ndjson_limit_with_options(
-        engine,
-        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
-        query,
-        limit,
-        writer,
-        options,
-    )
+    run_ndjson_file_limit_with_options(engine, path, query, limit, writer, options)
 }
 
 pub fn run_ndjson_file_limit_with_options<P, W>(
@@ -675,6 +799,16 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if limit == 0 {
+        return Ok(0);
+    }
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return drive_ndjson_rows_stream_file(engine, path, &plan, Some(limit), options, writer);
+    }
+    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
+        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
+    }
+
     let file = File::open(path)?;
     run_ndjson_limit_with_options(
         engine,
@@ -893,7 +1027,7 @@ where
     R: BufRead,
     F: FnMut(Value) -> Result<NdjsonControl, JetroEngineError>,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let plan = engine.cached_plan(query, PlanningContext::bytes());
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0;
@@ -908,6 +1042,332 @@ where
     }
 
     Ok(count)
+}
+
+fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
+    lower_root_rows_query(query, RowStreamSourceKind::NdjsonRows)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn ndjson_rows_subquery_plan(
+    query: &str,
+) -> Result<Option<RowStreamSubqueryPlan>, JetroEngineError> {
+    if !query.contains("$.rows") {
+        return Ok(None);
+    }
+    let expr = crate::parse::parser::parse(query)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))?;
+    lower_single_rows_subquery(&expr, RowStreamSourceKind::NdjsonRows)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn drive_ndjson_rows_subquery_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamSubqueryPlan,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let stream_value = collect_ndjson_rows_stream_file(engine, path, &plan.stream, options)?;
+    let wrapper = Compiler::compile(&plan.wrapper, "<ndjson-rows-wrapper>");
+    let env = Env::new(Val::Null).with_var(STREAM_BINDING, stream_value);
+    let value = engine
+        .lock_vm()
+        .exec_in_env(&wrapper, &env)
+        .map_err(JetroEngineError::Eval)?;
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
+    writer.flush()?;
+    Ok(emitted)
+}
+
+fn collect_ndjson_rows_stream_file<P>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+) -> Result<Val, JetroEngineError>
+where
+    P: AsRef<Path>,
+{
+    if let Some(value) =
+        super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+    {
+        return Ok(value);
+    }
+
+    let mut executor = CompiledRowStream::new(plan);
+    let mut out = Vec::new();
+
+    if plan.direction == RowStreamDirection::Forward {
+        let file = File::open(path)?;
+        let mut driver = NdjsonPerRowDriver::new(std::io::BufReader::with_capacity(
+            options.reader_buffer_capacity,
+            file,
+        ))
+        .with_options(options);
+        let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+        while !executor.is_exhausted() {
+            let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
+                break;
+            };
+            if collect_row_stream_result(
+                engine,
+                line_no,
+                executor.apply_owned_row(engine, line_no, row)?,
+                &mut out,
+            )? || executor.is_exhausted()
+            {
+                break;
+            }
+        }
+    } else {
+        let mut driver = super::ndjson_rev::NdjsonReverseFileDriver::with_options(path, options)?;
+        while !executor.is_exhausted() {
+            let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
+                break;
+            };
+            if collect_row_stream_result(
+                engine,
+                line_no,
+                executor.apply_owned_row(engine, line_no, row)?,
+                &mut out,
+            )? || executor.is_exhausted()
+            {
+                break;
+            }
+        }
+    }
+
+    if plan.demand.retained_limit == Some(1) {
+        Ok(out.into_iter().next().unwrap_or(Val::Null))
+    } else {
+        Ok(Val::Arr(std::sync::Arc::new(out)))
+    }
+}
+
+fn collect_row_stream_result(
+    engine: &JetroEngine,
+    line_no: u64,
+    result: RowStreamRowResult,
+    out: &mut Vec<Val>,
+) -> Result<bool, JetroEngineError> {
+    match result {
+        RowStreamRowResult::Emit(value) => out.push(value),
+        RowStreamRowResult::EmitBytes(bytes) => {
+            let document = parse_row(engine, line_no, bytes)?;
+            let value = document
+                .root_val_with(engine.keys())
+                .map_err(|err| row_eval_error(line_no, err))?;
+            out.push(value);
+        }
+        RowStreamRowResult::Skip => {}
+        RowStreamRowResult::Stop => return Ok(true),
+    }
+    Ok(false)
+}
+
+fn drive_ndjson_rows_stream_reader<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let (emitted, _) = drive_ndjson_rows_stream_reader_with_stats(
+        engine,
+        reader,
+        plan,
+        external_limit,
+        options,
+        writer,
+    )?;
+    Ok(emitted)
+}
+
+fn drive_ndjson_rows_stream_reader_with_stats<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<(usize, RowStreamStats), JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if plan.direction == RowStreamDirection::Reverse {
+        return Err(JetroEngineError::Eval(EvalError(
+            "$.rows().reverse() requires a file-backed NDJSON source".into(),
+        )));
+    }
+
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
+    let mut executor = CompiledRowStream::new(plan);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut emitted = 0usize;
+
+    while !executor.is_exhausted() {
+        let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
+            break;
+        };
+        if emit_row_stream_result(
+            executor.apply_owned_row(engine, line_no, row)?,
+            &mut writer,
+            &mut emitted,
+            external_limit,
+            options,
+        )? {
+            break;
+        }
+        if executor.is_exhausted() {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok((emitted, executor.stats().clone()))
+}
+
+fn drive_ndjson_rows_stream_file<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if let Some(value) =
+        super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+    {
+        return write_collected_rows_stream(value, external_limit, options, writer);
+    }
+
+    let (emitted, _) = drive_ndjson_rows_stream_file_with_stats(
+        engine,
+        path,
+        plan,
+        external_limit,
+        options,
+        writer,
+    )?;
+    Ok(emitted)
+}
+
+fn write_collected_rows_stream<W: Write>(
+    value: Val,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError> {
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut emitted = 0usize;
+    match value {
+        Val::Arr(values) => {
+            for value in values.iter() {
+                if external_limit.is_some_and(|limit| emitted >= limit) {
+                    break;
+                }
+                if write_val_line_with_options(&mut writer, value, options)? {
+                    emitted += 1;
+                }
+            }
+        }
+        value => {
+            if write_val_line_with_options(&mut writer, &value, options)? {
+                emitted += 1;
+            }
+        }
+    }
+    writer.flush()?;
+    Ok(emitted)
+}
+
+fn drive_ndjson_rows_stream_file_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamPlan,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<(usize, RowStreamStats), JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if plan.direction == RowStreamDirection::Forward {
+        let file = File::open(path)?;
+        return drive_ndjson_rows_stream_reader_with_stats(
+            engine,
+            std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+            plan,
+            external_limit,
+            options,
+            writer,
+        );
+    }
+
+    let mut driver = super::ndjson_rev::NdjsonReverseFileDriver::with_options(path, options)?;
+    let mut executor = CompiledRowStream::new(plan);
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let mut emitted = 0usize;
+
+    while !executor.is_exhausted() {
+        let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
+            break;
+        };
+        if emit_row_stream_result(
+            executor.apply_owned_row(engine, line_no, row)?,
+            &mut writer,
+            &mut emitted,
+            external_limit,
+            options,
+        )? {
+            break;
+        }
+        if executor.is_exhausted() {
+            break;
+        }
+    }
+
+    writer.flush()?;
+    Ok((emitted, executor.stats().clone()))
+}
+
+fn emit_row_stream_result<W: Write>(
+    result: RowStreamRowResult,
+    writer: &mut W,
+    emitted: &mut usize,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+) -> Result<bool, JetroEngineError> {
+    let wrote = match result {
+        RowStreamRowResult::Emit(value) => write_val_line_with_options(writer, &value, options)?,
+        RowStreamRowResult::EmitBytes(bytes) => {
+            write_json_bytes_line_with_options(writer, &bytes, options)?
+        }
+        RowStreamRowResult::Skip => return Ok(false),
+        RowStreamRowResult::Stop => return Ok(true),
+    };
+    if wrote {
+        *emitted += 1;
+    }
+    Ok(external_limit.is_some_and(|limit| *emitted >= limit))
 }
 
 fn drive_ndjson_writer<R, W>(
@@ -937,15 +1397,17 @@ where
         return drive_ndjson_tape_writer(engine, reader, &tape_plan, limit, options, writer);
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut executor = NdjsonRowExecutor::new(engine, query);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
-        count += 1;
-        executor.write_owned_row(line_no, row, &mut writer)?;
+        let value = executor.eval_owned_row(line_no, row)?;
+        if write_val_line_with_options(&mut writer, &value, options)? {
+            count += 1;
+        }
         if limit.is_some_and(|limit| count >= limit) {
             break;
         }
@@ -969,16 +1431,18 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
     let mut count = 0usize;
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
-        match write_ndjson_byte_plan_row(&mut writer, row, byte_plan)? {
+        out.clear();
+        match write_ndjson_byte_plan_row(&mut out, row, byte_plan)? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
                 scratch.parse_slice(row).map_err(|message| {
@@ -989,11 +1453,12 @@ where
                         ))),
                     )
                 })?;
-                tape_runner.write_row(&scratch, &mut writer)?;
+                tape_runner.write_row(&scratch, &mut out)?;
             }
         }
-        writer.write_all(b"\n")?;
-        count += 1;
+        if write_json_bytes_line_with_options(&mut writer, &out, options)? {
+            count += 1;
+        }
         Ok(!limit.is_some_and(|limit| count >= limit))
     })?;
 
@@ -1014,17 +1479,91 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
+    let mut constant_stream_cache = NdjsonConstantStreamCache::default();
+    let mut hint_state = matches!(
+        tape_plan,
+        NdjsonDirectTapePlan::Object(_)
+            | NdjsonDirectTapePlan::Array(_)
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Collect(_),
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::First(_),
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Last(_),
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Count,
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Numeric { .. },
+                ..
+            })
+            | NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
+                sink: NdjsonDirectStreamSink::Extreme { .. },
+                ..
+            })
+    )
+    .then(|| {
+        NdjsonHintState::new(
+            NdjsonHintConfig::default(),
+            NdjsonHintAccessPlan::from_direct_plans(None, tape_plan),
+        )
+    });
     let mut count = 0usize;
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
-        match write_ndjson_byte_tape_plan_row(&mut writer, row, tape_plan, &mut byte_scratch)? {
+        out.clear();
+        if let Some(write) = constant_stream_cache.write_row(&mut out, row, tape_plan)? {
+            if matches!(write, BytePlanWrite::Done) {
+                if write_json_bytes_line_with_options(&mut writer, &out, options)? {
+                    count += 1;
+                }
+                return Ok(!limit.is_some_and(|limit| count >= limit));
+            }
+        }
+        let hinted = if let Some(state) = hint_state.as_mut() {
+            if state.observe_row(row) == NdjsonHintDecision::UseHints {
+                byte_scratch.clear();
+                let write = state
+                    .with_root_layout_match(row, |root, matched| {
+                        write_ndjson_hinted_tape_plan_row(
+                            &mut byte_scratch,
+                            tape_plan,
+                            root,
+                            matched,
+                        )
+                    })
+                    .transpose()?
+                    .unwrap_or(BytePlanWrite::Fallback);
+                if matches!(write, BytePlanWrite::Done) {
+                    out.extend_from_slice(&byte_scratch);
+                }
+                Some(write)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let write = match hinted {
+            Some(write) => Ok(write),
+            None => write_ndjson_byte_tape_plan_row(&mut out, row, tape_plan, &mut byte_scratch),
+        };
+        match write? {
             BytePlanWrite::Done => {}
             BytePlanWrite::Fallback => {
                 scratch.parse_slice(row).map_err(|message| {
@@ -1035,11 +1574,12 @@ where
                         ))),
                     )
                 })?;
-                tape_runner.write_row(&scratch, &mut writer)?;
+                tape_runner.write_row(&scratch, &mut out)?;
             }
         }
-        writer.write_all(b"\n")?;
-        count += 1;
+        if write_json_bytes_line_with_options(&mut writer, &out, options)? {
+            count += 1;
+        }
         Ok(!limit.is_some_and(|limit| count >= limit))
     })?;
 
@@ -1077,16 +1617,19 @@ where
             let keep_going = if start == end {
                 true
             } else {
-                let row = &row[start..end];
-                if row.len() > driver.max_line_len {
+                let trimmed = &row[start..end];
+                if trimmed.len() > driver.max_line_len {
                     return Err(RowError::LineTooLarge {
                         line_no,
-                        len: row.len(),
+                        len: trimmed.len(),
                         max: driver.max_line_len,
                     }
                     .into());
                 }
-                visit(line_no, row)?
+                match frame_payload(driver.row_frame, line_no, trimmed)? {
+                    FramePayload::Data(range) => visit(line_no, &trimmed[range])?,
+                    FramePayload::Skip => true,
+                }
             };
             driver.reader.consume(pos + 1);
             if !keep_going {
@@ -1113,8 +1656,16 @@ where
                 }
                 .into());
             }
-            if !visit(driver.line_no, &spill[start..end])? {
-                return Ok(());
+            match frame_payload(driver.row_frame, driver.line_no, &spill[start..end])? {
+                FramePayload::Data(range) => {
+                    if !visit(
+                        driver.line_no,
+                        &spill[start + range.start..start + range.end],
+                    )? {
+                        return Ok(());
+                    }
+                }
+                FramePayload::Skip => {}
             }
         }
     }
@@ -1133,24 +1684,27 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
+    let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
     let mut runner = NdjsonTapeWriterRunner::new(engine, plan);
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        out.clear();
         scratch.parse_slice(row).map_err(|message| {
             row_parse_error(
                 line_no,
                 JetroEngineError::Eval(crate::EvalError(format!("Invalid JSON: {message}"))),
             )
         })?;
-        runner.write_row(&scratch, &mut writer)?;
-        writer.write_all(b"\n")?;
-        count += 1;
+        runner.write_row(&scratch, &mut out)?;
+        if write_json_bytes_line_with_options(&mut writer, &out, options)? {
+            count += 1;
+        }
         if limit.is_some_and(|limit| count >= limit) {
             break;
         }
@@ -1431,7 +1985,7 @@ where
     R: BufRead,
     W: Write,
 {
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut line = Vec::with_capacity(options.initial_buffer_capacity);
     let mut scratch =
@@ -1501,7 +2055,7 @@ where
         return Ok(0);
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     #[cfg(feature = "simd-json")]
     let direct_predicate = direct_tape_predicate(engine, predicate);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
@@ -1557,7 +2111,7 @@ where
         );
     }
 
-    let mut driver = NdjsonPerRowDriver::new(reader).with_max_line_len(options.max_line_len);
+    let mut driver = NdjsonPerRowDriver::new(reader).with_options(options);
     let mut executor = NdjsonRowExecutor::new(engine, predicate);
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
@@ -1605,40 +2159,6 @@ impl<'a> NdjsonRowExecutor<'a> {
         self.eval_document(line_no, &document)
     }
 
-    pub(super) fn write_owned_row<W: Write>(
-        &mut self,
-        line_no: u64,
-        row: Vec<u8>,
-        writer: &mut W,
-    ) -> Result<(), JetroEngineError> {
-        let document = self.parse_owned_result_row(line_no, row)?;
-        self.write_document_result(line_no, &document, writer)
-    }
-
-    fn parse_owned_result_row(
-        &self,
-        line_no: u64,
-        row: Vec<u8>,
-    ) -> Result<Jetro, JetroEngineError> {
-        #[cfg(feature = "simd-json")]
-        {
-            crate::data::tape::TapeData::parse(row)
-                .map(Jetro::from_tape_data)
-                .map_err(|message| {
-                    row_parse_error(
-                        line_no,
-                        JetroEngineError::Eval(crate::EvalError(format!(
-                            "Invalid JSON: {message}"
-                        ))),
-                    )
-                })
-        }
-        #[cfg(not(feature = "simd-json"))]
-        {
-            self.parse_owned_row(line_no, row)
-        }
-    }
-
     pub(super) fn parse_owned_row(
         &self,
         line_no: u64,
@@ -1654,56 +2174,6 @@ impl<'a> NdjsonRowExecutor<'a> {
     ) -> Result<Val, JetroEngineError> {
         crate::exec::router::collect_plan_val_with_vm(document, &self.plan, &mut self.vm)
             .map_err(|err| row_eval_error(line_no, err))
-    }
-
-    pub(super) fn write_document_result<W: Write>(
-        &mut self,
-        line_no: u64,
-        document: &Jetro,
-        writer: &mut W,
-    ) -> Result<(), JetroEngineError> {
-        if self.try_write_tape_result(line_no, document, writer)? {
-            return Ok(());
-        }
-        let value = self.eval_document(line_no, document)?;
-        write_val_line(writer, &value)
-    }
-
-    fn try_write_tape_result<W: Write>(
-        &self,
-        line_no: u64,
-        document: &Jetro,
-        writer: &mut W,
-    ) -> Result<bool, JetroEngineError> {
-        #[cfg(feature = "simd-json")]
-        {
-            use crate::ir::physical::{PlanNode, QueryRoot};
-
-            let QueryRoot::Node(root) = self.plan.root() else {
-                return Ok(false);
-            };
-            let PlanNode::RootPath(steps) = self.plan.node(*root) else {
-                return Ok(false);
-            };
-            let Some(tape) = document
-                .lazy_tape()
-                .map_err(|err| row_eval_error(line_no, err))?
-            else {
-                return Ok(false);
-            };
-            if let Some(idx) = json_tape_path_index(tape.as_ref(), steps) {
-                write_json_tape_at(writer, tape.as_ref(), idx)?;
-            } else {
-                writer.write_all(b"null")?;
-            }
-            writer.write_all(b"\n")?;
-            Ok(true)
-        }
-        #[cfg(not(feature = "simd-json"))]
-        {
-            let _ = (line_no, document, writer);
-            Ok(false)
-        }
     }
 
     pub(super) fn engine(&self) -> &'a JetroEngine {
@@ -2051,6 +2521,35 @@ pub(super) fn write_val_line<W: Write>(
     Ok(())
 }
 
+pub(super) fn write_val_line_with_options<W: Write>(
+    writer: &mut W,
+    value: &Val,
+    options: NdjsonOptions,
+) -> Result<bool, JetroEngineError> {
+    if value == &Val::Null && options.null_output == NdjsonNullOutput::Skip {
+        return Ok(false);
+    }
+    write_val_line(writer, value)?;
+    Ok(true)
+}
+
+pub(super) fn write_json_bytes_line_with_options<W: Write>(
+    writer: &mut W,
+    bytes: &[u8],
+    options: NdjsonOptions,
+) -> Result<bool, JetroEngineError> {
+    if is_json_null_bytes(bytes) && options.null_output == NdjsonNullOutput::Skip {
+        return Ok(false);
+    }
+    writer.write_all(bytes)?;
+    writer.write_all(b"\n")?;
+    Ok(true)
+}
+
+fn is_json_null_bytes(bytes: &[u8]) -> bool {
+    bytes == b"null"
+}
+
 pub(super) fn write_document_line<W: Write>(
     writer: &mut W,
     document: &Jetro,
@@ -2204,6 +2703,29 @@ where
 }
 
 #[cfg(feature = "simd-json")]
+fn find_json_tape_source_item<T, F>(tape: &T, source_idx: usize, mut matches: F) -> Option<usize>
+where
+    T: JsonTape,
+    F: FnMut(usize) -> bool,
+{
+    use crate::data::tape::TapeNode;
+
+    match tape.nodes().get(source_idx).copied()? {
+        TapeNode::Array { len, .. } => {
+            let mut cur = source_idx + 1;
+            for _ in 0..len {
+                if matches(cur) {
+                    return Some(cur);
+                }
+                cur += tape.span(cur);
+            }
+            None
+        }
+        _ => matches(source_idx).then_some(source_idx),
+    }
+}
+
+#[cfg(feature = "simd-json")]
 fn write_json_tape_stream<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
@@ -2256,6 +2778,48 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
             });
             write_i64(writer, count as i64)?;
         }
+        NdjsonDirectStreamSink::First(map) => {
+            let selected = find_json_tape_source_item(tape, source_idx, |item_idx| {
+                plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                })
+            });
+            if let Some(item_idx) = selected {
+                write_json_tape_stream_map(
+                    writer,
+                    tape,
+                    item_idx,
+                    map,
+                    suffix_cache,
+                    projection_caches,
+                )?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectStreamSink::Last(map) => {
+            let mut selected = None;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                if plan.predicate.as_ref().is_none_or(|predicate| {
+                    eval_json_tape_item_predicate_cached(tape, item_idx, predicate, predicate_cache)
+                }) {
+                    selected = Some(item_idx);
+                }
+                Ok::<(), JetroEngineError>(())
+            })?;
+            if let Some(item_idx) = selected {
+                write_json_tape_stream_map(
+                    writer,
+                    tape,
+                    item_idx,
+                    map,
+                    suffix_cache,
+                    projection_caches,
+                )?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
         NdjsonDirectStreamSink::Numeric { suffix_steps, op } => {
             let caches = NdjsonPathCaches {
                 source: source_cache,
@@ -2272,6 +2836,43 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
             );
             write_val_json(writer, &value)?;
         }
+        NdjsonDirectStreamSink::Extreme {
+            key_steps,
+            want_max,
+            value,
+        } => {
+            let mut best_idx = None;
+            visit_json_tape_source_items(tape, source_idx, |item_idx| {
+                let Some(key_idx) = suffix_cache.index(tape, item_idx, key_steps) else {
+                    return Ok::<(), JetroEngineError>(());
+                };
+                let key = json_tape_scalar(tape, key_idx);
+                let replace = best_idx
+                    .and_then(|idx| suffix_cache.index(tape, idx, key_steps))
+                    .map(|idx| {
+                        let order = crate::util::json_cmp_vals(key, json_tape_scalar(tape, idx));
+                        (*want_max && order.is_gt()) || (!*want_max && order.is_lt())
+                    })
+                    .unwrap_or(true);
+                if replace {
+                    best_idx = Some(item_idx);
+                }
+                Ok(())
+            })?;
+            if let Some(item_idx) = best_idx {
+                let path_idx = match value {
+                    NdjsonDirectProjectionValue::Path(steps)
+                    | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
+                        suffix_cache.index(tape, item_idx, steps)
+                    }
+                    NdjsonDirectProjectionValue::Nested(_)
+                    | NdjsonDirectProjectionValue::Literal(_) => None,
+                };
+                write_json_tape_direct_value(writer, tape, value, path_idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
     }
 
     Ok(())
@@ -2284,6 +2885,9 @@ fn write_json_tape_empty_stream_result<W: Write>(
 ) -> Result<(), JetroEngineError> {
     match sink {
         NdjsonDirectStreamSink::Collect(_) => writer.write_all(b"[]")?,
+        NdjsonDirectStreamSink::First(_) | NdjsonDirectStreamSink::Last(_) => {
+            writer.write_all(b"null")?
+        }
         NdjsonDirectStreamSink::Count => writer.write_all(b"0")?,
         NdjsonDirectStreamSink::Numeric { op, .. } => {
             let value = crate::exec::pipeline::num_finalise(
@@ -2297,6 +2901,7 @@ fn write_json_tape_empty_stream_result<W: Write>(
             );
             write_val_json(writer, &value)?;
         }
+        NdjsonDirectStreamSink::Extreme { .. } => writer.write_all(b"null")?,
     }
     Ok(())
 }
@@ -2317,6 +2922,7 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
                 | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                     suffix_cache.index(tape, item_idx, steps)
                 }
+                NdjsonDirectProjectionValue::Nested(_) => None,
                 NdjsonDirectProjectionValue::Literal(_) => None,
             };
             write_json_tape_direct_value(writer, tape, value, path_idx)?;
@@ -2411,6 +3017,7 @@ fn write_json_tape_object_projection_from<W: Write, T: JsonTape>(
             NdjsonDirectProjectionValue::Literal(Val::Null) if field.optional => {
                 continue;
             }
+            NdjsonDirectProjectionValue::Nested(_) => {}
             NdjsonDirectProjectionValue::Literal(_) => {}
         }
         if wrote {
@@ -2456,6 +3063,7 @@ fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
             | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
                 path_caches[idx].index(tape, start, steps)
             }
+            NdjsonDirectProjectionValue::Nested(_) => None,
             NdjsonDirectProjectionValue::Literal(_) => None,
         };
         write_json_tape_direct_value(writer, tape, item, path_idx)?;
@@ -2492,6 +3100,157 @@ fn write_json_tape_direct_value<W: Write, T: JsonTape>(
             }
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
+        NdjsonDirectProjectionValue::Nested(plan) => {
+            write_json_tape_nested_plan(writer, tape, plan)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    plan: &NdjsonDirectTapePlan,
+) -> Result<(), JetroEngineError> {
+    let mut root_cache = NdjsonPathCache::default();
+    let mut source_cache = NdjsonPathCache::default();
+    let mut suffix_cache = NdjsonPathCache::default();
+    let mut predicate_cache = NdjsonPathCache::default();
+    let mut projection_caches = Vec::new();
+    match plan {
+        NdjsonDirectTapePlan::RootPath(steps) => {
+            if let Some(idx) = root_cache.index(tape, 0, steps) {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectTapePlan::ViewScalarCall {
+            steps,
+            call,
+            optional,
+        } => {
+            let idx = root_cache.index(tape, 0, steps);
+            let value = idx
+                .map(|idx| json_tape_scalar(tape, idx))
+                .unwrap_or(crate::util::JsonView::Null);
+            if *optional && matches!(value, crate::util::JsonView::Null) {
+                writer.write_all(b"null")?;
+            } else if let Some(value) = call.try_apply_json_view(value) {
+                write_val_json(writer, &value)?;
+            } else if let Some(idx) = idx {
+                write_json_tape_at(writer, tape, idx)?;
+            } else {
+                writer.write_all(b"null")?;
+            }
+        }
+        NdjsonDirectTapePlan::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => {
+            write_json_tape_array_element_path(
+                writer,
+                tape,
+                source_steps,
+                *element,
+                suffix_steps,
+                &mut source_cache,
+                &mut suffix_cache,
+            )?;
+        }
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            write_json_tape_array_element_scalar(
+                writer,
+                tape,
+                source_steps,
+                *element,
+                suffix_steps,
+                call,
+                &mut source_cache,
+                &mut suffix_cache,
+            )?;
+        }
+        NdjsonDirectTapePlan::Stream(stream) => {
+            write_json_tape_stream(
+                writer,
+                tape,
+                stream,
+                &mut source_cache,
+                &mut suffix_cache,
+                &mut predicate_cache,
+                &mut projection_caches,
+            )?;
+        }
+        NdjsonDirectTapePlan::Object(fields) => {
+            write_json_tape_object_projection(writer, tape, fields, &mut projection_caches)?;
+        }
+        NdjsonDirectTapePlan::Array(items) => {
+            write_json_tape_array_projection(writer, tape, items, &mut projection_caches)?;
+        }
+        NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+            let idx = root_cache.index(tape, 0, steps);
+            write_json_tape_object_items(writer, tape, idx, *method)?;
+        }
+        NdjsonDirectTapePlan::ViewPipeline { .. } => {
+            writer.write_all(b"null")?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_element_path<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    element: super::ndjson_direct::NdjsonDirectElement,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    source_cache: &mut NdjsonPathCache,
+    suffix_cache: &mut NdjsonPathCache,
+) -> Result<(), JetroEngineError> {
+    let idx = source_cache
+        .index(tape, 0, source_steps)
+        .and_then(|idx| json_tape_array_element(tape, idx, element))
+        .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
+    if let Some(idx) = idx {
+        write_json_tape_at(writer, tape, idx)?;
+    } else {
+        writer.write_all(b"null")?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "simd-json")]
+fn write_json_tape_array_element_scalar<W: Write, T: JsonTape>(
+    writer: &mut W,
+    tape: &T,
+    source_steps: &[crate::ir::physical::PhysicalPathStep],
+    element: super::ndjson_direct::NdjsonDirectElement,
+    suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    call: &crate::builtins::BuiltinCall,
+    source_cache: &mut NdjsonPathCache,
+    suffix_cache: &mut NdjsonPathCache,
+) -> Result<(), JetroEngineError> {
+    let idx = source_cache
+        .index(tape, 0, source_steps)
+        .and_then(|idx| json_tape_array_element(tape, idx, element))
+        .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
+    if let Some(value) = idx
+        .map(|idx| json_tape_scalar(tape, idx))
+        .and_then(|value| call.try_apply_json_view(value))
+    {
+        write_val_json(writer, &value)?;
+    } else if let Some(idx) = idx {
+        write_json_tape_at(writer, tape, idx)?;
+    } else {
+        writer.write_all(b"null")?;
     }
     Ok(())
 }
@@ -2822,7 +3581,10 @@ fn write_json_objvec<W: Write>(
     Ok(())
 }
 
-fn write_json_str<W: Write>(writer: &mut W, value: &str) -> Result<(), JetroEngineError> {
+pub(super) fn write_json_str<W: Write>(
+    writer: &mut W,
+    value: &str,
+) -> Result<(), JetroEngineError> {
     writer.write_all(b"\"")?;
     let bytes = value.as_bytes();
     if !needs_json_escape(bytes) {
@@ -2979,6 +3741,47 @@ fn non_ws_range(buf: &[u8]) -> (usize, usize) {
 mod tests {
     #[test]
     #[cfg(feature = "simd-json")]
+    fn rows_stream_driver_reports_direct_stage_stats() {
+        let engine = crate::JetroEngine::new();
+        let plan = super::ndjson_rows_stream_plan(
+            "$.rows().filter($.active == true).distinct_by($.id).take(2).map($.id)",
+        )
+        .unwrap()
+        .unwrap();
+        let input = std::io::Cursor::new(
+            br#"{"id":"a","active":false}
+{"id":"a","active":true}
+{"id":"b","active":true}
+not-json
+"#
+            .to_vec(),
+        );
+        let mut out = Vec::new();
+
+        let (emitted, stats) = super::drive_ndjson_rows_stream_reader_with_stats(
+            &engine,
+            input,
+            &plan,
+            None,
+            super::NdjsonOptions::default(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(emitted, 2);
+        assert_eq!(String::from_utf8(out).unwrap(), "\"a\"\n\"b\"\n");
+        assert_eq!(stats.source, super::RowStreamSourceKind::NdjsonRows);
+        assert_eq!(stats.direction, super::RowStreamDirection::Forward);
+        assert_eq!(stats.rows_scanned, 3);
+        assert_eq!(stats.rows_filtered, 1);
+        assert_eq!(stats.rows_emitted, 2);
+        assert_eq!(stats.direct_filter_rows, 3);
+        assert_eq!(stats.direct_key_rows, 2);
+        assert_eq!(stats.direct_project_rows, 2);
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn parse_row_keeps_simd_document_lazy() {
         let engine = crate::JetroEngine::new();
         let row = br#"{"name":"Ada","age":30}"#.to_vec();
@@ -3056,16 +3859,114 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn direct_writer_plan_kind_exposes_hot_path_selection() {
+        let engine = crate::JetroEngine::new();
+        use super::NdjsonDirectPlanKind::{
+            ByteExpr, TapeArrayProjection, TapeObjectProjection, TapeRootPath, TapeStreamCollect,
+            TapeStreamCount, TapeStreamExtreme, TapeStreamFirst, TapeStreamLast, TapeStreamNumeric,
+        };
+
+        for (query, expected) in [
+            ("$.name", (Some(ByteExpr), TapeRootPath)),
+            ("$.a.b.c", (Some(ByteExpr), TapeRootPath)),
+            (r#"{test: $.a.b.c, b: $.a.b}"#, (None, TapeObjectProjection)),
+            (r#"[$.id, $.name]"#, (None, TapeArrayProjection)),
+            ("$.attributes.map(@.key)", (None, TapeStreamCollect)),
+            (
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                (None, TapeStreamCollect),
+            ),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
+                (None, TapeStreamFirst),
+            ),
+            ("$.attributes.map(@.value).last()", (None, TapeStreamLast)),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                (None, TapeStreamCount),
+            ),
+            (
+                "$.attributes.map(@.weight).sum()",
+                (None, TapeStreamNumeric),
+            ),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                (None, TapeStreamNumeric),
+            ),
+            (
+                "$.attributes.sort_by(@.value).last().key",
+                (None, TapeStreamExtreme),
+            ),
+        ] {
+            let actual = super::direct_writer_plan_kind(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have an observable direct plan"));
+            assert_eq!(actual, expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn direct_writer_path_kind_matches_runtime_writer_family() {
+        let engine = crate::JetroEngine::new();
+        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape};
+
+        for (query, expected) in [
+            ("$.name", ByteExpr),
+            ("$.a.b.c", ByteExpr),
+            (r#"{test: $.a.b.c, b: $.a.b}"#, ByteWritableTape),
+            (r#"[$.id, $.name]"#, ByteWritableTape),
+            ("$.attributes.map(@.key)", ByteWritableTape),
+            (
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                ByteWritableTape,
+            ),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                ByteWritableTape,
+            ),
+            ("$.attributes.map(@.weight).sum()", ByteWritableTape),
+            (
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                ByteWritableTape,
+            ),
+            (
+                r#"{id: $.id, name: $.name, count: $.attributes.len()}"#,
+                ByteWritableTape,
+            ),
+            (
+                r#"[$.id, $.name, $.attributes.first().value, $.attributes.last().value]"#,
+                ByteWritableTape,
+            ),
+            (
+                r#"{name_upper: $.name.upper(), values: $.attributes.map(@.value), last: $.attributes.last().value}"#,
+                ByteWritableTape,
+            ),
+            ("$.attributes.sort_by(@.value).last().key", ByteWritableTape),
+        ] {
+            assert_eq!(
+                super::direct_writer_path_kind(&engine, query),
+                Some(expected),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn direct_tape_plan_lowers_stream_shapes_generically() {
         let engine = crate::JetroEngine::new();
         for query in [
             "$.attributes.map(@.key)",
             "$.attributes.map(@.key.upper())",
+            "$.attributes.map(@.value).first()",
+            "$.attributes.map(@.value).last()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
             "$.attributes.map(@.weight).sum()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+            "$.attributes.sort_by(@.value).last().key",
         ] {
             let plan =
                 super::direct_tape_plan(&engine, query).expect("query should be direct NDJSON");
@@ -3139,6 +4040,32 @@ mod tests {
 
     #[test]
     #[cfg(feature = "simd-json")]
+    fn direct_byte_tape_plan_reduces_numeric_streams() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"attributes":[{"weight":1},{"weight":2.5},{"weight":3},{"weight":"skip"}]}"#;
+        for (query, expected) in [
+            ("$.attributes.map(@.weight).sum()", "6.5"),
+            ("$.attributes.map(@.weight).avg()", "2.1666666666666665"),
+            ("$.attributes.map(@.weight).min()", "1.0"),
+            ("$.attributes.map(@.weight).max()", "3.0"),
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte numeric stream should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
     fn direct_byte_tape_plan_collects_stream_maps() {
         let engine = crate::JetroEngine::new();
         let row = br#"{"attributes":[{"key":"k1","value":"v1"},{"key":"k2","value":"v2"}]}"#;
@@ -3156,6 +4083,14 @@ mod tests {
             (
                 r#"attributes.filter(@.value.contains("2")).map(@.key)"#,
                 r#"["k2"]"#,
+            ),
+            (
+                r#"attributes.filter(@.value.contains("2")).map({key: @.key, value: @.value})"#,
+                r#"[{"key":"k2","value":"v2"}]"#,
+            ),
+            (
+                r#"attributes.filter(@.key != "k1").map([@.key, @.value])"#,
+                r#"[["k2","v2"]]"#,
             ),
         ] {
             let plan = super::direct_tape_plan(&engine, query)
@@ -3238,8 +4173,8 @@ mod tests {
     fn run_ndjson_uses_byte_paths_for_nested_array_demands() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
-            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}]}}
-{"store":{"attributes":[{"value":"c"},{"value":"d"}]}}
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}],"after":1}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}],"after":2}}
 "#,
         );
 
@@ -3248,5 +4183,491 @@ mod tests {
             .run_ndjson(rows, "$.store.attributes.first().value", &mut out)
             .expect("nested byte array demand should run");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"c\"\n");
+
+        out.clear();
+        let rows = std::io::Cursor::new(
+            br#"{"store":{"attributes":[{"value":"a"},{"value":"b"}],"after":1}}
+{"store":{"attributes":[{"value":"c"},{"value":"d"}],"after":2}}
+"#,
+        );
+        engine
+            .run_ndjson(rows, "$.store.attributes.last().value", &mut out)
+            .expect("nested byte last demand should run from field prefix");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"d\"\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_static_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"name":"a","active":true}
+{"id":2,"name":"b","active":true}
+{"id":3,"name":"c","active":true}
+{"id":4,"name":"d","active":true}
+{"id":5,"name":"e","active":true}
+{"id":6,"name":"f","active":true}
+{"id":7,"name":"g","active":true}
+{"id":8,"name":"h","active":true}
+{"id":9,"name":"i","active":true}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, r#"{id: $.id, name: $.name}"#, &mut out)
+            .expect("hinted static projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"a\"}\n\
+{\"id\":2,\"name\":\"b\"}\n\
+{\"id\":3,\"name\":\"c\"}\n\
+{\"id\":4,\"name\":\"d\"}\n\
+{\"id\":5,\"name\":\"e\"}\n\
+{\"id\":6,\"name\":\"f\"}\n\
+{\"id\":7,\"name\":\"g\"}\n\
+{\"id\":8,\"name\":\"h\"}\n\
+{\"id\":9,\"name\":\"i\"}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_nested_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"profile":{"name":"a","score":10},"active":true}
+{"id":2,"profile":{"name":"b","score":20},"active":true}
+{"id":3,"profile":{"name":"c","score":30},"active":true}
+{"id":4,"profile":{"name":"d","score":40},"active":true}
+{"id":5,"profile":{"name":"e","score":50},"active":true}
+{"id":6,"profile":{"name":"f","score":60},"active":true}
+{"id":7,"profile":{"name":"g","score":70},"active":true}
+{"id":8,"profile":{"name":"h","score":80},"active":true}
+{"id":9,"profile":{"name":"i","score":90},"active":true}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"{id: $.id, name: $.profile.name, profile: $.profile}"#,
+                &mut out,
+            )
+            .expect("hinted nested projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"a\",\"profile\":{\"name\":\"a\",\"score\":10}}\n\
+{\"id\":2,\"name\":\"b\",\"profile\":{\"name\":\"b\",\"score\":20}}\n\
+{\"id\":3,\"name\":\"c\",\"profile\":{\"name\":\"c\",\"score\":30}}\n\
+{\"id\":4,\"name\":\"d\",\"profile\":{\"name\":\"d\",\"score\":40}}\n\
+{\"id\":5,\"name\":\"e\",\"profile\":{\"name\":\"e\",\"score\":50}}\n\
+{\"id\":6,\"name\":\"f\",\"profile\":{\"name\":\"f\",\"score\":60}}\n\
+{\"id\":7,\"name\":\"g\",\"profile\":{\"name\":\"g\",\"score\":70}}\n\
+{\"id\":8,\"name\":\"h\",\"profile\":{\"name\":\"h\",\"score\":80}}\n\
+{\"id\":9,\"name\":\"i\",\"profile\":{\"name\":\"i\",\"score\":90}}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_scalar_projection_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"profile":{"name":"a"}}
+{"id":2,"profile":{"name":"b"}}
+{"id":3,"profile":{"name":"c"}}
+{"id":4,"profile":{"name":"d"}}
+{"id":5,"profile":{"name":"e"}}
+{"id":6,"profile":{"name":"f"}}
+{"id":7,"profile":{"name":"g"}}
+{"id":8,"profile":{"name":"h"}}
+{"id":9,"profile":{"name":"i"}}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"{id: $.id, name: $.profile.name.upper()}"#,
+                &mut out,
+            )
+            .expect("hinted scalar projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"A\"}\n\
+{\"id\":2,\"name\":\"B\"}\n\
+{\"id\":3,\"name\":\"C\"}\n\
+{\"id\":4,\"name\":\"D\"}\n\
+{\"id\":5,\"name\":\"E\"}\n\
+{\"id\":6,\"name\":\"F\"}\n\
+{\"id\":7,\"name\":\"G\"}\n\
+{\"id\":8,\"name\":\"H\"}\n\
+{\"id\":9,\"name\":\"I\"}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_collect_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+{"id":2,"attributes":[{"key":"c","value":"z"}]}
+{"id":3,"attributes":[{"key":"d","value":"w"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map([@.key, @.value])", &mut out)
+            .expect("hinted stream collect should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[[\"a\",\"x\"],[\"b\",\"y\"]]\n[[\"c\",\"z\"]]\n[[\"d\",\"w\"]]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_cache_rejects_reordered_item_prefixes() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"k1","value":"a"}]}
+{"attributes":[{"value":"k1","key":"actual"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.key)", &mut out)
+            .expect("stream cache should fall back on reordered item fields");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[\"k1\"]\n[\"actual\"]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_map_preserves_missing_field_nulls() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x"},{"key":"b"}]}
+{"attributes":[{"value":"z"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map([@.key, @.value])", &mut out)
+            .expect("stream map should preserve nulls for missing fields");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[[\"a\",\"x\"],[\"b\",null]]\n[[null,\"z\"]]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_object_map_preserves_scalar_calls() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                "$.attributes.map({k: @.key, v: @.value.upper()})",
+                &mut out,
+            )
+            .expect("stream object map should preserve scalar calls");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[{\"k\":\"a\",\"v\":\"X\"},{\"k\":\"b\",\"v\":\"Y\"}]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_map_projects_nested_item_paths() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","meta":{"code":"x"}},{"key":"b","meta":{"code":"y"}}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
+                &mut out,
+            )
+            .expect("stream map should project nested item paths");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "[{\"k\":\"a\",\"code\":\"X\"},{\"k\":\"b\",\"code\":\"Y\"}]\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_count_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"value":"x_3"},{"value":"y"}]}
+{"id":2,"attributes":[{"value":"z_3"},{"value":"w_3"}]}
+{"id":3,"attributes":[{"value":"n"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                &mut out,
+            )
+            .expect("hinted stream count should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n2\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_filtered_count_ignores_missing_predicate_fields() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"value":"x_3"},{"key":"missing"},{"value":"y"}]}
+{"attributes":[{"key":"missing"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+                &mut out,
+            )
+            .expect("filtered count should ignore missing predicate fields");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "1\n0\n");
+    }
+
+    #[test]
+    fn run_ndjson_filter_last_returns_last_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"keep","value":"first"},{"key":"drop","value":"physical-last"}]}
+{"attributes":[{"key":"drop","value":"first"},{"key":"keep","value":"semantic-last"},{"key":"drop","value":"physical-last"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.key == "keep").last().value"#,
+                &mut out,
+            )
+            .expect("filtered last should preserve semantic output order");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"first\"\n\"semantic-last\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_filter_map_first_stops_at_first_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x_3"},{"key":"b","value":"later_3"}]}
+{"attributes":[{"key":"a","value":"skip"},{"key":"b","value":"y_3"}]}
+{"attributes":[{"key":"a","value":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
+                &mut out,
+            )
+            .expect("filtered first should use direct stream first");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"key\":\"a\",\"value\":\"x_3\"}\n{\"key\":\"b\",\"value\":\"y_3\"}\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_map_first_projects_first_item_without_filter() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"first"},{"key":"b","value":"later"}]}
+{"attributes":[]}
+{"attributes":[{"key":"c","value":"only"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.value).first()", &mut out)
+            .expect("unfiltered first should use direct stream first");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"first\"\n\"only\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_map_last_projects_last_item_without_filter() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"first"},{"key":"b","value":"last"}]}
+{"attributes":[]}
+{"attributes":[{"key":"c","value":"only"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.value).last()", &mut out)
+            .expect("unfiltered last should use direct stream last");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "\"last\"\n\"only\"\n"
+        );
+    }
+
+    #[test]
+    fn run_ndjson_filter_map_last_keeps_latest_matching_output() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"x_3"},{"key":"b","value":"later_3"}]}
+{"attributes":[{"key":"a","value":"skip"},{"key":"b","value":"y_3"}]}
+{"attributes":[{"key":"a","value":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).last()"#,
+                &mut out,
+            )
+            .expect("filtered last should use direct stream last");
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"key\":\"b\",\"value\":\"later_3\"}\n{\"key\":\"b\",\"value\":\"y_3\"}\n"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_numeric_survives_hint_activation() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"attributes":[{"weight":1},{"weight":2}]}
+{"id":2,"attributes":[{"weight":3.5},{"weight":4}]}
+{"id":3,"attributes":[{"weight":"skip"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.map(@.weight).sum()", &mut out)
+            .expect("hinted numeric stream should run");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "3\n7.5\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_filtered_stream_numeric_uses_shared_fields() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"value":"x_3","weight":1},{"value":"skip","weight":10},{"value":"y_3","weight":2.5}]}
+{"attributes":[{"value":"skip","weight":4}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+                &mut out,
+            )
+            .expect("filtered numeric stream should use byte path");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "3.5\n0\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_stream_extreme_projects_selected_item_field() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"m"},{"key":"b","value":"z"},{"key":"c","value":"n"}]}
+{"attributes":[{"key":"x","value":"b"},{"key":"y","value":"a"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.value).last().key", &mut out)
+            .expect("stream extreme should project selected item field");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"x\"\n");
+    }
+
+    #[test]
+    fn run_ndjson_stream_extreme_handles_escaped_string_keys() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","value":"v\"1"},{"key":"b","value":"v_9"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.value).last().key", &mut out)
+            .expect("escaped extrema keys should fall back safely");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n");
+    }
+
+    #[test]
+    fn run_ndjson_stream_extreme_handles_numeric_keys() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","score":1},{"key":"b","score":10},{"key":"c","score":2}]}
+{"attributes":[{"key":"x","score":-2},{"key":"y","score":-1.5}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(@.score).last().key", &mut out)
+            .expect("numeric extrema keys should use direct stream extrema");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"y\"\n");
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn run_ndjson_nested_direct_projection_writes_without_fallback() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"id":1,"name":"ada","attributes":[{"key":"a","value":"x"},{"key":"b","value":"y"}]}
+{"id":2,"name":"bob","attributes":[{"key":"c","value":"z"}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(
+                rows,
+                r#"{id: $.id, name: $.name, count: $.attributes.len(), first: $.attributes.first().value, values: $.attributes.map(@.value)}"#,
+                &mut out,
+            )
+            .expect("nested direct projection should run");
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "{\"id\":1,\"name\":\"ada\",\"count\":2,\"first\":\"x\",\"values\":[\"x\",\"y\"]}\n\
+{\"id\":2,\"name\":\"bob\",\"count\":1,\"first\":\"z\",\"values\":[\"z\"]}\n"
+        );
     }
 }

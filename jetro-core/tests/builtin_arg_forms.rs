@@ -304,6 +304,18 @@ fn flat_map_all_forms() {
 }
 
 #[test]
+fn flat_map_last_uses_semantic_output_order() {
+    let d = json!({"groups": [[1, 2], [], [3, 4], [5]]});
+    assert_eq!(run("$.groups.flat_map(@).last()", &d), "5");
+}
+
+#[test]
+fn unique_last_uses_distinct_output_order() {
+    let d = json!({"xs": ["a", "b", "a", "c", "b"]});
+    assert_eq!(run("$.xs.unique().last()", &d), "\"c\"");
+}
+
+#[test]
 fn sort_lambda_forms() {
     let d = users();
     let asc = r#"[{"active":false,"age":24,"id":2,"name":"Bob","score":40},{"active":true,"age":30,"id":1,"name":"Ada","score":80},{"active":true,"age":42,"id":3,"name":"Carol","score":95}]"#;
@@ -342,6 +354,7 @@ fn unique_by_all_forms() {
         "unique_by",
         &[
             "$.xs.unique_by(@.k)",
+            "$.xs.distinct_by(@.k)",
             "$.xs.unique_by(.k)",
             "$.xs.unique_by(x => x.k)",
             "$.xs.unique_by(lambda x: x.k)",
@@ -1137,4 +1150,36 @@ fn collect_values() {
     assert_eq!(run("42.collect()", &json!({})), "[42]");
     assert_eq!(run("[1,2].collect()", &json!({})), "[1,2]");
     assert_eq!(run("null.collect()", &json!({})), "[]");
+}
+
+#[test]
+fn document_rows_public_collect_value() {
+    let engine = jetro_core::JetroEngine::new();
+    let out = engine
+        .collect_value(
+            serde_json::json!([
+                {"id": "a", "v": 1},
+                {"id": "b", "v": 2},
+                {"id": "a", "v": 3}
+            ]),
+            "$.rows().distinct_by($.id).map($.v)",
+        )
+        .unwrap();
+
+    assert_eq!(out, serde_json::json!([1, 2]));
+}
+
+#[test]
+fn document_rows_unsupported_method_reports_planning_error() {
+    let engine = jetro_core::JetroEngine::new();
+    let err = engine
+        .collect_value(
+            serde_json::json!([{"id": "a", "score": 1}]),
+            "$.rows().sort($.score)",
+        )
+        .expect_err("unsupported document rows stream method should fail clearly");
+
+    assert!(err
+        .to_string()
+        .contains("unsupported rows() stream method sort()"));
 }

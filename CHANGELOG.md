@@ -1,5 +1,348 @@
 # Changelog
 
+## 0.5.10
+
+### Release focus
+
+- **End-to-end demand/tape execution**. Planned work for this release focuses
+  on carrying shared demand metadata from builtin definitions through logical
+  planning, physical planning, backend selection, tape/view execution, pipeline
+  execution, and NDJSON row execution without query-shape-specific fusions.
+- **Clean architecture and observability**. Planned work includes explicit
+  execution-path labels, fallback reasons, tighter module boundaries, removal
+  of unwired prototype code where it is not useful, and regression tests that
+  prove hot paths stay on the intended backend.
+- **Correctness hardening for all builtins**. Planned work includes auditing
+  builtin metadata, VM/pipeline/view/tape consistency, null/missing behavior,
+  arity and alias behavior, and adding equivalence tests for optimized builtin
+  families.
+- **NDJSON performance and proof**. Planned work includes extending generic
+  byte/tape direct execution, preserving cold-path performance, documenting
+  benchmark methodology, and adding path-selection tests for static projections,
+  filtered streams, reducers, and early-stop queries.
+
+### NDJSON observability
+
+- **NDJSON can frame JSON payloads inside delimited records**. `NdjsonOptions`
+  now supports a row-framing mode for records such as `kafka-key|payload`,
+  selecting the payload after a separator byte before parsing or direct byte
+  execution. The default remains plain JSON-per-line.
+- **Delimited tombstones are handled before parsing**. Framed payload mode can
+  skip, keep, or reject literal `null` payloads; the Kafka-style default use
+  case skips tombstones before JSON parsing, query execution, distinct keys, or
+  `$.rows()` stream stages do any work.
+- **Payload framing is allocation-light on hot paths**. Borrowed/direct NDJSON
+  byte paths receive a payload slice into the existing line buffer, while owned
+  fallback paths compact the payload in-place in the reusable row buffer only
+  when the separator leaves a prefix or suffix to remove.
+- **Forward, reverse, and `$.rows()` streams share framing semantics**. Reverse
+  file iteration applies the same payload framer as forward iteration, and raw
+  `$.rows().take(n)` output writes the framed JSON payload rather than the
+  original `key|payload` record.
+- **Delimited payload framing has benchmark coverage**. The NDJSON benchmark
+  includes framed root projection and framed `$.rows().take(...).map(...)`
+  cases so the separator scan and tombstone skip cost can be tracked against
+  plain NDJSON.
+- **NDJSON can now opt into whole-stream semantics from the expression**.
+  Root-level `$.rows()` switches `--ndjson` evaluation from row-local mode to
+  one stream plan over all rows, so expressions such as
+  `$.rows().reverse().distinct_by($.id).take(100).map({id: $.id, v: $.v})`
+  configure reverse traversal, retained-row early stop, de-duplication, and
+  projection without extra CLI flags.
+- **`$.rows()` stream execution reuses existing stage machinery**. Supported
+  root-path `distinct_by` keys and final `map` projections use the shared
+  byte/tape direct paths, `distinct_by` uses the shared adaptive distinct state
+  and canonical key serialization, and unsupported expressions fall back to the
+  compiled VM over the row value, preserving correctness without
+  query-chain-specific kernels.
+- **Bounded row streams avoid unnecessary parsing**. `$.rows().take(n)` and
+  direct-filtered retained rows can write original NDJSON row bytes directly;
+  `first()` lowers to the same bounded stream stage as `take(1)`, and
+  file-backed `reverse()` uses the reverse NDJSON driver while reader-backed
+  reverse streams return a clear unsupported-source error.
+- **`$.rows()` also works for regular JSON documents**. Array documents stream
+  their elements, object/scalar documents behave as a single row, and the
+  collected result is returned as a JSON array using the same stream stage
+  executor as NDJSON.
+- **Row-stream execution tracks internal path stats**. The executor now records
+  scanned rows, emitted rows, filtered rows, duplicate rows, and direct versus
+  fallback stage usage, giving future explain/debug output a stable accounting
+  source.
+- **File-backed row streams can use mapped partition input**. Eligible
+  `$.rows().filter(...).take(...)` plans now scan line-aligned file partitions
+  over a mapped byte source instead of copying the whole file into an owned
+  buffer before Rayon execution; platforms without mmap support retain the
+  existing read fallback.
+- **Rows-stream parallelism is policy-driven, not shape-fused**. Partition
+  execution is selected from stream demand metadata, source direction, retained
+  limit, file size, and `NdjsonParallelism`; map-only retained streams remain
+  sequential because they can stop cheaply without scanning unrelated
+  partitions.
+- **Rows-stream partition stats are merged internally**. The partition executor
+  now merges per-partition scan/filter/project counters and records partition
+  count, giving tests and future explain output a direct proof of which generic
+  execution path ran.
+- **Non-terminal direct maps now preserve downstream stages**. Byte-writing
+  direct projection is enabled only for terminal `map` stages; a chain such as
+  `$.rows().reverse().map($.id).take(3)` now routes through the value path for
+  the map so `take` still observes and bounds the stream correctly.
+- **Row-stream planning now carries explicit demand annotations**. Root
+  `$.rows()` plans record retained-row limits, predicate/key/projector needs,
+  and whether projection can legally run after row selection, so source
+  traversal and executor setup no longer have to rediscover those facts from
+  the stage list.
+- **Document row streaming avoids eager array cloning**. Regular JSON
+  `$.rows()` now iterates `Val::Arr` documents directly in forward or reverse
+  order, stops when the stream is exhausted, and only materializes non-`Arr`
+  columnar lanes when that fallback is required.
+- **Row-stream source and executor boundaries are cleaner**. Shared row result
+  and stats types moved out of the executor, and document row traversal now
+  lives behind a small source abstraction, keeping source access separate from
+  filter/distinct/take/map stage execution.
+- **Row-stream stats identify source and direction**. Internal stats now carry
+  the planned row source and traversal direction alongside counters, so future
+  explain/debug output can attribute direct/fallback behavior without
+  re-inspecting the stream plan.
+- **Expression-level `$.rows()` has benchmark coverage**. The NDJSON core
+  benchmark now includes reader-backed take/projection and
+  filter/distinct/take streams, plus file-backed reverse take, reverse
+  distinct/take, and fallback-key cases to compare expression-driven streaming
+  against the older direct APIs.
+- **CLI-equivalent file dispatch has regression coverage**. Core tests now
+  prove that file-backed `run_ndjson_source` keeps ordinary `--ndjson '$.id'`
+  row-local while root `$.rows().reverse().distinct_by(...).take(...)` is
+  planned as one whole-file stream through the same API used by jetrocli.
+- **Unsupported `$.rows()` chains fail before scanning input**. Unsupported
+  stream methods and non-method stream steps now have focused planner and API
+  regression tests for both NDJSON and regular JSON document execution.
+- **Reverse NDJSON has an exact stream-level `distinct_by` API**.
+  `run_ndjson_rev_distinct_by(key, query, limit, writer)` scans newest-to-oldest,
+  keeps only the first row seen for each key in that stream order, writes the
+  requested projection for retained rows, and stops once the retained-row limit
+  is reached. This is the correctness baseline for compacted-log/latest-per-key
+  workloads before adding direct byte keys and adaptive Bloom/Cuckoo filters.
+- **Reverse NDJSON `distinct_by` has adaptive Bloom/Cuckoo front filters**. The
+  retained-key set remains exact, but large streams lazily add a probabilistic
+  front filter so definitely-new keys avoid duplicate-probe work while false
+  positives still fall through to exact confirmation. The filter starts as
+  Bloom for smaller sets and promotes to a Cuckoo fingerprint filter for larger
+  key sets.
+- **Reverse NDJSON `distinct_by` uses direct byte plans where legal**. Direct
+  root and nested path keys can now be read from row bytes before parsing, so
+  duplicate rows are discarded without VM evaluation; retained rows also reuse
+  the direct byte/tape writer for supported projections.
+- **Reverse NDJSON `distinct_by` exposes execution stats**. Callers can request
+  counters for scanned rows, emitted rows, duplicate drops, direct versus
+  fallback key evaluation, direct versus fallback value writing, and the active
+  probabilistic front filter.
+- **Reverse NDJSON `distinct_by` canonicalizes direct keys**. Escaped string
+  keys and compound object/array keys can be normalized from the raw key slice,
+  avoiding full-row fallback while preserving exact duplicate behavior for
+  those key forms.
+- **Compacted-topic benchmark coverage was added**. The core NDJSON benchmark
+  now includes reverse `distinct_by` cases for high-duplicate streams,
+  low-duplicate streams, retained-row limits, direct key/projection paths, and
+  fallback key evaluation.
+- **Direct writer plan kinds are now test-visible**. NDJSON direct planning can
+  expose whether a query produced a byte expression plan, a tape root/scalar
+  plan, a stream collect/count/numeric plan, or a static projection plan. This
+  gives regression tests a stable way to prove hot shapes such as `$.name`,
+  `$.a.b.c`, object/array projections, filtered counts, and numeric reducers
+  stay on the expected direct execution family.
+- **Runtime writer-family selection is now test-visible**. NDJSON tests can
+  distinguish pure byte-expression writers, byte-writable tape-plan writers,
+  and tape fallback writers, so performance assertions match the actual writer
+  branch used by `run_ndjson`.
+- **Adaptive structural hint groundwork has started**. NDJSON now has an
+  internal schema-hint module that observes simple root object layouts through
+  the existing byte scanner, records stable field slots, detects unstable field
+  order, and rejects rows the byte scanner cannot validate instead of creating
+  unsafe hints.
+- **Hintable NDJSON access is derived from direct plan metadata**. Static
+  projections and stream plans now feed a generic access-path inventory that
+  captures source and projected paths algorithmically, forming the basis for
+  schema-guided byte access without query-chain-specific fusions.
+- **NDJSON structural hints now have adaptive activation rules**. The internal
+  hint state stays in learning mode until enough rows validate the required
+  root fields, refuses unstable field orders, and disables itself after too
+  many byte-scanner rejections so hinting remains fallback-safe.
+- **Stable root layouts can now produce a partial row index**. Learned root
+  object layouts can validate a row's field order and expose raw value byte
+  spans by slot, providing the primitive needed for projection pushdown without
+  building a full per-row structural index.
+- **Adaptive hints are wired into static NDJSON projections**. After the
+  learning threshold, byte-writable object and array projection plans can use a
+  validated root-layout match to emit root-field values by slot, while any
+  unsupported value shape or row mismatch falls back to the existing writer.
+- **NDJSON hint state now tracks activation counters**. The adaptive hint layer
+  records learned rows, rejected rows, hinted rows, and disabled state so future
+  explain/debug output can prove when schema-guided byte access is active.
+- **NDJSON hints now avoid per-row span allocation**. Active hint matches reuse
+  state-owned span scratch storage, keeping the hot projection path allocation
+  free after schema learning.
+- **Nested and scalar projection values can use hints**. Static object and
+  array projections can jump to a learned root slot and then reuse the existing
+  byte suffix walker or scalar writer for paths such as `$.profile.name` and
+  `$.profile.name.upper()`, without adding query-specific fusion chains.
+- **Hint fallback is preflighted before output**. Hinted projection writers now
+  prove every projected value can be emitted before writing an object or array,
+  so unsupported nested suffixes fall back cleanly without partial output.
+- **Stale hints self-disable on layout misses**. Once active, the hint layer
+  counts post-activation layout mismatches and disables itself after repeated
+  misses, preserving correctness on mixed-shape NDJSON while avoiding repeated
+  failed fast-path attempts.
+- **Root-slot matching now stops at the demanded fields**. Active hints validate
+  only the root slots required by the direct plan and stop after the last needed
+  slot, avoiding full root-object scans for early-field projections.
+- **Schema learning stops after activation**. The adaptive state machine now
+  performs full schema observation only during the learning window; active rows
+  go directly through the required-slot matcher. The default learning threshold
+  is two stable rows to favor cold NDJSON workloads.
+- **NDJSON string scanning uses SIMD byte search**. The byte parser now uses
+  `memchr2` for quote/backslash discovery in JSON string scanning, keeping the
+  simple-key and value-skip paths conservative while using platform-accelerated
+  byte search where available.
+- **Stream source hints now cover map, count, and numeric reducers**. Direct
+  stream plans can reuse the learned root source slot for collect, filtered
+  count, and numeric reducer sinks, then execute the existing raw-byte item
+  predicate, projection, and numeric fold logic.
+- **Numeric NDJSON streams can stay byte-native**. Queries such as
+  `$.attributes.map(@.weight).sum()` now route through byte-writable tape plans
+  instead of forcing tape materialization for every row.
+- **Stream item projections avoid repeated item scans**. Root-field stream maps
+  such as `attributes.map([@.key, @.value])` and object-shaped maps now scan
+  each simple item object once, cache the requested field spans for that item,
+  and reuse the spans across array/object/scalar projection writers.
+- **Filtered stream sinks now share item field spans**. Filtered stream maps,
+  filtered counts, and filtered numeric reducers can evaluate root-field
+  predicates and projections/reducer inputs from the same per-item byte scan,
+  avoiding duplicated path resolution without adding query-shape-specific
+  fusion chains.
+- **Stream extrema retain projected output directly**. Root-projectable
+  `sort_by(...).first()/last()` suffixes can keep only the selected projection
+  bytes while scanning candidates, avoiding whole-item retention for hot
+  extrema such as `$.attributes.sort_by(@.value).last().key`.
+- **NDJSON stream caches validate learned item prefixes**. Constant stream-map
+  reuse now proves that learned value offsets still belong to the same item
+  field prefix, so reordered or mixed-shape item objects fall back safely.
+- **Mixed-shape stream items have explicit regression proof**. Optimized
+  stream maps and filtered counts are now covered for missing item fields,
+  preserving `null` projection output and non-matching predicate behavior on
+  heterogeneous NDJSON arrays.
+- **Stream writer scratch storage is smaller and allocation-light**. Common
+  stream field sets and span buffers use inline storage, and fixed projection
+  keys are written directly through the JSON string writer rather than via
+  temporary `Val` allocation.
+- **Direct stream projection plans are built once per row source**. Root-field
+  array/object stream maps now derive reusable slot plans for raw fields and
+  supported scalar calls, reducing per-item projection work while preserving
+  fallback through the generic writer for nested or optional shapes.
+- **Direct stream projection plans understand nested suffixes**. Stream item
+  projections can jump to a root item field and then reuse the byte suffix
+  walker for paths and scalar calls such as `@.meta.code.upper()`, keeping
+  nested item shaping on the same algorithmic direct projection path.
+- **Release validation is green in release mode**. The full workspace test
+  suite passes with `cargo test --release --verbose --workspace`, covering the
+  optimized NDJSON byte/tape paths alongside the existing VM, parser, planner,
+  builtin, and API tests.
+- **The 25-query NDJSON CLI profile is re-baselined**. On the local
+  4.76M-row benchmark file, direct root projections run in 0.32-0.88s and
+  stream projection/filter/reducer cases are generally above 10x versus `jaq`.
+  Remaining weaker cases are concentrated around per-row tail/extrema access
+  and mixed root-plus-stream output, which are now the next optimization target.
+- **NDJSON extrema plans are observable as extrema**. Test-only direct-plan
+  labels now distinguish `sort_by(...).first()/last()` stream extrema from
+  numeric reducers, making performance and routing regressions easier to pin
+  to the correct executor family.
+- **Array-element demand uses root-field prefixes**. Direct byte paths for
+  `first`, `nth`, and `last` array element access now avoid computing an exact
+  root-field value span when the downstream array walker can stop at the
+  demanded element boundary. This improves `last()` and mixed root/stream
+  projections without adding query-shape-specific fusion.
+- **Selective stages distinguish reverse last from nth demand**. Filter-like
+  builtins and predicate match stages preserve ordered `LastInput` demand for
+  reverse-capable executors, while `nth` after a selective stage remains a
+  conservative ordered full scan.
+- **Bounded positional demand is explicitly order-sensitive**. Selective,
+  distinct-like, expanding, and multi-match demand laws now mark bounded
+  positional output as ordered work, so later physical planners cannot treat
+  `first`, `nth`, `last`, or `take` after these stages as order-insensitive.
+- **Selective and expanding positional semantics have runtime proof**. NDJSON
+  coverage now proves `filter(...).last()` returns the last matching output,
+  and builtin coverage proves `flat_map(...).last()` follows semantic output
+  order.
+- **Registry demand invariants guard positional ordering**. Builtin registry
+  tests now assert that selective, distinct-like, and expanding demand laws
+  preserve ordering for bounded positional sinks, with runtime coverage for
+  `unique().last()`.
+- **NDJSON string extrema compare simple keys directly**. Stream extrema can
+  compare simple JSON string keys from raw bytes before falling back to full
+  scalar comparison, improving `sort_by(string).first()/last()` without adding
+  query-chain-specific fusion. Escaped string keys have regression coverage for
+  the fallback path.
+- **NDJSON extrema compare numeric keys directly**. Stream extrema also use the
+  lightweight raw scalar comparator for numeric sort keys, with regression
+  coverage for integer, negative, and floating-point keys.
+- **NDJSON streams have a generic `first` sink**. Filter/map pipelines ending
+  in `first()` now lower to a reusable direct stream sink that stops at the
+  first matching item and applies the planned projection once. The benchmark
+  shape `filter(...).map({...}).first()` improved locally from roughly 4.26s to
+  roughly 3.8s on the 4.76M-row file, and the direct-plan test label now
+  distinguishes stream-first from stream-collect.
+- **Unfiltered stream-first has direct regression proof**.
+  `map(...).first()` now has focused NDJSON coverage for empty and non-empty
+  arrays, proving the generic stream-first sink also handles demand without a
+  predicate stage.
+- **Unfiltered stream-first uses first-child source demand**. Byte execution
+  now extracts only the demanded first array child for `map(...).first()` when
+  no predicate can require a later item; filtered `first()` still scans until
+  the first matching semantic output. Locally, `$.attributes.map(@.value).first()`
+  improved from roughly 2.56s to roughly 1.97s on the 4.76M-row file.
+- **NDJSON streams have a generic `last` sink**. `map(...).last()` and
+  `filter(...).map(...).last()` now lower to a reusable stream-last sink that
+  keeps only the latest semantic output and applies projection only to the
+  retained item. Unfiltered stream-last can select the last array child before
+  projection; filtered stream-last still scans for the latest matching output.
+- **Filtered stream-last shares item field spans**. Root-field predicates and
+  projections in `filter(...).map(...).last()` now reuse the same item scan,
+  matching the collect/first span-sharing architecture while retaining only one
+  selected output.
+- **Demand and NDJSON focused validation is green**. Release-mode focused
+  suites for chain demand and NDJSON execution pass after the demand-safety,
+  byte-extrema, and stream-first changes.
+- **NDJSON module validation is green**. The full `io::ndjson` release-mode
+  module suite passes after adding stream-last and the first/last source-demand
+  changes, covering byte, hinted, tape, and reverse NDJSON paths.
+- **Core release validation is green**. `cargo test -p jetro-core --release`
+  passes after the stream-first, stream-last, extrema, and demand-ordering
+  changes.
+- **Full release workspace validation is green**.
+  `cargo test --release --verbose --workspace` passes after the
+  stream-first, byte-extrema, and reverse selective-demand changes.
+- **Core compile health is clean**. `cargo check -p jetro-core` passes after
+  the demand propagation and NDJSON byte-executor changes.
+
+### Builtin hardening
+
+- **`distinct_by` is available as a key-based distinct alias**.
+  `distinct_by(key)` now resolves to the exact first-seen `unique_by(key)`
+  semantics, matching the NDJSON terminology planned for current-order
+  compaction and reverse-log latest-per-key scans.
+- **Builtin names and aliases are now collision-checked**. Registry tests prove
+  every canonical builtin name and alias resolves back to exactly one
+  `BuiltinMethod`, preventing silent lookup drift as the builtin catalog grows.
+- **Builtin spec metadata has baseline invariant checks**. Registry tests now
+  prove every builtin exposes a finite non-negative planner cost and that
+  numeric reducer metadata cannot drift away from numeric sink metadata.
+- **Terminal sink demand is checked for every sink builtin**. Registry tests
+  now validate count, numeric, approximate-distinct, first, and last sink
+  accumulators against the shared `Demand` model used by planners and
+  executors.
+- **Logical pipeline shapes must participate in demand propagation**. Registry
+  tests now assert that every builtin exposed to logical pipeline lowering also
+  publishes demand metadata, keeping logical planning and demand planning tied
+  together.
+
 ## 0.5.9
 
 ### Release focus

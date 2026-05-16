@@ -456,7 +456,7 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         HasPath => AbstractVal::scalar(VType::Bool),
         ReMatchAll | ReCapturesAll | ReSplit => AbstractVal::array(),
         ReReplace | ReReplaceAll => AbstractVal::scalar(VType::Str),
-        FromJson | Or | Set | Index => AbstractVal::UNKNOWN,
+        FromJson | Or | Set | Index | Rows => AbstractVal::UNKNOWN,
         EquiJoin => AbstractVal::array(),
         Unknown => AbstractVal::UNKNOWN,
     }
