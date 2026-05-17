@@ -6,7 +6,8 @@ use super::ndjson::{
 use super::ndjson_byte::{eval_ndjson_byte_predicate_row, raw_json_path_view};
 #[cfg(feature = "simd-json")]
 use super::ndjson_direct::{
-    direct_tape_predicate_for_expr, NdjsonDirectPredicate, NdjsonPhysicalPath,
+    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{
@@ -368,6 +369,8 @@ where
             direct_cmp: direct_first_match_cmp(&consumer.stream),
             #[cfg(feature = "simd-json")]
             direct_count: direct_count_consumer(&consumer.stream),
+            #[cfg(feature = "simd-json")]
+            direct_sum: direct_sum_consumer(&consumer.stream),
             done: false,
             stream: CompiledRowStream::new(&consumer.stream),
             values: Vec::new(),
@@ -425,6 +428,8 @@ struct RunningConsumer {
     direct_cmp: Option<DirectCmp>,
     #[cfg(feature = "simd-json")]
     direct_count: Option<DirectCount>,
+    #[cfg(feature = "simd-json")]
+    direct_sum: Option<DirectSum>,
     done: bool,
     stream: CompiledRowStream,
     values: Vec<Val>,
@@ -435,6 +440,10 @@ impl RunningConsumer {
         #[cfg(feature = "simd-json")]
         if let Some(count) = self.direct_count.as_ref() {
             return Some(Val::Int(count.count as i64));
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(sum) = self.direct_sum.as_ref() {
+            return Some(sum.acc.value());
         }
         self.stream.finish()
     }
@@ -453,6 +462,55 @@ struct DirectCount {
     predicates: Vec<NdjsonDirectPredicate>,
     limit: Option<usize>,
     count: usize,
+}
+
+#[cfg(feature = "simd-json")]
+struct DirectSum {
+    predicates: Vec<NdjsonDirectPredicate>,
+    value_path: NdjsonPhysicalPath,
+    acc: NumericSum,
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone, Debug, Default)]
+struct NumericSum {
+    int_acc: i64,
+    float_acc: f64,
+    floated: bool,
+}
+
+#[cfg(feature = "simd-json")]
+impl NumericSum {
+    fn add_view(&mut self, value: JsonView<'_>) {
+        match value {
+            JsonView::Int(n) if !self.floated => {
+                self.int_acc = self.int_acc.wrapping_add(n);
+            }
+            JsonView::Int(n) => self.float_acc += n as f64,
+            JsonView::UInt(n) if !self.floated && i64::try_from(n).is_ok() => {
+                self.int_acc = self.int_acc.wrapping_add(n as i64);
+            }
+            JsonView::UInt(n) if !self.floated => {
+                self.float_acc = self.int_acc as f64 + n as f64;
+                self.floated = true;
+            }
+            JsonView::UInt(n) => self.float_acc += n as f64,
+            JsonView::Float(f) if !self.floated => {
+                self.float_acc = self.int_acc as f64 + f;
+                self.floated = true;
+            }
+            JsonView::Float(f) => self.float_acc += f,
+            _ => {}
+        }
+    }
+
+    fn value(&self) -> Val {
+        if self.floated {
+            Val::Float(self.float_acc)
+        } else {
+            Val::Int(self.int_acc)
+        }
+    }
 }
 
 fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
@@ -504,6 +562,30 @@ fn direct_count_consumer(plan: &RowStreamPlan) -> Option<DirectCount> {
         predicates,
         limit,
         count: 0,
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
+    let [prefix @ .., RowStreamStage::Map(map), RowStreamStage::Sum] = plan.stages.as_slice()
+    else {
+        return None;
+    };
+    let value_path = match direct_tape_plan_for_expr(map)? {
+        NdjsonDirectTapePlan::RootPath(steps) => steps,
+        _ => return None,
+    };
+    let mut predicates = Vec::new();
+    for stage in prefix {
+        match stage {
+            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
+            _ => return None,
+        }
+    }
+    Some(DirectSum {
+        predicates,
+        value_path,
+        acc: NumericSum::default(),
     })
 }
 
@@ -582,6 +664,25 @@ fn apply_fanout_row(
                 count.count += 1;
                 if count.limit.is_some_and(|limit| count.count >= limit) {
                     consumer.done = true;
+                }
+            }
+            continue;
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(sum) = consumer.direct_sum.as_mut() {
+            let mut keep = true;
+            for predicate in &sum.predicates {
+                match eval_ndjson_byte_predicate_row(&row, predicate)? {
+                    Some(true) => {}
+                    Some(false) | None => {
+                        keep = false;
+                        break;
+                    }
+                }
+            }
+            if keep {
+                if let Some(value) = raw_json_path_view(&row, &sum.value_path) {
+                    sum.acc.add_view(value);
                 }
             }
             continue;
@@ -921,6 +1022,11 @@ mod tests {
             ],
         );
         let query = r#"{first_active: $.rows().find(active == true).first(), active_count: $.rows().filter(active == true).count(), active_total: $.rows().filter(active == true).map($.price).sum()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        #[cfg(feature = "simd-json")]
+        assert!(direct_sum_consumer(&plan.consumers[2].stream).is_some());
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
