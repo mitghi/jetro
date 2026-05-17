@@ -1,9 +1,9 @@
 use super::mapped_bytes::{split_line_aligned_ranges, MappedBytes};
-use super::ndjson::{parse_row, row_eval_error, NdjsonOptions, NdjsonParallelism};
+use super::ndjson::{collect_row_stream_result, NdjsonOptions, NdjsonParallelism};
 use super::ndjson_scan::{for_each_framed_payload_in_range, framed_payload_ranges_in_range};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
-use super::stream_types::{RowStreamRowResult, RowStreamStats};
+use super::stream_types::RowStreamStats;
 use crate::data::value::Val;
 use crate::{JetroEngine, JetroEngineError};
 use rayon::prelude::*;
@@ -142,7 +142,7 @@ fn scan_partition(
             }
             let row = bytes[row_range].to_vec();
             let result = stream.apply_owned_row(engine, 1, row)?;
-            if collect_result(engine, result, &mut values)? {
+            if collect_row_stream_result(engine, 1, result, &mut values)? {
                 break;
             }
         }
@@ -169,28 +169,8 @@ fn scan_forward_partition_rows(
         }
         let row = bytes[row_range].to_vec();
         let result = stream.apply_owned_row(engine, 1, row)?;
-        collect_result(engine, result, values)
+        collect_row_stream_result(engine, 1, result, values)
     })
-}
-
-fn collect_result(
-    engine: &JetroEngine,
-    result: RowStreamRowResult,
-    values: &mut Vec<Val>,
-) -> Result<bool, JetroEngineError> {
-    match result {
-        RowStreamRowResult::Emit(value) => values.push(value),
-        RowStreamRowResult::EmitBytes(row) => {
-            let document = parse_row(engine, 1, row)?;
-            let value = document
-                .root_val_with(engine.keys())
-                .map_err(|err| row_eval_error(1, err))?;
-            values.push(value);
-        }
-        RowStreamRowResult::Skip => {}
-        RowStreamRowResult::Stop => return Ok(true),
-    }
-    Ok(false)
 }
 
 fn collect_line_ranges(
