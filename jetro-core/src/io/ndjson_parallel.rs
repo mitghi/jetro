@@ -24,14 +24,20 @@ where
 {
     Ok(
         collect_rows_stream_file_with_stats(engine, path, plan, options)?
-            .map(|result| result.value),
+            .map(ParallelRowsResult::into_value),
     )
 }
 
 pub(super) struct ParallelRowsResult {
     pub(super) value: Val,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) stats: RowStreamStats,
+}
+
+impl ParallelRowsResult {
+    fn into_value(self) -> Val {
+        let _stats = self.stats;
+        self.value
+    }
 }
 
 pub(super) fn collect_rows_stream_file_with_stats<P>(
