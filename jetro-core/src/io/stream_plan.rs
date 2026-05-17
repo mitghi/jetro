@@ -118,12 +118,18 @@ pub(super) fn lower_root_rows_expr(
     };
 
     let mut plan = RowStreamPlan::new(source);
+    let mut terminal = None;
     for step in steps {
         let Step::Method(name, args) = step else {
             return Err(RowStreamPlanError::new(format!(
                 "unsupported rows() stream step {step:?}"
             )));
         };
+        if let Some(terminal) = terminal {
+            return Err(RowStreamPlanError::new(format!(
+                "rows() stream method {name}() cannot follow terminal method {terminal}()"
+            )));
+        }
         let method = BuiltinMethod::from_name(name);
         match method {
             BuiltinMethod::Reverse => {
@@ -157,6 +163,7 @@ pub(super) fn lower_root_rows_expr(
             BuiltinMethod::Count => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
+                terminal = Some(name.as_str());
             }
             BuiltinMethod::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
@@ -405,6 +412,19 @@ mod tests {
         assert_eq!(
             err,
             "rows() stream method take() expects a literal non-negative integer"
+        );
+    }
+
+    #[test]
+    fn rejects_rows_stream_stage_after_terminal_count() {
+        let expr = parse("$.rows().count().map($.id)").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            err,
+            "rows() stream method map() cannot follow terminal method count()"
         );
     }
 
