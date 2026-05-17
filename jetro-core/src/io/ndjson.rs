@@ -33,6 +33,7 @@ use super::stream_plan::{RowStreamDirection, RowStreamPlan};
 use super::stream_subquery::{RowStreamSubqueryPlan, STREAM_BINDING};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
+pub use super::ndjson_driver::NdjsonPerRowDriver;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
@@ -46,7 +47,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::MutexGuard;
 
-const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
+pub(super) const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 pub(super) const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
@@ -159,170 +160,6 @@ impl NdjsonOptions {
     pub fn with_null_output(mut self, null_output: NdjsonNullOutput) -> Self {
         self.null_output = null_output;
         self
-    }
-}
-
-/// Forward-only per-row NDJSON reader.
-pub struct NdjsonPerRowDriver<R> {
-    reader: R,
-    line_no: u64,
-    max_line_len: usize,
-    row_frame: NdjsonRowFrame,
-}
-
-impl<R: BufRead> NdjsonPerRowDriver<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-            line_no: 0,
-            max_line_len: DEFAULT_MAX_LINE_LEN,
-            row_frame: NdjsonRowFrame::JsonLine,
-        }
-    }
-
-    pub fn with_options(mut self, options: NdjsonOptions) -> Self {
-        self.max_line_len = options.max_line_len;
-        self.row_frame = options.row_frame;
-        self
-    }
-
-    pub fn with_max_line_len(mut self, max_line_len: usize) -> Self {
-        self.max_line_len = max_line_len;
-        self
-    }
-
-    pub fn with_row_frame(mut self, row_frame: NdjsonRowFrame) -> Self {
-        self.row_frame = row_frame;
-        self
-    }
-
-    pub fn line_no(&self) -> u64 {
-        self.line_no
-    }
-
-    /// Read the next non-empty NDJSON row into `buf`, returning its 1-based line
-    /// number. Empty and whitespace-only rows are skipped.
-    pub fn read_next_nonempty<'a>(
-        &mut self,
-        buf: &'a mut Vec<u8>,
-    ) -> Result<Option<(u64, &'a [u8])>, RowError> {
-        loop {
-            buf.clear();
-            let read = self.read_physical_line(buf)?;
-            if read == 0 {
-                return Ok(None);
-            }
-            self.line_no += 1;
-
-            strip_initial_bom(self.line_no, buf);
-            trim_line_ending(buf);
-
-            let (start, end) = non_ws_range(buf);
-            if start == end {
-                continue;
-            }
-
-            let len = end - start;
-            if len > self.max_line_len {
-                return Err(RowError::LineTooLarge {
-                    line_no: self.line_no,
-                    len,
-                    max: self.max_line_len,
-                });
-            }
-
-            match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
-                FramePayload::Data(range) => {
-                    return Ok(Some((
-                        self.line_no,
-                        &buf[start + range.start..start + range.end],
-                    )));
-                }
-                FramePayload::Skip => continue,
-            }
-        }
-    }
-
-    /// Read the next non-empty row and transfer ownership of `buf` to the
-    /// caller. This is the hot path used by `JetroEngine` NDJSON execution so
-    /// the row can be parsed without an extra bytes copy.
-    pub fn read_next_owned(
-        &mut self,
-        buf: &mut Vec<u8>,
-    ) -> Result<Option<(u64, Vec<u8>)>, RowError> {
-        loop {
-            buf.clear();
-            let read = self.read_physical_line(buf)?;
-            if read == 0 {
-                return Ok(None);
-            }
-            self.line_no += 1;
-
-            strip_initial_bom(self.line_no, buf);
-            trim_line_ending(buf);
-
-            let (start, end) = non_ws_range(buf);
-            if start == end {
-                continue;
-            }
-
-            let len = end - start;
-            if len > self.max_line_len {
-                return Err(RowError::LineTooLarge {
-                    line_no: self.line_no,
-                    len,
-                    max: self.max_line_len,
-                });
-            }
-
-            let payload = match frame_payload(self.row_frame, self.line_no, &buf[start..end])? {
-                FramePayload::Data(range) => start + range.start..start + range.end,
-                FramePayload::Skip => continue,
-            };
-            if payload.start > 0 || payload.end < buf.len() {
-                buf.copy_within(payload.clone(), 0);
-                buf.truncate(payload.end - payload.start);
-            }
-
-            let capacity = buf.capacity();
-            return Ok(Some((
-                self.line_no,
-                std::mem::replace(buf, Vec::with_capacity(capacity)),
-            )));
-        }
-    }
-
-    fn read_physical_line(&mut self, buf: &mut Vec<u8>) -> Result<usize, RowError> {
-        loop {
-            let available = self.reader.fill_buf()?;
-            if available.is_empty() {
-                return Ok(buf.len());
-            }
-
-            if let Some(pos) = memchr(b'\n', available) {
-                buf.extend_from_slice(&available[..=pos]);
-                self.reader.consume(pos + 1);
-                self.check_physical_line_len(buf.len())?;
-                return Ok(buf.len());
-            }
-
-            let len = available.len();
-            buf.extend_from_slice(available);
-            self.reader.consume(len);
-            self.check_physical_line_len(buf.len())?;
-        }
-    }
-
-    fn check_physical_line_len(&self, len: usize) -> Result<(), RowError> {
-        let hard_max = self.max_line_len.saturating_add(2);
-        if len > hard_max {
-            return Err(RowError::LineTooLarge {
-                line_no: self.line_no + 1,
-                len,
-                max: self.max_line_len,
-            });
-        }
-        Ok(())
     }
 }
 
@@ -3571,19 +3408,19 @@ fn write_control_escape<W: Write>(writer: &mut W, byte: u8) -> Result<(), JetroE
     Ok(())
 }
 
-fn trim_line_ending(buf: &mut Vec<u8>) {
+pub(super) fn trim_line_ending(buf: &mut Vec<u8>) {
     while matches!(buf.last(), Some(b'\n' | b'\r')) {
         buf.pop();
     }
 }
 
-fn strip_initial_bom(line_no: u64, buf: &mut Vec<u8>) {
+pub(super) fn strip_initial_bom(line_no: u64, buf: &mut Vec<u8>) {
     if line_no == 1 && buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
         buf.drain(..3);
     }
 }
 
-fn non_ws_range(buf: &[u8]) -> (usize, usize) {
+pub(super) fn non_ws_range(buf: &[u8]) -> (usize, usize) {
     let start = buf
         .iter()
         .position(|b| !b.is_ascii_whitespace())

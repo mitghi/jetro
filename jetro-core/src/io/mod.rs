@@ -8,6 +8,7 @@ mod mapped_bytes;
 mod ndjson;
 mod ndjson_byte;
 mod ndjson_direct;
+mod ndjson_driver;
 mod ndjson_distinct;
 mod ndjson_frame;
 mod ndjson_hint;
@@ -44,8 +45,9 @@ pub use ndjson::{
     run_ndjson_matches_source_with_options, run_ndjson_matches_with_options, run_ndjson_source,
     run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
     run_ndjson_with_options, NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonParallelism,
-    NdjsonPerRowDriver, NdjsonWriterPathKind,
+    NdjsonWriterPathKind,
 };
+pub use ndjson_driver::NdjsonPerRowDriver;
 pub use ndjson_distinct::DistinctFrontFilterKind;
 pub use ndjson_frame::{NdjsonRowFrame, NullPayload};
 pub use ndjson_rev::{
