@@ -1,7 +1,8 @@
 use super::ndjson::{
     collect_row_stream_result, ndjson_writer_with_options, parse_row, row_eval_error,
-    write_val_line_with_options, NdjsonOptions,
+    write_val_line_with_options, NdjsonOptions, NdjsonParallelism,
 };
+use super::ndjson_frame::{frame_payload, FramePayload};
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{eval_ndjson_byte_predicate_row, raw_json_path_view};
 #[cfg(feature = "simd-json")]
@@ -15,6 +16,7 @@ use super::stream_plan::{
     RowStreamSourceKind, RowStreamStage,
 };
 use super::stream_numeric::NumericAccumulator;
+use super::mapped_bytes::MappedBytes;
 use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
@@ -24,7 +26,12 @@ use crate::parse::ast::{Arg, ArrayElem, BinOp, Expr, ObjField, Step};
 use crate::util::{json_cmp_binop, JsonView};
 use crate::{EvalError, JetroEngine, JetroEngineError};
 use std::io::Write;
+use std::ops::Range;
+use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(feature = "simd-json")]
+use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
 pub(super) struct RowStreamFanoutPlan {
@@ -457,6 +464,13 @@ fn collect_ndjson_rows_fanout_file<P>(
 where
     P: AsRef<std::path::Path>,
 {
+    #[cfg(feature = "simd-json")]
+    if let Some(value) =
+        collect_parallel_direct_reducer_fanout(engine, path.as_ref(), plan, options)?
+    {
+        return Ok(value);
+    }
+
     let mut consumers: Vec<_> = plan
         .consumers
         .iter()
@@ -840,6 +854,226 @@ fn row_to_val(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Val, J
         .map_err(|err| row_eval_error(line_no, err))
 }
 
+#[cfg(feature = "simd-json")]
+fn collect_parallel_direct_reducer_fanout(
+    engine: &JetroEngine,
+    path: &Path,
+    plan: &RowStreamFanoutPlan,
+    options: NdjsonOptions,
+) -> Result<Option<Val>, JetroEngineError> {
+    if options.parallelism == NdjsonParallelism::Off
+        || plan.source.direction != RowStreamDirection::Forward
+        || rayon::current_num_threads() <= 1
+    {
+        return Ok(None);
+    }
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() < options.parallel_min_bytes {
+        return Ok(None);
+    }
+    let reducers = plan
+        .consumers
+        .iter()
+        .map(|consumer| DirectFanoutReducer::from_consumer(consumer))
+        .collect::<Option<Vec<_>>>();
+    let Some(reducers) = reducers.filter(|reducers| reducers.len() >= 2) else {
+        return Ok(None);
+    };
+
+    let bytes = Arc::new(MappedBytes::open(path)?);
+    let ranges = split_line_aligned_ranges(bytes.as_slice());
+    if ranges.len() <= 1 {
+        return Ok(None);
+    }
+    let parts = ranges
+        .into_par_iter()
+        .map(|range| scan_direct_reducer_partition(bytes.clone(), range, &reducers, options))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut merged = reducers;
+    for part in parts {
+        for (dst, src) in merged.iter_mut().zip(part) {
+            dst.merge(&src);
+        }
+    }
+    let value = finish_direct_reducer_body(engine, plan, &merged)?;
+    Ok(Some(value))
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone)]
+struct DirectFanoutReducer {
+    binding: String,
+    kind: DirectFanoutReducerKind,
+}
+
+#[cfg(feature = "simd-json")]
+#[derive(Clone)]
+enum DirectFanoutReducerKind {
+    Count {
+        predicates: Vec<NdjsonDirectPredicate>,
+        count: usize,
+    },
+    Numeric {
+        predicates: Vec<NdjsonDirectPredicate>,
+        value_path: NdjsonPhysicalPath,
+        acc: NumericAccumulator,
+    },
+}
+
+#[cfg(feature = "simd-json")]
+impl DirectFanoutReducer {
+    fn from_consumer(consumer: &RowStreamFanoutConsumer) -> Option<Self> {
+        if let Some(count) = direct_count_consumer(&consumer.stream).filter(|count| count.limit.is_none()) {
+            return Some(Self {
+                binding: consumer.binding.clone(),
+                kind: DirectFanoutReducerKind::Count {
+                    predicates: count.predicates,
+                    count: 0,
+                },
+            });
+        }
+        if let Some(sum) = direct_sum_consumer(&consumer.stream) {
+            return Some(Self {
+                binding: consumer.binding.clone(),
+                kind: DirectFanoutReducerKind::Numeric {
+                    predicates: sum.predicates,
+                    value_path: sum.value_path,
+                    acc: sum.acc,
+                },
+            });
+        }
+        None
+    }
+
+    fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
+        match &mut self.kind {
+            DirectFanoutReducerKind::Count { predicates, count } => {
+                if direct_predicates_match(row, predicates)? {
+                    *count += 1;
+                }
+            }
+            DirectFanoutReducerKind::Numeric {
+                predicates,
+                value_path,
+                acc,
+            } => {
+                if direct_predicates_match(row, predicates)? {
+                    if let Some(value) = raw_json_path_view(row, value_path) {
+                        acc.add_view(value);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn merge(&mut self, other: &Self) {
+        match (&mut self.kind, &other.kind) {
+            (
+                DirectFanoutReducerKind::Count { count, .. },
+                DirectFanoutReducerKind::Count { count: other, .. },
+            ) => *count += *other,
+            (
+                DirectFanoutReducerKind::Numeric { acc, .. },
+                DirectFanoutReducerKind::Numeric { acc: other, .. },
+            ) => acc.merge(other),
+            _ => {}
+        }
+    }
+
+    fn value(&self) -> Val {
+        match &self.kind {
+            DirectFanoutReducerKind::Count { count, .. } => Val::Int(*count as i64),
+            DirectFanoutReducerKind::Numeric { acc, .. } => acc.value(),
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+fn scan_direct_reducer_partition(
+    bytes: Arc<MappedBytes>,
+    range: Range<usize>,
+    reducers: &[DirectFanoutReducer],
+    options: NdjsonOptions,
+) -> Result<Vec<DirectFanoutReducer>, JetroEngineError> {
+    let mut reducers = reducers.to_vec();
+    let bytes = bytes.as_slice();
+    let mut cursor = range.start;
+    while cursor < range.end {
+        let start = cursor;
+        let rel_end = memchr::memchr(b'\n', &bytes[cursor..range.end]);
+        let mut end = rel_end.map_or(range.end, |pos| cursor + pos);
+        cursor = rel_end.map_or(range.end, |pos| cursor + pos + 1);
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        if bytes[start..end].iter().all(|byte| byte.is_ascii_whitespace()) {
+            continue;
+        }
+        let row = match frame_payload(options.row_frame, 1, &bytes[start..end])? {
+            FramePayload::Data(payload) => &bytes[start + payload.start..start + payload.end],
+            FramePayload::Skip => continue,
+        };
+        for reducer in &mut reducers {
+            reducer.apply_row(row)?;
+        }
+    }
+    Ok(reducers)
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_predicates_match(
+    row: &[u8],
+    predicates: &[NdjsonDirectPredicate],
+) -> Result<bool, JetroEngineError> {
+    for predicate in predicates {
+        match eval_ndjson_byte_predicate_row(row, predicate)? {
+            Some(true) => {}
+            Some(false) | None => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "simd-json")]
+fn finish_direct_reducer_body(
+    engine: &JetroEngine,
+    plan: &RowStreamFanoutPlan,
+    reducers: &[DirectFanoutReducer],
+) -> Result<Val, JetroEngineError> {
+    let mut env = Env::new(Val::Null);
+    for reducer in reducers {
+        env = env.with_var(&reducer.binding, reducer.value());
+    }
+    let body = Compiler::compile(&plan.body, "<ndjson-rows-fanout-body>");
+    engine
+        .lock_vm()
+        .exec_in_env(&body, &env)
+        .map_err(JetroEngineError::Eval)
+}
+
+#[cfg(feature = "simd-json")]
+fn split_line_aligned_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
+    let target = rayon::current_num_threads().max(1) * 4;
+    let approx = (bytes.len() / target.max(1)).max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut end = (start + approx).min(bytes.len());
+        if end < bytes.len() {
+            while end < bytes.len() && bytes[end - 1] != b'\n' {
+                end += 1;
+            }
+        }
+        if end > start {
+            ranges.push(start..end);
+        }
+        start = end;
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1186,6 +1420,38 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"avg_price":7.5,"min_price":5,"max_price":10}"#
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn parallel_direct_reducer_fanout_matches_sequential_result() {
+        let path = temp_ndjson(
+            "parallel-reducers",
+            &[
+                r#"{"active":true,"price":10}"#,
+                r#"{"active":false,"price":30}"#,
+                r#"{"active":true,"price":5}"#,
+                r#"{"active":true,"price":7}"#,
+            ],
+        );
+        let query = r#"{active_count: $.rows().filter(active == true).count(), active_total: $.rows().filter(active == true).map($.price).sum()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        let engine = JetroEngine::new();
+        let value = collect_parallel_direct_reducer_fanout(
+            &engine,
+            &path,
+            &plan,
+            NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("parallel direct reducer fanout");
+        std::fs::remove_file(path).ok();
+        assert_eq!(
+            serde_json::Value::from(value),
+            serde_json::json!({"active_count": 3, "active_total": 22})
         );
     }
 }

@@ -114,6 +114,43 @@ impl NumericAccumulator {
         }
     }
 
+    pub(super) fn merge(&mut self, other: &Self) {
+        debug_assert_eq!(self.method, other.method);
+        match self.method {
+            BuiltinMethod::Sum | BuiltinMethod::Avg => {
+                if self.floated || other.floated {
+                    if !self.floated {
+                        self.float_acc = self.int_acc as f64;
+                        self.floated = true;
+                    }
+                    self.float_acc += if other.floated {
+                        other.float_acc
+                    } else {
+                        other.int_acc as f64
+                    };
+                } else {
+                    self.int_acc = self.int_acc.wrapping_add(other.int_acc);
+                }
+                self.count += other.count;
+            }
+            BuiltinMethod::Min | BuiltinMethod::Max => {
+                if let Some(best) = other.best.as_ref() {
+                    let replace = match self.method {
+                        BuiltinMethod::Min => self.best.is_none() || other.best_f64 < self.best_f64,
+                        BuiltinMethod::Max => self.best.is_none() || other.best_f64 > self.best_f64,
+                        _ => false,
+                    };
+                    if replace {
+                        self.best = Some(best.clone());
+                        self.best_f64 = other.best_f64;
+                    }
+                }
+                self.count += other.count;
+            }
+            _ => {}
+        }
+    }
+
     fn add_extreme(&mut self, number: f64, value: impl FnOnce() -> Val) -> bool {
         if !matches!(self.method, BuiltinMethod::Min | BuiltinMethod::Max) {
             return false;
