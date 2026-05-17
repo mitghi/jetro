@@ -72,6 +72,8 @@ pub(super) enum RowStreamStage {
     Avg,
     Min,
     Max,
+    Any(Expr),
+    All(Expr),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -189,6 +191,16 @@ pub(super) fn lower_root_rows_expr(
                 plan.stages.push(RowStreamStage::Max);
                 terminal = Some(name.as_str());
             }
+            BuiltinMethod::Any => {
+                let expr = single_expr_arg(name, args)?.clone();
+                plan.stages.push(RowStreamStage::Any(expr));
+                terminal = Some(name.as_str());
+            }
+            BuiltinMethod::All => {
+                let expr = single_expr_arg(name, args)?.clone();
+                plan.stages.push(RowStreamStage::All(expr));
+                terminal = Some(name.as_str());
+            }
             BuiltinMethod::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Map(expr));
@@ -221,7 +233,9 @@ impl RowStreamDemand {
                 | RowStreamStage::Sum
                 | RowStreamStage::Avg
                 | RowStreamStage::Min
-                | RowStreamStage::Max => demand.scalar_output = true,
+                | RowStreamStage::Max
+                | RowStreamStage::Any(_)
+                | RowStreamStage::All(_) => demand.scalar_output = true,
             }
         }
         demand.retained_limit = seen_take;
@@ -231,7 +245,10 @@ impl RowStreamDemand {
     }
 }
 
-fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> RowStreamParallelism {
+fn classify_parallelism(
+    plan: &RowStreamPlan,
+    retained_limit: Option<usize>,
+) -> RowStreamParallelism {
     let mut saw_filter = false;
     for stage in &plan.stages {
         match stage {
@@ -242,7 +259,9 @@ fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> 
             | RowStreamStage::Sum
             | RowStreamStage::Avg
             | RowStreamStage::Min
-            | RowStreamStage::Max => {}
+            | RowStreamStage::Max
+            | RowStreamStage::Any(_)
+            | RowStreamStage::All(_) => {}
             RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
         }
     }
@@ -275,6 +294,8 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
                 | RowStreamStage::Avg
                 | RowStreamStage::Min
                 | RowStreamStage::Max
+                | RowStreamStage::Any(_)
+                | RowStreamStage::All(_)
         )
     })
 }
@@ -435,7 +456,10 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert_eq!(err, "rows() stream method reverse() expects 0 arguments, got 1");
+        assert_eq!(
+            err,
+            "rows() stream method reverse() expects 0 arguments, got 1"
+        );
     }
 
     #[test]
@@ -473,6 +497,30 @@ mod tests {
 
         assert!(plan.demand.scalar_output);
         assert!(matches!(plan.stages.last(), Some(RowStreamStage::Sum)));
+    }
+
+    #[test]
+    fn lowers_rows_stream_predicate_sinks() {
+        let any = parse("$.rows().any($.active)").unwrap();
+        let any_plan = lower_root_rows_expr(&any, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        assert!(any_plan.demand.scalar_output);
+        assert_eq!(any_plan.demand.predicate_count, 0);
+        assert!(matches!(
+            any_plan.stages.last(),
+            Some(RowStreamStage::Any(_))
+        ));
+
+        let all = parse("$.rows().all($.active)").unwrap();
+        let all_plan = lower_root_rows_expr(&all, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        assert!(all_plan.demand.scalar_output);
+        assert!(matches!(
+            all_plan.stages.last(),
+            Some(RowStreamStage::All(_))
+        ));
     }
 
     #[test]

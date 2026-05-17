@@ -1,8 +1,8 @@
+use super::mapped_bytes::MappedBytes;
 use super::ndjson::{
     collect_row_stream_result, ndjson_writer_with_options, parse_row, row_eval_error,
     write_val_line_with_options, NdjsonOptions, NdjsonParallelism,
 };
-use super::ndjson_frame::{frame_payload, FramePayload};
 #[cfg(feature = "simd-json")]
 use super::ndjson_byte::{eval_ndjson_byte_predicate_row, raw_json_path_view};
 #[cfg(feature = "simd-json")]
@@ -10,13 +10,13 @@ use super::ndjson_direct::{
     direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
     NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
+use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
+use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
     RowStreamSourceKind, RowStreamStage,
 };
-use super::stream_numeric::NumericAccumulator;
-use super::mapped_bytes::MappedBytes;
 use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
@@ -132,7 +132,8 @@ fn rewrite_let_stream_fanout_body(
     expr: &Expr,
     builder: &mut LetFanoutBodyBuilder<'_>,
 ) -> Result<Expr, RowStreamPlanError> {
-    if let Some(stream) = lower_consumer_stream_lenient(expr, builder.stream_name, builder.source)? {
+    if let Some(stream) = lower_consumer_stream_lenient(expr, builder.stream_name, builder.source)?
+    {
         let binding = format!("__jetro_rows_fanout_body_{}", builder.next_id);
         builder.next_id += 1;
         builder.consumers.push(RowStreamFanoutConsumer {
@@ -411,7 +412,9 @@ fn normalize_step(step: Step) -> Step {
             args.into_iter()
                 .map(|arg| match arg {
                     Arg::Pos(expr) => Arg::Pos(normalize_bare_ident_predicate(expr)),
-                    Arg::Named(name, expr) => Arg::Named(name, normalize_bare_ident_predicate(expr)),
+                    Arg::Named(name, expr) => {
+                        Arg::Named(name, normalize_bare_ident_predicate(expr))
+                    }
                 })
                 .collect(),
         ),
@@ -715,9 +718,8 @@ fn apply_fanout_row(
 ) -> Result<(), JetroEngineError> {
     let mut matched_value = None;
     #[cfg(feature = "simd-json")]
-    let shared_view = shared_cmp_path(consumers).and_then(|steps| {
-        raw_json_path_view(&row, steps).map(|view| (steps.to_vec(), view))
-    });
+    let shared_view = shared_cmp_path(consumers)
+        .and_then(|steps| raw_json_path_view(&row, steps).map(|view| (steps.to_vec(), view)));
     for consumer in consumers {
         if consumer.done || consumer.stream.is_exhausted() {
             continue;
@@ -766,7 +768,8 @@ fn apply_fanout_row(
             continue;
         }
         #[cfg(feature = "simd-json")]
-        if let (Some((steps, view)), Some(cmp)) = (shared_view.as_ref(), consumer.direct_cmp.as_ref())
+        if let (Some((steps, view)), Some(cmp)) =
+            (shared_view.as_ref(), consumer.direct_cmp.as_ref())
         {
             if same_path(steps, &cmp.steps) {
                 if !json_cmp_binop(*view, cmp.op, JsonView::from_val(&cmp.lit)) {
@@ -834,7 +837,7 @@ fn shared_cmp_path(consumers: &[RunningConsumer]) -> Option<&[PhysicalPathStep]>
             Some(_) => return None,
         }
     }
-    (count > 1).then_some(shared?) 
+    (count > 1).then_some(shared?)
 }
 
 #[cfg(feature = "simd-json")]
@@ -924,7 +927,9 @@ enum DirectFanoutReducerKind {
 #[cfg(feature = "simd-json")]
 impl DirectFanoutReducer {
     fn from_consumer(consumer: &RowStreamFanoutConsumer) -> Option<Self> {
-        if let Some(count) = direct_count_consumer(&consumer.stream).filter(|count| count.limit.is_none()) {
+        if let Some(count) =
+            direct_count_consumer(&consumer.stream).filter(|count| count.limit.is_none())
+        {
             return Some(Self {
                 binding: consumer.binding.clone(),
                 kind: DirectFanoutReducerKind::Count {
@@ -1008,7 +1013,10 @@ fn scan_direct_reducer_partition(
         if end > start && bytes[end - 1] == b'\r' {
             end -= 1;
         }
-        if bytes[start..end].iter().all(|byte| byte.is_ascii_whitespace()) {
+        if bytes[start..end]
+            .iter()
+            .all(|byte| byte.is_ascii_whitespace())
+        {
             continue;
         }
         let row = match frame_payload(options.row_frame, 1, &bytes[start..end])? {
@@ -1333,7 +1341,8 @@ mod tests {
                 r#"{"name":"high","score":11}"#,
             ],
         );
-        let query = r#"{gte: $.rows().find(score >= 10).first(), lt: $.rows().find(5 > score).first()}"#;
+        let query =
+            r#"{gte: $.rows().find(score >= 10).first(), lt: $.rows().find(5 > score).first()}"#;
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
@@ -1420,6 +1429,39 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"avg_price":7.5,"min_price":5,"max_price":10}"#
+        );
+    }
+
+    #[test]
+    fn executes_predicate_sink_fanout() {
+        let path = temp_ndjson(
+            "predicate-sinks",
+            &[
+                r#"{"active":true,"price":10}"#,
+                r#"{"active":false,"price":30}"#,
+                r#"{"active":true,"price":5}"#,
+            ],
+        );
+        let query = r#"{has_inactive: $.rows().any(active == false), all_active: $.rows().all(active == true), active_count: $.rows().filter(active == true).count()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        assert_eq!(plan.consumers.len(), 3);
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"has_inactive":true,"all_active":false,"active_count":2}"#
         );
     }
 
