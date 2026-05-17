@@ -10,7 +10,6 @@ mod ndjson_byte;
 mod ndjson_direct;
 mod ndjson_distinct;
 mod ndjson_frame;
-#[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
 mod ndjson_parallel;
 mod ndjson_rev;
@@ -21,7 +20,6 @@ mod stream_direct;
 mod stream_exec;
 mod stream_fanout;
 mod stream_numeric;
-#[allow(dead_code)]
 mod stream_plan;
 mod stream_source;
 mod stream_subquery;

@@ -113,10 +113,6 @@ pub(super) enum RowStreamParallelism {
         retained_limit: Option<usize>,
         direction: RowStreamDirection,
     },
-    PartitionMap {
-        retained_limit: Option<usize>,
-        direction: RowStreamDirection,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +134,7 @@ impl fmt::Display for RowStreamPlanError {
     }
 }
 
+#[cfg(test)]
 /// Returns true when the expression is rooted at `$.rows()`.
 pub(super) fn is_root_rows_expr(expr: &Expr) -> bool {
     root_rows_steps(expr).is_some()

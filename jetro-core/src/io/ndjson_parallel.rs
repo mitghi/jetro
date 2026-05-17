@@ -28,9 +28,9 @@ where
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct ParallelRowsResult {
     pub(super) value: Val,
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) stats: RowStreamStats,
 }
 
@@ -90,10 +90,6 @@ where
 fn parallel_limit(plan: &RowStreamPlan) -> Option<usize> {
     match plan.demand.parallel {
         RowStreamParallelism::PartitionFilter {
-            retained_limit: Some(limit),
-            ..
-        }
-        | RowStreamParallelism::PartitionMap {
             retained_limit: Some(limit),
             ..
         } if limit > 0 => Some(limit),

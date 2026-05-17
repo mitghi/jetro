@@ -268,7 +268,6 @@ impl CompiledRowStream {
         Ok(RowStreamRowResult::Emit(value))
     }
 
-    #[allow(dead_code)]
     pub(super) fn apply_val_row(
         &mut self,
         vm: &mut VM,
