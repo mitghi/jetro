@@ -52,7 +52,6 @@ pub enum Val {
     ObjVec(Arc<ObjVecData>),
 }
 
-
 /// Struct-of-arrays backing store for `Val::ObjVec`: rows share a single key schema.
 /// `cells` is row-major flat: row `r`, column `c` lives at `cells[r * keys.len() + c]`.
 #[derive(Debug)]
@@ -65,7 +64,6 @@ pub struct ObjVecData {
     /// zero-tag-check aggregates (sum/min/max) over typed columns.
     pub typed_cols: Option<Arc<Vec<ObjVecCol>>>,
 }
-
 
 /// Typed column lane for a single `ObjVecData` column; `Mixed` means the slot contains
 /// heterogeneous or non-scalar values and must be accessed through the `cells` flat array.
@@ -82,7 +80,6 @@ pub enum ObjVecCol {
     /// All values in this column are `bool`; indexed by row directly without tag checks.
     Bools(Vec<bool>),
 }
-
 
 /// Inspect the flat `cells` buffer and produce per-column typed lanes for an `ObjVecData`.
 /// A column becomes `Mixed` if any row disagrees with the first row's type tag.
@@ -243,7 +240,6 @@ impl Val {
     }
 }
 
-
 /// Return a shared `Arc<str>` for `k`, reusing a cached copy from the
 /// process-wide [`crate::data::intern::default_cache`] when possible.
 /// Used by `From<serde_json::Value> for Val` and the standalone
@@ -255,7 +251,6 @@ impl Val {
 pub fn intern_key(k: &str) -> Arc<str> {
     crate::data::intern::default_cache().intern(k)
 }
-
 
 impl Val {
     /// Look up `key` in an `Obj` or `ObjSmall` value; returns `Val::Null` for any other variant or missing key.
@@ -582,7 +577,6 @@ impl Val {
     }
 }
 
-
 /// Convert a borrowed `serde_json::Value` tree into `Val`, promoting homogeneous arrays
 /// to columnar `IntVec` or `StrVec` lanes on the fly.
 impl From<&serde_json::Value> for Val {
@@ -599,8 +593,6 @@ impl From<&serde_json::Value> for Val {
             }
             serde_json::Value::String(s) => Val::Str(Arc::from(s.as_str())),
             serde_json::Value::Array(a) => {
-                
-                
                 let all_i64 = !a.is_empty()
                     && a.iter().all(|v| {
                         matches!(v,
@@ -619,8 +611,7 @@ impl From<&serde_json::Value> for Val {
                         .collect();
                     return Val::IntVec(Arc::new(out));
                 }
-                
-                
+
                 let all_str =
                     !a.is_empty() && a.iter().all(|v| matches!(v, serde_json::Value::String(_)));
                 if all_str {
@@ -745,7 +736,6 @@ impl From<Val> for serde_json::Value {
     }
 }
 
-
 /// Lazy serde `Serialize` adapter for `&Val` that avoids allocating an intermediate
 /// `serde_json::Value` tree; used by `to_json_vec` and the `Display` impl.
 pub struct ValRef<'a>(pub &'a Val);
@@ -862,11 +852,7 @@ impl Val {
 
     /// Parse a mutable byte slice in-place using simd-json, then walk the tape to produce `Val`.
     /// The input buffer is mutated by simd-json's in-place unescaping; caller must own the bytes.
-    #[cfg(feature = "simd-json")]
-    #[cfg(feature = "simd-json")]
     pub fn from_json_simd(bytes: &mut [u8]) -> Result<Val, String> {
-        
-        
         let tape = simd_json::to_tape(bytes).map_err(|e| e.to_string())?;
         let nodes = tape.0;
         let mut idx = 0usize;
@@ -875,7 +861,6 @@ impl Val {
 
     /// Return the number of tape slots consumed by the node at `idx`: 1 for scalars/strings,
     /// `count + 1` for arrays and objects (count is the total descendant node count).
-    #[cfg(feature = "simd-json")]
     fn node_span(nodes: &[simd_json::Node<'_>], idx: usize) -> usize {
         match nodes[idx] {
             simd_json::Node::Object { count, .. } | simd_json::Node::Array { count, .. } => {
@@ -887,7 +872,6 @@ impl Val {
 
     /// Walk the tape starting at `start` and verify that `n_entries` consecutive objects all share
     /// the same `first_len` keys in the same order; returns the shared key slice or `None` on mismatch.
-    #[cfg(feature = "simd-json")]
     #[allow(clippy::needless_lifetimes)]
     fn probe_obj_shape_inner<'a>(
         nodes: &'a [simd_json::Node<'a>],
@@ -896,7 +880,7 @@ impl Val {
         first_len: usize,
     ) -> Option<Vec<&'a str>> {
         use simd_json::Node;
-        
+
         let mut keys: Vec<&'a str> = Vec::with_capacity(first_len);
         if !matches!(nodes[start], Node::Object { len, .. } if len as usize == first_len) {
             return None;
@@ -908,12 +892,11 @@ impl Val {
                 _ => return None,
             }
             idx += 1;
-            
+
             idx += Self::node_span(nodes, idx);
         }
         let mut entry_start = idx;
         for _ in 1..n_entries {
-            
             match nodes[entry_start] {
                 Node::Object { len, .. } if len as usize == first_len => {}
                 _ => return None,
@@ -934,7 +917,6 @@ impl Val {
 
     /// Recursively materialise a `Val` from a simd-json tape by advancing `idx`; promotes
     /// homogeneous arrays to columnar lanes and uniform object arrays to `ObjVec`.
-    #[cfg(feature = "simd-json")]
     fn from_simd_tape(nodes: &[simd_json::Node<'_>], idx: &mut usize) -> Val {
         use simd_json::Node;
         use simd_json::StaticNode as SN;
@@ -958,14 +940,12 @@ impl Val {
                     return Val::arr(Vec::new());
                 }
                 let start = *idx;
-                
-                
+
                 let first = nodes[start];
                 let mut try_int =
                     matches!(first, Node::Static(SN::I64(_)) | Node::Static(SN::U64(_)));
                 let mut try_str = matches!(first, Node::String(_));
-                
-                
+
                 let mut probe = start;
                 let mut counted = 0usize;
                 while counted < len {
@@ -1017,8 +997,7 @@ impl Val {
                     }
                     return Val::StrVec(Arc::new(out));
                 }
-                
-                
+
                 if let Node::Object { len: first_len, .. } = first {
                     if first_len > 0 && first_len <= 64 {
                         let shape_keys =
@@ -1040,8 +1019,7 @@ impl Val {
                                 .map(|k| intern_key(k))
                                 .collect::<Vec<_>>()
                                 .into();
-                            
-                            
+
                             let stride = key_arcs.len();
                             let nrows = if stride == 0 { 0 } else { cells.len() / stride };
                             let typed = build_typed_cols_from_cells(&cells, stride, nrows);
@@ -1062,8 +1040,6 @@ impl Val {
             Node::Object { len, .. } => {
                 let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(len);
                 for _ in 0..len {
-                    
-                    
                     let key = match nodes[*idx] {
                         Node::String(s) => s,
                         _ => unreachable!("object key must be string"),
@@ -1079,7 +1055,6 @@ impl Val {
 
     /// Materialise a `Val` from a `TapeData` (a pre-parsed, Arc-owned simd-json tape), producing
     /// `StrSlice` views into the tape buffer instead of allocating new `Arc<str>` for strings.
-    #[cfg(feature = "simd-json")]
     pub fn from_tape_data(tape: &Arc<crate::data::tape::TapeData>) -> Val {
         let mut idx = 0usize;
         Self::from_tape_walk(tape, &mut idx)
@@ -1087,7 +1062,6 @@ impl Val {
 
     /// Recursive walk helper for `from_tape_data`; advances `idx` through `TapeNode` entries,
     /// emitting `StrSlice` for string nodes and promoting homogeneous arrays to columnar lanes.
-    #[cfg(feature = "simd-json")]
     fn from_tape_walk(tape: &Arc<crate::data::tape::TapeData>, idx: &mut usize) -> Val {
         use crate::data::tape::TapeNode;
         use simd_json::StaticNode as SN;
@@ -1110,7 +1084,7 @@ impl Val {
                 if len == 0 {
                     return Val::arr(Vec::new());
                 }
-                
+
                 let first_idx = *idx;
                 let first = tape.nodes[first_idx];
                 let mut try_int = matches!(
@@ -1201,8 +1175,7 @@ impl Val {
                     }
                     return Val::StrSliceVec(Arc::new(out));
                 }
-                
-                
+
                 let mut out: Vec<Val> = Vec::with_capacity(len);
                 for _ in 0..len {
                     out.push(Self::from_tape_walk(tape, idx));
@@ -1227,7 +1200,6 @@ impl Val {
 
     /// Convert a `simd_json::BorrowedValue` into `Val`, promoting homogeneous integer and string
     /// arrays to columnar lanes. Kept as a fallback for borrowed-value API callers.
-    #[cfg(feature = "simd-json")]
     #[allow(dead_code)]
     fn from_simd_borrowed(v: &simd_json::BorrowedValue<'_>) -> Val {
         use simd_json::value::borrowed::Value as SV;
@@ -1246,7 +1218,6 @@ impl Val {
             SV::Static(SN::F64(f)) => Val::Float(*f),
             SV::String(s) => Val::Str(Arc::<str>::from(s.as_ref())),
             SV::Array(a) => {
-                
                 let all_i64 = !a.is_empty()
                     && a.iter()
                         .all(|v| matches!(v, SV::Static(SN::I64(_)) | SV::Static(SN::U64(_))));
@@ -1259,7 +1230,6 @@ impl Val {
                             if *n <= i64::MAX as u64 {
                                 out.push(*n as i64);
                             } else {
-                                
                                 return Val::Arr(Arc::new(
                                     a.iter().map(Self::from_simd_borrowed).collect(),
                                 ));
@@ -1303,10 +1273,7 @@ impl Val {
     /// Convert a borrowed `serde_json::Value` into `Val`, interning every
     /// object key into `caches`. Promotes homogeneous arrays to columnar
     /// lanes, matching `From<&serde_json::Value> for Val`.
-    pub fn from_value_with(
-        caches: &crate::data::intern::KeyCache,
-        v: &serde_json::Value,
-    ) -> Self {
+    pub fn from_value_with(caches: &crate::data::intern::KeyCache, v: &serde_json::Value) -> Self {
         match v {
             serde_json::Value::Null => Val::Null,
             serde_json::Value::Bool(b) => Val::Bool(*b),
@@ -1364,7 +1331,6 @@ impl Val {
 
     /// Materialise a `Val` from a simd-json `TapeData`, interning object
     /// keys through `caches` instead of the default thread-local cache.
-    #[cfg(feature = "simd-json")]
     pub fn from_tape_data_with(
         caches: &crate::data::intern::KeyCache,
         tape: &Arc<crate::data::tape::TapeData>,
@@ -1376,7 +1342,6 @@ impl Val {
     /// Recursive helper for [`Val::from_tape_data_with`]; mirrors
     /// [`Val::from_tape_walk`] body for body, replacing every
     /// `intern_key` call with `caches.intern`.
-    #[cfg(feature = "simd-json")]
     fn from_tape_walk_with(
         caches: &crate::data::intern::KeyCache,
         tape: &Arc<crate::data::tape::TapeData>,
@@ -1516,7 +1481,6 @@ impl Val {
     }
 }
 
-
 /// serde `Visitor` implementation that drives `Val`'s `Deserialize`; promotes homogeneous
 /// integer and string sequences to `IntVec`/`StrVec` columnar lanes without a two-pass scan.
 struct ValVisitor;
@@ -1564,8 +1528,6 @@ impl<'de> Visitor<'de> for ValVisitor {
     }
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Val, A::Error> {
-        
-        
         enum Lane {
             Unset,
             Int(Vec<i64>),
@@ -1644,8 +1606,7 @@ mod valref_tests {
         let val = Val::from(&v);
         let via_tree = serde_json::to_vec(&serde_json::Value::from(val.clone())).unwrap();
         let via_ref = val.to_json_vec();
-        
-        
+
         assert_eq!(via_tree, via_ref, "payload: {js}");
     }
 
@@ -1680,8 +1641,6 @@ mod valref_tests {
         let val = Val::Float(f64::INFINITY);
         assert_eq!(val.to_json_vec(), b"0");
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn from_tape_data_uses_borrowed_string_slices_and_preserves_json() {
         let js =
@@ -1703,8 +1662,6 @@ mod valref_tests {
         let nested = obj.get("nested").unwrap().as_object().unwrap();
         assert!(matches!(nested.get("name"), Some(Val::StrSlice(_))));
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn from_tape_data_promotes_float_arrays_and_indexes_str_slice_vec() {
         let js = br#"{"nums":[1,2.5,3],"names":["a","b"]}"#.to_vec();
@@ -1722,7 +1679,6 @@ mod valref_tests {
         assert_eq!(names.get_index(1).as_str_ref(), Some("b"));
     }
 }
-
 
 /// Structural equality for scalar and columnar variants; compound variants (Arr/Obj/ObjVec)
 /// are intentionally not deeply compared here to avoid O(n) surprises on large trees.
@@ -1810,7 +1766,6 @@ impl std::hash::Hash for Val {
         }
     }
 }
-
 
 /// Human-readable display: scalars and strings emit their raw value; compound variants
 /// fall back to compact JSON serialisation via `ValRef` to avoid allocating a tree.

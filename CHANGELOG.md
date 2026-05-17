@@ -20,6 +20,9 @@
   byte/tape direct execution, preserving cold-path performance, documenting
   benchmark methodology, and adding path-selection tests for static projections,
   filtered streams, reducers, and early-stop queries.
+- **simd-json is mandatory**. The optional `simd-json` feature flag has been
+  removed; byte-backed parsing, tape/view execution, structural materialization,
+  and NDJSON direct paths now always compile with simd-json support.
 
 ### NDJSON observability
 
@@ -985,7 +988,7 @@ git diff --check
 
 ### Performance
 
-- `simd-json` is enabled by default.
+- `simd-json` is mandatory for byte-backed parsing and tape/view execution.
 - `Jetro::from_bytes` keeps raw bytes and lazily builds expensive
   representations only when needed.
 - Added lazy simd-json tape handling and `TapeView`/`ValueView` execution paths.

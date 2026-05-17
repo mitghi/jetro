@@ -25,15 +25,15 @@ mod exec;
 mod indexed_exec;
 mod ir;
 mod kernels;
-mod nested;
 pub(crate) mod logical_lower;
 mod lower;
 pub(crate) mod materialized_exec;
+mod nested;
 mod operator;
 mod plan;
 mod reducer;
-mod row_source;
 mod row_program;
+mod row_source;
 mod sink_accumulator;
 mod symbolic;
 mod val_stage_flow;
@@ -45,10 +45,9 @@ pub(crate) use capability::{
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
     apply_item_in_env, bounded_sort_by_key, bounded_sort_by_key_cmp, cmp_val_total, is_truthy,
-    num_finalise, num_fold, num_fold_f64, num_fold_i64, ordered_by_key_cmp, walk_field_chain, BoundedKeySorter,
-    OrderedKeySorter,
+    num_finalise, num_fold, num_fold_f64, num_fold_i64, ordered_by_key_cmp, walk_field_chain,
+    BoundedKeySorter, OrderedKeySorter,
 };
-pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 #[cfg(test)]
 pub use ir::Strategy;
 pub use ir::{
@@ -59,6 +58,7 @@ pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{
     eval_kernel_with_vm, eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue,
 };
+pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
     PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
@@ -68,12 +68,10 @@ pub use plan::compute_strategies;
 #[cfg(test)]
 pub use plan::plan;
 #[cfg(test)]
-pub use plan::select_strategy;
-pub use plan::{
-    compute_strategies_with_kernels, plan_with_exprs, select_exec_path,
-};
-#[cfg(test)]
 pub use plan::plan_with_kernels;
+#[cfg(test)]
+pub use plan::select_strategy;
+pub use plan::{compute_strategies_with_kernels, plan_with_exprs, select_exec_path};
 pub(crate) use reducer::ReducerAccumulator;
 pub(crate) use row_program::RowProgram;
 pub(crate) use sink_accumulator::SinkAccumulator;
@@ -92,8 +90,6 @@ pub(crate) enum StageFlow<T> {
     /// A terminal-map stage already wrote the result; no further accumulation needed.
     TerminalCollected,
 }
-
-#[cfg(feature = "simd-json")]
 /// Executes the field-chain traversal of `body` against a borrowed simd-json tape, returning
 /// the first matching value or `None` if the shape is not tape-compatible.
 #[allow(dead_code)]
@@ -106,8 +102,6 @@ pub(crate) fn run_tape_field_chain(
     let mut vm = crate::vm::VM::new();
     materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
 }
-
-#[cfg(feature = "simd-json")]
 /// Executes tape row streaming with caller-owned VM state.
 pub(crate) fn run_tape_field_chain_with_vm(
     body: &PipelineBody,
@@ -725,8 +719,6 @@ mod tests {
         assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(2));
         assert!(iter.next().is_none());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_row_source_walks_field_chain_array_lazily() {
         let tape = crate::data::tape::TapeData::parse(
@@ -1250,10 +1242,7 @@ mod tests {
             "$.orders.map({status: status, label: id}).group_by(status)",
             doc.clone(),
         );
-        assert_pipeline_matches_vm(
-            "$.orders.map({id: id, label: status}).index_by(id)",
-            doc,
-        );
+        assert_pipeline_matches_vm("$.orders.map({id: id, label: status}).index_by(id)", doc);
     }
 
     #[test]
@@ -1431,11 +1420,15 @@ mod tests {
             SourceAccessMode::Indexed(0)
         ));
         assert!(matches!(
-            lower_query("$.books.map(isbn).nth(2)").unwrap().source_access,
+            lower_query("$.books.map(isbn).nth(2)")
+                .unwrap()
+                .source_access,
             SourceAccessMode::Indexed(2)
         ));
         assert!(matches!(
-            lower_query("$.books.map(isbn).last()").unwrap().source_access,
+            lower_query("$.books.map(isbn).last()")
+                .unwrap()
+                .source_access,
             SourceAccessMode::IndexedFromEnd(0)
         ));
     }
@@ -1565,15 +1558,21 @@ mod tests {
 
     #[test]
     fn selected_materialization_planning_tracks_pull_demand() {
-        assert!(lower_query("$.books.map(isbn).first()")
-            .unwrap()
-            .source_selected_materialization_supported);
-        assert!(lower_query("$.books.filter(price > 20).map(isbn).take(2)")
-            .unwrap()
-            .source_selected_materialization_supported);
-        assert!(!lower_query("$.books.map(isbn)")
-            .unwrap()
-            .source_selected_materialization_supported);
+        assert!(
+            lower_query("$.books.map(isbn).first()")
+                .unwrap()
+                .source_selected_materialization_supported
+        );
+        assert!(
+            lower_query("$.books.filter(price > 20).map(isbn).take(2)")
+                .unwrap()
+                .source_selected_materialization_supported
+        );
+        assert!(
+            !lower_query("$.books.map(isbn)")
+                .unwrap()
+                .source_selected_materialization_supported
+        );
     }
 
     #[test]
@@ -1610,7 +1609,9 @@ mod tests {
         assert!(Sink::Collect.supports_late_projection(PullDemand::FirstInput(2)));
         assert!(!Sink::Collect.supports_late_projection(PullDemand::LastInput(2)));
         assert!(Sink::Nth(3).supports_late_projection(PullDemand::NthInput(3)));
-        assert!(Sink::Terminal(BuiltinMethod::Last).supports_late_projection(PullDemand::LastInput(1)));
+        assert!(
+            Sink::Terminal(BuiltinMethod::Last).supports_late_projection(PullDemand::LastInput(1))
+        );
         assert!(!Sink::Reducer(ReducerSpec::count()).supports_late_projection(PullDemand::All));
     }
 
@@ -2345,7 +2346,10 @@ mod tests {
 
         let first_one = lower_query("$.xs.map(@ + 1).first(1)").unwrap();
         assert_eq!(first_one.exec_path, PhysicalExecPath::Indexed);
-        assert!(matches!(first_one.source_access, SourceAccessMode::Indexed(0)));
+        assert!(matches!(
+            first_one.source_access,
+            SourceAccessMode::Indexed(0)
+        ));
 
         let last_one = lower_query("$.xs.map(@ + 1).last(1)").unwrap();
         assert_eq!(last_one.exec_path, PhysicalExecPath::Indexed);

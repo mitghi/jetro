@@ -177,15 +177,12 @@ impl From<String> for StrRef {
     }
 }
 
-
 /// Re-export of the simd-json tape node type, fixed to a `'static` lifetime because
 /// the backing buffer is owned by `TapeData` and kept alive via `Arc`.
-#[cfg(feature = "simd-json")]
 pub type TapeNode = simd_json::Node<'static>;
 
 /// Parsed simd-json tape together with the byte buffer and structural-index buffers
 /// that must remain alive for the duration of the tape's use.
-#[cfg(feature = "simd-json")]
 pub struct TapeData {
     /// The raw JSON bytes with simd-json's in-place mutations applied; string
     /// positions in `nodes` index into this buffer.
@@ -200,8 +197,6 @@ pub struct TapeData {
     #[cfg(test)]
     materialized_subtrees: AtomicUsize,
 }
-
-#[cfg(feature = "simd-json")]
 impl TapeData {
     /// Parse a JSON byte vector into a `TapeData` wrapped in an `Arc`.
     /// The input buffer is consumed and stored alongside the tape so that
@@ -303,15 +298,11 @@ impl TapeData {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 pub(crate) struct TapeScratch {
     bytes_buf: Vec<u8>,
     buffers: simd_json::Buffers,
     pub(crate) nodes: Vec<TapeNode>,
 }
-
-#[cfg(feature = "simd-json")]
 impl TapeScratch {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {

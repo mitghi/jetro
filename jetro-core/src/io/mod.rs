@@ -6,18 +6,14 @@
 mod document_rows;
 mod mapped_bytes;
 mod ndjson;
-#[cfg(feature = "simd-json")]
 mod ndjson_byte;
-#[cfg(feature = "simd-json")]
 mod ndjson_direct;
 mod ndjson_distinct;
 mod ndjson_frame;
-#[cfg(feature = "simd-json")]
 #[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
 mod ndjson_parallel;
 mod ndjson_rev;
-#[cfg(feature = "simd-json")]
 mod ndjson_stream_cache;
 mod source;
 mod stream_direct;

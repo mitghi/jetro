@@ -13,8 +13,8 @@ use crate::{
     vm::VM,
 };
 
-use super::row_source;
 use super::nested::PreparedPlan;
+use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
@@ -49,7 +49,9 @@ pub(super) fn run(
         if pipeline.stages.is_empty() && row_source::array_like_rows(&recv).is_none() {
             return Ok(apply_membership_scalar_sink(
                 spec,
-                membership_target.as_ref().expect("membership target exists"),
+                membership_target
+                    .as_ref()
+                    .expect("membership target exists"),
                 &recv,
             ));
         }
@@ -92,14 +94,9 @@ pub(super) fn run(
                 continue;
             }
 
-            if let Some(applied) = apply_adapter_materialized(
-                stage,
-                &mut buf,
-                vm,
-                &mut loop_env,
-                kernel,
-                strategy,
-            ) {
+            if let Some(applied) =
+                apply_adapter_materialized(stage, &mut buf, vm, &mut loop_env, kernel, strategy)
+            {
                 applied?;
                 continue;
             }
@@ -121,7 +118,9 @@ pub(super) fn run(
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
                 &item,
-                membership_target.as_ref().expect("membership target exists"),
+                membership_target
+                    .as_ref()
+                    .expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
                 observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
@@ -157,7 +156,6 @@ pub(super) fn run(
 }
 
 /// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
-#[cfg(feature = "simd-json")]
 #[allow(dead_code)]
 pub(super) fn run_tape_field_chain(
     body: &PipelineBody,
@@ -170,7 +168,6 @@ pub(super) fn run_tape_field_chain(
 }
 
 /// Streams a pipeline directly from a `simd-json` tape using caller-owned VM state.
-#[cfg(feature = "simd-json")]
 pub(super) fn run_tape_field_chain_with_vm(
     body: &PipelineBody,
     tape: &crate::data::tape::TapeData,
@@ -336,7 +333,9 @@ where
             Sink::Membership(spec) => sink_acc.observe_membership(
                 spec.op,
                 &item,
-                membership_target.as_ref().expect("membership target exists"),
+                membership_target
+                    .as_ref()
+                    .expect("membership target exists"),
             ),
             Sink::ArgExtreme(_) => {
                 observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
@@ -606,15 +605,9 @@ fn eval_membership_target(
     }
 }
 
-fn apply_membership_scalar_sink(
-    spec: &super::MembershipSinkSpec,
-    target: &Val,
-    recv: &Val,
-) -> Val {
+fn apply_membership_scalar_sink(spec: &super::MembershipSinkSpec, target: &Val, recv: &Val) -> Val {
     match spec.method {
-        crate::builtins::BuiltinMethod::Includes => {
-            crate::builtins::includes_apply(recv, target)
-        }
+        crate::builtins::BuiltinMethod::Includes => crate::builtins::includes_apply(recv, target),
         crate::builtins::BuiltinMethod::Index => {
             crate::builtins::index_value_apply(recv, target).unwrap_or(Val::Null)
         }

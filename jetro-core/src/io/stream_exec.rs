@@ -1,5 +1,11 @@
 use super::ndjson::{parse_row, row_eval_error};
+use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+use super::ndjson_direct::{
+    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan,
+};
 use super::ndjson_distinct::{distinct_key_bytes, AdaptiveDistinctKeys};
+use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, write_direct_map};
 use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
@@ -9,16 +15,6 @@ use crate::data::value::Val;
 use crate::util::is_truthy;
 use crate::vm::opcode::Program;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
-
-#[cfg(feature = "simd-json")]
-use super::ndjson_byte::eval_ndjson_byte_predicate_row;
-#[cfg(feature = "simd-json")]
-use super::ndjson_direct::{
-    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
-    NdjsonDirectTapePlan,
-};
-#[cfg(feature = "simd-json")]
-use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, write_direct_map};
 
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
@@ -67,12 +63,7 @@ impl CompiledRowStream {
         let mut vm = None;
         for stage in &mut self.stages {
             match stage {
-                CompiledRowStreamStage::Filter {
-                    program,
-                    #[cfg(feature = "simd-json")]
-                    direct,
-                } => {
-                    #[cfg(feature = "simd-json")]
+                CompiledRowStreamStage::Filter { program, direct } => {
                     if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
                             self.stats.direct_filter_rows += 1;
@@ -104,10 +95,8 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::DistinctBy {
                     program,
                     seen,
-                    #[cfg(feature = "simd-json")]
                     direct,
                 } => {
-                    #[cfg(feature = "simd-json")]
                     if let (Some(plan), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(inserted) = insert_direct_distinct_key(seen, raw_row, plan) {
                             self.stats.direct_key_rows += 1;
@@ -175,10 +164,8 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::Any {
                     program,
                     matched,
-                    #[cfg(feature = "simd-json")]
                     direct,
                 } => {
-                    #[cfg(feature = "simd-json")]
                     if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
                             self.stats.direct_filter_rows += 1;
@@ -212,10 +199,8 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::All {
                     program,
                     failed,
-                    #[cfg(feature = "simd-json")]
                     direct,
                 } => {
-                    #[cfg(feature = "simd-json")]
                     if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
                             self.stats.direct_filter_rows += 1;
@@ -246,12 +231,7 @@ impl CompiledRowStream {
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
-                CompiledRowStreamStage::Map {
-                    program,
-                    #[cfg(feature = "simd-json")]
-                    direct,
-                } => {
-                    #[cfg(feature = "simd-json")]
+                CompiledRowStreamStage::Map { program, direct } => {
                     if let Some(raw_row) = row.as_deref() {
                         if let Some(bytes) = write_direct_map(raw_row, direct.as_ref())? {
                             self.stats.direct_project_rows += 1;
@@ -411,13 +391,11 @@ fn ensure_row_stream_value(
 enum CompiledRowStreamStage {
     Filter {
         program: Program,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectPredicate>,
     },
     DistinctBy {
         program: Program,
         seen: AdaptiveDistinctKeys,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectTapePlan>,
     },
     Take {
@@ -436,18 +414,15 @@ enum CompiledRowStreamStage {
     Any {
         program: Program,
         matched: bool,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectPredicate>,
     },
     All {
         program: Program,
         failed: bool,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectPredicate>,
     },
     Map {
         program: Program,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectTapePlan>,
     },
 }
@@ -457,13 +432,11 @@ impl CompiledRowStreamStage {
         match stage {
             RowStreamStage::Filter(expr) => Self::Filter {
                 program: Compiler::compile(expr, "<ndjson-rows-filter>"),
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_predicate_for_expr(expr),
             },
             RowStreamStage::DistinctBy(expr) => Self::DistinctBy {
                 program: Compiler::compile(expr, "<ndjson-rows-distinct-by>"),
                 seen: AdaptiveDistinctKeys::default(),
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_plan_for_expr(expr),
             },
             RowStreamStage::Take(limit) => Self::Take {
@@ -487,18 +460,15 @@ impl CompiledRowStreamStage {
             RowStreamStage::Any(expr) => Self::Any {
                 program: Compiler::compile(expr, "<ndjson-rows-any>"),
                 matched: false,
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_predicate_for_expr(expr),
             },
             RowStreamStage::All(expr) => Self::All {
                 program: Compiler::compile(expr, "<ndjson-rows-all>"),
                 failed: false,
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_predicate_for_expr(expr),
             },
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
-                #[cfg(feature = "simd-json")]
                 direct: is_last
                     .then(|| direct_tape_plan_for_expr(expr).filter(direct_map_can_write))
                     .flatten(),
@@ -514,7 +484,6 @@ mod tests {
     use crate::parse::parser::parse;
 
     #[test]
-    #[cfg(feature = "simd-json")]
     fn stats_track_direct_and_fallback_stage_paths() {
         let expr = parse("$.rows().filter($.active).distinct_by($.id).map($.id)").unwrap();
         let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)

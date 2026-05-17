@@ -430,8 +430,6 @@ mod tests {
 
         assert_eq!(out, json!({"value": "ok"}));
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn object_shape_root_paths_read_from_tape_without_materializing_root_val() {
         let j =
@@ -442,8 +440,6 @@ mod tests {
         assert_eq!(out, json!({"value": "next", "n": 7}));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_match_obj_keys_routes_through_structural_index() {
         // `$..match { {role: "admin"} -> ..., ... }` is lowered to a
@@ -474,8 +470,6 @@ mod tests {
         );
         assert!(j.structural_index_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_match_first_obj_keys_via_structural_index() {
         // The early-stop variant returns the first truthy arm body
@@ -497,8 +491,6 @@ mod tests {
         assert_eq!(out, serde_json::json!(7));
         assert!(j.structural_index_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_shape_reads_from_structural_index_without_tape_or_root_val() {
         let j = Jetro::from_bytes(
@@ -519,8 +511,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_like_literal_pattern_reads_from_structural_index() {
         let j = Jetro::from_bytes(
@@ -540,8 +530,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_find_field_literal_predicate_reads_from_structural_index() {
         let j = Jetro::from_bytes(
@@ -559,8 +547,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn deep_find_kind_and_field_predicate_reads_from_structural_index() {
         let j = Jetro::from_bytes(
@@ -580,8 +566,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn anchored_deep_find_executes_pipeline_suffix() {
         let j = Jetro::from_bytes(
@@ -598,8 +582,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn anchored_deep_shape_reads_only_structural_subtree() {
         let j = Jetro::from_bytes(
@@ -614,8 +596,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn structural_prefix_executes_pipeline_suffix() {
         let j = Jetro::from_bytes(
@@ -632,8 +612,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn structural_prefix_executes_call_suffix() {
         let j = Jetro::from_bytes(
@@ -649,8 +627,6 @@ mod tests {
         assert!(j.structural_index_is_built());
         assert!(!j.tape_is_built());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn top_level_pipeline_source_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -665,8 +641,6 @@ mod tests {
         assert_eq!(out, json!(["a"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_fstring_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -681,8 +655,6 @@ mod tests {
         assert_eq!(out, json!(["#1 ada (NYC) $10", "#2 bob (LA) $20"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -703,8 +675,6 @@ mod tests {
         );
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_map_collect_uses_terminal_objvec_collector() {
         let j = Jetro::from_bytes(
@@ -728,8 +698,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_scalar_map_collects_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
@@ -744,8 +712,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_key_projection_last_uses_tape_native_helpers() {
         let j = Jetro::from_bytes(
@@ -766,8 +732,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_values_entries_use_tape_native_helpers() {
         let j = Jetro::from_bytes(
@@ -784,8 +748,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_key_predicates_use_tape_native_helpers() {
         let j = Jetro::from_bytes(
@@ -808,8 +770,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_has_preserves_array_and_string_membership_without_materialization() {
         let j = Jetro::from_bytes(
@@ -830,8 +790,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_missing_treats_null_as_missing_without_materialization() {
         let j = Jetro::from_bytes(
@@ -848,8 +806,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_path_helpers_use_tape_native_navigation() {
         let j = Jetro::from_bytes(
@@ -874,8 +830,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
@@ -897,8 +851,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn object_shape_pipeline_child_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -915,8 +867,6 @@ mod tests {
         assert_eq!(out, json!({"top": ["a"], "v": 3}));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
@@ -931,8 +881,6 @@ mod tests {
         assert_eq!(out, json!(["ada"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_native_take_materializes_only_output_subtree() {
         let j = Jetro::from_bytes(
@@ -949,8 +897,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_current_row_collect_materializes_only_output_subtree() {
         let j = Jetro::from_bytes(
@@ -967,8 +913,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 1);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_remove_last_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -984,8 +928,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_remove_last_ignores_removed_physical_tail() {
         let j = Jetro::from_bytes(
@@ -1000,8 +942,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_remove_take_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1017,8 +957,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_compact_take_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1034,8 +972,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_compact_last_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1050,8 +986,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_compact_last_ignores_physical_null_tail() {
         let j = Jetro::from_bytes(
@@ -1066,8 +1000,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_map_first_reads_head_without_materializing_result_row() {
         let j = Jetro::from_bytes(
@@ -1082,8 +1014,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_map_last_reads_tail_and_materializes_one_result() {
         let j = Jetro::from_bytes(
@@ -1098,8 +1028,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_chained_map_last_composes_late_projection() {
         let j = Jetro::from_bytes(
@@ -1116,8 +1044,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_chained_map_take_composes_bounded_projection() {
         let j = Jetro::from_bytes(
@@ -1134,8 +1060,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_chained_map_nth_uses_indexed_projection() {
         let j = Jetro::from_bytes(
@@ -1152,8 +1076,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_filter_map_last_scans_from_tail_until_match() {
         let j = Jetro::from_bytes(
@@ -1170,8 +1092,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_filter_last_ignores_failing_physical_tail() {
         let j = Jetro::from_bytes(
@@ -1188,8 +1108,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_map_nth_reads_indexed_row() {
         let j = Jetro::from_bytes(
@@ -1204,8 +1122,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_filter_map_nth_preserves_filtered_semantics() {
         let j = Jetro::from_bytes(
@@ -1222,8 +1138,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_prefix_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1240,8 +1154,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_row_bridge_materializes_only_demanded_rows_for_generic_prefix() {
         let j = Jetro::from_bytes(
@@ -1258,8 +1170,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_static_arg_scalar_filter_materializes_only_output_subtree() {
         let j = Jetro::from_bytes(
@@ -1277,8 +1187,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_static_arg_scalar_filter_reuses_view_builtin_metadata() {
         let j = Jetro::from_bytes(
@@ -1296,8 +1204,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_string_predicate_scalar_filter_stays_view_native() {
         let j = Jetro::from_bytes(
@@ -1315,8 +1221,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_string_index_scalar_filter_stays_view_native() {
         let j = Jetro::from_bytes(
@@ -1334,8 +1238,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_no_arg_string_scalar_filter_preserves_output_demand() {
         let j = Jetro::from_bytes(
@@ -1353,8 +1255,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_no_arg_numeric_string_scalar_filter_preserves_output_demand() {
         let j = Jetro::from_bytes(
@@ -1372,8 +1272,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_numeric_scalar_filter_preserves_output_demand() {
         let j = Jetro::from_bytes(
@@ -1391,8 +1289,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_float_numeric_scalar_filter_preserves_output_demand() {
         let j = Jetro::from_bytes(
@@ -1410,8 +1306,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn object_shape_tape_pipeline_generic_first_stage_uses_row_bridge() {
         let j = Jetro::from_bytes(
@@ -1428,8 +1322,6 @@ mod tests {
         assert_eq!(out, json!({"first": ["ada"], "v": 3}));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_pipeline_count_and_sum_read_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -1450,8 +1342,6 @@ mod tests {
         assert_eq!(direct_sum, json!(1806));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_numeric_projection_sink_reads_scalar_keys_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
@@ -1466,8 +1356,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_approx_count_distinct_hashes_tape_scalars_without_materializing_rows() {
         let j = Jetro::from_bytes(
@@ -1485,8 +1373,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_group_by_reduces_tape_rows_without_materializing_root() {
         let j = Jetro::from_bytes(
@@ -1513,8 +1399,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 3);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_flat_map_then_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -1527,8 +1411,6 @@ mod tests {
         assert_eq!(out, json!([10, 20, 30]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_flat_map_take_stops_after_expanded_rows_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -1543,8 +1425,6 @@ mod tests {
         assert_eq!(out, json!([10, 20]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_flat_map_take_collects_expanded_rows_without_materializing_root_val() {
         let j = Jetro::from_bytes(
@@ -1559,8 +1439,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 2);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_materializes_boundary_rows_not_root_for_suffix_builtin() {
         let j = Jetro::from_bytes(
@@ -1575,8 +1453,6 @@ mod tests {
         assert_eq!(out, json!(["ADA", "BOB"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_allows_current_only_generic_suffix_without_materializing_root() {
         let j = Jetro::from_bytes(
@@ -1591,8 +1467,6 @@ mod tests {
         assert_eq!(out, json!(["ada", "bob"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_uses_stage_metadata_for_materialized_suffix_barriers() {
         let j = Jetro::from_bytes(
@@ -1607,8 +1481,6 @@ mod tests {
         assert_eq!(out, json!(2));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_topk_materializes_only_winners_for_current_projection_suffix() {
         let j = Jetro::from_bytes(
@@ -1631,8 +1503,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_topk_keeps_projection_builtin_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1649,8 +1519,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_topk_keeps_object_key_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1667,8 +1535,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_keeps_object_key_terminal_projection_as_tape_view() {
         let j = Jetro::from_bytes(
@@ -1685,8 +1551,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_keeps_scalar_terminal_projection_as_tape_view() {
         let j = Jetro::from_bytes(
@@ -1703,8 +1567,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_many_keeps_projection_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1721,8 +1583,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_head_many_keeps_projection_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1739,8 +1599,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_nth_keeps_projection_as_tape_view() {
         let j = Jetro::from_bytes(
@@ -1757,8 +1615,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_streams_into_sort_topk_without_materializing_prefix_rows() {
         let j = Jetro::from_bytes(
@@ -1775,8 +1631,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_until_output_feeds_take_while_suffix_as_tape_views() {
         let j = Jetro::from_bytes(
@@ -1793,8 +1647,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_filter_map_last_scans_sorted_tail_until_match() {
         let j = Jetro::from_bytes(
@@ -1811,8 +1663,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_filter_map_nth_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1829,8 +1679,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_filter_map_last_many_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1847,8 +1695,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_string_predicate_map_last_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1865,8 +1711,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_numeric_predicate_map_last_stays_borrowed() {
         let j = Jetro::from_bytes(
@@ -1883,8 +1727,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_membership_dynamic_target_stops_without_row_materialization() {
         let j = Jetro::from_bytes(
@@ -1900,8 +1742,6 @@ mod tests {
         assert!(j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_index_dynamic_target_stops_without_row_materialization() {
         let j = Jetro::from_bytes(
@@ -1917,8 +1757,6 @@ mod tests {
         assert!(j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_indices_dynamic_target_scans_without_row_materialization() {
         let j = Jetro::from_bytes(
@@ -1933,8 +1771,6 @@ mod tests {
         assert!(j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_pick_omit_helpers_only_materialize_outputs() {
         let j = Jetro::from_bytes(
@@ -1955,8 +1791,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_object_collection_helpers_stay_borrowed() {
         let j = Jetro::from_bytes(
@@ -1981,8 +1815,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_sort_tail_path_helpers_stay_borrowed() {
         let j = Jetro::from_bytes(
@@ -2003,8 +1835,6 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
@@ -2023,8 +1853,6 @@ mod tests {
         assert!(!full.root_val_is_materialized());
         assert!(!prefix.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn view_prefix_rejects_root_dependent_generic_suffix() {
         let j = Jetro::from_bytes(
@@ -2039,8 +1867,6 @@ mod tests {
         assert_eq!(out, json!(["ada"]));
         assert!(j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_root_facts_match_no_root_materialization_execution() {
         let expr = r#"{"a": $.rows.filter(score > 10).take(1), "b": $.meta.version}"#;
@@ -2058,8 +1884,6 @@ mod tests {
         assert_eq!(out, json!({"a": [{"score": 11}], "b": 1}));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_nodes_reject_interpreted_backend_at_runtime() {
         let node = PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from("meta"))]);
@@ -2101,8 +1925,6 @@ mod tests {
             .0
             .contains("no planned backend could execute physical node"));
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_dynamic_index_chain_executes_without_root_materialization() {
         let expr = r#"{"item": $.items[$.index].name, "field": $.object[$.key]}"#;
@@ -2120,8 +1942,6 @@ mod tests {
         assert_eq!(out, json!({"item": "one", "field": 7}));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_scalar_expressions_execute_without_root_materialization() {
         let expr = r#"{"gt": $.n > 1, "sum": $.n + 4, "picked": "yes" if $.ok else "no", "fallback": $.missing ?? $.n}"#;
@@ -2138,8 +1958,6 @@ mod tests {
         );
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_composite_fields_execute_without_root_materialization() {
         let expr =
@@ -2161,8 +1979,6 @@ mod tests {
         );
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn vm_fallback_root_facts_match_materialized_execution() {
         let expr = r#"{"a": [x for x in $.rows if x.score > 10], "b": $.meta.version}"#;
@@ -2180,8 +1996,6 @@ mod tests {
         assert_eq!(out, json!({"a": [{"score": 11}], "b": 1}));
         assert!(j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn root_receiver_sort_executes_without_root_val_cache_materialization() {
         let plan = planner::plan_query_with_context("$.sort()", planner::PlanningContext::bytes());
@@ -2297,8 +2111,6 @@ mod tests {
             })
         );
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn local_ident_pipeline_body_uses_env_not_row_field_kernel() {
         let expr = r#"let title = "fixed" in $.books.map(title).take(2)"#;
@@ -2326,8 +2138,6 @@ mod tests {
         assert_eq!(out, json!(["fixed", "fixed"]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn local_ident_reducer_projection_uses_env_not_row_field_kernel() {
         let expr = r#"let bonus = 10 in $.books.sum(bonus)"#;
@@ -2353,8 +2163,6 @@ mod tests {
         assert_eq!(out, json!(30));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn local_ident_compiled_map_body_uses_env_not_inner_row_field() {
         let expr = r#"let label = "fixed" in $.books.map(@.items.map(label).take(1))"#;
@@ -2382,8 +2190,6 @@ mod tests {
         assert_eq!(out, json!([["fixed"], ["fixed"]]));
         assert!(!j.root_val_is_materialized());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn byte_native_let_keeps_locals_visible_without_root_materialization() {
         let expr =

@@ -1,5 +1,3 @@
-
-
 use jetro_core::Jetro;
 use serde_json::{json, Value};
 
@@ -10,7 +8,6 @@ fn j(document: Value) -> Jetro {
 fn q(expr: &str, document: &Value) -> Result<Value, jetro_core::EvalError> {
     j(document.clone()).collect(expr)
 }
-
 
 #[test]
 fn trim_upper_fused_ascii() {
@@ -136,8 +133,7 @@ fn map_split_len_sum_single_byte() {
     let out = j(doc)
         .collect(r#"$.map(@.split('-').map(len).sum())"#)
         .unwrap();
-    
-    
+
     assert_eq!(out.to_string(), "[6,1,6]");
 }
 
@@ -147,8 +143,7 @@ fn map_split_len_sum_multi_byte_sep() {
     let out = j(doc)
         .collect(r#"$.map(@.split('--').map(len).sum())"#)
         .unwrap();
-    
-    
+
     assert_eq!(out.to_string(), "[4,3]");
 }
 
@@ -158,7 +153,7 @@ fn map_split_len_sum_unicode() {
     let out = j(doc)
         .collect(r#"$.map(@.split('-').map(len).sum())"#)
         .unwrap();
-    
+
     assert_eq!(out.to_string(), "[3]");
 }
 
@@ -209,7 +204,6 @@ fn empty_string_edge_cases() {
     assert_eq!(o3.to_string(), r#"[""]"#);
 }
 
-
 #[test]
 fn walk_post_order_doubles_numbers() {
     let doc = json!({"a": [1, 2, {"b": 3}], "c": 4});
@@ -245,7 +239,7 @@ fn schema_array_unifies_items() {
     let out = j(doc).collect("$.schema()").unwrap();
     let s = out.to_string();
     assert!(s.contains(r#""type":"Array""#), "got {s}");
-    
+
     assert!(
         s.contains(r#""extra":{"type":"Bool","optional":true}"#)
             || s.contains(r#""extra":{"optional":true,"type":"Bool"}"#),
@@ -260,7 +254,6 @@ fn schema_mixed_scalar_array() {
     let s = out.to_string();
     assert!(s.contains(r#""type":"Mixed""#), "got {s}");
 }
-
 
 #[test]
 fn explode_basic() {
@@ -323,7 +316,6 @@ fn group_shape_count() {
     assert!(s.contains(r#""b":1"#), "got {s}");
 }
 
-
 #[test]
 fn filter_intvec_gt_int_literal() {
     let doc = json!([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -341,7 +333,7 @@ fn filter_intvec_eq_int() {
 #[test]
 fn filter_intvec_flipped_lit_lt_current() {
     let doc = json!([1, 2, 3, 4, 5]);
-    
+
     let out = j(doc).collect(r#"$.filter(2 < @)"#).unwrap();
     assert_eq!(out.to_string(), r#"[3,4,5]"#);
 }
@@ -355,7 +347,6 @@ fn filter_floatvec_gte_float() {
 
 #[test]
 fn filter_intvec_preserves_typed_output() {
-    
     let doc = json!([1, 2, 3, 4, 5]);
     let out = j(doc).collect(r#"$.filter(@ > 2).sum()"#).unwrap();
     assert_eq!(out.to_string(), "12");
@@ -363,8 +354,6 @@ fn filter_intvec_preserves_typed_output() {
 
 #[test]
 fn filter_non_columnar_fallback() {
-    
-    
     let doc = json!(["a", "bb", "ccc", "dddd"]);
     let out = j(doc).collect(r#"$.filter(@ > "b")"#).unwrap();
     assert_eq!(out.to_string(), r#"["bb","ccc","dddd"]"#);
@@ -386,7 +375,6 @@ fn filter_strvec_lt_str() {
 
 #[test]
 fn filter_strvec_preserves_lane_for_sort() {
-    
     let doc = json!(["pear", "apple", "banana", "cherry"]);
     let out = j(doc).collect(r#"$.filter(@ > "b").sort()"#).unwrap();
     assert_eq!(out.to_string(), r#"["banana","cherry","pear"]"#);
@@ -394,7 +382,6 @@ fn filter_strvec_preserves_lane_for_sort() {
 
 #[test]
 fn filter_strvec_mixed_types_not_columnar() {
-    
     let doc = json!(["a", 1, "b", 2]);
     let out = j(doc).collect(r#"$.filter(@ == "a")"#).unwrap();
     assert_eq!(out.to_string(), r#"["a"]"#);
@@ -423,7 +410,6 @@ fn filter_strvec_contains() {
 
 #[test]
 fn filter_strvec_contains_empty_needle() {
-    
     let doc = json!(["a", "bb", "ccc"]);
     let out = j(doc).collect(r#"$.filter(@.contains(""))"#).unwrap();
     assert_eq!(out.to_string(), r#"["a","bb","ccc"]"#);
@@ -438,7 +424,6 @@ fn filter_strvec_starts_with_no_match() {
 
 #[test]
 fn filter_strvec_starts_with_needle_longer_than_item() {
-    
     let doc = json!(["a", "bb", "ccc"]);
     let out = j(doc)
         .collect(r#"$.filter(@.starts_with("abcd"))"#)
@@ -469,7 +454,6 @@ fn map_strvec_trim() {
 
 #[test]
 fn map_strvec_upper_unicode_fallback() {
-    
     let doc = json!(["café", "niño"]);
     let out = j(doc).collect(r#"$.map(@.upper())"#).unwrap();
     assert_eq!(out.to_string(), r#"["CAFÉ","NIÑO"]"#);
@@ -505,7 +489,6 @@ fn map_intvec_sub_lhs_flipped() {
 
 #[test]
 fn map_intvec_div_int_promotes_float() {
-    
     let doc = json!([1, 2, 4]);
     let out = j(doc).collect(r#"$.map(@ / 2)"#).unwrap();
     assert_eq!(out.to_string(), r#"[0.5,1.0,2.0]"#);
@@ -548,7 +531,6 @@ fn map_neg_floatvec() {
 
 #[test]
 fn map_intvec_mul_chain_filter() {
-    
     let doc = json!([1, 2, 3, 4, 5, 6]);
     let out = j(doc).collect(r#"$.filter(@ > 2).map(@ * 10)"#).unwrap();
     assert_eq!(out.to_string(), r#"[30,40,50,60]"#);
@@ -556,14 +538,12 @@ fn map_intvec_mul_chain_filter() {
 
 #[test]
 fn strvec_filter_then_map_chain() {
-    
     let doc = json!(["apple", "banana", "avocado", "cherry"]);
     let out = j(doc)
         .collect(r#"$.filter(@.starts_with("a")).map(@.upper())"#)
         .unwrap();
     assert_eq!(out.to_string(), r#"["APPLE","AVOCADO"]"#);
 }
-
 
 #[test]
 fn fanout_multiple_views() {
@@ -583,7 +563,6 @@ fn zip_shape_named_and_bare() {
 
 #[test]
 fn rec_fixpoint_cap() {
-    
     let doc = json!(32);
     let out = j(doc).collect(r#"$.rec(@ / 2 if @ > 0 else 0)"#).unwrap();
     assert_eq!(out.to_string(), "0");
@@ -621,8 +600,6 @@ fn split_consumer_fusions() {
     let nth2 = j(doc).collect(r#"$.map(@.split('-').nth(2))"#).unwrap();
     assert_eq!(nth2.to_string(), r#"["c",null,null]"#);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_basic_query() {
     let bytes = br#"{"store":{"books":[{"title":"Dune","price":12.99},{"title":"Foundation","price":9.99}]}}"#.to_vec();
@@ -632,11 +609,8 @@ fn simd_json_basic_query() {
         .unwrap();
     assert_eq!(titles.to_string(), r#"["Dune"]"#);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_descendant_query() {
-    
     let bytes = br#"{"a":{"id":1,"sub":{"id":2}},"b":{"id":3}}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let ids = j.collect("$..id").unwrap();
@@ -674,7 +648,6 @@ fn compile_handle_run_on_jetro() {
     assert_eq!(j1.collect("$.n").unwrap(), json!([1]));
     assert_eq!(j2.collect("$.n").unwrap(), json!([2]));
 }
-
 
 #[test]
 fn has_array_value() {
@@ -724,7 +697,6 @@ fn elegant_indices_via_any_and_contains() {
     assert_eq!(r, json!([1, 3]));
 }
 
-
 #[test]
 fn iter_eager_array() {
     let j = j(json!([1, 2, 3]));
@@ -765,7 +737,6 @@ fn iter_eager_fallback_for_sort() {
     let xs = j.collect("$.sort()").unwrap();
     assert_eq!(xs, json!([1, 2, 3]));
 }
-
 
 #[test]
 fn find_index_basic() {
@@ -830,11 +801,10 @@ fn max_by_min_by_lambda_key() {
     assert_eq!(r, json!("a"));
 }
 
-
 #[test]
 fn rolling_avg_basic() {
     let r = q("$.rolling_avg(3)", &json!([1, 2, 3, 4, 5])).unwrap();
-    
+
     assert_eq!(r, json!([null, null, 2.0, 3.0, 4.0]));
 }
 
@@ -887,12 +857,11 @@ fn cummax_cummin() {
 fn zscore_basic() {
     let r = q("$.zscore()", &json!([1, 2, 3, 4, 5])).unwrap();
     let arr = r.as_array().unwrap();
-    
+
     assert!((arr[2].as_f64().unwrap() - 0.0).abs() < 1e-9);
     assert!(arr[0].as_f64().unwrap() < 0.0);
     assert!(arr[4].as_f64().unwrap() > 0.0);
 }
-
 
 #[test]
 fn case_conversions() {
@@ -954,7 +923,6 @@ fn byte_introspection() {
     let bs = q("$.bytes()", &json!("abc")).unwrap();
     assert_eq!(bs, json!([97, 98, 99]));
 }
-
 
 #[test]
 fn regex_match_and_captures() {
@@ -1057,19 +1025,13 @@ fn compile_handle_run_val_skips_value_materialise() {
     let r = j(json!({"count": 42})).collect("$.count").unwrap();
     assert_eq!(r, json!([42]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_lazy_tape_foundation() {
-    
-    
     let bytes = br#"{"items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let names = j.collect("$.items.map(name)").unwrap();
     assert_eq!(names, json!(["a", "b"]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_sum_min_max_count() {
     let bytes = br#"{"products":[
@@ -1091,24 +1053,18 @@ fn simd_lazy_descend_sum_min_max_count() {
     let av = j.collect("$..price.avg()").unwrap();
     assert!((av.as_f64().unwrap() - 10.0).abs() < 1e-9);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_bare_collect_int_and_float() {
-    
     let bytes = br#"{"a":[{"k":1},{"k":2},{"nested":{"k":3}}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k").unwrap();
     assert_eq!(r, json!([1, 2, 3]));
 
-    
     let bytes2 = br#"{"a":[{"k":1},{"k":2.5},{"nested":{"k":3}}]}"#.to_vec();
     let j2 = Jetro::from_bytes(bytes2).unwrap();
     let r2 = j2.collect("$..k").unwrap();
     assert_eq!(r2, json!([1, 2.5, 3]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_filter_compound_predicate() {
     let bytes = br#"{"orders":[
@@ -1131,12 +1087,10 @@ fn simd_lazy_array_filter_compound_predicate() {
         .collect(r#"$.orders.filter(status == "shipped" and total > 80).map(total).sum()"#)
         .unwrap();
     assert_eq!(s.as_i64().unwrap(), 300);
-    
+
     let n3 = j.collect(r#"$.orders.filter(status == "shipped" and priority == "high" and total >= 75).count()"#).unwrap();
     assert_eq!(n3.as_i64().unwrap(), 2);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_filter_map_aggregate() {
     let bytes = br#"{"orders":[
@@ -1178,8 +1132,6 @@ fn simd_lazy_array_filter_map_aggregate() {
         .unwrap();
     assert_eq!(cnt.as_i64().unwrap(), 3);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_filter_count_numeric_and_string() {
     let bytes = br#"{"orders":[
@@ -1196,16 +1148,13 @@ fn simd_lazy_array_filter_count_numeric_and_string() {
         .collect(r#"$.orders.filter(status == "shipped").count()"#)
         .unwrap();
     assert_eq!(n2.as_i64().unwrap(), 3);
-    
-    
+
     let n4 = j.collect("$.orders.filter(total >= 100).len()").unwrap();
     assert_eq!(n4.as_i64().unwrap(), 2);
-    
+
     let n5 = j.collect("$.orders.filter(100 < total).count()").unwrap();
     assert_eq!(n5.as_i64().unwrap(), 1);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_map_field_aggregate() {
     let bytes = br#"{"orders":[
@@ -1226,23 +1175,15 @@ fn simd_lazy_array_map_field_aggregate() {
     let bare = j.collect("$.orders.map(total)").unwrap();
     assert_eq!(bare, json!([100, 200, 50]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_array_map_field_handles_non_object_entry() {
-    
     let bytes = br#"{"items":[1,2,3]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
-    
-    
+
     let _ = j.collect("$.items.map(total)");
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_count_works_on_strings() {
-    
-    
     let bytes = br#"{"a":[{"k":"x"},{"k":"y"},{"nested":{"k":"z"}}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k.count()").unwrap();
@@ -1250,41 +1191,27 @@ fn simd_lazy_descend_count_works_on_strings() {
     let r2 = j.collect("$..k.len()").unwrap();
     assert_eq!(r2.as_i64().unwrap(), 3);
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_sum_handles_mixed_values() {
-    
-    
     let bytes = br#"{"a":[{"k":1},{"k":"oops"},{"k":3}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
-    
-    
+
     let _ = j.collect("$..k.sum()");
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_descend_bare_non_numeric_values() {
-    
     let bytes = br#"{"a":[{"k":"hello"},{"k":"world"}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$..k").unwrap();
     assert_eq!(r, json!(["hello", "world"]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_lazy_unsupported_query_uses_val_semantics() {
-    
-    
     let bytes = br#"{"items":[{"price":5},{"price":15},{"price":20}]}"#.to_vec();
     let j = Jetro::from_bytes(bytes).unwrap();
     let r = j.collect("$.items.filter(price > 10).map(price)").unwrap();
     assert_eq!(r, json!([15, 20]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_ndjson_basic() {
     let bytes = br#"[
@@ -1299,8 +1226,6 @@ fn simd_json_ndjson_basic() {
     let warns = j.collect(r#"$.filter(level == "warn").map(id)"#).unwrap();
     assert_eq!(warns, json!([2]));
 }
-
-#[cfg(feature = "simd-json")]
 #[test]
 fn simd_json_invalid_falls_back_with_helpful_error() {
     let bad = b"{ this is not json ".to_vec();

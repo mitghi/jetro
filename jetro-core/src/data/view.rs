@@ -2,9 +2,9 @@
 //!
 //! `ValueView` is the abstract interface that lets `physical_eval` and
 //! `view_pipeline` navigate a document without materialising a `Val` tree.
-//! Implementations exist for `Val` (in-memory) and for the tape path
-//! (simd-json, behind the `simd-json` feature). Paths that need a concrete
-//! `Val` call `materialize()`; structural navigation stays zero-alloc.
+//! Implementations exist for `Val` (in-memory) and for the simd-json tape path.
+//! Paths that need a concrete `Val` call `materialize()`; structural navigation
+//! stays zero-alloc.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -13,8 +13,8 @@ use crate::data::value::Val;
 use crate::util::JsonView;
 
 /// Navigation interface shared by all document representations.
-/// Implementations exist for `ValView` (in-memory `Val` tree) and,
-/// behind the `simd-json` feature, for `TapeView` (borrowed tape nodes).
+/// Implementations exist for `ValView` (in-memory `Val` tree) and `TapeView`
+/// (borrowed simd-json tape nodes).
 pub(crate) trait ValueView<'a>: Clone {
     /// Return a borrowed scalar view of the current node without allocating.
     fn scalar(&self) -> JsonView<'_>;
@@ -142,7 +142,10 @@ impl<'a> ValueView<'a> for ValView<'a> {
         match self.value() {
             Val::Obj(map) => Some(Val::arr(map.values().cloned().collect::<Vec<_>>())),
             Val::ObjSmall(pairs) => Some(Val::arr(
-                pairs.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(),
+                pairs
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>(),
             )),
             _ => None,
         }
@@ -315,7 +318,6 @@ impl<'a> ValueView<'a> for ValView<'a> {
 
 /// `ValueView` implementation that navigates a simd-json tape without
 /// materialising `Val` nodes until `materialize()` is explicitly called.
-#[cfg(feature = "simd-json")]
 #[derive(Clone, Copy)]
 pub(crate) enum TapeView<'a> {
     /// A live reference to a tape node at `idx` within the borrowed `TapeData`.
@@ -328,8 +330,6 @@ pub(crate) enum TapeView<'a> {
     /// Sentinel for a field or index that was not found; behaves like `Val::Null`.
     Missing,
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> TapeView<'a> {
     /// Return a `TapeView` pointing at the root node of `tape`, or `Missing`
     /// if the tape is empty (invalid JSON).
@@ -384,8 +384,6 @@ impl<'a> TapeView<'a> {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> ValueView<'a> for TapeView<'a> {
     #[inline]
     fn scalar(&self) -> JsonView<'_> {
@@ -638,7 +636,6 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
 /// Iterator that yields `TapeView` nodes for each element of a tape array,
 /// advancing through the tape by the span of each node.
-#[cfg(feature = "simd-json")]
 struct TapeArrayIter<'a> {
     /// The tape buffer being iterated.
     tape: &'a crate::data::tape::TapeData,
@@ -647,8 +644,6 @@ struct TapeArrayIter<'a> {
     /// Current tape position (index of the next element node).
     cur: usize,
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> Iterator for TapeArrayIter<'a> {
     type Item = TapeView<'a>;
 
@@ -666,8 +661,6 @@ impl<'a> Iterator for TapeArrayIter<'a> {
         })
     }
 }
-
-#[cfg(feature = "simd-json")]
 #[derive(Clone, Copy)]
 pub(crate) enum TapeScratchView<'a> {
     Node {
@@ -676,8 +669,6 @@ pub(crate) enum TapeScratchView<'a> {
     },
     Missing,
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> TapeScratchView<'a> {
     #[inline]
     fn materialize_at(tape: &'a crate::data::tape::TapeScratch, idx: &mut usize) -> Val {
@@ -698,7 +689,9 @@ impl<'a> TapeScratchView<'a> {
                 }
             }
             TapeNode::Static(SN::F64(f)) => Val::Float(f),
-            TapeNode::String(_) => Val::StrSlice(crate::data::tape::StrRef::from(tape.str_at(*idx - 1))),
+            TapeNode::String(_) => {
+                Val::StrSlice(crate::data::tape::StrRef::from(tape.str_at(*idx - 1)))
+            }
             TapeNode::Array { len, .. } => {
                 let mut out = Vec::with_capacity(len);
                 for _ in 0..len {
@@ -719,8 +712,6 @@ impl<'a> TapeScratchView<'a> {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> ValueView<'a> for TapeScratchView<'a> {
     #[inline]
     fn scalar(&self) -> JsonView<'_> {
@@ -860,15 +851,11 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 struct TapeScratchArrayIter<'a> {
     tape: &'a crate::data::tape::TapeScratch,
     remaining: usize,
     cur: usize,
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> Iterator for TapeScratchArrayIter<'a> {
     type Item = TapeScratchView<'a>;
 
@@ -905,7 +892,7 @@ mod tests {
 
     use super::{scalar_view_to_owned_val, ValView, ValueView};
     use crate::util::{json_cmp_binop, JsonView};
-    use crate::{parse::ast::BinOp, data::value::Val};
+    use crate::{data::value::Val, parse::ast::BinOp};
 
     #[test]
     fn val_view_reads_nested_fields_without_materializing_parent() {
@@ -990,8 +977,6 @@ mod tests {
         assert!(scalar_view_to_owned_val(JsonView::ArrayLen(3)).is_none());
         assert!(scalar_view_to_owned_val(JsonView::ObjectLen(2)).is_none());
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_matches_val_view_for_field_index_scalar_reads() {
         use super::TapeView;
@@ -1046,8 +1031,6 @@ mod tests {
                 .map(serde_json::Value::from)
         );
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn tape_view_materializes_current_subtree_only() {
         use super::TapeView;

@@ -1,3 +1,7 @@
+use super::ndjson_byte::{
+    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
+    BytePlanWrite, RawFieldValue,
+};
 use super::ndjson_distinct::{
     distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
 };
@@ -12,12 +16,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-
-#[cfg(feature = "simd-json")]
-use super::ndjson_byte::{
-    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
-    BytePlanWrite, RawFieldValue,
-};
 
 /// Reverse NDJSON line reader over a seekable file.
 ///
@@ -284,7 +282,6 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    #[cfg(feature = "simd-json")]
     if let Some(plan) = super::ndjson::direct_tape_plan(engine, query) {
         return drive_rev_writer_tape(engine, path, &plan, None, options, writer);
     }
@@ -337,8 +334,6 @@ where
     if limit == 0 {
         return Ok(0);
     }
-
-    #[cfg(feature = "simd-json")]
     if let Some(plan) = super::ndjson::direct_tape_plan(engine, query) {
         return drive_rev_writer_tape(engine, path, &plan, Some(limit), options, writer);
     }
@@ -441,10 +436,7 @@ where
     if limit == 0 {
         return Ok(NdjsonRevDistinctStats::default());
     }
-
-    #[cfg(feature = "simd-json")]
     let direct_key_plan = super::ndjson::direct_tape_plan(engine, key_query);
-    #[cfg(feature = "simd-json")]
     let direct_value_plan = super::ndjson::direct_tape_plan(engine, query)
         .filter(|plan| tape_plan_can_write_byte_row(plan));
 
@@ -453,9 +445,7 @@ where
     let mut vm = None;
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
-    #[cfg(feature = "simd-json")]
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
-    #[cfg(feature = "simd-json")]
     let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut seen = AdaptiveDistinctKeys::default();
     let mut stats = NdjsonRevDistinctStats::default();
@@ -464,14 +454,10 @@ where
         stats.rows_scanned += 1;
         let mut row = Some(row);
         let mut document = None;
-
-        #[cfg(feature = "simd-json")]
         let direct_key = direct_key_plan.as_ref().and_then(|plan| {
             row.as_deref()
                 .and_then(|row| distinct_key_direct(row, plan))
         });
-        #[cfg(not(feature = "simd-json"))]
-        let direct_key = None;
 
         let inserted = if let Some(key) = direct_key {
             stats.direct_key_rows += 1;
@@ -496,8 +482,6 @@ where
             stats.duplicate_rows += 1;
             continue;
         }
-
-        #[cfg(feature = "simd-json")]
         if let (Some(plan), Some(row)) = (direct_value_plan.as_ref(), row.as_deref()) {
             byte_scratch.clear();
             out.clear();
@@ -555,8 +539,6 @@ pub struct NdjsonRevDistinctStats {
     pub fallback_value_rows: usize,
     pub front_filter: DistinctFrontFilterKind,
 }
-
-#[cfg(feature = "simd-json")]
 fn distinct_key_direct<'a>(
     row: &'a [u8],
     plan: &super::ndjson::NdjsonDirectTapePlan,
@@ -608,8 +590,6 @@ where
 {
     drive_rev_matches_writer(engine, path, predicate, limit, options, writer)
 }
-
-#[cfg(feature = "simd-json")]
 fn drive_rev_writer_tape<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -731,8 +711,6 @@ where
     if limit == 0 {
         return Ok(0);
     }
-
-    #[cfg(feature = "simd-json")]
     if let Some(predicate) = super::ndjson::direct_tape_predicate(engine, predicate) {
         return drive_rev_matches_writer_tape(engine, path, &predicate, limit, options, writer);
     }
@@ -764,8 +742,6 @@ where
     writer.flush()?;
     Ok(emitted)
 }
-
-#[cfg(feature = "simd-json")]
 fn drive_rev_matches_writer_tape<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -895,8 +871,6 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn direct_distinct_key_classifier_rejects_escaped_strings() {
         assert_eq!(

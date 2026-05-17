@@ -112,8 +112,6 @@ pub(super) fn distinct_key_bytes(key: &Val) -> Result<Vec<u8>, JetroEngineError>
     super::ndjson::write_val_json(&mut out, key)?;
     Ok(out)
 }
-
-#[cfg(feature = "simd-json")]
 pub(super) fn raw_distinct_key_bytes(value: &[u8]) -> Option<Cow<'_, [u8]>> {
     let first = value.iter().copied().find(|b| !b.is_ascii_whitespace())?;
     match first {
@@ -125,8 +123,6 @@ pub(super) fn raw_distinct_key_bytes(value: &[u8]) -> Option<Cow<'_, [u8]>> {
         _ => None,
     }
 }
-
-#[cfg(feature = "simd-json")]
 fn raw_json_number_is_integer(value: &[u8]) -> bool {
     value
         .iter()
@@ -134,8 +130,6 @@ fn raw_json_number_is_integer(value: &[u8]) -> bool {
         .take_while(|b| !b.is_ascii_whitespace())
         .all(|b| b != b'.' && b != b'e' && b != b'E')
 }
-
-#[cfg(feature = "simd-json")]
 fn raw_json_string_has_escape(value: &[u8]) -> bool {
     for byte in value
         .iter()
@@ -151,16 +145,12 @@ fn raw_json_string_has_escape(value: &[u8]) -> bool {
     }
     true
 }
-
-#[cfg(feature = "simd-json")]
 fn canonical_escaped_json_string_key(value: &[u8]) -> Option<Vec<u8>> {
     let decoded: String = serde_json::from_slice(value).ok()?;
     let mut out = Vec::with_capacity(value.len());
     super::ndjson::write_json_str(&mut out, &decoded).ok()?;
     Some(out)
 }
-
-#[cfg(feature = "simd-json")]
 fn canonical_json_value_key(value: &[u8]) -> Option<Vec<u8>> {
     let decoded: serde_json::Value = serde_json::from_slice(value).ok()?;
     let mut out = Vec::with_capacity(value.len());
@@ -191,7 +181,9 @@ impl DistinctFrontFilter {
 
     fn capacity_satisfies(&self, keys: usize) -> bool {
         match self {
-            Self::Bloom(bloom) => bloom.bit_len() >= keys * AdaptiveDistinctKeys::BLOOM_BITS_PER_KEY,
+            Self::Bloom(bloom) => {
+                bloom.bit_len() >= keys * AdaptiveDistinctKeys::BLOOM_BITS_PER_KEY
+            }
             Self::Cuckoo(cuckoo) => cuckoo.capacity_satisfies(keys),
         }
     }
@@ -364,7 +356,11 @@ impl CuckooFilter {
 
 fn cuckoo_fingerprint(hash: u64) -> u16 {
     let fp = (hash as u16) ^ ((hash >> 16) as u16) ^ ((hash >> 32) as u16);
-    if fp == 0 { 1 } else { fp }
+    if fp == 0 {
+        1
+    } else {
+        fp
+    }
 }
 
 fn cuckoo_fp_hash(fp: u16) -> usize {

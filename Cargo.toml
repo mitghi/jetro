@@ -20,7 +20,3 @@ categories = ["algorithms", "encoding"]
 [dependencies]
 jetro-core   = { path = "jetro-core", version = "0.5.10" }
 serde_json   = "1.0.102"
-
-[features]
-default   = ["simd-json"]
-simd-json = ["jetro-core/simd-json"]
