@@ -597,6 +597,7 @@ struct DirectSum {
 }
 
 #[cfg(feature = "simd-json")]
+#[derive(Clone)]
 struct DirectPredicateSink {
     predicates: Vec<NdjsonDirectPredicate>,
     test: NdjsonDirectPredicate,
@@ -605,6 +606,7 @@ struct DirectPredicateSink {
 }
 
 #[cfg(feature = "simd-json")]
+#[derive(Clone)]
 enum DirectPredicateSinkMode {
     Any { matched: bool },
     All { failed: bool },
@@ -635,6 +637,30 @@ impl DirectPredicateSink {
         match self.mode {
             DirectPredicateSinkMode::Any { matched } => Val::Bool(matched),
             DirectPredicateSinkMode::All { failed } => Val::Bool(!failed),
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        match (&mut self.mode, &other.mode) {
+            (
+                DirectPredicateSinkMode::Any { matched },
+                DirectPredicateSinkMode::Any {
+                    matched: other_matched,
+                },
+            ) => {
+                *matched |= *other_matched;
+                self.decided |= *matched;
+            }
+            (
+                DirectPredicateSinkMode::All { failed },
+                DirectPredicateSinkMode::All {
+                    failed: other_failed,
+                },
+            ) => {
+                *failed |= *other_failed;
+                self.decided |= *failed;
+            }
+            _ => {}
         }
     }
 }
@@ -1012,6 +1038,7 @@ enum DirectFanoutReducerKind {
         value_path: NdjsonPhysicalPath,
         acc: NumericAccumulator,
     },
+    PredicateSink(DirectPredicateSink),
 }
 
 #[cfg(feature = "simd-json")]
@@ -1038,6 +1065,12 @@ impl DirectFanoutReducer {
                 },
             });
         }
+        if let Some(sink) = direct_predicate_sink_consumer(&consumer.stream) {
+            return Some(Self {
+                binding: consumer.binding.clone(),
+                kind: DirectFanoutReducerKind::PredicateSink(sink),
+            });
+        }
         None
     }
 
@@ -1059,6 +1092,11 @@ impl DirectFanoutReducer {
                     }
                 }
             }
+            DirectFanoutReducerKind::PredicateSink(sink) => {
+                if !sink.decided {
+                    sink.apply_row(row)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1073,6 +1111,10 @@ impl DirectFanoutReducer {
                 DirectFanoutReducerKind::Numeric { acc, .. },
                 DirectFanoutReducerKind::Numeric { acc: other, .. },
             ) => acc.merge(other),
+            (
+                DirectFanoutReducerKind::PredicateSink(sink),
+                DirectFanoutReducerKind::PredicateSink(other),
+            ) => sink.merge(other),
             _ => {}
         }
     }
@@ -1081,6 +1123,7 @@ impl DirectFanoutReducer {
         match &self.kind {
             DirectFanoutReducerKind::Count { count, .. } => Val::Int(*count as i64),
             DirectFanoutReducerKind::Numeric { acc, .. } => acc.value(),
+            DirectFanoutReducerKind::PredicateSink(sink) => sink.value(),
         }
     }
 }
@@ -1626,6 +1669,38 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(value),
             serde_json::json!({"active_count": 3, "active_total": 22})
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "simd-json")]
+    fn parallel_direct_predicate_fanout_matches_sequential_result() {
+        let path = temp_ndjson(
+            "parallel-predicate-sinks",
+            &[
+                r#"{"active":true,"price":10}"#,
+                r#"{"active":true,"price":20}"#,
+                r#"{"active":false,"price":30}"#,
+                r#"{"active":true,"price":40}"#,
+            ],
+        );
+        let query = r#"{has_expensive: $.rows().any($.price > 35), all_active: $.rows().all($.active == true), active_count: $.rows().filter($.active == true).count()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        let engine = JetroEngine::new();
+        let value = collect_parallel_direct_reducer_fanout(
+            &engine,
+            &path,
+            &plan,
+            NdjsonOptions::default().with_parallel_min_bytes(0),
+        )
+        .unwrap()
+        .expect("parallel direct predicate fanout");
+        std::fs::remove_file(path).ok();
+        assert_eq!(
+            serde_json::Value::from(value),
+            serde_json::json!({"has_expensive": true, "all_active": false, "active_count": 3})
         );
     }
 }
