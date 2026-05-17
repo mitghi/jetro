@@ -323,6 +323,9 @@
   adaptation, per-row driving, and line-output policy now live in focused
   modules instead of the main NDJSON API surface, while the hot direct byte/tape
   paths continue to reuse the same zero-copy helpers.
+- **NDJSON warning hygiene is clean**. The NDJSON package no longer relies on
+  broad dead-code suppression; test-only helpers are explicitly gated and
+  production stats paths are wired through normal code.
 - **NDJSON route observability is public**. Callers can ask which writer family
   a row-local query uses and which `$.rows()` file-plan family an expression
   lowers to, with stable labels for byte expression, byte-writable tape, tape,
