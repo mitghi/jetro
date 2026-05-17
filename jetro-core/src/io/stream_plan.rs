@@ -174,7 +174,7 @@ pub(super) fn lower_root_rows_expr(
                     RowStreamDirection::Reverse => RowStreamDirection::Forward,
                 };
             }
-            BuiltinMethod::Filter => {
+            BuiltinMethod::Filter | BuiltinMethod::FindAll => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Filter(expr));
             }
@@ -442,6 +442,19 @@ mod tests {
         ));
         assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(1)));
+    }
+
+    #[test]
+    fn lowers_rows_find_all_as_filter_alias() {
+        let expr = parse("$.rows().find_all($.active).take(2)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.demand.predicate_count, 1);
+        assert_eq!(plan.demand.retained_limit, Some(2));
+        assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
+        assert!(matches!(plan.stages[1], RowStreamStage::Take(2)));
     }
 
     #[test]

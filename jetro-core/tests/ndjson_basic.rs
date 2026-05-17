@@ -714,6 +714,27 @@ fn rows_stream_last_retains_final_matching_row() {
 }
 
 #[test]
+fn rows_stream_find_all_alias_filters_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"{"active":true,"id":1}
+{"active":false,"id":2}
+{"active":true,"id":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().find_all($.active == true).map($.id)",
+            &mut out,
+        )
+        .expect("find_all should lower as row filter");
+
+    assert_eq!(rows, 2);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+}
+
+#[test]
 fn rows_stream_parallel_reads_delimited_payloads_and_skips_tombstones() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-framed");
