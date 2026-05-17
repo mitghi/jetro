@@ -23,6 +23,9 @@
 - **simd-json is mandatory**. The optional `simd-json` feature flag has been
   removed; byte-backed parsing, tape/view execution, structural materialization,
   and NDJSON direct paths now always compile with simd-json support.
+- **Current release-prep status**. NDJSON architecture cleanup, public route
+  observability, focused release validation, full workspace release validation,
+  and the cold benchmark baseline are complete for this branch.
 
 ### NDJSON observability
 
