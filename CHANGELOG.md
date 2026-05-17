@@ -336,8 +336,9 @@
   passes after the stream-first, stream-last, extrema, demand-ordering, NDJSON
   module-boundary, and route-observability changes.
 - **Full release workspace validation is green**.
-  `cargo test --release --verbose --workspace` passes after the
-  stream-first, byte-extrema, and reverse selective-demand changes.
+  `cargo test --release --workspace` passes after the stream-first,
+  byte-extrema, reverse selective-demand, NDJSON module-boundary, and public
+  observability changes.
 - **Core compile health is clean**. `cargo check -p jetro-core` passes after
   the demand propagation and NDJSON byte-executor changes.
 
