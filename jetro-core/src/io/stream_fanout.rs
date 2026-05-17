@@ -663,19 +663,7 @@ fn direct_count_consumer(plan: &RowStreamPlan) -> Option<DirectCount> {
     let [prefix @ .., RowStreamStage::Count] = plan.stages.as_slice() else {
         return None;
     };
-    let mut predicates = Vec::new();
-    let mut limit = None;
-    for stage in prefix {
-        match stage {
-            RowStreamStage::Filter(expr) => {
-                predicates.push(direct_tape_predicate_for_expr(expr)?);
-            }
-            RowStreamStage::Take(n) => {
-                limit = Some(limit.map_or(*n, |prev: usize| prev.min(*n)));
-            }
-            _ => return None,
-        }
-    }
+    let (predicates, limit) = direct_filter_take_prefix(prefix)?;
     Some(DirectCount {
         predicates,
         limit,
@@ -697,13 +685,7 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
         NdjsonDirectTapePlan::RootPath(steps) => steps,
         _ => return None,
     };
-    let mut predicates = Vec::new();
-    for stage in prefix {
-        match stage {
-            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
-            _ => return None,
-        }
-    }
+    let predicates = direct_filter_prefix(prefix)?;
     Some(DirectSum {
         predicates,
         value_path,
@@ -725,19 +707,39 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
         ),
         _ => return None,
     };
-    let mut predicates = Vec::new();
-    for stage in prefix {
-        match stage {
-            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
-            _ => return None,
-        }
-    }
+    let predicates = direct_filter_prefix(prefix)?;
     Some(DirectPredicateSink {
         predicates,
         test,
         mode,
         decided: false,
     })
+}
+fn direct_filter_prefix(stages: &[RowStreamStage]) -> Option<Vec<NdjsonDirectPredicate>> {
+    let mut predicates = Vec::new();
+    for stage in stages {
+        match stage {
+            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
+            _ => return None,
+        }
+    }
+    Some(predicates)
+}
+fn direct_filter_take_prefix(
+    stages: &[RowStreamStage],
+) -> Option<(Vec<NdjsonDirectPredicate>, Option<usize>)> {
+    let mut predicates = Vec::new();
+    let mut limit = None;
+    for stage in stages {
+        match stage {
+            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
+            RowStreamStage::Take(n) => {
+                limit = Some(limit.map_or(*n, |prev: usize| prev.min(*n)));
+            }
+            _ => return None,
+        }
+    }
+    Some((predicates, limit))
 }
 fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
     fn supported_op(op: BinOp) -> bool {
@@ -792,21 +794,7 @@ fn apply_fanout_row(
             continue;
         }
         if let Some(count) = consumer.direct_count.as_mut() {
-            let mut keep = true;
-            for predicate in &count.predicates {
-                match eval_ndjson_byte_predicate_row(&row, predicate)? {
-                    Some(true) => {}
-                    Some(false) => {
-                        keep = false;
-                        break;
-                    }
-                    None => {
-                        keep = false;
-                        break;
-                    }
-                }
-            }
-            if keep {
+            if eval_ndjson_byte_predicates_all(&row, &count.predicates)? {
                 count.count += 1;
                 if count.limit.is_some_and(|limit| count.count >= limit) {
                     consumer.done = true;
@@ -815,17 +803,7 @@ fn apply_fanout_row(
             continue;
         }
         if let Some(sum) = consumer.direct_sum.as_mut() {
-            let mut keep = true;
-            for predicate in &sum.predicates {
-                match eval_ndjson_byte_predicate_row(&row, predicate)? {
-                    Some(true) => {}
-                    Some(false) | None => {
-                        keep = false;
-                        break;
-                    }
-                }
-            }
-            if keep {
+            if eval_ndjson_byte_predicates_all(&row, &sum.predicates)? {
                 if let Some(value) = raw_json_path_view(&row, &sum.value_path) {
                     sum.acc.add_view(value);
                 }
