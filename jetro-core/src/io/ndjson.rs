@@ -16,21 +16,21 @@ use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::ndjson_hint::{
     NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
 };
+use super::ndjson_rows::{
+    ndjson_rows_file_plan, ndjson_rows_stream_plan, ndjson_rows_subquery_plan, NdjsonRowsFilePlan,
+};
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 use super::stream_exec::CompiledRowStream;
-use super::stream_fanout::{
-    drive_ndjson_rows_fanout_file, lower_rows_fanout_expr, RowStreamFanoutPlan,
-};
-use super::stream_plan::{
-    lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
-};
-use super::stream_subquery::{lower_single_rows_subquery, RowStreamSubqueryPlan, STREAM_BINDING};
+use super::stream_fanout::drive_ndjson_rows_fanout_file;
+use super::stream_plan::{RowStreamDirection, RowStreamPlan};
+#[cfg(test)]
+use super::stream_plan::RowStreamSourceKind;
+use super::stream_subquery::{RowStreamSubqueryPlan, STREAM_BINDING};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
-use crate::parse::ast::Expr;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
@@ -1036,30 +1036,6 @@ where
     Ok(count)
 }
 
-fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
-    lower_root_rows_query(query, RowStreamSourceKind::NdjsonRows)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
-}
-
-enum NdjsonRowsFilePlan {
-    Stream(RowStreamPlan),
-    Fanout(RowStreamFanoutPlan),
-    Subquery(RowStreamSubqueryPlan),
-}
-
-fn ndjson_rows_file_plan(query: &str) -> Result<Option<NdjsonRowsFilePlan>, JetroEngineError> {
-    if let Some(plan) = ndjson_rows_stream_plan(query)? {
-        return Ok(Some(NdjsonRowsFilePlan::Stream(plan)));
-    }
-    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
-        return Ok(Some(NdjsonRowsFilePlan::Fanout(plan)));
-    }
-    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
-        return Ok(Some(NdjsonRowsFilePlan::Subquery(plan)));
-    }
-    Ok(None)
-}
-
 fn drive_ndjson_rows_file_plan<W>(
     engine: &JetroEngine,
     path: &Path,
@@ -1082,35 +1058,6 @@ where
             drive_ndjson_rows_subquery_file(engine, path, plan, options, writer)
         }
     }
-}
-
-fn ndjson_rows_subquery_plan(
-    query: &str,
-) -> Result<Option<RowStreamSubqueryPlan>, JetroEngineError> {
-    let Some(expr) = parse_ndjson_rows_expr(query)? else {
-        return Ok(None);
-    };
-    lower_single_rows_subquery(&expr, RowStreamSourceKind::NdjsonRows)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
-}
-
-fn ndjson_rows_fanout_plan(
-    query: &str,
-) -> Result<Option<super::stream_fanout::RowStreamFanoutPlan>, JetroEngineError> {
-    let Some(expr) = parse_ndjson_rows_expr(query)? else {
-        return Ok(None);
-    };
-    lower_rows_fanout_expr(&expr, RowStreamSourceKind::NdjsonRows)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
-}
-
-fn parse_ndjson_rows_expr(query: &str) -> Result<Option<Expr>, JetroEngineError> {
-    if !query.contains("$.rows") {
-        return Ok(None);
-    }
-    crate::parse::parser::parse(query)
-        .map(Some)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
 fn drive_ndjson_rows_subquery_file<P, W>(
