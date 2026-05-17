@@ -18,7 +18,9 @@ use super::ndjson_hint::{
 };
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 use super::stream_exec::CompiledRowStream;
-use super::stream_fanout::{drive_ndjson_rows_fanout_file, lower_rows_fanout_expr};
+use super::stream_fanout::{
+    drive_ndjson_rows_fanout_file, lower_rows_fanout_expr, RowStreamFanoutPlan,
+};
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
@@ -675,14 +677,9 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    if let Some(plan) = ndjson_rows_stream_plan(query)? {
-        return drive_ndjson_rows_stream_file(engine, path, &plan, None, options, writer);
-    }
-    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
-        return drive_ndjson_rows_fanout_file(engine, path, &plan, options, writer);
-    }
-    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
-        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
+    let path = path.as_ref();
+    if let Some(plan) = ndjson_rows_file_plan(query)? {
+        return drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer);
     }
 
     let file = File::open(path)?;
@@ -799,14 +796,9 @@ where
     if limit == 0 {
         return Ok(0);
     }
-    if let Some(plan) = ndjson_rows_stream_plan(query)? {
-        return drive_ndjson_rows_stream_file(engine, path, &plan, Some(limit), options, writer);
-    }
-    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
-        return drive_ndjson_rows_fanout_file(engine, path, &plan, options, writer);
-    }
-    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
-        return drive_ndjson_rows_subquery_file(engine, path, &plan, options, writer);
+    let path = path.as_ref();
+    if let Some(plan) = ndjson_rows_file_plan(query)? {
+        return drive_ndjson_rows_file_plan(engine, path, &plan, Some(limit), options, writer);
     }
 
     let file = File::open(path)?;
@@ -1047,6 +1039,49 @@ where
 fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEngineError> {
     lower_root_rows_query(query, RowStreamSourceKind::NdjsonRows)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+enum NdjsonRowsFilePlan {
+    Stream(RowStreamPlan),
+    Fanout(RowStreamFanoutPlan),
+    Subquery(RowStreamSubqueryPlan),
+}
+
+fn ndjson_rows_file_plan(query: &str) -> Result<Option<NdjsonRowsFilePlan>, JetroEngineError> {
+    if let Some(plan) = ndjson_rows_stream_plan(query)? {
+        return Ok(Some(NdjsonRowsFilePlan::Stream(plan)));
+    }
+    if let Some(plan) = ndjson_rows_fanout_plan(query)? {
+        return Ok(Some(NdjsonRowsFilePlan::Fanout(plan)));
+    }
+    if let Some(plan) = ndjson_rows_subquery_plan(query)? {
+        return Ok(Some(NdjsonRowsFilePlan::Subquery(plan)));
+    }
+    Ok(None)
+}
+
+fn drive_ndjson_rows_file_plan<W>(
+    engine: &JetroEngine,
+    path: &Path,
+    plan: &NdjsonRowsFilePlan,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<usize, JetroEngineError>
+where
+    W: Write,
+{
+    match plan {
+        NdjsonRowsFilePlan::Stream(plan) => {
+            drive_ndjson_rows_stream_file(engine, path, plan, limit, options, writer)
+        }
+        NdjsonRowsFilePlan::Fanout(plan) => {
+            drive_ndjson_rows_fanout_file(engine, path, plan, options, writer)
+        }
+        NdjsonRowsFilePlan::Subquery(plan) => {
+            drive_ndjson_rows_subquery_file(engine, path, plan, options, writer)
+        }
+    }
 }
 
 fn ndjson_rows_subquery_plan(
