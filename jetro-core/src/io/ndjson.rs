@@ -51,9 +51,8 @@ const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
 pub(super) const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum NdjsonWriterPathKind {
+pub enum NdjsonWriterPathKind {
     ByteExpr,
     ByteWritableTape,
     Tape,
@@ -61,6 +60,13 @@ pub(super) enum NdjsonWriterPathKind {
 
 #[cfg(test)]
 pub(super) fn direct_writer_path_kind(
+    engine: &JetroEngine,
+    query: &str,
+) -> Option<NdjsonWriterPathKind> {
+    ndjson_writer_path_kind(engine, query)
+}
+
+pub fn ndjson_writer_path_kind(
     engine: &JetroEngine,
     query: &str,
 ) -> Option<NdjsonWriterPathKind> {
@@ -3796,6 +3802,15 @@ not-json
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn public_writer_path_kind_reports_direct_family() {
+        let engine = crate::JetroEngine::new();
+        assert_eq!(
+            crate::io::ndjson_writer_path_kind(&engine, "$.name"),
+            Some(super::NdjsonWriterPathKind::ByteExpr)
+        );
     }
 
     #[test]
