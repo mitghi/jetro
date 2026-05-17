@@ -125,7 +125,7 @@ fn rewrite_let_stream_fanout_body(
     expr: &Expr,
     builder: &mut LetFanoutBodyBuilder<'_>,
 ) -> Result<Expr, RowStreamPlanError> {
-    if let Some(stream) = lower_consumer_stream(expr, builder.stream_name, builder.source)? {
+    if let Some(stream) = lower_consumer_stream_lenient(expr, builder.stream_name, builder.source)? {
         let binding = format!("__jetro_rows_fanout_body_{}", builder.next_id);
         builder.next_id += 1;
         builder.consumers.push(RowStreamFanoutConsumer {
@@ -281,7 +281,10 @@ fn lower_fanout_rows_expr(
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamPlan>, RowStreamPlanError> {
     let normalized = normalize_rows_stream_expr(expr);
-    lower_root_rows_expr(&normalized, source_kind)
+    match lower_root_rows_expr(&normalized, source_kind) {
+        Ok(plan) => Ok(plan),
+        Err(_) => Ok(None),
+    }
 }
 
 fn normalize_rows_stream_expr(expr: &Expr) -> Expr {
@@ -349,6 +352,17 @@ fn collect_let_chain<'a>(expr: &'a Expr, bindings: &mut Vec<(String, &'a Expr)>)
         cur = body.as_ref();
     }
     cur
+}
+
+fn lower_consumer_stream_lenient(
+    expr: &Expr,
+    stream_name: &str,
+    source: &RowStreamPlan,
+) -> Result<Option<RowStreamPlan>, RowStreamPlanError> {
+    match lower_consumer_stream(expr, stream_name, source) {
+        Ok(plan) => Ok(plan),
+        Err(_) => Ok(None),
+    }
 }
 
 fn lower_consumer_stream(
