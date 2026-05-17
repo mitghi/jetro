@@ -463,8 +463,15 @@ fn direct_first_match_cmp(plan: &RowStreamPlan) -> Option<DirectCmp> {
 
 #[cfg(feature = "simd-json")]
 fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
+    fn supported_op(op: BinOp) -> bool {
+        matches!(
+            op,
+            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte
+        )
+    }
+
     match predicate {
-        NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::Eq => {
+        NdjsonDirectPredicate::Binary { lhs, op, rhs } if supported_op(*op) => {
             match (lhs.as_ref(), rhs.as_ref()) {
                 (NdjsonDirectPredicate::Path(steps), NdjsonDirectPredicate::Literal(lit)) => {
                     Some(DirectCmp {
@@ -474,9 +481,16 @@ fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<Direct
                     })
                 }
                 (NdjsonDirectPredicate::Literal(lit), NdjsonDirectPredicate::Path(steps)) => {
+                    let op = match op {
+                        BinOp::Lt => BinOp::Gt,
+                        BinOp::Lte => BinOp::Gte,
+                        BinOp::Gt => BinOp::Lt,
+                        BinOp::Gte => BinOp::Lte,
+                        other => *other,
+                    };
                     Some(DirectCmp {
                         steps: steps.clone(),
-                        op: *op,
+                        op,
                         lit: lit.clone(),
                     })
                 }
@@ -789,6 +803,35 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"first_active":{"name":"Ada","active":true},"active_count":2}"#
+        );
+    }
+
+    #[test]
+    fn executes_shared_path_comparison_fanout() {
+        let path = temp_ndjson(
+            "cmp",
+            &[
+                r#"{"name":"low","score":3}"#,
+                r#"{"name":"mid","score":7}"#,
+                r#"{"name":"high","score":11}"#,
+            ],
+        );
+        let query = r#"{gte: $.rows().find(score >= 10).first(), lt: $.rows().find(5 > score).first()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"gte":{"name":"high","score":11},"lt":{"name":"low","score":3}}"#
         );
     }
 }
