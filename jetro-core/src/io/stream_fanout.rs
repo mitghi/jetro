@@ -3,7 +3,9 @@ use super::ndjson::{
     collect_row_stream_result, ndjson_writer_with_options, parse_row, row_eval_error,
     write_val_line_with_options, NdjsonOptions, NdjsonParallelism,
 };
-use super::ndjson_byte::{eval_ndjson_byte_predicate_row, raw_json_path_view};
+use super::ndjson_byte::{
+    eval_ndjson_byte_predicate_row, eval_ndjson_byte_predicates_all, raw_json_path_view,
+};
 use super::ndjson_direct::{
     direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
     NdjsonDirectTapePlan, NdjsonPhysicalPath,
@@ -585,7 +587,7 @@ enum DirectPredicateSinkMode {
 }
 impl DirectPredicateSink {
     fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
-        if !direct_predicates_match(row, &self.predicates)? {
+        if !eval_ndjson_byte_predicates_all(row, &self.predicates)? {
             return Ok(());
         }
         let keep = eval_ndjson_byte_predicate_row(row, &self.test)?.unwrap_or(false);
@@ -1017,7 +1019,7 @@ impl DirectFanoutReducer {
     fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
         match &mut self.kind {
             DirectFanoutReducerKind::Count { predicates, count } => {
-                if direct_predicates_match(row, predicates)? {
+                if eval_ndjson_byte_predicates_all(row, predicates)? {
                     *count += 1;
                 }
             }
@@ -1026,7 +1028,7 @@ impl DirectFanoutReducer {
                 value_path,
                 acc,
             } => {
-                if direct_predicates_match(row, predicates)? {
+                if eval_ndjson_byte_predicates_all(row, predicates)? {
                     if let Some(value) = raw_json_path_view(row, value_path) {
                         acc.add_view(value);
                     }
@@ -1082,18 +1084,6 @@ fn scan_direct_reducer_partition(
         Ok(false)
     })?;
     Ok(reducers)
-}
-fn direct_predicates_match(
-    row: &[u8],
-    predicates: &[NdjsonDirectPredicate],
-) -> Result<bool, JetroEngineError> {
-    for predicate in predicates {
-        match eval_ndjson_byte_predicate_row(row, predicate)? {
-            Some(true) => {}
-            Some(false) | None => return Ok(false),
-        }
-    }
-    Ok(true)
 }
 fn finish_direct_reducer_body(
     engine: &JetroEngine,
