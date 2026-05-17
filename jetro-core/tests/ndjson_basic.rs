@@ -735,6 +735,41 @@ fn rows_stream_find_all_alias_filters_rows() {
 }
 
 #[test]
+fn rows_stream_scalar_sink_empty_edges_are_finished() {
+    let engine = JetroEngine::new();
+    let empty = b"";
+
+    let mut any_out = Vec::new();
+    let rows = engine
+        .run_ndjson(Cursor::new(empty), "$.rows().any($.active)", &mut any_out)
+        .expect("empty any should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(any_out).unwrap(), "false\n");
+
+    let mut all_out = Vec::new();
+    let rows = engine
+        .run_ndjson(Cursor::new(empty), "$.rows().all($.active)", &mut all_out)
+        .expect("empty all should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(all_out).unwrap(), "true\n");
+
+    let mut last_out = Vec::new();
+    let rows = engine
+        .run_ndjson_with_options(
+            Cursor::new(
+                br#"{"active":false,"id":1}
+"#,
+            ),
+            "$.rows().filter($.active == true).last()",
+            &mut last_out,
+            NdjsonOptions::default().with_null_output(NdjsonNullOutput::Emit),
+        )
+        .expect("missing last should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(last_out).unwrap(), "null\n");
+}
+
+#[test]
 fn rows_stream_parallel_reads_delimited_payloads_and_skips_tombstones() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-framed");

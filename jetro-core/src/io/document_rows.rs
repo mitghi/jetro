@@ -230,4 +230,25 @@ mod tests {
             json!({"active": true, "id": 3})
         );
     }
+
+    #[test]
+    fn document_rows_scalar_sink_empty_edges_are_finished() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([]));
+
+        let any = collect_document_rows(&engine, &document, "$.rows().any($.active)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(any), json!(false));
+
+        let all = collect_document_rows(&engine, &document, "$.rows().all($.active)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(all), json!(true));
+
+        let last = collect_document_rows(&engine, &document, "$.rows().last()")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(last), json!(null));
+    }
 }
