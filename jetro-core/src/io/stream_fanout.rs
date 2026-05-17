@@ -885,6 +885,20 @@ mod tests {
     }
 
     #[test]
+    fn declines_mixed_direction_shape_fanout() {
+        let query = r#"{newest: $.rows().reverse().find(name == "Ada").first(), oldest: $.rows().find(name == "Ada").first()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows).unwrap();
+        assert!(plan.is_none());
+    }
+
+    #[test]
+    fn declines_single_shape_stream_for_existing_subquery_path() {
+        let query = r#"{active_count: $.rows().filter(active == true).count()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows).unwrap();
+        assert!(plan.is_none());
+    }
+
+    #[test]
     fn executes_reverse_first_match_fanout_in_one_result() {
         let path = temp_ndjson(
             "reverse",
