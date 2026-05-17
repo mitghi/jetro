@@ -253,6 +253,10 @@
   stream projection/filter/reducer cases are generally above 10x versus `jaq`.
   Remaining weaker cases are concentrated around per-row tail/extrema access
   and mixed root-plus-stream output, which are now the next optimization target.
+- **Cold showcase performance remains near native**. The local
+  `bench_cold` release example stays around 1.0x-1.6x native across the suite
+  after the NDJSON cleanup, with the README showcase at 1.16x native and about
+  12x faster than `jaq` in the latest run.
 - **NDJSON extrema plans are observable as extrema**. Test-only direct-plan
   labels now distinguish `sort_by(...).first()/last()` stream extrema from
   numeric reducers, making performance and routing regressions easier to pin
