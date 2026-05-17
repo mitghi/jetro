@@ -1,4 +1,4 @@
-use super::mapped_bytes::MappedBytes;
+use super::mapped_bytes::{split_line_aligned_ranges, MappedBytes};
 use super::ndjson::{parse_row, row_eval_error, NdjsonOptions, NdjsonParallelism};
 use super::ndjson_frame::{frame_payload, FramePayload};
 use super::stream_exec::CompiledRowStream;
@@ -22,7 +22,10 @@ pub(super) fn collect_rows_stream_file<P>(
 where
     P: AsRef<Path>,
 {
-    Ok(collect_rows_stream_file_with_stats(engine, path, plan, options)?.map(|result| result.value))
+    Ok(
+        collect_rows_stream_file_with_stats(engine, path, plan, options)?
+            .map(|result| result.value),
+    )
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -46,7 +49,7 @@ where
     };
 
     let bytes = Arc::new(MappedBytes::open(path.as_ref())?);
-    let ranges = split_line_aligned_ranges(bytes.as_slice());
+    let ranges = split_line_aligned_ranges(bytes.as_slice(), TARGET_RANGES_PER_THREAD);
     if ranges.len() <= 1 {
         return Ok(None);
     }
@@ -235,28 +238,6 @@ fn collect_line_ranges(
     Ok(rows)
 }
 
-fn split_line_aligned_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
-    let target = rayon::current_num_threads().max(1) * TARGET_RANGES_PER_THREAD;
-    let approx = (bytes.len() / target.max(1)).max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-
-    while start < bytes.len() {
-        let mut end = (start + approx).min(bytes.len());
-        if end < bytes.len() {
-            while end < bytes.len() && bytes[end - 1] != b'\n' {
-                end += 1;
-            }
-        }
-        if end > start {
-            ranges.push(start..end);
-        }
-        start = end;
-    }
-
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,7 +299,10 @@ mod tests {
         .expect("forced parallel path should run");
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(serde_json::Value::from(value), json!({"id": 2, "name": "target"}));
+        assert_eq!(
+            serde_json::Value::from(value),
+            json!({"id": 2, "name": "target"})
+        );
     }
 
     #[test]
@@ -368,11 +352,7 @@ mod tests {
             std::process::id(),
             "map-take"
         ));
-        std::fs::write(
-            &path,
-            b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n",
-        )
-        .unwrap();
+        std::fs::write(&path, b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n").unwrap();
         let plan = lower_root_rows_query(
             "$.rows().reverse().map($.id).take(3)",
             RowStreamSourceKind::NdjsonRows,

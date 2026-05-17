@@ -1,4 +1,4 @@
-use super::mapped_bytes::MappedBytes;
+use super::mapped_bytes::{split_line_aligned_ranges, MappedBytes};
 use super::ndjson::{
     collect_row_stream_result, ndjson_writer_with_options, parse_row, row_eval_error,
     write_val_line_with_options, NdjsonOptions, NdjsonParallelism,
@@ -946,7 +946,7 @@ fn collect_parallel_direct_reducer_fanout(
     };
 
     let bytes = Arc::new(MappedBytes::open(path)?);
-    let ranges = split_line_aligned_ranges(bytes.as_slice());
+    let ranges = split_line_aligned_ranges(bytes.as_slice(), 4);
     if ranges.len() <= 1 {
         return Ok(None);
     }
@@ -1127,26 +1127,6 @@ fn finish_direct_reducer_body(
         .exec_in_env(&body, &env)
         .map_err(JetroEngineError::Eval)
 }
-fn split_line_aligned_ranges(bytes: &[u8]) -> Vec<Range<usize>> {
-    let target = rayon::current_num_threads().max(1) * 4;
-    let approx = (bytes.len() / target.max(1)).max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    while start < bytes.len() {
-        let mut end = (start + approx).min(bytes.len());
-        if end < bytes.len() {
-            while end < bytes.len() && bytes[end - 1] != b'\n' {
-                end += 1;
-            }
-        }
-        if end > start {
-            ranges.push(start..end);
-        }
-        start = end;
-    }
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
