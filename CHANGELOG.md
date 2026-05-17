@@ -310,6 +310,11 @@
   projections in `filter(...).map(...).last()` now reuse the same item scan,
   matching the collect/first span-sharing architecture while retaining only one
   selected output.
+- **NDJSON internals share scanner and dispatch primitives**. Line-aligned
+  partition splitting, framed payload scanning, row-result collection, direct
+  predicate checks, fanout prefix lowering, `$.rows()` parsing, and file-backed
+  rows dispatch now live behind shared helpers instead of duplicated loops in
+  parallel, fanout, and stream entrypoints.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.

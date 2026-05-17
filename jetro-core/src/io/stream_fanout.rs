@@ -24,7 +24,7 @@ use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::parse::ast::{Arg, ArrayElem, BinOp, Expr, ObjField, Step};
 use crate::util::{json_cmp_binop, JsonView};
-use crate::{EvalError, JetroEngine, JetroEngineError};
+use crate::{JetroEngine, JetroEngineError};
 use rayon::prelude::*;
 use std::io::Write;
 use std::ops::Range;
@@ -45,6 +45,7 @@ struct RowStreamFanoutConsumer {
     scalar: bool,
 }
 
+#[cfg(test)]
 pub(super) fn lower_rows_fanout_query(
     query: &str,
     source: RowStreamSourceKind,
@@ -53,9 +54,9 @@ pub(super) fn lower_rows_fanout_query(
         return Ok(None);
     }
     let expr = crate::parse::parser::parse(query)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))?;
+        .map_err(|err| JetroEngineError::Eval(crate::EvalError(err.to_string())))?;
     lower_rows_fanout_expr(&expr, source)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+        .map_err(|err| JetroEngineError::Eval(crate::EvalError(err.to_string())))
 }
 
 pub(super) fn lower_rows_fanout_expr(
