@@ -77,6 +77,34 @@ pub(super) enum RowStreamStage {
     All(Expr),
 }
 
+impl RowStreamStage {
+    fn scalar_sink(&self) -> bool {
+        matches!(
+            self,
+            RowStreamStage::Last
+                | RowStreamStage::Count
+                | RowStreamStage::Sum
+                | RowStreamStage::Avg
+                | RowStreamStage::Min
+                | RowStreamStage::Max
+                | RowStreamStage::Any(_)
+                | RowStreamStage::All(_)
+        )
+    }
+
+    fn retained_limit(&self) -> Option<usize> {
+        match self {
+            RowStreamStage::Take(n) => Some(*n),
+            RowStreamStage::Last => Some(1),
+            _ => None,
+        }
+    }
+
+    fn blocks_parallel_partitioning(&self) -> bool {
+        matches!(self, RowStreamStage::DistinctBy(_) | RowStreamStage::Last)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) enum RowStreamParallelism {
     #[default]
@@ -231,18 +259,12 @@ impl RowStreamDemand {
             match stage {
                 RowStreamStage::Filter(_) => demand.predicate_count += 1,
                 RowStreamStage::DistinctBy(_) => demand.key_count += 1,
-                RowStreamStage::Take(n) => {
-                    seen_take.get_or_insert(*n);
+                stage if stage.retained_limit().is_some() => {
+                    seen_take.get_or_insert(stage.retained_limit().expect("retained limit"));
                 }
-                RowStreamStage::Last => seen_take = Some(1),
                 RowStreamStage::Map(_) => demand.projector_count += 1,
-                RowStreamStage::Count
-                | RowStreamStage::Sum
-                | RowStreamStage::Avg
-                | RowStreamStage::Min
-                | RowStreamStage::Max
-                | RowStreamStage::Any(_)
-                | RowStreamStage::All(_) => demand.scalar_output = true,
+                stage if stage.scalar_sink() => demand.scalar_output = true,
+                _ => {}
             }
         }
         demand.retained_limit = seen_take;
@@ -262,15 +284,11 @@ fn classify_parallelism(
             RowStreamStage::Filter(_) => saw_filter = true,
             RowStreamStage::Map(_) => {}
             RowStreamStage::Take(_) => {}
-            RowStreamStage::Last => {}
-            RowStreamStage::Count
-            | RowStreamStage::Sum
-            | RowStreamStage::Avg
-            | RowStreamStage::Min
-            | RowStreamStage::Max
-            | RowStreamStage::Any(_)
-            | RowStreamStage::All(_) => {}
-            RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
+            stage if stage.blocks_parallel_partitioning() => {
+                return RowStreamParallelism::Sequential;
+            }
+            stage if stage.scalar_sink() => {}
+            _ => {}
         }
     }
 
@@ -294,18 +312,9 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
     stages[..map_idx].iter().any(|stage| {
         matches!(
             stage,
-            RowStreamStage::Filter(_)
-                | RowStreamStage::DistinctBy(_)
-                | RowStreamStage::Take(_)
-                | RowStreamStage::Last
-                | RowStreamStage::Count
-                | RowStreamStage::Sum
-                | RowStreamStage::Avg
-                | RowStreamStage::Min
-                | RowStreamStage::Max
-                | RowStreamStage::Any(_)
-                | RowStreamStage::All(_)
-        )
+            RowStreamStage::Filter(_) | RowStreamStage::DistinctBy(_)
+        ) || stage.retained_limit().is_some()
+            || stage.scalar_sink()
     })
 }
 
@@ -443,6 +452,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(plan.demand.retained_limit, Some(1));
+        assert_eq!(plan.demand.parallel, RowStreamParallelism::Sequential);
         assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Last));
     }
