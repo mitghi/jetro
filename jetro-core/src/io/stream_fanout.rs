@@ -909,4 +909,33 @@ mod tests {
             r#"{"gte":{"name":"high","score":11},"lt":{"name":"low","score":3}}"#
         );
     }
+
+    #[test]
+    fn executes_mixed_find_count_and_sum_fanout() {
+        let path = temp_ndjson(
+            "sum",
+            &[
+                r#"{"name":"Ada","active":true,"price":10}"#,
+                r#"{"name":"Bob","active":false,"price":30}"#,
+                r#"{"name":"Cara","active":true,"price":5}"#,
+            ],
+        );
+        let query = r#"{first_active: $.rows().find(active == true).first(), active_count: $.rows().filter(active == true).count(), active_total: $.rows().filter(active == true).map($.price).sum()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"first_active":{"name":"Ada","active":true,"price":10},"active_count":2,"active_total":15}"#
+        );
+    }
 }

@@ -68,6 +68,7 @@ pub(super) enum RowStreamStage {
     Take(usize),
     Map(Expr),
     Count,
+    Sum,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -165,6 +166,11 @@ pub(super) fn lower_root_rows_expr(
                 plan.stages.push(RowStreamStage::Count);
                 terminal = Some(name.as_str());
             }
+            BuiltinMethod::Sum => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Sum);
+                terminal = Some(name.as_str());
+            }
             BuiltinMethod::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Map(expr));
@@ -193,7 +199,7 @@ impl RowStreamDemand {
                     seen_take.get_or_insert(*n);
                 }
                 RowStreamStage::Map(_) => demand.projector_count += 1,
-                RowStreamStage::Count => demand.scalar_output = true,
+                RowStreamStage::Count | RowStreamStage::Sum => demand.scalar_output = true,
             }
         }
         demand.retained_limit = seen_take;
@@ -210,7 +216,7 @@ fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> 
             RowStreamStage::Filter(_) => saw_filter = true,
             RowStreamStage::Map(_) => {}
             RowStreamStage::Take(_) => {}
-            RowStreamStage::Count => {}
+            RowStreamStage::Count | RowStreamStage::Sum => {}
             RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
         }
     }
@@ -239,6 +245,7 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
                 | RowStreamStage::DistinctBy(_)
                 | RowStreamStage::Take(_)
                 | RowStreamStage::Count
+                | RowStreamStage::Sum
         )
     })
 }
@@ -426,6 +433,17 @@ mod tests {
             err,
             "rows() stream method map() cannot follow terminal method count()"
         );
+    }
+
+    #[test]
+    fn lowers_rows_stream_sum_sink() {
+        let expr = parse("$.rows().filter($.active).map($.price).sum()").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        assert!(plan.demand.scalar_output);
+        assert!(matches!(plan.stages.last(), Some(RowStreamStage::Sum)));
     }
 
     #[test]
