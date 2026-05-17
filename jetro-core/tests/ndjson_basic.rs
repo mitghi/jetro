@@ -1,11 +1,25 @@
 use jetro_core::io::{
-    DistinctFrontFilterKind, NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonRowFrame,
-    NdjsonSource, NullPayload,
+    ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind, NdjsonControl,
+    NdjsonNullOutput, NdjsonOptions, NdjsonRowFrame, NdjsonRowsPlanKind, NdjsonSource,
+    NdjsonWriterPathKind, NullPayload,
 };
 use jetro_core::{JetroEngine, JetroEngineError};
 use serde_json::json;
 use std::io::Cursor;
 use std::path::PathBuf;
+
+#[test]
+fn ndjson_public_plan_observability_reports_routes() {
+    let engine = JetroEngine::new();
+    assert_eq!(
+        ndjson_writer_path_kind(&engine, "$.name"),
+        Some(NdjsonWriterPathKind::ByteExpr)
+    );
+    assert_eq!(
+        ndjson_rows_plan_kind("$.rows().take(1)").unwrap(),
+        Some(NdjsonRowsPlanKind::Stream)
+    );
+}
 
 #[test]
 fn collect_ndjson_evaluates_query_per_non_empty_row() {
