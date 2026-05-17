@@ -14,6 +14,7 @@ use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
     RowStreamSourceKind, RowStreamStage,
 };
+use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
@@ -468,20 +469,57 @@ struct DirectCount {
 struct DirectSum {
     predicates: Vec<NdjsonDirectPredicate>,
     value_path: NdjsonPhysicalPath,
-    acc: NumericSum,
+    acc: NumericViewAggregate,
 }
 
 #[cfg(feature = "simd-json")]
-#[derive(Clone, Debug, Default)]
-struct NumericSum {
+#[derive(Clone, Debug)]
+struct NumericViewAggregate {
+    method: BuiltinMethod,
     int_acc: i64,
     float_acc: f64,
     floated: bool,
+    count: usize,
+    best: Option<Val>,
+    best_f64: f64,
 }
 
 #[cfg(feature = "simd-json")]
-impl NumericSum {
+impl NumericViewAggregate {
+    fn new(method: BuiltinMethod) -> Self {
+        Self {
+            method,
+            ..Self::default()
+        }
+    }
+
     fn add_view(&mut self, value: JsonView<'_>) {
+        let number = match value {
+            JsonView::Int(n) => n as f64,
+            JsonView::UInt(n) => n as f64,
+            JsonView::Float(f) => f,
+            _ => return,
+        };
+        if matches!(self.method, BuiltinMethod::Min | BuiltinMethod::Max) {
+            let replace = match self.method {
+                BuiltinMethod::Min => self.best.is_none() || number < self.best_f64,
+                BuiltinMethod::Max => self.best.is_none() || number > self.best_f64,
+                _ => false,
+            };
+            if replace {
+                self.best = Some(match value {
+                    JsonView::Int(n) => Val::Int(n),
+                    JsonView::UInt(n) => i64::try_from(n)
+                        .map(Val::Int)
+                        .unwrap_or(Val::Float(n as f64)),
+                    JsonView::Float(f) => Val::Float(f),
+                    _ => Val::Null,
+                });
+                self.best_f64 = number;
+            }
+            self.count += 1;
+            return;
+        }
         match value {
             JsonView::Int(n) if !self.floated => {
                 self.int_acc = self.int_acc.wrapping_add(n);
@@ -502,13 +540,47 @@ impl NumericSum {
             JsonView::Float(f) => self.float_acc += f,
             _ => {}
         }
+        self.count += 1;
     }
 
     fn value(&self) -> Val {
-        if self.floated {
-            Val::Float(self.float_acc)
-        } else {
-            Val::Int(self.int_acc)
+        match self.method {
+            BuiltinMethod::Sum => {
+                if self.floated {
+                    Val::Float(self.float_acc)
+                } else {
+                    Val::Int(self.int_acc)
+                }
+            }
+            BuiltinMethod::Avg => {
+                if self.count == 0 {
+                    Val::Null
+                } else {
+                    let sum = if self.floated {
+                        self.float_acc
+                    } else {
+                        self.int_acc as f64
+                    };
+                    Val::Float(sum / self.count as f64)
+                }
+            }
+            BuiltinMethod::Min | BuiltinMethod::Max => self.best.clone().unwrap_or(Val::Null),
+            _ => Val::Null,
+        }
+    }
+}
+
+#[cfg(feature = "simd-json")]
+impl Default for NumericViewAggregate {
+    fn default() -> Self {
+        Self {
+            method: BuiltinMethod::Sum,
+            int_acc: 0,
+            float_acc: 0.0,
+            floated: false,
+            count: 0,
+            best: None,
+            best_f64: 0.0,
         }
     }
 }
@@ -567,9 +639,15 @@ fn direct_count_consumer(plan: &RowStreamPlan) -> Option<DirectCount> {
 
 #[cfg(feature = "simd-json")]
 fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
-    let [prefix @ .., RowStreamStage::Map(map), RowStreamStage::Sum] = plan.stages.as_slice()
-    else {
+    let [prefix @ .., RowStreamStage::Map(map), terminal] = plan.stages.as_slice() else {
         return None;
+    };
+    let method = match terminal {
+        RowStreamStage::Sum => BuiltinMethod::Sum,
+        RowStreamStage::Avg => BuiltinMethod::Avg,
+        RowStreamStage::Min => BuiltinMethod::Min,
+        RowStreamStage::Max => BuiltinMethod::Max,
+        _ => return None,
     };
     let value_path = match direct_tape_plan_for_expr(map)? {
         NdjsonDirectTapePlan::RootPath(steps) => steps,
@@ -585,7 +663,7 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
     Some(DirectSum {
         predicates,
         value_path,
-        acc: NumericSum::default(),
+        acc: NumericViewAggregate::new(method),
     })
 }
 
@@ -1056,6 +1134,14 @@ mod tests {
             ],
         );
         let query = r#"{avg_price: $.rows().filter(active == true).map($.price).avg(), min_price: $.rows().filter(active == true).map($.price).min(), max_price: $.rows().filter(active == true).map($.price).max()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        #[cfg(feature = "simd-json")]
+        assert!(plan
+            .consumers
+            .iter()
+            .all(|consumer| direct_sum_consumer(&consumer.stream).is_some()));
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
