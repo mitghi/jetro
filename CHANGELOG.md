@@ -315,6 +315,14 @@
   predicate checks, fanout prefix lowering, `$.rows()` parsing, and file-backed
   rows dispatch now live behind shared helpers instead of duplicated loops in
   parallel, fanout, and stream entrypoints.
+- **NDJSON module boundaries are cleaner**. Row planning, row parsing/error
+  adaptation, per-row driving, and line-output policy now live in focused
+  modules instead of the main NDJSON API surface, while the hot direct byte/tape
+  paths continue to reuse the same zero-copy helpers.
+- **NDJSON route observability is public**. Callers can ask which writer family
+  a row-local query uses and which `$.rows()` file-plan family an expression
+  lowers to, with stable labels for byte expression, byte-writable tape, tape,
+  stream, fanout, and subquery routes.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
