@@ -14,6 +14,7 @@ mod ndjson_frame;
 mod ndjson_hint;
 mod ndjson_parallel;
 mod ndjson_rev;
+mod ndjson_scan;
 mod ndjson_stream_cache;
 mod source;
 mod stream_direct;

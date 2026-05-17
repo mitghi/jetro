@@ -1,6 +1,6 @@
 use super::mapped_bytes::{split_line_aligned_ranges, MappedBytes};
 use super::ndjson::{parse_row, row_eval_error, NdjsonOptions, NdjsonParallelism};
-use super::ndjson_frame::{frame_payload, FramePayload};
+use super::ndjson_scan::{for_each_framed_payload_in_range, framed_payload_ranges_in_range};
 use super::stream_exec::CompiledRowStream;
 use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
@@ -163,29 +163,14 @@ fn scan_forward_partition_rows(
     values: &mut Vec<Val>,
     options: NdjsonOptions,
 ) -> Result<(), JetroEngineError> {
-    let mut cursor = range.start;
-    while cursor < range.end && !stream.is_exhausted() {
-        let start = cursor;
-        let rel_end = memchr::memchr(b'\n', &bytes[cursor..range.end]);
-        let mut end = rel_end.map_or(range.end, |pos| cursor + pos);
-        cursor = rel_end.map_or(range.end, |pos| cursor + pos + 1);
-        if end > start && bytes[end - 1] == b'\r' {
-            end -= 1;
+    for_each_framed_payload_in_range(bytes, range, options, |row_range, _| {
+        if stream.is_exhausted() {
+            return Ok(true);
         }
-        if bytes[start..end].iter().all(|b| b.is_ascii_whitespace()) {
-            continue;
-        }
-        let row_range = match frame_payload(options.row_frame, 1, &bytes[start..end])? {
-            FramePayload::Data(payload) => start + payload.start..start + payload.end,
-            FramePayload::Skip => continue,
-        };
         let row = bytes[row_range].to_vec();
         let result = stream.apply_owned_row(engine, 1, row)?;
-        if collect_result(engine, result, values)? {
-            break;
-        }
-    }
-    Ok(())
+        collect_result(engine, result, values)
+    })
 }
 
 fn collect_result(
@@ -214,24 +199,7 @@ fn collect_line_ranges(
     direction: RowStreamDirection,
     options: NdjsonOptions,
 ) -> Result<Vec<Range<usize>>, JetroEngineError> {
-    let mut rows = Vec::new();
-    let mut cursor = range.start;
-    while cursor < range.end {
-        let start = cursor;
-        let rel_end = memchr::memchr(b'\n', &bytes[cursor..range.end]);
-        let mut end = rel_end.map_or(range.end, |pos| cursor + pos);
-        cursor = rel_end.map_or(range.end, |pos| cursor + pos + 1);
-        if end > start && bytes[end - 1] == b'\r' {
-            end -= 1;
-        }
-        if bytes[start..end].iter().all(|b| b.is_ascii_whitespace()) {
-            continue;
-        }
-        match frame_payload(options.row_frame, 1, &bytes[start..end])? {
-            FramePayload::Data(payload) => rows.push(start + payload.start..start + payload.end),
-            FramePayload::Skip => {}
-        }
-    }
+    let mut rows = framed_payload_ranges_in_range(bytes, range, options)?;
     if direction == RowStreamDirection::Reverse {
         rows.reverse();
     }

@@ -8,7 +8,7 @@ use super::ndjson_direct::{
     direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
     NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
-use super::ndjson_frame::{frame_payload, FramePayload};
+use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;
 use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{
@@ -1075,29 +1075,12 @@ fn scan_direct_reducer_partition(
 ) -> Result<Vec<DirectFanoutReducer>, JetroEngineError> {
     let mut reducers = reducers.to_vec();
     let bytes = bytes.as_slice();
-    let mut cursor = range.start;
-    while cursor < range.end {
-        let start = cursor;
-        let rel_end = memchr::memchr(b'\n', &bytes[cursor..range.end]);
-        let mut end = rel_end.map_or(range.end, |pos| cursor + pos);
-        cursor = rel_end.map_or(range.end, |pos| cursor + pos + 1);
-        if end > start && bytes[end - 1] == b'\r' {
-            end -= 1;
-        }
-        if bytes[start..end]
-            .iter()
-            .all(|byte| byte.is_ascii_whitespace())
-        {
-            continue;
-        }
-        let row = match frame_payload(options.row_frame, 1, &bytes[start..end])? {
-            FramePayload::Data(payload) => &bytes[start + payload.start..start + payload.end],
-            FramePayload::Skip => continue,
-        };
+    for_each_framed_payload_in_range(bytes, range, options, |_row_range, row| {
         for reducer in &mut reducers {
             reducer.apply_row(row)?;
         }
-    }
+        Ok(false)
+    })?;
     Ok(reducers)
 }
 fn direct_predicates_match(
