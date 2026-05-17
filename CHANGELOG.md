@@ -333,8 +333,8 @@
   module suite passes after adding stream-last and the first/last source-demand
   changes, covering byte, hinted, tape, and reverse NDJSON paths.
 - **Core release validation is green**. `cargo test -p jetro-core --release`
-  passes after the stream-first, stream-last, extrema, and demand-ordering
-  changes.
+  passes after the stream-first, stream-last, extrema, demand-ordering, NDJSON
+  module-boundary, and route-observability changes.
 - **Full release workspace validation is green**.
   `cargo test --release --verbose --workspace` passes after the
   stream-first, byte-extrema, and reverse selective-demand changes.
