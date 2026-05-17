@@ -166,7 +166,7 @@ pub(super) fn lower_root_rows_expr(
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Take(1));
             }
-            BuiltinMethod::Count => {
+            BuiltinMethod::Count | BuiltinMethod::Len => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
                 terminal = Some(name.as_str());
@@ -497,6 +497,17 @@ mod tests {
 
         assert!(plan.demand.scalar_output);
         assert!(matches!(plan.stages.last(), Some(RowStreamStage::Sum)));
+    }
+
+    #[test]
+    fn lowers_rows_stream_len_as_count_sink() {
+        let expr = parse("$.rows().filter($.active).len()").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        assert!(plan.demand.scalar_output);
+        assert!(matches!(plan.stages.last(), Some(RowStreamStage::Count)));
     }
 
     #[test]

@@ -1465,6 +1465,43 @@ mod tests {
     }
 
     #[test]
+    fn executes_len_alias_count_fanout() {
+        let path = temp_ndjson(
+            "len",
+            &[
+                r#"{"active":true}"#,
+                r#"{"active":false}"#,
+                r#"{"active":true}"#,
+            ],
+        );
+        let query =
+            r#"{active_len: $.rows().filter($.active == true).len(), all_len: $.rows().len()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        #[cfg(feature = "simd-json")]
+        assert!(plan
+            .consumers
+            .iter()
+            .all(|consumer| direct_count_consumer(&consumer.stream).is_some()));
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        assert_eq!(
+            String::from_utf8(out).unwrap().trim(),
+            r#"{"active_len":2,"all_len":3}"#
+        );
+    }
+
+    #[test]
     fn executes_shared_path_comparison_fanout() {
         let path = temp_ndjson(
             "cmp",
