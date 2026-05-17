@@ -366,6 +366,8 @@ where
             direct_first_predicate: direct_first_match_predicate(&consumer.stream),
             #[cfg(feature = "simd-json")]
             direct_cmp: direct_first_match_cmp(&consumer.stream),
+            #[cfg(feature = "simd-json")]
+            direct_count: direct_count_consumer(&consumer.stream),
             done: false,
             stream: CompiledRowStream::new(&consumer.stream),
             values: Vec::new(),
@@ -398,7 +400,7 @@ where
 
     let mut env = Env::new(Val::Null);
     for consumer in consumers {
-        let value = if let Some(value) = consumer.stream.finish() {
+        let value = if let Some(value) = consumer.finish_value() {
             value
         } else if consumer.scalar {
             consumer.values.into_iter().next().unwrap_or(Val::Null)
@@ -421,9 +423,21 @@ struct RunningConsumer {
     direct_first_predicate: Option<NdjsonDirectPredicate>,
     #[cfg(feature = "simd-json")]
     direct_cmp: Option<DirectCmp>,
+    #[cfg(feature = "simd-json")]
+    direct_count: Option<DirectCount>,
     done: bool,
     stream: CompiledRowStream,
     values: Vec<Val>,
+}
+
+impl RunningConsumer {
+    fn finish_value(&self) -> Option<Val> {
+        #[cfg(feature = "simd-json")]
+        if let Some(count) = self.direct_count.as_ref() {
+            return Some(Val::Int(count.count as i64));
+        }
+        self.stream.finish()
+    }
 }
 
 #[cfg(feature = "simd-json")]
@@ -432,6 +446,13 @@ struct DirectCmp {
     steps: NdjsonPhysicalPath,
     op: BinOp,
     lit: Val,
+}
+
+#[cfg(feature = "simd-json")]
+struct DirectCount {
+    predicates: Vec<NdjsonDirectPredicate>,
+    limit: Option<usize>,
+    count: usize,
 }
 
 fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
@@ -459,6 +480,31 @@ fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPred
 fn direct_first_match_cmp(plan: &RowStreamPlan) -> Option<DirectCmp> {
     let predicate = direct_first_match_predicate(plan)?;
     direct_cmp_from_predicate(&predicate)
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_count_consumer(plan: &RowStreamPlan) -> Option<DirectCount> {
+    let [prefix @ .., RowStreamStage::Count] = plan.stages.as_slice() else {
+        return None;
+    };
+    let mut predicates = Vec::new();
+    let mut limit = None;
+    for stage in prefix {
+        match stage {
+            RowStreamStage::Filter(expr) => {
+                predicates.push(direct_tape_predicate_for_expr(expr)?);
+            }
+            RowStreamStage::Take(n) => {
+                limit = Some(limit.map_or(*n, |prev: usize| prev.min(*n)));
+            }
+            _ => return None,
+        }
+    }
+    Some(DirectCount {
+        predicates,
+        limit,
+        count: 0,
+    })
 }
 
 #[cfg(feature = "simd-json")]
@@ -514,6 +560,30 @@ fn apply_fanout_row(
     });
     for consumer in consumers {
         if consumer.done || consumer.stream.is_exhausted() {
+            continue;
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(count) = consumer.direct_count.as_mut() {
+            let mut keep = true;
+            for predicate in &count.predicates {
+                match eval_ndjson_byte_predicate_row(&row, predicate)? {
+                    Some(true) => {}
+                    Some(false) => {
+                        keep = false;
+                        break;
+                    }
+                    None => {
+                        keep = false;
+                        break;
+                    }
+                }
+            }
+            if keep {
+                count.count += 1;
+                if count.limit.is_some_and(|limit| count.count >= limit) {
+                    consumer.done = true;
+                }
+            }
             continue;
         }
         #[cfg(feature = "simd-json")]
@@ -788,6 +858,11 @@ mod tests {
             ],
         );
         let query = r#"{first_active: $.rows().find(active == true).first(), active_count: $.rows().filter(active == true).count()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        #[cfg(feature = "simd-json")]
+        assert!(direct_count_consumer(&plan.consumers[1].stream).is_some());
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
