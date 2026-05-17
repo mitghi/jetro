@@ -145,6 +145,10 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
+                CompiledRowStreamStage::Count { count } => {
+                    *count += 1;
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Map {
                     program,
                     #[cfg(feature = "simd-json")]
@@ -224,6 +228,10 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
+                CompiledRowStreamStage::Count { count } => {
+                    *count += 1;
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Map { program, .. } => {
                     value = vm.execute_val_raw_fresh_root(program, value)?;
                     self.stats.fallback_project_rows += 1;
@@ -232,6 +240,13 @@ impl CompiledRowStream {
         }
         self.stats.rows_emitted += 1;
         Ok(RowStreamRowResult::Emit(value))
+    }
+
+    pub(super) fn finish(&self) -> Option<Val> {
+        self.stages.iter().find_map(|stage| match stage {
+            CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
+            _ => None,
+        })
     }
 }
 
@@ -276,6 +291,9 @@ enum CompiledRowStreamStage {
         limit: usize,
         seen: usize,
     },
+    Count {
+        count: usize,
+    },
     Map {
         program: Program,
         #[cfg(feature = "simd-json")]
@@ -301,6 +319,7 @@ impl CompiledRowStreamStage {
                 limit: *limit,
                 seen: 0,
             },
+            RowStreamStage::Count => Self::Count { count: 0 },
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
                 #[cfg(feature = "simd-json")]

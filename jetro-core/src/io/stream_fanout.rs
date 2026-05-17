@@ -83,7 +83,7 @@ fn lower_rows_fanout_expr(
         let Some(stream) = lower_consumer_stream(init, &stream_name, &source)? else {
             return Ok(None);
         };
-        let scalar = stream.demand.retained_limit == Some(1);
+        let scalar = stream.demand.retained_limit == Some(1) || stream.demand.scalar_output;
         consumers.push(RowStreamFanoutConsumer {
             binding: name.clone(),
             stream,
@@ -237,7 +237,7 @@ impl FanoutBuilder {
         }
         self.consumers.push(RowStreamFanoutConsumer {
             binding,
-            scalar: stream.demand.retained_limit == Some(1),
+            scalar: stream.demand.retained_limit == Some(1) || stream.demand.scalar_output,
             stream,
         });
         true
@@ -398,7 +398,9 @@ where
 
     let mut env = Env::new(Val::Null);
     for consumer in consumers {
-        let value = if consumer.scalar {
+        let value = if let Some(value) = consumer.stream.finish() {
+            value
+        } else if consumer.scalar {
             consumer.values.into_iter().next().unwrap_or(Val::Null)
         } else {
             Val::Arr(Arc::new(consumer.values))
@@ -758,6 +760,35 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"users":{"a":{"name":"Ada","version":2},"b":{"name":"Bob","version":1}}}"#
+        );
+    }
+
+    #[test]
+    fn executes_mixed_find_and_count_fanout() {
+        let path = temp_ndjson(
+            "count",
+            &[
+                r#"{"name":"Ada","active":true}"#,
+                r#"{"name":"Bob","active":false}"#,
+                r#"{"name":"Cara","active":true}"#,
+            ],
+        );
+        let query = r#"{first_active: $.rows().find(active == true).first(), active_count: $.rows().filter(active == true).count()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"first_active":{"name":"Ada","active":true},"active_count":2}"#
         );
     }
 }

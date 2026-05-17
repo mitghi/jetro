@@ -1159,7 +1159,9 @@ where
         }
     }
 
-    if plan.demand.retained_limit == Some(1) {
+    if let Some(value) = executor.finish() {
+        Ok(value)
+    } else if plan.demand.retained_limit == Some(1) {
         Ok(out.into_iter().next().unwrap_or(Val::Null))
     } else {
         Ok(Val::Arr(std::sync::Arc::new(out)))
