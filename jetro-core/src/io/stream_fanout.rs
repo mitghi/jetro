@@ -488,6 +488,8 @@ where
             direct_count: direct_count_consumer(&consumer.stream),
             #[cfg(feature = "simd-json")]
             direct_sum: direct_sum_consumer(&consumer.stream),
+            #[cfg(feature = "simd-json")]
+            direct_predicate_sink: direct_predicate_sink_consumer(&consumer.stream),
             done: false,
             stream: CompiledRowStream::new(&consumer.stream),
             values: Vec::new(),
@@ -547,6 +549,8 @@ struct RunningConsumer {
     direct_count: Option<DirectCount>,
     #[cfg(feature = "simd-json")]
     direct_sum: Option<DirectSum>,
+    #[cfg(feature = "simd-json")]
+    direct_predicate_sink: Option<DirectPredicateSink>,
     done: bool,
     stream: CompiledRowStream,
     values: Vec<Val>,
@@ -561,6 +565,10 @@ impl RunningConsumer {
         #[cfg(feature = "simd-json")]
         if let Some(sum) = self.direct_sum.as_ref() {
             return Some(sum.acc.value());
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(sink) = self.direct_predicate_sink.as_ref() {
+            return Some(sink.value());
         }
         self.stream.finish()
     }
@@ -586,6 +594,49 @@ struct DirectSum {
     predicates: Vec<NdjsonDirectPredicate>,
     value_path: NdjsonPhysicalPath,
     acc: NumericAccumulator,
+}
+
+#[cfg(feature = "simd-json")]
+struct DirectPredicateSink {
+    predicates: Vec<NdjsonDirectPredicate>,
+    test: NdjsonDirectPredicate,
+    mode: DirectPredicateSinkMode,
+    decided: bool,
+}
+
+#[cfg(feature = "simd-json")]
+enum DirectPredicateSinkMode {
+    Any { matched: bool },
+    All { failed: bool },
+}
+
+#[cfg(feature = "simd-json")]
+impl DirectPredicateSink {
+    fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
+        if !direct_predicates_match(row, &self.predicates)? {
+            return Ok(());
+        }
+        let keep = eval_ndjson_byte_predicate_row(row, &self.test)?.unwrap_or(false);
+        match &mut self.mode {
+            DirectPredicateSinkMode::Any { matched } if keep => {
+                *matched = true;
+                self.decided = true;
+            }
+            DirectPredicateSinkMode::All { failed } if !keep => {
+                *failed = true;
+                self.decided = true;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn value(&self) -> Val {
+        match self.mode {
+            DirectPredicateSinkMode::Any { matched } => Val::Bool(matched),
+            DirectPredicateSinkMode::All { failed } => Val::Bool(!failed),
+        }
+    }
 }
 
 fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
@@ -667,6 +718,37 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
         predicates,
         value_path,
         acc: NumericAccumulator::new(method),
+    })
+}
+
+#[cfg(feature = "simd-json")]
+fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicateSink> {
+    let [prefix @ .., terminal] = plan.stages.as_slice() else {
+        return None;
+    };
+    let (test, mode) = match terminal {
+        RowStreamStage::Any(expr) => (
+            direct_tape_predicate_for_expr(expr)?,
+            DirectPredicateSinkMode::Any { matched: false },
+        ),
+        RowStreamStage::All(expr) => (
+            direct_tape_predicate_for_expr(expr)?,
+            DirectPredicateSinkMode::All { failed: false },
+        ),
+        _ => return None,
+    };
+    let mut predicates = Vec::new();
+    for stage in prefix {
+        match stage {
+            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
+            _ => return None,
+        }
+    }
+    Some(DirectPredicateSink {
+        predicates,
+        test,
+        mode,
+        decided: false,
     })
 }
 
@@ -764,6 +846,14 @@ fn apply_fanout_row(
                 if let Some(value) = raw_json_path_view(&row, &sum.value_path) {
                     sum.acc.add_view(value);
                 }
+            }
+            continue;
+        }
+        #[cfg(feature = "simd-json")]
+        if let Some(sink) = consumer.direct_predicate_sink.as_mut() {
+            sink.apply_row(&row)?;
+            if sink.decided {
+                consumer.done = true;
             }
             continue;
         }
@@ -1447,6 +1537,12 @@ mod tests {
             .unwrap()
             .expect("fanout plan");
         assert_eq!(plan.consumers.len(), 3);
+        #[cfg(feature = "simd-json")]
+        assert!(plan
+            .consumers
+            .iter()
+            .take(2)
+            .all(|consumer| direct_predicate_sink_consumer(&consumer.stream).is_some()));
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
@@ -1462,6 +1558,42 @@ mod tests {
         assert_eq!(
             got.trim(),
             r#"{"has_inactive":true,"all_active":false,"active_count":2}"#
+        );
+    }
+
+    #[test]
+    fn executes_filtered_predicate_sink_fanout() {
+        let path = temp_ndjson(
+            "filtered-predicate-sinks",
+            &[
+                r#"{"kind":"prod","ok":true}"#,
+                r#"{"kind":"test","ok":false}"#,
+                r#"{"kind":"prod","ok":true}"#,
+            ],
+        );
+        let query = r#"{all_prod_ok: $.rows().filter($.kind == "prod").all($.ok == true), any_test_ok: $.rows().filter($.kind == "test").any($.ok == true)}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        #[cfg(feature = "simd-json")]
+        assert!(plan
+            .consumers
+            .iter()
+            .all(|consumer| direct_predicate_sink_consumer(&consumer.stream).is_some()));
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        assert_eq!(
+            String::from_utf8(out).unwrap().trim(),
+            r#"{"all_prod_ok":true,"any_test_ok":false}"#
         );
     }
 
