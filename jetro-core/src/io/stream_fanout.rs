@@ -1044,4 +1044,33 @@ mod tests {
             r#"{"first_active":{"name":"Ada","active":true,"price":10},"active_count":2,"active_total":15}"#
         );
     }
+
+    #[test]
+    fn executes_numeric_reducer_fanout() {
+        let path = temp_ndjson(
+            "numeric",
+            &[
+                r#"{"active":true,"price":10}"#,
+                r#"{"active":false,"price":30}"#,
+                r#"{"active":true,"price":5}"#,
+            ],
+        );
+        let query = r#"{avg_price: $.rows().filter(active == true).map($.price).avg(), min_price: $.rows().filter(active == true).map($.price).min(), max_price: $.rows().filter(active == true).map($.price).max()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"avg_price":7.5,"min_price":5,"max_price":10}"#
+        );
+    }
 }

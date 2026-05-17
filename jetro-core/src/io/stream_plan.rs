@@ -69,6 +69,9 @@ pub(super) enum RowStreamStage {
     Map(Expr),
     Count,
     Sum,
+    Avg,
+    Min,
+    Max,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -171,6 +174,21 @@ pub(super) fn lower_root_rows_expr(
                 plan.stages.push(RowStreamStage::Sum);
                 terminal = Some(name.as_str());
             }
+            BuiltinMethod::Avg => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Avg);
+                terminal = Some(name.as_str());
+            }
+            BuiltinMethod::Min => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Min);
+                terminal = Some(name.as_str());
+            }
+            BuiltinMethod::Max => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Max);
+                terminal = Some(name.as_str());
+            }
             BuiltinMethod::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Map(expr));
@@ -199,7 +217,11 @@ impl RowStreamDemand {
                     seen_take.get_or_insert(*n);
                 }
                 RowStreamStage::Map(_) => demand.projector_count += 1,
-                RowStreamStage::Count | RowStreamStage::Sum => demand.scalar_output = true,
+                RowStreamStage::Count
+                | RowStreamStage::Sum
+                | RowStreamStage::Avg
+                | RowStreamStage::Min
+                | RowStreamStage::Max => demand.scalar_output = true,
             }
         }
         demand.retained_limit = seen_take;
@@ -216,7 +238,11 @@ fn classify_parallelism(plan: &RowStreamPlan, retained_limit: Option<usize>) -> 
             RowStreamStage::Filter(_) => saw_filter = true,
             RowStreamStage::Map(_) => {}
             RowStreamStage::Take(_) => {}
-            RowStreamStage::Count | RowStreamStage::Sum => {}
+            RowStreamStage::Count
+            | RowStreamStage::Sum
+            | RowStreamStage::Avg
+            | RowStreamStage::Min
+            | RowStreamStage::Max => {}
             RowStreamStage::DistinctBy(_) => return RowStreamParallelism::Sequential,
         }
     }
@@ -246,6 +272,9 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
                 | RowStreamStage::Take(_)
                 | RowStreamStage::Count
                 | RowStreamStage::Sum
+                | RowStreamStage::Avg
+                | RowStreamStage::Min
+                | RowStreamStage::Max
         )
     })
 }

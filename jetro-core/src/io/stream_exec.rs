@@ -2,6 +2,7 @@ use super::ndjson::{parse_row, row_eval_error};
 use super::ndjson_distinct::{distinct_key_bytes, AdaptiveDistinctKeys};
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
+use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
@@ -149,7 +150,7 @@ impl CompiledRowStream {
                     *count += 1;
                     return Ok(RowStreamRowResult::Skip);
                 }
-                CompiledRowStreamStage::Sum { acc } => {
+                CompiledRowStreamStage::Numeric { acc } => {
                     let value = ensure_row_stream_value(
                         engine,
                         line_no,
@@ -243,7 +244,7 @@ impl CompiledRowStream {
                     *count += 1;
                     return Ok(RowStreamRowResult::Skip);
                 }
-                CompiledRowStreamStage::Sum { acc } => {
+                CompiledRowStreamStage::Numeric { acc } => {
                     acc.add(&value);
                     return Ok(RowStreamRowResult::Skip);
                 }
@@ -260,21 +261,62 @@ impl CompiledRowStream {
     pub(super) fn finish(&self) -> Option<Val> {
         self.stages.iter().find_map(|stage| match stage {
             CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
-            CompiledRowStreamStage::Sum { acc } => Some(acc.value()),
+            CompiledRowStreamStage::Numeric { acc } => Some(acc.value()),
             _ => None,
         })
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct NumericSum {
+#[derive(Clone, Debug)]
+struct NumericAggregate {
+    method: BuiltinMethod,
     int_acc: i64,
     float_acc: f64,
     floated: bool,
+    count: usize,
+    best: Option<Val>,
+    best_f64: f64,
 }
 
-impl NumericSum {
+impl Default for NumericAggregate {
+    fn default() -> Self {
+        Self {
+            method: BuiltinMethod::Sum,
+            int_acc: 0,
+            float_acc: 0.0,
+            floated: false,
+            count: 0,
+            best: None,
+            best_f64: 0.0,
+        }
+    }
+}
+
+impl NumericAggregate {
+    fn new(method: BuiltinMethod) -> Self {
+        Self {
+            method,
+            ..Self::default()
+        }
+    }
+
     fn add(&mut self, value: &Val) {
+        let Some(number) = value.as_f64() else {
+            return;
+        };
+        if matches!(self.method, BuiltinMethod::Min | BuiltinMethod::Max) {
+            let replace = match self.method {
+                BuiltinMethod::Min => self.best.is_none() || number < self.best_f64,
+                BuiltinMethod::Max => self.best.is_none() || number > self.best_f64,
+                _ => false,
+            };
+            if replace {
+                self.best = Some(value.clone());
+                self.best_f64 = number;
+            }
+            self.count += 1;
+            return;
+        }
         match value {
             Val::Int(n) if !self.floated => {
                 self.int_acc = self.int_acc.wrapping_add(*n);
@@ -291,13 +333,32 @@ impl NumericSum {
             }
             _ => {}
         }
+        self.count += 1;
     }
 
     fn value(&self) -> Val {
-        if self.floated {
-            Val::Float(self.float_acc)
-        } else {
-            Val::Int(self.int_acc)
+        match self.method {
+            BuiltinMethod::Sum => {
+                if self.floated {
+                    Val::Float(self.float_acc)
+                } else {
+                    Val::Int(self.int_acc)
+                }
+            }
+            BuiltinMethod::Avg => {
+                if self.count == 0 {
+                    Val::Null
+                } else {
+                    let sum = if self.floated {
+                        self.float_acc
+                    } else {
+                        self.int_acc as f64
+                    };
+                    Val::Float(sum / self.count as f64)
+                }
+            }
+            BuiltinMethod::Min | BuiltinMethod::Max => self.best.clone().unwrap_or(Val::Null),
+            _ => Val::Null,
         }
     }
 }
@@ -346,8 +407,8 @@ enum CompiledRowStreamStage {
     Count {
         count: usize,
     },
-    Sum {
-        acc: NumericSum,
+    Numeric {
+        acc: NumericAggregate,
     },
     Map {
         program: Program,
@@ -375,8 +436,17 @@ impl CompiledRowStreamStage {
                 seen: 0,
             },
             RowStreamStage::Count => Self::Count { count: 0 },
-            RowStreamStage::Sum => Self::Sum {
-                acc: NumericSum::default(),
+            RowStreamStage::Sum => Self::Numeric {
+                acc: NumericAggregate::new(BuiltinMethod::Sum),
+            },
+            RowStreamStage::Avg => Self::Numeric {
+                acc: NumericAggregate::new(BuiltinMethod::Avg),
+            },
+            RowStreamStage::Min => Self::Numeric {
+                acc: NumericAggregate::new(BuiltinMethod::Min),
+            },
+            RowStreamStage::Max => Self::Numeric {
+                acc: NumericAggregate::new(BuiltinMethod::Max),
             },
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
