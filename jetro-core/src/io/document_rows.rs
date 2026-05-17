@@ -37,7 +37,13 @@ fn run_document_rows(
     }
 
     let stats = stream.stats().clone();
-    Ok((Val::Arr(Arc::new(out)), stats))
+    if let Some(value) = stream.finish() {
+        Ok((value, stats))
+    } else if plan.demand.retained_limit == Some(1) {
+        Ok((out.into_iter().next().unwrap_or(Val::Null), stats))
+    } else {
+        Ok((Val::Arr(Arc::new(out)), stats))
+    }
 }
 
 fn apply_document_row(
@@ -167,5 +173,38 @@ mod tests {
         assert_eq!(stats.source, RowStreamSourceKind::DocumentRows);
         assert_eq!(stats.rows_scanned, 2);
         assert_eq!(stats.rows_emitted, 2);
+    }
+
+    #[test]
+    fn document_rows_scalar_sinks_return_finished_value() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([
+            {"active": true, "price": 10},
+            {"active": false, "price": 30},
+            {"active": true, "price": 5}
+        ]));
+
+        let count = collect_document_rows(
+            &engine,
+            &document,
+            "$.rows().filter($.active == true).count()",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(serde_json::Value::from(count), json!(2));
+
+        let sum = collect_document_rows(
+            &engine,
+            &document,
+            "$.rows().filter($.active == true).map($.price).sum()",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(serde_json::Value::from(sum), json!(15));
+
+        let any = collect_document_rows(&engine, &document, "$.rows().any($.price > 20)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(any), json!(true));
     }
 }
