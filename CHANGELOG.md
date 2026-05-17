@@ -323,6 +323,9 @@
   a row-local query uses and which `$.rows()` file-plan family an expression
   lowers to, with stable labels for byte expression, byte-writable tape, tape,
   stream, fanout, and subquery routes.
+- **NDJSON route validation is green in release mode**. The focused
+  release-mode `io::ndjson` suite and facade-level route-observability test
+  pass after the module-boundary and public observability changes.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
