@@ -59,6 +59,16 @@ pub enum NdjsonWriterPathKind {
     Tape,
 }
 
+impl std::fmt::Display for NdjsonWriterPathKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ByteExpr => "byte-expr",
+            Self::ByteWritableTape => "byte-writable-tape",
+            Self::Tape => "tape",
+        })
+    }
+}
+
 #[cfg(test)]
 pub(super) fn direct_writer_path_kind(
     engine: &JetroEngine,
@@ -3644,10 +3654,9 @@ not-json
     #[test]
     fn public_writer_path_kind_reports_direct_family() {
         let engine = crate::JetroEngine::new();
-        assert_eq!(
-            crate::io::ndjson_writer_path_kind(&engine, "$.name"),
-            Some(super::NdjsonWriterPathKind::ByteExpr)
-        );
+        let kind = crate::io::ndjson_writer_path_kind(&engine, "$.name").unwrap();
+        assert_eq!(kind, super::NdjsonWriterPathKind::ByteExpr);
+        assert_eq!(kind.to_string(), "byte-expr");
     }
 
     #[test]

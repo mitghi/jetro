@@ -16,6 +16,16 @@ pub enum NdjsonRowsPlanKind {
     Subquery,
 }
 
+impl std::fmt::Display for NdjsonRowsPlanKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stream => "stream",
+            Self::Fanout => "fanout",
+            Self::Subquery => "subquery",
+        })
+    }
+}
+
 pub fn ndjson_rows_plan_kind(query: &str) -> Result<Option<NdjsonRowsPlanKind>, JetroEngineError> {
     Ok(ndjson_rows_file_plan(query)?.map(|plan| match plan {
         NdjsonRowsFilePlan::Stream(_) => NdjsonRowsPlanKind::Stream,
@@ -85,6 +95,7 @@ mod tests {
             ndjson_rows_plan_kind("$.rows().filter($.active).take(1)").unwrap(),
             Some(NdjsonRowsPlanKind::Stream)
         );
+        assert_eq!(NdjsonRowsPlanKind::Stream.to_string(), "stream");
         assert_eq!(
             ndjson_rows_plan_kind(
                 r#"let stream = $.rows(), a = stream.filter($.active).count(), b = stream.filter($.paid).count() in {a, b}"#
