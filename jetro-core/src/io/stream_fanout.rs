@@ -62,7 +62,7 @@ fn lower_rows_fanout_expr(
 
     let mut bindings = Vec::new();
     let body = collect_let_chain(expr, &mut bindings);
-    if bindings.len() < 2 {
+    if bindings.is_empty() {
         return Ok(None);
     }
 
@@ -92,6 +92,16 @@ fn lower_rows_fanout_expr(
             scalar,
         });
     }
+
+    let mut body_builder = LetFanoutBodyBuilder {
+        stream_name: &stream_name,
+        source: &source,
+        consumers,
+        next_id: 0,
+    };
+    let body = rewrite_let_stream_fanout_body(body, &mut body_builder)?;
+    let consumers = body_builder.consumers;
+
     if consumers.is_empty() {
         return Ok(None);
     }
@@ -99,8 +109,82 @@ fn lower_rows_fanout_expr(
     Ok(Some(RowStreamFanoutPlan {
         source,
         consumers,
-        body: body.clone(),
+        body,
     }))
+}
+
+struct LetFanoutBodyBuilder<'a> {
+    stream_name: &'a str,
+    source: &'a RowStreamPlan,
+    consumers: Vec<RowStreamFanoutConsumer>,
+    next_id: usize,
+}
+
+fn rewrite_let_stream_fanout_body(
+    expr: &Expr,
+    builder: &mut LetFanoutBodyBuilder<'_>,
+) -> Result<Expr, RowStreamPlanError> {
+    if let Some(stream) = lower_consumer_stream(expr, builder.stream_name, builder.source)? {
+        let binding = format!("__jetro_rows_fanout_body_{}", builder.next_id);
+        builder.next_id += 1;
+        builder.consumers.push(RowStreamFanoutConsumer {
+            binding: binding.clone(),
+            scalar: stream.demand.retained_limit == Some(1) || stream.demand.scalar_output,
+            stream,
+        });
+        return Ok(Expr::Ident(binding));
+    }
+
+    match expr {
+        Expr::Object(fields) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for field in fields {
+                out.push(match field {
+                    ObjField::Kv {
+                        key,
+                        val,
+                        optional,
+                        cond,
+                    } => ObjField::Kv {
+                        key: key.clone(),
+                        val: rewrite_let_stream_fanout_body(val, builder)?,
+                        optional: *optional,
+                        cond: cond
+                            .as_ref()
+                            .map(|cond| rewrite_let_stream_fanout_body(cond, builder))
+                            .transpose()?,
+                    },
+                    ObjField::Dynamic { key, val } => ObjField::Dynamic {
+                        key: rewrite_let_stream_fanout_body(key, builder)?,
+                        val: rewrite_let_stream_fanout_body(val, builder)?,
+                    },
+                    ObjField::Spread(value) => {
+                        ObjField::Spread(rewrite_let_stream_fanout_body(value, builder)?)
+                    }
+                    ObjField::SpreadDeep(value) => {
+                        ObjField::SpreadDeep(rewrite_let_stream_fanout_body(value, builder)?)
+                    }
+                    ObjField::Short(name) => ObjField::Short(name.clone()),
+                });
+            }
+            Ok(Expr::Object(out))
+        }
+        Expr::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(match item {
+                    ArrayElem::Expr(value) => {
+                        ArrayElem::Expr(rewrite_let_stream_fanout_body(value, builder)?)
+                    }
+                    ArrayElem::Spread(value) => {
+                        ArrayElem::Spread(rewrite_let_stream_fanout_body(value, builder)?)
+                    }
+                });
+            }
+            Ok(Expr::Array(out))
+        }
+        _ => Ok(expr.clone()),
+    }
 }
 
 fn lower_shape_rows_fanout_expr(
@@ -964,6 +1048,35 @@ mod tests {
             ],
         );
         let query = r#"{user_a: $.rows().reverse().find(name == "Ada").first(), user_b: $.rows().reverse().find(name == "Bob").first()}"#;
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(
+            got.trim(),
+            r#"{"user_a":{"name":"Ada","version":2},"user_b":{"name":"Bob","version":1}}"#
+        );
+    }
+
+    #[test]
+    fn executes_let_stream_body_shape_fanout() {
+        let path = temp_ndjson(
+            "let-body",
+            &[
+                r#"{"name":"Ada","version":1}"#,
+                r#"{"name":"Bob","version":1}"#,
+                r#"{"name":"Ada","version":2}"#,
+            ],
+        );
+        let query = r#"let stream = $.rows().reverse() in {user_a: stream.find(name == "Ada").first(), user_b: stream.find(name == "Bob").first()}"#;
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
