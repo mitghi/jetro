@@ -1254,6 +1254,13 @@ where
         }
     }
 
+    emit_row_stream_finish(
+        &executor,
+        &mut writer,
+        &mut emitted,
+        external_limit,
+        options,
+    )?;
     writer.flush()?;
     Ok((emitted, executor.stats().clone()))
 }
@@ -1363,8 +1370,33 @@ where
         }
     }
 
+    emit_row_stream_finish(
+        &executor,
+        &mut writer,
+        &mut emitted,
+        external_limit,
+        options,
+    )?;
     writer.flush()?;
     Ok((emitted, executor.stats().clone()))
+}
+
+fn emit_row_stream_finish<W: Write>(
+    executor: &CompiledRowStream,
+    writer: &mut W,
+    emitted: &mut usize,
+    external_limit: Option<usize>,
+    options: NdjsonOptions,
+) -> Result<(), JetroEngineError> {
+    if external_limit.is_some_and(|limit| *emitted >= limit) {
+        return Ok(());
+    }
+    if let Some(value) = executor.finish() {
+        if write_val_line_with_options(writer, &value, options)? {
+            *emitted += 1;
+        }
+    }
+    Ok(())
 }
 
 fn emit_row_stream_result<W: Write>(
@@ -4531,10 +4563,7 @@ not-json
             .run_ndjson(rows, "$.attributes.map(@.value).first()", &mut out)
             .expect("unfiltered first should use direct stream first");
 
-        assert_eq!(
-            std::str::from_utf8(&out).unwrap(),
-            "\"first\"\n\"only\"\n"
-        );
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"first\"\n\"only\"\n");
     }
 
     #[test]
@@ -4552,10 +4581,7 @@ not-json
             .run_ndjson(rows, "$.attributes.map(@.value).last()", &mut out)
             .expect("unfiltered last should use direct stream last");
 
-        assert_eq!(
-            std::str::from_utf8(&out).unwrap(),
-            "\"last\"\n\"only\"\n"
-        );
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"last\"\n\"only\"\n");
     }
 
     #[test]

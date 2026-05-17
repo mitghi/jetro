@@ -648,6 +648,48 @@ fn rows_stream_reverse_reads_delimited_payloads_and_skips_tombstones() {
 }
 
 #[test]
+fn rows_stream_reader_writes_scalar_sink_finish() {
+    let engine = JetroEngine::new();
+    let input = br#"{"active":true,"price":10}
+{"active":false,"price":30}
+{"active":true,"price":5}
+"#;
+
+    let mut count_out = Vec::new();
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().filter($.active == true).count()",
+            &mut count_out,
+        )
+        .expect("count sink should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(count_out).unwrap(), "2\n");
+
+    let mut sum_out = Vec::new();
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().filter($.active == true).map($.price).sum()",
+            &mut sum_out,
+        )
+        .expect("sum sink should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(sum_out).unwrap(), "15\n");
+
+    let mut any_out = Vec::new();
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().any($.price > 20)",
+            &mut any_out,
+        )
+        .expect("any sink should finish");
+    assert_eq!(rows, 1);
+    assert_eq!(String::from_utf8(any_out).unwrap(), "true\n");
+}
+
+#[test]
 fn rows_stream_parallel_reads_delimited_payloads_and_skips_tombstones() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-framed");
@@ -713,11 +755,7 @@ fn rows_stream_root_find_can_use_parallel_writer() {
 fn rows_stream_root_take_can_use_parallel_writer() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-root-take");
-    std::fs::write(
-        &path,
-        b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n",
-    )
-    .unwrap();
+    std::fs::write(&path, b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n{\"id\":4}\n").unwrap();
     let mut out = Vec::new();
 
     let rows = engine
@@ -994,7 +1032,10 @@ fn rows_stream_direct_and_fallback_distinct_keys_match() {
         )
         .expect("fallback key rows stream should run");
 
-    assert_eq!(String::from_utf8(direct.clone()).unwrap(), "\"a\"\n\"b\"\n\"d\"\n");
+    assert_eq!(
+        String::from_utf8(direct.clone()).unwrap(),
+        "\"a\"\n\"b\"\n\"d\"\n"
+    );
     assert_eq!(direct, fallback);
 }
 
