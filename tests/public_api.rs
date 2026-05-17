@@ -1,9 +1,25 @@
 use jetro::{
-    io::{DistinctFrontFilterKind, NdjsonSource},
+    io::{
+        ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind,
+        NdjsonRowsPlanKind, NdjsonSource, NdjsonWriterPathKind,
+    },
     JetroEngine,
 };
 use serde_json::json;
 use std::io::Cursor;
+
+#[test]
+fn facade_exposes_ndjson_route_observability() {
+    let engine = JetroEngine::new();
+    assert_eq!(
+        ndjson_writer_path_kind(&engine, "$.name"),
+        Some(NdjsonWriterPathKind::ByteExpr)
+    );
+    assert_eq!(
+        ndjson_rows_plan_kind("$.rows().take(1)").unwrap(),
+        Some(NdjsonRowsPlanKind::Stream)
+    );
+}
 
 #[test]
 fn facade_exposes_ndjson_match_api() {
