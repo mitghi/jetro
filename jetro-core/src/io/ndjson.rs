@@ -18,7 +18,7 @@ use super::ndjson_hint::{
 };
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 use super::stream_exec::CompiledRowStream;
-use super::stream_fanout::{drive_ndjson_rows_fanout_file, lower_rows_fanout_query};
+use super::stream_fanout::{drive_ndjson_rows_fanout_file, lower_rows_fanout_expr};
 use super::stream_plan::{
     lower_root_rows_query, RowStreamDirection, RowStreamPlan, RowStreamSourceKind,
 };
@@ -28,6 +28,7 @@ use super::{NdjsonSource, RowError};
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
+use crate::parse::ast::Expr;
 use crate::plan::physical::PlanningContext;
 use crate::util::is_truthy;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
@@ -1051,11 +1052,9 @@ fn ndjson_rows_stream_plan(query: &str) -> Result<Option<RowStreamPlan>, JetroEn
 fn ndjson_rows_subquery_plan(
     query: &str,
 ) -> Result<Option<RowStreamSubqueryPlan>, JetroEngineError> {
-    if !query.contains("$.rows") {
+    let Some(expr) = parse_ndjson_rows_expr(query)? else {
         return Ok(None);
-    }
-    let expr = crate::parse::parser::parse(query)
-        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))?;
+    };
     lower_single_rows_subquery(&expr, RowStreamSourceKind::NdjsonRows)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
@@ -1063,10 +1062,20 @@ fn ndjson_rows_subquery_plan(
 fn ndjson_rows_fanout_plan(
     query: &str,
 ) -> Result<Option<super::stream_fanout::RowStreamFanoutPlan>, JetroEngineError> {
+    let Some(expr) = parse_ndjson_rows_expr(query)? else {
+        return Ok(None);
+    };
+    lower_rows_fanout_expr(&expr, RowStreamSourceKind::NdjsonRows)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
+}
+
+fn parse_ndjson_rows_expr(query: &str) -> Result<Option<Expr>, JetroEngineError> {
     if !query.contains("$.rows") {
         return Ok(None);
     }
-    lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+    crate::parse::parser::parse(query)
+        .map(Some)
+        .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
 fn drive_ndjson_rows_subquery_file<P, W>(

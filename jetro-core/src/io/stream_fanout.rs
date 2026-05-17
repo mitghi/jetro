@@ -58,7 +58,7 @@ pub(super) fn lower_rows_fanout_query(
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
-fn lower_rows_fanout_expr(
+pub(super) fn lower_rows_fanout_expr(
     expr: &Expr,
     source_kind: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, RowStreamPlanError> {
