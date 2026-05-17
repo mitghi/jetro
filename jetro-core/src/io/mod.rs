@@ -16,6 +16,7 @@ mod ndjson_rev;
 mod ndjson_rows;
 mod ndjson_scan;
 mod ndjson_stream_cache;
+mod ndjson_write;
 mod source;
 mod stream_direct;
 mod stream_exec;

@@ -20,11 +20,15 @@ use super::ndjson_rows::{
     ndjson_rows_file_plan, ndjson_rows_stream_plan, ndjson_rows_subquery_plan, NdjsonRowsFilePlan,
 };
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
+pub(super) use super::ndjson_write::{
+    ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
+    write_val_line_with_options,
+};
 use super::stream_exec::CompiledRowStream;
 use super::stream_fanout::drive_ndjson_rows_fanout_file;
-use super::stream_plan::{RowStreamDirection, RowStreamPlan};
 #[cfg(test)]
 use super::stream_plan::RowStreamSourceKind;
+use super::stream_plan::{RowStreamDirection, RowStreamPlan};
 use super::stream_subquery::{RowStreamSubqueryPlan, STREAM_BINDING};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
@@ -37,13 +41,13 @@ use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
 use memchr::memchr;
 use serde_json::Value;
 use std::fs::File;
-use std::io::{BufRead, BufWriter, Write};
+use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::MutexGuard;
 
 const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024 * 1024;
 const DEFAULT_LINE_BUFFER_CAPACITY: usize = 8192;
-const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
+pub(super) const DEFAULT_READER_BUFFER_CAPACITY: usize = 1024 * 1024;
 pub(super) const DEFAULT_REVERSE_CHUNK_SIZE: usize = 64 * 1024;
 
 #[cfg(test)]
@@ -2488,44 +2492,6 @@ fn json_tape_scalar<T: JsonTape>(tape: &T, idx: usize) -> crate::util::JsonView<
     }
 }
 
-pub(super) fn write_val_line<W: Write>(
-    writer: &mut W,
-    value: &Val,
-) -> Result<(), JetroEngineError> {
-    write_val_json(writer, value)?;
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-pub(super) fn write_val_line_with_options<W: Write>(
-    writer: &mut W,
-    value: &Val,
-    options: NdjsonOptions,
-) -> Result<bool, JetroEngineError> {
-    if value == &Val::Null && options.null_output == NdjsonNullOutput::Skip {
-        return Ok(false);
-    }
-    write_val_line(writer, value)?;
-    Ok(true)
-}
-
-pub(super) fn write_json_bytes_line_with_options<W: Write>(
-    writer: &mut W,
-    bytes: &[u8],
-    options: NdjsonOptions,
-) -> Result<bool, JetroEngineError> {
-    if is_json_null_bytes(bytes) && options.null_output == NdjsonNullOutput::Skip {
-        return Ok(false);
-    }
-    writer.write_all(bytes)?;
-    writer.write_all(b"\n")?;
-    Ok(true)
-}
-
-fn is_json_null_bytes(bytes: &[u8]) -> bool {
-    bytes == b"null"
-}
-
 pub(super) fn write_document_line<W: Write>(
     writer: &mut W,
     document: &Jetro,
@@ -2542,16 +2508,6 @@ pub(super) fn write_document_line<W: Write>(
         .root_val_with(engine.keys())
         .map_err(|err| row_eval_error(line_no, err))?;
     write_val_line(writer, &root)
-}
-
-pub(super) fn ndjson_writer_with_options<W: Write>(
-    writer: W,
-    options: NdjsonOptions,
-) -> BufWriter<W> {
-    let capacity = options
-        .reader_buffer_capacity
-        .max(DEFAULT_READER_BUFFER_CAPACITY);
-    BufWriter::with_capacity(capacity, writer)
 }
 
 pub(super) fn write_val_json<W: Write>(
