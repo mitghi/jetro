@@ -690,6 +690,30 @@ fn rows_stream_reader_writes_scalar_sink_finish() {
 }
 
 #[test]
+fn rows_stream_last_retains_final_matching_row() {
+    let engine = JetroEngine::new();
+    let input = br#"{"active":true,"id":1}
+{"active":false,"id":2}
+{"active":true,"id":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(
+            Cursor::new(input),
+            "$.rows().filter($.active == true).last()",
+            &mut out,
+        )
+        .expect("last sink should finish");
+
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"active\":true,\"id\":3}\n"
+    );
+}
+
+#[test]
 fn rows_stream_parallel_reads_delimited_payloads_and_skips_tombstones() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-parallel-framed");

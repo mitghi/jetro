@@ -207,4 +207,27 @@ mod tests {
             .unwrap();
         assert_eq!(serde_json::Value::from(any), json!(true));
     }
+
+    #[test]
+    fn document_rows_last_returns_final_matching_row() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([
+            {"active": true, "id": 1},
+            {"active": false, "id": 2},
+            {"active": true, "id": 3}
+        ]));
+
+        let out = collect_document_rows(
+            &engine,
+            &document,
+            "$.rows().filter($.active == true).last()",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            json!({"active": true, "id": 3})
+        );
+    }
 }

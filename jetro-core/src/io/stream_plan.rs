@@ -67,6 +67,7 @@ pub(super) enum RowStreamStage {
     DistinctBy(Expr),
     Take(usize),
     Map(Expr),
+    Last,
     Count,
     Sum,
     Avg,
@@ -166,6 +167,11 @@ pub(super) fn lower_root_rows_expr(
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Take(1));
             }
+            BuiltinMethod::Last => {
+                require_arity(name, args, 0)?;
+                plan.stages.push(RowStreamStage::Last);
+                terminal = Some(name.as_str());
+            }
             BuiltinMethod::Count | BuiltinMethod::Len => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
@@ -228,6 +234,7 @@ impl RowStreamDemand {
                 RowStreamStage::Take(n) => {
                     seen_take.get_or_insert(*n);
                 }
+                RowStreamStage::Last => seen_take = Some(1),
                 RowStreamStage::Map(_) => demand.projector_count += 1,
                 RowStreamStage::Count
                 | RowStreamStage::Sum
@@ -255,6 +262,7 @@ fn classify_parallelism(
             RowStreamStage::Filter(_) => saw_filter = true,
             RowStreamStage::Map(_) => {}
             RowStreamStage::Take(_) => {}
+            RowStreamStage::Last => {}
             RowStreamStage::Count
             | RowStreamStage::Sum
             | RowStreamStage::Avg
@@ -289,6 +297,7 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
             RowStreamStage::Filter(_)
                 | RowStreamStage::DistinctBy(_)
                 | RowStreamStage::Take(_)
+                | RowStreamStage::Last
                 | RowStreamStage::Count
                 | RowStreamStage::Sum
                 | RowStreamStage::Avg
@@ -424,6 +433,18 @@ mod tests {
         ));
         assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(1)));
+    }
+
+    #[test]
+    fn lowers_rows_last_as_scalar_retention_sink() {
+        let expr = parse("$.rows().filter($.active).last()").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(plan.demand.retained_limit, Some(1));
+        assert!(matches!(plan.stages[0], RowStreamStage::Filter(_)));
+        assert!(matches!(plan.stages[1], RowStreamStage::Last));
     }
 
     #[test]

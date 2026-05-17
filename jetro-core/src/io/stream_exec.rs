@@ -147,6 +147,16 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
+                CompiledRowStreamStage::Last { value: last } => {
+                    *last = Some(ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?);
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Count { count } => {
                     *count += 1;
                     return Ok(RowStreamRowResult::Skip);
@@ -315,6 +325,10 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
+                CompiledRowStreamStage::Last { value: last } => {
+                    *last = Some(value);
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Count { count } => {
                     *count += 1;
                     return Ok(RowStreamRowResult::Skip);
@@ -359,6 +373,7 @@ impl CompiledRowStream {
 
     pub(super) fn finish(&self) -> Option<Val> {
         self.stages.iter().find_map(|stage| match stage {
+            CompiledRowStreamStage::Last { value } => Some(value.clone().unwrap_or(Val::Null)),
             CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
             CompiledRowStreamStage::Numeric { acc } => Some(acc.value()),
             CompiledRowStreamStage::Any { matched, .. } => Some(Val::Bool(*matched)),
@@ -409,6 +424,9 @@ enum CompiledRowStreamStage {
         limit: usize,
         seen: usize,
     },
+    Last {
+        value: Option<Val>,
+    },
     Count {
         count: usize,
     },
@@ -452,6 +470,7 @@ impl CompiledRowStreamStage {
                 limit: *limit,
                 seen: 0,
             },
+            RowStreamStage::Last => Self::Last { value: None },
             RowStreamStage::Count => Self::Count { count: 0 },
             RowStreamStage::Sum => Self::Numeric {
                 acc: NumericAccumulator::new(BuiltinMethod::Sum),
