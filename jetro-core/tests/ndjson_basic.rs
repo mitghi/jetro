@@ -652,6 +652,32 @@ fn run_ndjson_file_with_report_returns_file_route_stats() {
 }
 
 #[test]
+fn run_ndjson_file_with_report_exposes_parallel_partitions() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-file-parallel-report");
+    let mut input = Vec::new();
+    for id in 0..256 {
+        input.extend_from_slice(format!("{{\"id\":{id},\"active\":true}}\n").as_bytes());
+    }
+    std::fs::write(&path, input).unwrap();
+    let options = NdjsonOptions::default().with_parallel_min_bytes(1);
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_with_report_and_options(
+            &path,
+            "$.rows().filter($.active).take(8).map($.id)",
+            &mut out,
+            options,
+        )
+        .expect("parallel rows stream report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(report.stats.rows_emitted, 8);
+    assert!(report.stats.parallel_partitions > 1);
+}
+
+#[test]
 fn run_ndjson_source_with_report_dispatches_file_source() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-source-report");
