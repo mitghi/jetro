@@ -4113,6 +4113,41 @@ not-json
     }
 
     #[test]
+    fn rows_stream_driver_filters_array_find_on_byte_predicate() {
+        let engine = crate::JetroEngine::new();
+        let plan = super::super::ndjson_rows::ndjson_rows_stream_plan(
+            r#"$.rows().filter(@.custom_attributes.find(@.value == "z")).map($.id)"#,
+        )
+        .unwrap()
+        .unwrap();
+        let input = std::io::Cursor::new(
+            br#"{"id":"a","custom_attributes":[{"value":"x"}]}
+{"id":"b","custom_attributes":[{"value":"z"}]}
+{"id":"c","custom_attributes":[{"value":null}]}
+"#
+            .to_vec(),
+        );
+        let mut out = Vec::new();
+
+        let (emitted, stats) = super::drive_ndjson_rows_stream_reader_with_stats(
+            &engine,
+            input,
+            &plan,
+            None,
+            super::NdjsonOptions::default(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(emitted, 1);
+        assert_eq!(String::from_utf8(out).unwrap(), "\"b\"\n");
+        assert_eq!(stats.rows_scanned, 3);
+        assert_eq!(stats.rows_filtered, 2);
+        assert_eq!(stats.direct_filter_rows, 3);
+        assert_eq!(stats.fallback_filter_rows, 0);
+    }
+
+    #[test]
     fn parse_row_keeps_simd_document_lazy() {
         let engine = crate::JetroEngine::new();
         let row = br#"{"name":"Ada","age":30}"#.to_vec();
@@ -4350,6 +4385,24 @@ not-json
                 .expect("byte predicate should evaluate")
                 .unwrap_or_else(|| panic!("{} should not need tape fallback", predicate.0));
             assert_eq!(matched, predicate.1, "{}", predicate.0);
+        }
+    }
+
+    #[test]
+    fn direct_byte_predicate_covers_array_find_field_comparison() {
+        let row = br#"{"custom_attributes":[{"attribute_name":"a","value":"x"},{"attribute_name":"b","value":"z"},{"attribute_name":"c","value":null}]}"#;
+        for (predicate, expected) in [
+            (r#"@.custom_attributes.find(@.value == "z")"#, true),
+            (r#"@.custom_attributes.find(value == "missing")"#, false),
+            (r#"@.custom_attributes.find(@.value == null)"#, true),
+        ] {
+            let expr = crate::parse::parser::parse(predicate).expect("parse");
+            let plan = super::super::ndjson_direct::direct_tape_predicate_for_expr(&expr)
+                .unwrap_or_else(|| panic!("{predicate} should have a direct predicate"));
+            let matched = super::eval_ndjson_byte_predicate_row(row, &plan)
+                .expect("byte predicate should evaluate")
+                .unwrap_or_else(|| panic!("{predicate} should not need tape fallback"));
+            assert_eq!(matched, expected, "{predicate}");
         }
     }
 

@@ -1273,7 +1273,13 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
             call.try_apply_json_view(value)
                 .map(|value| crate::util::is_truthy(&value))
         }
-        NdjsonDirectPredicate::ArrayAny { .. } => None,
+        NdjsonDirectPredicate::ArrayAny {
+            source_steps,
+            predicate,
+        } => {
+            let source = raw_json_path_value(row, source_steps)?;
+            raw_json_any_filtered_source(source, predicate)
+        }
         NdjsonDirectPredicate::ViewPipeline { .. } => None,
     }
 }
@@ -1291,25 +1297,43 @@ fn raw_json_count_filtered_source(
     source: &[u8],
     predicate: &NdjsonDirectItemPredicate,
 ) -> Option<usize> {
-    let mut root_fields = RootFieldSet::new();
-    if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
-        return raw_json_count_filtered_source_from_root_fields(source, predicate, &root_fields);
-    }
     let mut count = 0usize;
-    raw_json_source_items(source, |item| {
-        if eval_raw_item_predicate(item, predicate)? {
-            count += 1;
-        }
-        Some(())
+    raw_json_visit_matching_source(source, predicate, || {
+        count += 1;
+        true
     })?;
     Some(count)
 }
 
-fn raw_json_count_filtered_source_from_root_fields(
+fn raw_json_any_filtered_source(
     source: &[u8],
     predicate: &NdjsonDirectItemPredicate,
-    root_fields: &[&str],
-) -> Option<usize> {
+) -> Option<bool> {
+    let mut matched = false;
+    raw_json_visit_matching_source(source, predicate, || {
+        matched = true;
+        false
+    })?;
+    Some(matched)
+}
+
+fn raw_json_visit_matching_source<F>(
+    source: &[u8],
+    predicate: &NdjsonDirectItemPredicate,
+    on_match: F,
+) -> Option<()>
+where
+    F: FnMut() -> bool,
+{
+    let mut root_fields = RootFieldSet::new();
+    if collect_stream_predicate_root_fields(predicate, &mut root_fields) {
+        return raw_json_visit_matching_source_from_root_fields(
+            source,
+            predicate,
+            &root_fields,
+            on_match,
+        );
+    }
     let start = skip_json_ws(source, 0);
     let end = trim_json_ws_end(source);
     if source.get(start) != Some(&b'[') {
@@ -1317,11 +1341,44 @@ fn raw_json_count_filtered_source_from_root_fields(
     }
     let mut pos = skip_json_ws(source, start + 1);
     if pos < end && source[pos] == b']' {
-        return Some(0);
+        return Some(());
+    }
+    let mut on_match = on_match;
+    loop {
+        let value_start = skip_json_ws(source, pos);
+        let value_end = skip_json_value(source, value_start)?;
+        if eval_raw_item_predicate(&source[value_start..value_end], predicate)? && !on_match() {
+            return Some(());
+        }
+        pos = skip_json_ws(source, value_end);
+        match source.get(pos).copied() {
+            Some(b',') => pos += 1,
+            Some(b']') => return Some(()),
+            _ => return None,
+        }
+    }
+}
+
+fn raw_json_visit_matching_source_from_root_fields<F>(
+    source: &[u8],
+    predicate: &NdjsonDirectItemPredicate,
+    root_fields: &[&str],
+    mut on_match: F,
+) -> Option<()>
+where
+    F: FnMut() -> bool,
+{
+    let start = skip_json_ws(source, 0);
+    let end = trim_json_ws_end(source);
+    if source.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut pos = skip_json_ws(source, start + 1);
+    if pos < end && source[pos] == b']' {
+        return Some(());
     }
     let ordinals = infer_raw_json_object_field_ordinals_at(source, pos, root_fields);
     let mut spans = RootFieldSpans::new();
-    let mut count = 0usize;
     loop {
         pos = skip_json_ws(source, pos);
         spans.clear();
@@ -1336,13 +1393,15 @@ fn raw_json_count_filtered_source_from_root_fields(
         } else {
             scan_raw_json_object_field_spans_at(source, pos, root_fields, &mut spans)
         }?;
-        if eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)? {
-            count += 1;
+        if eval_raw_item_predicate_from_root_fields(source, root_fields, &spans, predicate)?
+            && !on_match()
+        {
+            return Some(());
         }
         pos = skip_json_ws(source, next);
         match source.get(pos).copied() {
             Some(b',') => pos += 1,
-            Some(b']') => return Some(count),
+            Some(b']') => return Some(()),
             _ => return None,
         }
     }

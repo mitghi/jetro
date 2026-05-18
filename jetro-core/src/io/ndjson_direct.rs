@@ -777,6 +777,9 @@ pub(super) fn direct_tape_predicate(
 }
 
 pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
+    if let Some(predicate) = direct_array_any_predicate_expr(expr) {
+        return Some(predicate);
+    }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_predicate_from_plan(&plan)
 }
