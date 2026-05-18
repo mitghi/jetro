@@ -341,6 +341,10 @@
 - **NDJSON route validation is green in release mode**. The focused
   release-mode `io::ndjson` suite and facade-level route-observability test
   pass after the module-boundary and public observability changes.
+- **NDJSON route hardening has focused validation**. Route explanation,
+  reader-backed fanout rejection with and without limit, framed-payload source
+  capability reporting, and core compile health pass in the focused checks for
+  this cleanup pass.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
