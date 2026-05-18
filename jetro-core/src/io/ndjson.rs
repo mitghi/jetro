@@ -18,8 +18,9 @@ use super::ndjson_hint::{
 };
 pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, row_parse_error};
 use super::ndjson_rows::{
-    ndjson_rows_file_plan, ndjson_rows_stream_plan, ndjson_rows_subquery_plan, NdjsonRowsFilePlan,
+    ndjson_rows_file_plan, ndjson_rows_stream_plan, NdjsonRowsFilePlan,
 };
+use super::ndjson_route::{ndjson_explain, NdjsonRouteKind, NdjsonSourceMode};
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
@@ -564,11 +565,7 @@ where
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
         return drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer);
     }
-    if ndjson_rows_subquery_plan(query)?.is_some() {
-        return Err(JetroEngineError::Eval(EvalError(
-            "$.rows() stream subqueries require a file-backed NDJSON source".into(),
-        )));
-    }
+    reject_unsupported_reader_rows(engine, query, options)?;
 
     drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
@@ -620,8 +617,25 @@ where
             writer,
         );
     }
+    reject_unsupported_reader_rows(engine, query, options)?;
 
     drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
+}
+
+fn reject_unsupported_reader_rows(
+    engine: &JetroEngine,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<(), JetroEngineError> {
+    let route = ndjson_explain(engine, NdjsonSourceMode::Reader, query, options)?;
+    if route.kind == NdjsonRouteKind::UnsupportedRows {
+        let message = route
+            .fallback_reason
+            .map(|reason| reason.to_string())
+            .unwrap_or_else(|| "unsupported $.rows() NDJSON reader route".to_string());
+        return Err(JetroEngineError::Eval(EvalError(message)));
+    }
+    Ok(())
 }
 
 pub fn run_ndjson_file_limit<P, W>(
