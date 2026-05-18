@@ -371,6 +371,9 @@
   rows-stream, match-limited, source/file, parallel partition, structural hint,
   and reverse distinct report paths, with `cargo check -p jetro-core` passing
   after the report expansion.
+- **Reverse report validation is green**. Focused tests cover reverse match
+  reports, facade-level NDJSON report exports, route metadata invariants, and
+  core compile health after the reverse report additions.
 - **README documents NDJSON route/report observability**. The API section now
   shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
   selection and execution counters.
