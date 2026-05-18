@@ -378,6 +378,8 @@
   --test ndjson_basic -- --nocapture` passes after the route/report expansion,
   covering row-local, rows-stream, match, reverse, framed payload, source
   dispatch, parallel, and distinct paths together.
+- **Facade and workspace compile validation are green**. Public API tests and
+  `cargo check --workspace` pass after the final NDJSON report API additions.
 - **README documents NDJSON route/report observability**. The API section now
   shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
   selection and execution counters.
