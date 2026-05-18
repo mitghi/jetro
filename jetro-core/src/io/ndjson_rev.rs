@@ -654,6 +654,53 @@ where
 {
     drive_rev_matches_writer(engine, path, predicate, limit, options, writer)
 }
+
+pub fn run_ndjson_rev_matches_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_matches_with_report_and_options(
+        engine,
+        path,
+        predicate,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_matches_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let (_, stats) =
+        drive_rev_matches_writer_with_stats(engine, path, predicate, limit, options, writer)?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain {
+            kind: NdjsonRouteKind::Matches,
+            source: NdjsonSourceCaps::file(options),
+            writer_path: None,
+            rows_plan: None,
+            fallback_reason: None,
+        },
+        stats,
+    ))
+}
 fn drive_rev_writer_tape<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -772,22 +819,43 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    Ok(drive_rev_matches_writer_with_stats(engine, path, predicate, limit, options, writer)?.0)
+}
+
+fn drive_rev_matches_writer_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+    writer: W,
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
     if limit == 0 {
-        return Ok(0);
+        return Ok((0, NdjsonExecutionStats::default()));
     }
     if let Some(predicate) = super::ndjson::direct_tape_predicate(engine, predicate) {
-        return drive_rev_matches_writer_tape(engine, path, &predicate, limit, options, writer);
+        return drive_rev_matches_writer_tape_with_stats(
+            engine, path, &predicate, limit, options, writer,
+        );
     }
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
         let document = executor.parse_owned_row(reverse_row_no, row)?;
         let matched = executor.eval_document(reverse_row_no, &document)?;
+        stats.fallback_filter_rows += 1;
         if !is_truthy(&matched) {
+            stats.rows_filtered += 1;
             continue;
         }
 
@@ -798,22 +866,23 @@ where
             executor.engine(),
         )?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
-fn drive_rev_matches_writer_tape<P, W>(
+fn drive_rev_matches_writer_tape_with_stats<P, W>(
     engine: &JetroEngine,
     path: P,
     predicate: &super::ndjson::NdjsonDirectPredicate,
     limit: usize,
     options: super::ndjson::NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     P: AsRef<Path>,
     W: Write,
@@ -827,8 +896,10 @@ where
     let mut vm = needs_vm.then(|| engine.lock_vm());
     let env = needs_vm.then(|| crate::data::context::Env::new(crate::Val::Null));
     let mut predicate_path = super::ndjson::NdjsonPathCache::default();
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
         scratch.parse_slice(&row).map_err(|message| {
             super::ndjson::row_parse_error(
                 reverse_row_no,
@@ -844,18 +915,22 @@ where
         )
         .map_err(JetroEngineError::Eval)?
         {
+            stats.fallback_filter_rows += 1;
+            stats.rows_filtered += 1;
             continue;
         }
+        stats.fallback_filter_rows += 1;
         writer.write_all(&row)?;
         writer.write_all(b"\n")?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
 
 fn trim_line_ending(buf: &mut Vec<u8>) {

@@ -1119,6 +1119,39 @@ impl JetroEngine {
         io::run_ndjson_rev_matches_with_options(self, path, predicate, limit, writer, options)
     }
 
+    /// Like [`JetroEngine::run_ndjson_rev_matches`], returning the shared report.
+    pub fn run_ndjson_rev_matches_with_report<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches_with_report(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_matches_with_report`] with explicit options.
+    pub fn run_ndjson_rev_matches_with_report_and_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_matches_with_report_and_options(
+            self, path, predicate, limit, writer, options,
+        )
+    }
+
     /// Evaluate `query` independently for every non-empty NDJSON row and collect
     /// the per-row results.
     pub fn collect_ndjson<R>(

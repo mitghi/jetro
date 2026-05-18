@@ -2188,6 +2188,32 @@ fn reverse_match_writer_preserves_raw_matching_rows() {
 }
 
 #[test]
+fn reverse_matches_with_report_tracks_filter_stats() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-matches-report");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n{\"id\":3,\"active\":true}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_rev_matches_with_report(&path, "active", 2, &mut out)
+        .expect("reverse matches report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":3,\"active\":true}\n{\"id\":1,\"active\":true}\n"
+    );
+    assert_eq!(report.route.kind, jetro_core::io::NdjsonRouteKind::Matches);
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.rows_filtered, 1);
+}
+
+#[test]
 fn reverse_options_enforce_max_line_length() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-max-line");

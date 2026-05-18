@@ -67,8 +67,9 @@ pub use ndjson_rev::{
     run_ndjson_rev_distinct_by_with_report, run_ndjson_rev_distinct_by_with_report_and_options,
     run_ndjson_rev_distinct_by_with_stats, run_ndjson_rev_distinct_by_with_stats_and_options,
     run_ndjson_rev_limit, run_ndjson_rev_limit_with_options, run_ndjson_rev_matches,
-    run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonRevDistinctStats,
-    NdjsonReverseFileDriver,
+    run_ndjson_rev_matches_with_options, run_ndjson_rev_matches_with_report,
+    run_ndjson_rev_matches_with_report_and_options, run_ndjson_rev_with_options,
+    NdjsonRevDistinctStats, NdjsonReverseFileDriver,
 };
 pub use ndjson_route::{
     ndjson_explain, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonFallbackReason,
