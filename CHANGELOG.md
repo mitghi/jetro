@@ -4,78 +4,45 @@
 
 ### Release focus
 
-- **NDJSON route and report observability**. This branch adds public route
-  explanation and execution-report APIs for NDJSON reader, file, source,
-  limited, match, reverse match, and reverse `distinct_by` execution.
-- **Whole-stream row fanout and scalar sinks**. `$.rows()` stream plans now
-  cover fanout/subquery shapes plus terminal count, length, sum, numeric
-  reducers, last, predicate sinks, and `find_all` lowering through shared row
-  stream machinery.
-- **NDJSON implementation cleanup**. Row planning, parsing, line writing,
-  route selection, range splitting, partition scanning, direct predicate
-  checks, and rows-file dispatch moved behind focused shared helpers.
-- **simd-json is mandatory**. The optional `simd-json` feature flag has been
-  removed; byte-backed parsing, tape/view execution, structural
-  materialization, and NDJSON direct paths now always compile with simd-json
-  support.
+- **Ordered reverse row search**. File-backed
+  `$.rows().reverse().find(...)` and equivalent `filter(...).take(1)` plans can
+  search line-aligned partitions in semantic reverse order, preserving early
+  stop while still using the shared row-stream executor.
+- **Byte-native nested array predicates**. Row filters can evaluate generic
+  object-field `.find(...)` predicates such as
+  `@.custom_attributes.find(@.value == "z")` directly on row bytes, including
+  bare-field and `null` literal comparisons.
 
 ### NDJSON
 
-- Added `ndjson_explain`, `ndjson_rows_plan_kind`, and
-  `ndjson_writer_path_kind` so callers and tests can inspect row-local,
-  stream, fanout, subquery, file, reader, reverse, mmap, partition, and framed
-  payload route selection before execution.
-- Added `NdjsonExecutionReport` / `NdjsonExecutionStats` and
-  `run_ndjson_*_with_report` API variants for reader, file, source, limited,
-  match-limited, reverse match, and reverse `distinct_by` paths.
-- Report counters now cover scanned, emitted, filtered, duplicate, direct
-  filter/project/key, fallback filter/project/key, partition, and structural
-  hint activity where the executor can provide them.
-- File-backed `$.rows()` fanout and embedded subquery routes now carry normal
-  row-stream executor counters into reports instead of emitted-row-only
-  accounting.
-- Reader-backed fanout/subquery routes now fail before scanning with a typed
-  file-backed-source fallback reason when the requested plan requires file
-  capabilities.
-- Parallel file-backed stream reports preserve partition execution and merge
-  per-partition stats into the public report.
-- File-backed reverse `$.rows()` plans with ordered early-stop demand now use
-  the existing tail-first stream driver instead of partition collection, so
-  `reverse().find(...)` and equivalent `filter(...).take(1)` plans can stop as
-  soon as the semantic winner is found.
-- Reverse match reports use the shared NDJSON report shape while preserving
-  newest-to-oldest output.
-- Row-local direct byte/tape writers, match-limited scans, reverse distinct
-  scans, source dispatch, framed payload capabilities, and early-stop limit
-  paths have focused route/report coverage.
-
-### Row Streams
-
-- Added generic `$.rows()` fanout/subquery execution for object, array, and
-  let-bound stream shapes so multiple whole-stream results can be produced
-  from one file-backed source.
-- Added shared stream numeric accumulators and row-stream terminal support for
-  `count`, `len`, `sum`, numeric reducers, `last`, `any`, `all`, and
-  `find_all`.
-- Broadened first-match lowering and predicate read sharing so fanout plans can
-  reuse predicate analysis instead of duplicating query-shape-specific logic.
-- Hardened row-stream sink edges and terminal validation for empty streams and
-  terminal-method ordering.
+- Added `RowStreamFileStrategy::OrderedPartitionSearch` for ordered early-stop
+  plans when partitioned file execution is available.
+- Ordered partition search processes bounded worker waves, merges partition
+  output in semantic order, and stops once the retained output limit is
+  satisfied.
+- Reverse ordered-search reports now preserve partition counters while still
+  showing bounded scan/emission behavior.
+- Added a reusable `ArrayAny` direct predicate shape so nested array searches
+  are represented as generic predicate metadata rather than query-shape
+  executor fusions.
+- Added an early-exit byte scanner for array item predicates, sharing the
+  existing root-field span optimization used by filtered stream reducers.
 
 ### Maintenance
 
-- Removed stale NDJSON dead-code gates and broad warning suppression by wiring
-  production stats paths through normal code and gating test-only helpers
-  explicitly.
-- Split NDJSON row parsing, row driving, rows planning, line writing, route
-  planning, and helper dispatch into focused modules.
-- Updated README API documentation for NDJSON route/report observability.
-- Bumped workspace crates to `0.5.11`.
+- Kept reverse search and nested predicate execution on the existing
+  row-stream/byte predicate machinery rather than adding shape-specific
+  executors.
+- Added semantic coverage for tail, middle, head, and no-match ordered reverse
+  search positions.
+- Added direct-byte predicate coverage for nested array `.find(...)` matches,
+  misses, and `null` comparisons, plus row-stream stats coverage proving zero
+  filter fallback rows on supported input.
 
 ### Validation
 
-- Focused NDJSON route/report suites, facade public API tests, `cargo check
-  --workspace`, and `cargo test -p jetro-core --release` pass for this branch.
+- Focused `jetro-core` ordered-search and array-predicate tests pass for this
+  branch.
 
 ## 0.5.10
 

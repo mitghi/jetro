@@ -4390,11 +4390,12 @@ not-json
 
     #[test]
     fn direct_byte_predicate_covers_array_find_field_comparison() {
-        let row = br#"{"custom_attributes":[{"attribute_name":"a","value":"x"},{"attribute_name":"b","value":"z"},{"attribute_name":"c","value":null}]}"#;
+        let row = br#"{"custom_attributes":[{"attribute_name":"a","value":"x"},{"attribute_name":"b","value":"z"},{"attribute_name":"c","value":null},{"attribute_name":"d","value":""}]}"#;
         for (predicate, expected) in [
             (r#"@.custom_attributes.find(@.value == "z")"#, true),
             (r#"@.custom_attributes.find(value == "missing")"#, false),
             (r#"@.custom_attributes.find(@.value == null)"#, true),
+            (r#"@.custom_attributes.find(@.value == "")"#, true),
         ] {
             let expr = crate::parse::parser::parse(predicate).expect("parse");
             let plan = super::super::ndjson_direct::direct_tape_predicate_for_expr(&expr)
