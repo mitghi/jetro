@@ -4,6 +4,79 @@
 
 ### Release focus
 
+- **NDJSON route and report observability**. This branch adds public route
+  explanation and execution-report APIs for NDJSON reader, file, source,
+  limited, match, reverse match, and reverse `distinct_by` execution.
+- **Whole-stream row fanout and scalar sinks**. `$.rows()` stream plans now
+  cover fanout/subquery shapes plus terminal count, length, sum, numeric
+  reducers, last, predicate sinks, and `find_all` lowering through shared row
+  stream machinery.
+- **NDJSON implementation cleanup**. Row planning, parsing, line writing,
+  route selection, range splitting, partition scanning, direct predicate
+  checks, and rows-file dispatch moved behind focused shared helpers.
+- **simd-json is mandatory**. The optional `simd-json` feature flag has been
+  removed; byte-backed parsing, tape/view execution, structural
+  materialization, and NDJSON direct paths now always compile with simd-json
+  support.
+
+### NDJSON
+
+- Added `ndjson_explain`, `ndjson_rows_plan_kind`, and
+  `ndjson_writer_path_kind` so callers and tests can inspect row-local,
+  stream, fanout, subquery, file, reader, reverse, mmap, partition, and framed
+  payload route selection before execution.
+- Added `NdjsonExecutionReport` / `NdjsonExecutionStats` and
+  `run_ndjson_*_with_report` API variants for reader, file, source, limited,
+  match-limited, reverse match, and reverse `distinct_by` paths.
+- Report counters now cover scanned, emitted, filtered, duplicate, direct
+  filter/project/key, fallback filter/project/key, partition, and structural
+  hint activity where the executor can provide them.
+- File-backed `$.rows()` fanout and embedded subquery routes now carry normal
+  row-stream executor counters into reports instead of emitted-row-only
+  accounting.
+- Reader-backed fanout/subquery routes now fail before scanning with a typed
+  file-backed-source fallback reason when the requested plan requires file
+  capabilities.
+- Parallel file-backed stream reports preserve partition execution and merge
+  per-partition stats into the public report.
+- Reverse match reports use the shared NDJSON report shape while preserving
+  newest-to-oldest output.
+- Row-local direct byte/tape writers, match-limited scans, reverse distinct
+  scans, source dispatch, framed payload capabilities, and early-stop limit
+  paths have focused route/report coverage.
+
+### Row Streams
+
+- Added generic `$.rows()` fanout/subquery execution for object, array, and
+  let-bound stream shapes so multiple whole-stream results can be produced
+  from one file-backed source.
+- Added shared stream numeric accumulators and row-stream terminal support for
+  `count`, `len`, `sum`, numeric reducers, `last`, `any`, `all`, and
+  `find_all`.
+- Broadened first-match lowering and predicate read sharing so fanout plans can
+  reuse predicate analysis instead of duplicating query-shape-specific logic.
+- Hardened row-stream sink edges and terminal validation for empty streams and
+  terminal-method ordering.
+
+### Maintenance
+
+- Removed stale NDJSON dead-code gates and broad warning suppression by wiring
+  production stats paths through normal code and gating test-only helpers
+  explicitly.
+- Split NDJSON row parsing, row driving, rows planning, line writing, route
+  planning, and helper dispatch into focused modules.
+- Updated README API documentation for NDJSON route/report observability.
+- Bumped workspace crates to `0.5.11`.
+
+### Validation
+
+- Focused NDJSON route/report suites, facade public API tests, `cargo check
+  --workspace`, and `cargo test -p jetro-core --release` pass for this branch.
+
+## 0.5.10
+
+### Release focus
+
 - **End-to-end demand/tape execution**. Planned work for this release focuses
   on carrying shared demand metadata from builtin definitions through logical
   planning, physical planning, backend selection, tape/view execution, pipeline
@@ -20,12 +93,6 @@
   byte/tape direct execution, preserving cold-path performance, documenting
   benchmark methodology, and adding path-selection tests for static projections,
   filtered streams, reducers, and early-stop queries.
-- **simd-json is mandatory**. The optional `simd-json` feature flag has been
-  removed; byte-backed parsing, tape/view execution, structural materialization,
-  and NDJSON direct paths now always compile with simd-json support.
-- **Current release-prep status**. NDJSON architecture cleanup, public route
-  observability, focused release validation, full workspace release validation,
-  and the cold benchmark baseline are complete for this branch.
 
 ### NDJSON observability
 
@@ -256,10 +323,6 @@
   stream projection/filter/reducer cases are generally above 10x versus `jaq`.
   Remaining weaker cases are concentrated around per-row tail/extrema access
   and mixed root-plus-stream output, which are now the next optimization target.
-- **Cold showcase performance remains near native**. The local
-  `bench_cold` release example stays around 1.0x-1.6x native across the suite
-  after the NDJSON cleanup, with the README showcase at 1.16x native and about
-  12x faster than `jaq` in the latest run.
 - **NDJSON extrema plans are observable as extrema**. Test-only direct-plan
   labels now distinguish `sort_by(...).first()/last()` stream extrema from
   numeric reducers, making performance and routing regressions easier to pin
@@ -317,91 +380,6 @@
   projections in `filter(...).map(...).last()` now reuse the same item scan,
   matching the collect/first span-sharing architecture while retaining only one
   selected output.
-- **NDJSON internals share scanner and dispatch primitives**. Line-aligned
-  partition splitting, framed payload scanning, row-result collection, direct
-  predicate checks, fanout prefix lowering, `$.rows()` parsing, and file-backed
-  rows dispatch now live behind shared helpers instead of duplicated loops in
-  parallel, fanout, and stream entrypoints.
-- **NDJSON module boundaries are cleaner**. Row planning, row parsing/error
-  adaptation, per-row driving, and line-output policy now live in focused
-  modules instead of the main NDJSON API surface, while the hot direct byte/tape
-  paths continue to reuse the same zero-copy helpers.
-- **NDJSON warning hygiene is clean**. The NDJSON package no longer relies on
-  broad dead-code suppression; test-only helpers are explicitly gated and
-  production stats paths are wired through normal code.
-- **NDJSON route observability is public**. Callers can ask which writer family
-  a row-local query uses and which `$.rows()` file-plan family an expression
-  lowers to, with stable labels for byte expression, byte-writable tape, tape,
-  stream, fanout, and subquery routes.
-- **NDJSON route explain now includes source capabilities and typed fallback
-  reasons**. Reader-backed and file-backed routes report reverse, mmap,
-  partition, and framed-payload capability labels, and unsupported reader
-  `$.rows()` fanout/subquery plans fail before scanning input with a shared
-  typed file-backed-source reason.
-- **NDJSON routing is centralized behind an internal route plan**. Reader and
-  file execution now consume the same route planner used by public explain,
-  avoiding separate rows-plan rediscovery for stream, fanout, subquery, and
-  row-local dispatch.
-- **NDJSON execution reports are public**. Reader, file, source, and limited
-  run APIs can return a route/counter report with source capabilities, route
-  family, writer family, rows scanned/emitted/filtered, duplicate drops, direct
-  versus fallback stage counters, and partition count where the executor
-  provides those stats.
-- **NDJSON reports now cover row-local, match, and reverse distinct execution**.
-  Direct byte/tape row-local writers report scanned/emitted rows, direct
-  projection rows, fallback projection rows, and structural hint activity;
-  match-limited original-row output reports scanned/emitted/filtered rows and
-  direct versus fallback predicate evaluation; reverse `distinct_by` exposes
-  duplicate drops and direct/fallback key/project counters through the shared
-  report shape.
-- **Whole-stream fanout and subquery reports now carry executor counters**.
-  File-backed `$.rows()` fanout and embedded subquery routes reuse the same row
-  stream stats collection as their normal execution paths, so reports now
-  expose scanned, emitted, filtered, duplicate, direct/fallback, and partition
-  counters instead of falling back to emitted-row-only accounting.
-- **Reverse match reports use the shared NDJSON report model**.
-  `run_ndjson_rev_matches_with_report` reports reverse file source
-  capabilities, the `matches` route family, scanned/emitted/filtered rows, and
-  predicate direct/fallback counters while preserving newest-to-oldest output.
-- **File-backed stream reports preserve partition stats**. Reported file-backed
-  `$.rows()` streams now reuse the same generic partition executor as the
-  normal run path when eligible, carrying partition count and merged stage
-  counters into the public report instead of bypassing the parallel path.
-- **NDJSON report coverage spans hot and whole-stream routes**. Regression
-  tests cover row-local byte projections, rows-stream filtering/projection,
-  file-backed fanout, source dispatch, framed payload route capabilities, and
-  early-stop limit reports without changing the existing fast `run_ndjson`
-  behavior.
-- **NDJSON report validation is green**. Focused tests now cover row-local,
-  rows-stream, match-limited, source/file, parallel partition, structural hint,
-  and reverse distinct report paths, with `cargo check -p jetro-core` passing
-  after the report expansion.
-- **Reverse report validation is green**. Focused tests cover reverse match
-  reports, facade-level NDJSON report exports, route metadata invariants, and
-  core compile health after the reverse report additions.
-- **The full NDJSON integration suite is green**. `cargo test -p jetro-core
-  --test ndjson_basic -- --nocapture` passes after the route/report expansion,
-  covering row-local, rows-stream, match, reverse, framed payload, source
-  dispatch, parallel, and distinct paths together.
-- **NDJSON report integration validation is green**. The full
-  `ndjson_basic` integration suite now includes the fanout and subquery report
-  counter paths, with 91 focused NDJSON tests passing after the stats wiring.
-- **Facade and workspace compile validation are green**. Public API tests and
-  `cargo check --workspace` pass after the final NDJSON report API additions.
-- **Workspace compile validation remains green after report counter wiring**.
-  `cargo check --workspace` passes after the fanout/subquery report stats
-  changes; the public API integration binary requires a separate rerun because
-  it stalled before listing tests in the local validation environment.
-- **README documents NDJSON route/report observability**. The API section now
-  shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
-  selection and execution counters.
-- **NDJSON route validation is green in release mode**. The focused
-  release-mode `io::ndjson` suite and facade-level route-observability test
-  pass after the module-boundary and public observability changes.
-- **NDJSON route hardening has focused validation**. Route explanation,
-  reader-backed fanout rejection with and without limit, framed-payload source
-  capability reporting, and core compile health pass in the focused checks for
-  this cleanup pass.
 - **Demand and NDJSON focused validation is green**. Release-mode focused
   suites for chain demand and NDJSON execution pass after the demand-safety,
   byte-extrema, and stream-first changes.
@@ -409,15 +387,11 @@
   module suite passes after adding stream-last and the first/last source-demand
   changes, covering byte, hinted, tape, and reverse NDJSON paths.
 - **Core release validation is green**. `cargo test -p jetro-core --release`
-  passes after the stream-first, stream-last, extrema, demand-ordering, NDJSON
-  module-boundary, and route-observability changes.
-- **Core release validation remains green after NDJSON report stats**.
-  `cargo test -p jetro-core --release` passes after fanout/subquery report
-  counter wiring, including the updated `ndjson_basic` integration coverage.
+  passes after the stream-first, stream-last, extrema, and demand-ordering
+  changes.
 - **Full release workspace validation is green**.
-  `cargo test --release --workspace` passes after the stream-first,
-  byte-extrema, reverse selective-demand, NDJSON module-boundary, and public
-  observability changes.
+  `cargo test --release --verbose --workspace` passes after the
+  stream-first, byte-extrema, and reverse selective-demand changes.
 - **Core compile health is clean**. `cargo check -p jetro-core` passes after
   the demand propagation and NDJSON byte-executor changes.
 
@@ -1084,7 +1058,7 @@ git diff --check
 
 ### Performance
 
-- `simd-json` is mandatory for byte-backed parsing and tape/view execution.
+- `simd-json` is enabled by default.
 - `Jetro::from_bytes` keeps raw bytes and lazily builds expensive
   representations only when needed.
 - Added lazy simd-json tape handling and `TapeView`/`ValueView` execution paths.
