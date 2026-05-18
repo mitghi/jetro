@@ -993,6 +993,39 @@ impl JetroEngine {
         io::run_ndjson_matches_file_with_options(self, path, predicate, limit, writer, options)
     }
 
+    /// Like [`JetroEngine::run_ndjson_matches_file`], returning the shared report.
+    pub fn run_ndjson_matches_file_with_report<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file_with_report(self, path, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_file_with_report`] with explicit options.
+    pub fn run_ndjson_matches_file_with_report_and_options<P, W>(
+        &self,
+        path: P,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_file_with_report_and_options(
+            self, path, predicate, limit, writer, options,
+        )
+    }
+
     /// Evaluate `predicate` against each row from an [`io::NdjsonSource`], write
     /// matching original rows, and stop after `limit` matches.
     pub fn run_ndjson_matches_source<W>(
@@ -1021,6 +1054,37 @@ impl JetroEngine {
         W: std::io::Write,
     {
         io::run_ndjson_matches_source_with_options(self, source, predicate, limit, writer, options)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_source`], returning the shared report.
+    pub fn run_ndjson_matches_source_with_report<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source_with_report(self, source, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_source_with_report`] with explicit options.
+    pub fn run_ndjson_matches_source_with_report_and_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_source_with_report_and_options(
+            self, source, predicate, limit, writer, options,
+        )
     }
 
     /// Read an NDJSON file from tail to head, write matching original rows, and

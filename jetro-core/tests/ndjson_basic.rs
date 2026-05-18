@@ -1523,6 +1523,32 @@ fn run_ndjson_matches_with_report_tracks_filter_stats() {
 }
 
 #[test]
+fn run_ndjson_matches_source_with_report_dispatches_file_source() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-matches-source-report");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_matches_source_with_report(
+            NdjsonSource::file(path.clone()),
+            "active",
+            10,
+            &mut out,
+        )
+        .expect("matches source report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(report.stats.rows_scanned, 2);
+    assert_eq!(report.stats.rows_emitted, 1);
+}
+
+#[test]
 fn run_ndjson_matches_writes_raw_matching_rows() {
     let engine = JetroEngine::new();
     let input = br#" { "name" : "Ada" , "score" : 10 }

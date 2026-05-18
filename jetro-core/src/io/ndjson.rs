@@ -1219,6 +1219,60 @@ where
     )
 }
 
+pub fn run_ndjson_matches_file_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_matches_file_with_report_and_options(
+        engine,
+        path,
+        predicate,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_matches_file_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let file = File::open(path)?;
+    let (_, stats) = drive_ndjson_matches_writer_with_stats(
+        engine,
+        std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+        predicate,
+        limit,
+        options,
+        writer,
+    )?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain {
+            kind: NdjsonRouteKind::RowLocal,
+            source: NdjsonSourceCaps::file(options),
+            writer_path: None,
+            rows_plan: None,
+            fallback_reason: None,
+        },
+        stats,
+    ))
+}
+
 pub fn run_ndjson_matches_source<W>(
     engine: &JetroEngine,
     source: NdjsonSource,
@@ -1237,6 +1291,47 @@ where
         writer,
         NdjsonOptions::default(),
     )
+}
+
+pub fn run_ndjson_matches_source_with_report<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_matches_source_with_report_and_options(
+        engine,
+        source,
+        predicate,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_matches_source_with_report_and_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => run_ndjson_matches_file_with_report_and_options(
+            engine, path, predicate, limit, writer, options,
+        ),
+        NdjsonSource::Reader(reader) => run_ndjson_matches_with_report_and_options(
+            engine, reader, predicate, limit, writer, options,
+        ),
+    }
 }
 
 pub fn run_ndjson_matches_source_with_options<W>(
