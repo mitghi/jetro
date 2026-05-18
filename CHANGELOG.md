@@ -411,6 +411,9 @@
 - **Core release validation is green**. `cargo test -p jetro-core --release`
   passes after the stream-first, stream-last, extrema, demand-ordering, NDJSON
   module-boundary, and route-observability changes.
+- **Core release validation remains green after NDJSON report stats**.
+  `cargo test -p jetro-core --release` passes after fanout/subquery report
+  counter wiring, including the updated `ndjson_basic` integration coverage.
 - **Full release workspace validation is green**.
   `cargo test --release --workspace` passes after the stream-first,
   byte-extrema, reverse selective-demand, NDJSON module-boundary, and public
