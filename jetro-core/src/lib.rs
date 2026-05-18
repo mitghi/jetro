@@ -498,6 +498,33 @@ impl JetroEngine {
         io::run_ndjson_source_with_options(self, source, query, writer, options)
     }
 
+    /// Evaluate an [`io::NdjsonSource`] query and return a route/counter report.
+    pub fn run_ndjson_source_with_report<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_with_report(self, source, query, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source_with_report`] with explicit options.
+    pub fn run_ndjson_source_with_report_and_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_with_report_and_options(self, source, query, writer, options)
+    }
+
     /// Evaluate `query` for rows from an [`io::NdjsonSource`], write at most
     /// `limit` results, and stop reading.
     pub fn run_ndjson_source_limit<W>(

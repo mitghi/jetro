@@ -828,6 +828,38 @@ where
     }
 }
 
+pub fn run_ndjson_source_with_report<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_source_with_report_and_options(engine, source, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_source_with_report_and_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_file_with_report_and_options(engine, path, query, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_with_report_and_options(engine, reader, query, writer, options)
+        }
+    }
+}
+
 pub fn run_ndjson_source_limit<W>(
     engine: &JetroEngine,
     source: NdjsonSource,

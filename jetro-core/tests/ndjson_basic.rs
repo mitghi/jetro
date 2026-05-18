@@ -571,6 +571,27 @@ fn run_ndjson_file_with_report_returns_file_route_stats() {
 }
 
 #[test]
+fn run_ndjson_source_with_report_dispatches_file_source() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-source-report");
+    std::fs::write(&path, b"{\"id\":1}\n{\"id\":2}\n").unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_source_with_report(
+            NdjsonSource::file(path.clone()),
+            "$.rows().take(1).map($.id)",
+            &mut out,
+        )
+        .expect("source report should dispatch to file route");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n");
+    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(report.stats.rows_scanned, 1);
+}
+
+#[test]
 fn rows_stream_take_writes_original_rows() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"name":"Ada"}
