@@ -1,6 +1,7 @@
 use super::ndjson::{ndjson_writer_path_kind, NdjsonOptions, NdjsonWriterPathKind};
 use super::ndjson_frame::NdjsonRowFrame;
 use super::ndjson_rows::{ndjson_rows_file_plan, NdjsonRowsFilePlan, NdjsonRowsPlanKind};
+use super::stream_types::RowStreamStats;
 use crate::{JetroEngine, JetroEngineError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +120,45 @@ pub struct NdjsonRouteExplain {
     pub writer_path: Option<NdjsonWriterPathKind>,
     pub rows_plan: Option<NdjsonRowsPlanKind>,
     pub fallback_reason: Option<NdjsonFallbackReason>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NdjsonExecutionStats {
+    pub rows_scanned: usize,
+    pub rows_emitted: usize,
+    pub rows_filtered: usize,
+    pub duplicate_rows: usize,
+    pub direct_filter_rows: usize,
+    pub fallback_filter_rows: usize,
+    pub direct_key_rows: usize,
+    pub fallback_key_rows: usize,
+    pub direct_project_rows: usize,
+    pub fallback_project_rows: usize,
+    pub parallel_partitions: usize,
+}
+
+impl From<&RowStreamStats> for NdjsonExecutionStats {
+    fn from(stats: &RowStreamStats) -> Self {
+        Self {
+            rows_scanned: stats.rows_scanned,
+            rows_emitted: stats.rows_emitted,
+            rows_filtered: stats.rows_filtered,
+            duplicate_rows: stats.duplicate_rows,
+            direct_filter_rows: stats.direct_filter_rows,
+            fallback_filter_rows: stats.fallback_filter_rows,
+            direct_key_rows: stats.direct_key_rows,
+            fallback_key_rows: stats.fallback_key_rows,
+            direct_project_rows: stats.direct_project_rows,
+            fallback_project_rows: stats.fallback_project_rows,
+            parallel_partitions: stats.parallel_partitions,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NdjsonExecutionReport {
+    pub route: NdjsonRouteExplain,
+    pub stats: NdjsonExecutionStats,
 }
 
 pub(super) enum NdjsonRoutePlan {
@@ -316,5 +356,23 @@ mod tests {
         assert_eq!(file.kind, NdjsonRouteKind::RowsFanout);
         assert!(file.is_supported());
         assert!(file.fallback_reason.is_none());
+    }
+
+    #[test]
+    fn execution_stats_copy_row_stream_counters() {
+        let stream = RowStreamStats {
+            rows_scanned: 3,
+            rows_emitted: 2,
+            rows_filtered: 1,
+            direct_project_rows: 2,
+            parallel_partitions: 4,
+            ..RowStreamStats::default()
+        };
+        let stats = NdjsonExecutionStats::from(&stream);
+        assert_eq!(stats.rows_scanned, 3);
+        assert_eq!(stats.rows_emitted, 2);
+        assert_eq!(stats.rows_filtered, 1);
+        assert_eq!(stats.direct_project_rows, 2);
+        assert_eq!(stats.parallel_partitions, 4);
     }
 }
