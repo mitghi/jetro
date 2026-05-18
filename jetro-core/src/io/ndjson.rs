@@ -737,6 +737,74 @@ where
     }
 }
 
+pub fn run_ndjson_limit_with_report<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_ndjson_limit_with_report_and_options(
+        engine,
+        reader,
+        query,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_limit_with_report_and_options<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if limit == 0 {
+        let route = ndjson_route_plan(engine, NdjsonSourceMode::Reader, query, options)?
+            .explain()
+            .clone();
+        return Ok(NdjsonExecutionReport::emitted_only(route, 0));
+    }
+
+    match ndjson_route_plan(engine, NdjsonSourceMode::Reader, query, options)? {
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Stream(plan),
+        } => {
+            let (_, stats) = drive_ndjson_rows_stream_reader_with_stats(
+                engine,
+                reader,
+                &plan,
+                Some(limit),
+                options,
+                writer,
+            )?;
+            Ok(NdjsonExecutionReport::new(
+                explain,
+                NdjsonExecutionStats::from(&stats),
+            ))
+        }
+        NdjsonRoutePlan::Rows { explain, .. } | NdjsonRoutePlan::Unsupported { explain } => {
+            Err(unsupported_ndjson_route_error(&explain))
+        }
+        NdjsonRoutePlan::RowLocal { explain } => {
+            let rows = drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)?;
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+        }
+    }
+}
+
 pub fn run_ndjson_file_limit<P, W>(
     engine: &JetroEngine,
     path: P,

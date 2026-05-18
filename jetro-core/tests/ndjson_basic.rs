@@ -567,6 +567,25 @@ fn run_ndjson_with_report_keeps_row_local_route() {
 }
 
 #[test]
+fn run_ndjson_limit_with_report_tracks_early_stop() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+{"id":2}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_limit_with_report(Cursor::new(input), "$.rows().map($.id)", 2, &mut out)
+        .expect("limited rows stream report should stop before invalid tail");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_scanned, 2);
+    assert_eq!(report.stats.rows_emitted, 2);
+}
+
+#[test]
 fn run_ndjson_file_with_report_returns_file_route_stats() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-file-report");
