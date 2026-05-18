@@ -9,6 +9,15 @@ pub enum NdjsonSourceMode {
     File,
 }
 
+impl std::fmt::Display for NdjsonSourceMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Reader => "reader",
+            Self::File => "file",
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NdjsonSourceCaps {
     pub mode: NdjsonSourceMode,
@@ -20,6 +29,13 @@ pub struct NdjsonSourceCaps {
 }
 
 impl NdjsonSourceCaps {
+    pub fn for_mode(mode: NdjsonSourceMode, options: NdjsonOptions) -> Self {
+        match mode {
+            NdjsonSourceMode::Reader => Self::reader(options),
+            NdjsonSourceMode::File => Self::file(options),
+        }
+    }
+
     pub fn reader(options: NdjsonOptions) -> Self {
         Self {
             mode: NdjsonSourceMode::Reader,
@@ -40,6 +56,25 @@ impl NdjsonSourceCaps {
             partitionable: true,
             framed_payload: options.row_frame != NdjsonRowFrame::JsonLine,
         }
+    }
+}
+
+impl std::fmt::Display for NdjsonSourceCaps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.mode)?;
+        if self.reverse {
+            f.write_str("+reverse")?;
+        }
+        if self.mmap {
+            f.write_str("+mmap")?;
+        }
+        if self.partitionable {
+            f.write_str("+partitionable")?;
+        }
+        if self.framed_payload {
+            f.write_str("+framed-payload")?;
+        }
+        Ok(())
     }
 }
 
@@ -113,10 +148,7 @@ pub fn ndjson_explain(
     query: &str,
     options: NdjsonOptions,
 ) -> Result<NdjsonRouteExplain, JetroEngineError> {
-    let source = match source {
-        NdjsonSourceMode::Reader => NdjsonSourceCaps::reader(options),
-        NdjsonSourceMode::File => NdjsonSourceCaps::file(options),
-    };
+    let source = NdjsonSourceCaps::for_mode(source, options);
     let rows_plan = ndjson_rows_plan_kind(query)?;
     if let Some(rows_plan) = rows_plan {
         let file_required = matches!(
@@ -171,6 +203,7 @@ mod tests {
         .unwrap();
         assert_eq!(row.kind, NdjsonRouteKind::RowLocal);
         assert_eq!(row.writer_path, Some(NdjsonWriterPathKind::ByteExpr));
+        assert_eq!(row.source.to_string(), "reader");
 
         let rows = ndjson_explain(
             &engine,
@@ -181,6 +214,7 @@ mod tests {
         .unwrap();
         assert_eq!(rows.kind, NdjsonRouteKind::RowsStream);
         assert_eq!(rows.rows_plan, Some(NdjsonRowsPlanKind::Stream));
+        assert_eq!(rows.source.to_string(), "file+reverse+mmap+partitionable");
     }
 
     #[test]
