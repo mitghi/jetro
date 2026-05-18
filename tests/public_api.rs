@@ -1,7 +1,8 @@
 use jetro::{
     io::{
-        ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind,
-        NdjsonRowsPlanKind, NdjsonSource, NdjsonWriterPathKind,
+        ndjson_explain, ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind,
+        NdjsonFallbackReason, NdjsonRouteKind, NdjsonRowsPlanKind, NdjsonSource,
+        NdjsonSourceMode, NdjsonWriterPathKind,
     },
     JetroEngine,
 };
@@ -18,6 +19,28 @@ fn facade_exposes_ndjson_route_observability() {
     assert_eq!(
         ndjson_rows_plan_kind("$.rows().take(1)").unwrap(),
         Some(NdjsonRowsPlanKind::Stream)
+    );
+    let row = ndjson_explain(
+        &engine,
+        NdjsonSourceMode::Reader,
+        "$.name",
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(row.kind, NdjsonRouteKind::RowLocal);
+    assert_eq!(row.writer_path, Some(NdjsonWriterPathKind::ByteExpr));
+
+    let unsupported = ndjson_explain(
+        &engine,
+        NdjsonSourceMode::Reader,
+        r#"{head: $.rows().take(1)}"#,
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(unsupported.kind, NdjsonRouteKind::UnsupportedRows);
+    assert_eq!(
+        unsupported.fallback_reason,
+        Some(NdjsonFallbackReason::FileBackedRowsRequired)
     );
 }
 
