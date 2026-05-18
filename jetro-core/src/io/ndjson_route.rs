@@ -52,13 +52,38 @@ pub enum NdjsonRouteKind {
     UnsupportedRows,
 }
 
+impl std::fmt::Display for NdjsonRouteKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::RowLocal => "row-local",
+            Self::RowsStream => "rows-stream",
+            Self::RowsFanout => "rows-fanout",
+            Self::RowsSubquery => "rows-subquery",
+            Self::UnsupportedRows => "unsupported-rows",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NdjsonFallbackReason {
+    FileBackedRowsRequired,
+}
+
+impl std::fmt::Display for NdjsonFallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::FileBackedRowsRequired => "rows plan requires a file-backed NDJSON source",
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NdjsonRouteExplain {
     pub kind: NdjsonRouteKind,
     pub source: NdjsonSourceCaps,
     pub writer_path: Option<NdjsonWriterPathKind>,
     pub rows_plan: Option<NdjsonRowsPlanKind>,
-    pub fallback_reason: Option<&'static str>,
+    pub fallback_reason: Option<NdjsonFallbackReason>,
 }
 
 pub fn ndjson_explain(
@@ -83,7 +108,7 @@ pub fn ndjson_explain(
                 source,
                 writer_path: None,
                 rows_plan: Some(rows_plan),
-                fallback_reason: Some("rows plan requires a file-backed NDJSON source"),
+                fallback_reason: Some(NdjsonFallbackReason::FileBackedRowsRequired),
             });
         }
         let kind = match rows_plan {
@@ -150,7 +175,12 @@ mod tests {
         assert_eq!(route.kind, NdjsonRouteKind::UnsupportedRows);
         assert_eq!(
             route.fallback_reason,
-            Some("rows plan requires a file-backed NDJSON source")
+            Some(NdjsonFallbackReason::FileBackedRowsRequired)
+        );
+        assert_eq!(route.kind.to_string(), "unsupported-rows");
+        assert_eq!(
+            route.fallback_reason.unwrap().to_string(),
+            "rows plan requires a file-backed NDJSON source"
         );
     }
 }

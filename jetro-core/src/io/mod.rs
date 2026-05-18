@@ -61,7 +61,8 @@ pub use ndjson_rev::{
     NdjsonReverseFileDriver,
 };
 pub use ndjson_route::{
-    ndjson_explain, NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps, NdjsonSourceMode,
+    ndjson_explain, NdjsonFallbackReason, NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps,
+    NdjsonSourceMode,
 };
 pub use ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
 pub use source::NdjsonSource;
