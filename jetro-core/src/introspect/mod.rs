@@ -5,11 +5,11 @@
 //! explicit inspection APIs.
 
 mod inspect;
-mod report;
+pub(crate) mod ndjson;
 pub(crate) mod physical;
 pub(crate) mod pipeline;
-pub(crate) mod ndjson;
 mod render;
+mod report;
 
 pub(crate) use inspect::inspect_query;
 pub use report::{

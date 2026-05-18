@@ -119,7 +119,9 @@ pub(crate) enum RowStreamParallelism {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RowStreamFileStrategy {
     Sequential,
-    Partitioned { retained_limit: usize },
+    Partitioned {
+        retained_limit: usize,
+    },
     OrderedPartitionSearch {
         direction: RowStreamDirection,
         retained_limit: usize,

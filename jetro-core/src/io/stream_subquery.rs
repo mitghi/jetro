@@ -1,8 +1,8 @@
-use super::stream_plan::{lower_root_rows_expr, RowStreamPlan, RowStreamPlanError, RowStreamSourceKind};
-use crate::builtins::BuiltinMethod;
-use crate::parse::ast::{
-    Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, Step,
+use super::stream_plan::{
+    lower_root_rows_expr, RowStreamPlan, RowStreamPlanError, RowStreamSourceKind,
 };
+use crate::builtins::BuiltinMethod;
+use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, Step};
 
 pub(super) const STREAM_BINDING: &str = "__jetro_rows_stream_0";
 
@@ -185,21 +185,23 @@ fn replace_steps(
         .iter()
         .map(|step| {
             Ok(match step {
-                crate::parse::ast::Step::DynIndex(expr) => {
-                    crate::parse::ast::Step::DynIndex(Box::new(replace_rows_expr(
-                        expr, source, lifted,
-                    )?))
-                }
+                crate::parse::ast::Step::DynIndex(expr) => crate::parse::ast::Step::DynIndex(
+                    Box::new(replace_rows_expr(expr, source, lifted)?),
+                ),
                 crate::parse::ast::Step::InlineFilter(expr) => {
                     crate::parse::ast::Step::InlineFilter(Box::new(replace_rows_expr(
                         expr, source, lifted,
                     )?))
                 }
-                crate::parse::ast::Step::Method(name, args) => {
-                    crate::parse::ast::Step::Method(name.clone(), replace_args(args, source, lifted)?)
-                }
+                crate::parse::ast::Step::Method(name, args) => crate::parse::ast::Step::Method(
+                    name.clone(),
+                    replace_args(args, source, lifted)?,
+                ),
                 crate::parse::ast::Step::OptMethod(name, args) => {
-                    crate::parse::ast::Step::OptMethod(name.clone(), replace_args(args, source, lifted)?)
+                    crate::parse::ast::Step::OptMethod(
+                        name.clone(),
+                        replace_args(args, source, lifted)?,
+                    )
                 }
                 _ => step.clone(),
             })

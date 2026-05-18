@@ -146,9 +146,11 @@ fn node_detail(node: &PlanNode) -> Option<String> {
         PlanNode::Object(fields) => Some(format!("fields={}", fields.len())),
         PlanNode::Array(items) => Some(format!("items={}", items.len())),
         PlanNode::Let { name, .. } => Some(format!("name={name}")),
-        PlanNode::UpdateBatch { selector, ops, .. } => {
-            Some(format!("selector_steps={}, ops={}", selector.len(), ops.len()))
-        }
+        PlanNode::UpdateBatch { selector, ops, .. } => Some(format!(
+            "selector_steps={}, ops={}",
+            selector.len(),
+            ops.len()
+        )),
         _ => None,
     }
 }

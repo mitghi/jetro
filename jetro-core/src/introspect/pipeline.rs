@@ -1,5 +1,5 @@
 use super::report::{PipelineInspection, PipelineStageInspection};
-use crate::exec::pipeline::{FallbackBoundary, PipelineBody, PhysicalExecPath, Sink, Stage};
+use crate::exec::pipeline::{FallbackBoundary, PhysicalExecPath, PipelineBody, Sink, Stage};
 use crate::ir::physical::{PipelinePlanSource, PlanNode, QueryPlan};
 
 pub(crate) fn inspect_first_pipeline(plan: &QueryPlan) -> Option<PipelineInspection> {
@@ -115,10 +115,9 @@ fn stage_label(stage: &Stage) -> (&'static str, Option<String>) {
         Stage::UsizeBuiltin { method, value } => {
             ("builtin-usize", Some(format!("{method:?}({value})")))
         }
-        Stage::StringBuiltin { method, value } => (
-            "builtin-string",
-            Some(format!("{method:?}({value:?})")),
-        ),
+        Stage::StringBuiltin { method, value } => {
+            ("builtin-string", Some(format!("{method:?}({value:?})")))
+        }
         Stage::StringPairBuiltin {
             method,
             first,

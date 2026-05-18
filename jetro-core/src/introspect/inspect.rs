@@ -16,28 +16,28 @@ pub(crate) fn inspect_query(
     let plan = engine.cached_plan(query, planning_context(options.context));
     let (summary, physical) = super::physical::inspect_physical_plan(&plan);
     let logical = (options.level != InspectLevel::Summary).then(|| inspect_logical(query));
-    let physical = matches!(options.level, InspectLevel::Plan | InspectLevel::Detailed)
-        .then_some(physical);
+    let physical =
+        matches!(options.level, InspectLevel::Plan | InspectLevel::Detailed).then_some(physical);
     let pipeline = (options.level == InspectLevel::Detailed)
         .then(|| super::pipeline::inspect_first_pipeline(&plan))
         .flatten();
     let ndjson = match options.context {
-        InspectContext::NdjsonReader if options.level == InspectLevel::Detailed => Some(
-            super::ndjson::inspect_ndjson_query(
+        InspectContext::NdjsonReader if options.level == InspectLevel::Detailed => {
+            Some(super::ndjson::inspect_ndjson_query(
                 engine,
                 query,
                 NdjsonSourceMode::Reader,
                 ndjson_options,
-            )?,
-        ),
-        InspectContext::NdjsonFile if options.level == InspectLevel::Detailed => Some(
-            super::ndjson::inspect_ndjson_query(
+            )?)
+        }
+        InspectContext::NdjsonFile if options.level == InspectLevel::Detailed => {
+            Some(super::ndjson::inspect_ndjson_query(
                 engine,
                 query,
                 NdjsonSourceMode::File,
                 ndjson_options,
-            )?,
-        ),
+            )?)
+        }
         _ => None,
     };
 
@@ -67,7 +67,10 @@ fn summary_with_context(
     mut summary: InspectionSummary,
     context: InspectContext,
 ) -> InspectionSummary {
-    if matches!(context, InspectContext::NdjsonReader | InspectContext::NdjsonFile) {
+    if matches!(
+        context,
+        InspectContext::NdjsonReader | InspectContext::NdjsonFile
+    ) {
         summary.materializes_root = false;
     }
     summary
@@ -168,7 +171,10 @@ mod tests {
 
         assert!(report.physical.is_some());
         assert_eq!(
-            report.ndjson.as_ref().map(|ndjson| ndjson.route_kind.as_str()),
+            report
+                .ndjson
+                .as_ref()
+                .map(|ndjson| ndjson.route_kind.as_str()),
             Some("rows-stream")
         );
         assert!(report.format_tree().contains("ordered-partition-search"));

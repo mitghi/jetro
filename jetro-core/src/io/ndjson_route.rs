@@ -210,7 +210,6 @@ impl NdjsonRoutePlan {
             | Self::Unsupported { explain } => explain,
         }
     }
-
 }
 
 impl NdjsonRouteExplain {
@@ -367,8 +366,7 @@ mod tests {
     #[test]
     fn route_explain_marks_reader_rows_fanout_unsupported() {
         let engine = JetroEngine::new();
-        let query =
-            r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#;
+        let query = r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#;
 
         let reader = ndjson_explain(
             &engine,

@@ -29,11 +29,7 @@ impl QueryInspection {
             "  contains vm fallback: {}",
             self.summary.contains_vm_fallback
         );
-        let _ = writeln!(
-            out,
-            "  byte native: {}",
-            self.summary.can_run_byte_native
-        );
+        let _ = writeln!(out, "  byte native: {}", self.summary.can_run_byte_native);
 
         if let Some(logical) = &self.logical {
             let _ = writeln!(out, "logical:");

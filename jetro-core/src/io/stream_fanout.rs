@@ -469,7 +469,8 @@ where
     P: AsRef<std::path::Path>,
     W: Write,
 {
-    let (value, mut stats) = collect_ndjson_rows_fanout_file_with_stats(engine, path, plan, options)?;
+    let (value, mut stats) =
+        collect_ndjson_rows_fanout_file_with_stats(engine, path, plan, options)?;
     let mut writer = ndjson_writer_with_options(writer, options);
     let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
     stats.rows_emitted = emitted;

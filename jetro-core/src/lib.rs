@@ -800,9 +800,7 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
         W: std::io::Write,
     {
-        io::run_ndjson_rev_distinct_by_with_report(
-            self, path, key_query, query, limit, writer,
-        )
+        io::run_ndjson_rev_distinct_by_with_report(self, path, key_query, query, limit, writer)
     }
 
     /// Like [`JetroEngine::run_ndjson_rev_distinct_by_with_report`] with explicit options.
