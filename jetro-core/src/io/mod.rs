@@ -14,6 +14,7 @@ mod ndjson_frame;
 mod ndjson_hint;
 mod ndjson_parallel;
 mod ndjson_rev;
+mod ndjson_route;
 mod ndjson_row;
 mod ndjson_rows;
 mod ndjson_scan;
@@ -58,6 +59,9 @@ pub use ndjson_rev::{
     run_ndjson_rev_limit, run_ndjson_rev_limit_with_options, run_ndjson_rev_matches,
     run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonRevDistinctStats,
     NdjsonReverseFileDriver,
+};
+pub use ndjson_route::{
+    ndjson_explain, NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps, NdjsonSourceMode,
 };
 pub use ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
 pub use source::NdjsonSource;
