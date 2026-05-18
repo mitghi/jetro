@@ -101,6 +101,46 @@ fn facade_exposes_ndjson_execution_report_api() {
 }
 
 #[test]
+fn facade_exposes_ndjson_match_and_reverse_report_api() {
+    let engine = JetroEngine::new();
+    let rows = Cursor::new(
+        br#"{"id":1,"active":true}
+{"id":2,"active":false}
+"#,
+    );
+    let mut out = Vec::new();
+
+    let matches = engine
+        .run_ndjson_matches_with_report(rows, "active", 10, &mut out)
+        .expect("facade match report API should run");
+
+    assert_eq!(matches.route.kind, NdjsonRouteKind::Matches);
+    assert_eq!(matches.stats.rows_scanned, 2);
+    assert_eq!(matches.stats.rows_emitted, 1);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "jetro-facade-rev-report-{}.ndjson",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"v\":1}\n{\"id\":2,\"v\":1}\n{\"id\":1,\"v\":2}\n",
+    )
+    .unwrap();
+    let mut rev_out = Vec::new();
+
+    let reverse = engine
+        .run_ndjson_rev_distinct_by_with_report(&path, "id", "v", 10, &mut rev_out)
+        .expect("facade reverse distinct report API should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(rev_out).unwrap(), "2\n1\n");
+    assert_eq!(reverse.stats.rows_scanned, 3);
+    assert_eq!(reverse.stats.duplicate_rows, 1);
+}
+
+#[test]
 fn facade_exposes_reverse_distinct_by_stats_api() {
     let engine = JetroEngine::new();
     let mut path = std::env::temp_dir();
