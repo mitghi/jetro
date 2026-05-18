@@ -81,6 +81,26 @@ fn facade_exposes_ndjson_match_api() {
 }
 
 #[test]
+fn facade_exposes_ndjson_execution_report_api() {
+    let engine = JetroEngine::new();
+    let rows = Cursor::new(
+        br#"{"id":1,"active":true}
+{"id":2,"active":false}
+"#,
+    );
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(rows, "$.rows().filter($.active).map($.id)", &mut out)
+        .expect("facade report API should run");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n");
+    assert_eq!(report.route.kind, NdjsonRouteKind::RowsStream);
+    assert_eq!(report.stats.rows_scanned, 2);
+    assert_eq!(report.stats.rows_emitted, 1);
+}
+
+#[test]
 fn facade_exposes_reverse_distinct_by_stats_api() {
     let engine = JetroEngine::new();
     let mut path = std::env::temp_dir();
