@@ -47,6 +47,7 @@ pub use ndjson::{
     run_ndjson_limit_with_report_and_options, run_ndjson_matches, run_ndjson_matches_file,
     run_ndjson_matches_file_with_options, run_ndjson_matches_source,
     run_ndjson_matches_source_with_options, run_ndjson_matches_with_options, run_ndjson_source,
+    run_ndjson_matches_with_report, run_ndjson_matches_with_report_and_options,
     run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
     run_ndjson_source_limit_with_report, run_ndjson_source_limit_with_report_and_options,
     run_ndjson_source_with_report, run_ndjson_source_with_report_and_options,

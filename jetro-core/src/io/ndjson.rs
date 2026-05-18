@@ -20,7 +20,7 @@ pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, r
 use super::ndjson_rows::NdjsonRowsFilePlan;
 use super::ndjson_route::{
     ndjson_route_plan, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain,
-    NdjsonRoutePlan, NdjsonSourceMode,
+    NdjsonRouteKind, NdjsonRoutePlan, NdjsonSourceCaps, NdjsonSourceMode,
 };
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
@@ -1124,6 +1124,53 @@ where
     W: Write,
 {
     drive_ndjson_matches_writer(engine, reader, predicate, limit, options, writer)
+}
+
+pub fn run_ndjson_matches_with_report<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_ndjson_matches_with_report_and_options(
+        engine,
+        reader,
+        predicate,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_matches_with_report_and_options<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let (_, stats) =
+        drive_ndjson_matches_writer_with_stats(engine, reader, predicate, limit, options, writer)?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain {
+            kind: NdjsonRouteKind::RowLocal,
+            source: NdjsonSourceCaps::reader(options),
+            writer_path: None,
+            rows_plan: None,
+            fallback_reason: None,
+        },
+        stats,
+    ))
 }
 
 pub fn run_ndjson_matches_file<P, W>(
@@ -2246,14 +2293,14 @@ impl NdjsonPathCache {
         }
     }
 }
-fn drive_ndjson_tape_matches_writer<R, W>(
+fn drive_ndjson_tape_matches_writer_with_stats<R, W>(
     engine: &JetroEngine,
     reader: R,
     predicate: &NdjsonDirectPredicate,
     limit: usize,
     options: NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     R: BufRead,
     W: Write,
@@ -2268,15 +2315,20 @@ where
     let mut vm = needs_vm.then(|| engine.lock_vm());
     let env = needs_vm.then(|| crate::data::context::Env::new(Val::Null));
     let mut predicate_path = NdjsonPathCache::default();
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut line)? {
+        stats.rows_scanned += 1;
         if let Some(matched) = eval_ndjson_byte_predicate_row(&row, predicate)? {
+            stats.direct_filter_rows += 1;
             if !matched {
+                stats.rows_filtered += 1;
                 continue;
             }
             writer.write_all(&row)?;
             writer.write_all(b"\n")?;
             emitted += 1;
+            stats.rows_emitted += 1;
             if emitted >= limit {
                 break;
             }
@@ -2298,18 +2350,22 @@ where
         )
         .map_err(JetroEngineError::Eval)?
         {
+            stats.fallback_filter_rows += 1;
+            stats.rows_filtered += 1;
             continue;
         }
+        stats.fallback_filter_rows += 1;
         writer.write_all(&row)?;
         writer.write_all(b"\n")?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
 
 fn drive_ndjson_matches<R, F>(
@@ -2371,11 +2427,29 @@ where
     R: BufRead,
     W: Write,
 {
+    Ok(drive_ndjson_matches_writer_with_stats(
+        engine, reader, predicate, limit, options, writer,
+    )?
+    .0)
+}
+
+fn drive_ndjson_matches_writer_with_stats<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    predicate: &str,
+    limit: usize,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
     if limit == 0 {
-        return Ok(0);
+        return Ok((0, NdjsonExecutionStats::default()));
     }
     if let Some(predicate) = direct_tape_predicate(engine, predicate) {
-        return drive_ndjson_tape_matches_writer(
+        return drive_ndjson_tape_matches_writer_with_stats(
             engine, reader, &predicate, limit, options, writer,
         );
     }
@@ -2385,23 +2459,28 @@ where
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut emitted = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        stats.rows_scanned += 1;
         let document = executor.parse_owned_row(line_no, row)?;
         let matched = executor.eval_document(line_no, &document)?;
+        stats.fallback_filter_rows += 1;
         if !is_truthy(&matched) {
+            stats.rows_filtered += 1;
             continue;
         }
 
         write_document_line(&mut writer, &document, line_no, executor.engine())?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
 
 pub(super) struct NdjsonRowExecutor<'a> {

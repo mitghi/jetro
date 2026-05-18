@@ -929,6 +929,39 @@ impl JetroEngine {
         io::run_ndjson_matches_with_options(self, reader, predicate, limit, writer, options)
     }
 
+    /// Evaluate a match-limited NDJSON query and return the shared execution report.
+    pub fn run_ndjson_matches_with_report<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_with_report(self, reader, predicate, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_matches_with_report`] with explicit options.
+    pub fn run_ndjson_matches_with_report_and_options<R, W>(
+        &self,
+        reader: R,
+        predicate: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        R: std::io::BufRead,
+        W: std::io::Write,
+    {
+        io::run_ndjson_matches_with_report_and_options(
+            self, reader, predicate, limit, writer, options,
+        )
+    }
+
     /// Open an NDJSON file, write matching original rows, and stop after `limit` matches.
     pub fn run_ndjson_matches_file<P, W>(
         &self,

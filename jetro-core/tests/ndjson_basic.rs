@@ -1500,6 +1500,29 @@ fn run_ndjson_matches_writes_matching_original_rows() {
 }
 
 #[test]
+fn run_ndjson_matches_with_report_tracks_filter_stats() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"active":true}
+{"id":2,"active":false}
+{"id":3,"active":true}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_matches_with_report(Cursor::new(input), "active", 2, &mut out)
+        .expect("matches report should run");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"active\":true}\n{\"id\":3,\"active\":true}\n"
+    );
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.rows_filtered, 1);
+    assert_eq!(report.stats.direct_filter_rows, 3);
+}
+
+#[test]
 fn run_ndjson_matches_writes_raw_matching_rows() {
     let engine = JetroEngine::new();
     let input = br#" { "name" : "Ada" , "score" : 10 }
