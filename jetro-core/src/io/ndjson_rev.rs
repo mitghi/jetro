@@ -691,13 +691,7 @@ where
     let (_, stats) =
         drive_rev_matches_writer_with_stats(engine, path, predicate, limit, options, writer)?;
     Ok(NdjsonExecutionReport::new(
-        NdjsonRouteExplain {
-            kind: NdjsonRouteKind::Matches,
-            source: NdjsonSourceCaps::file(options),
-            writer_path: None,
-            rows_plan: None,
-            fallback_reason: None,
-        },
+        NdjsonRouteExplain::matches(NdjsonSourceCaps::file(options)),
         stats,
     ))
 }

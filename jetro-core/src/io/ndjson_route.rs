@@ -214,6 +214,16 @@ impl NdjsonRoutePlan {
 }
 
 impl NdjsonRouteExplain {
+    pub fn matches(source: NdjsonSourceCaps) -> Self {
+        Self {
+            kind: NdjsonRouteKind::Matches,
+            source,
+            writer_path: None,
+            rows_plan: None,
+            fallback_reason: None,
+        }
+    }
+
     pub fn is_rows_route(&self) -> bool {
         self.rows_plan.is_some()
     }

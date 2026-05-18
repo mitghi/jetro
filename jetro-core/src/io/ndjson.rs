@@ -20,7 +20,7 @@ pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, r
 use super::ndjson_rows::NdjsonRowsFilePlan;
 use super::ndjson_route::{
     ndjson_route_plan, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain,
-    NdjsonRouteKind, NdjsonRoutePlan, NdjsonSourceCaps, NdjsonSourceMode,
+    NdjsonRoutePlan, NdjsonSourceCaps, NdjsonSourceMode,
 };
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
@@ -1162,13 +1162,7 @@ where
     let (_, stats) =
         drive_ndjson_matches_writer_with_stats(engine, reader, predicate, limit, options, writer)?;
     Ok(NdjsonExecutionReport::new(
-        NdjsonRouteExplain {
-            kind: NdjsonRouteKind::Matches,
-            source: NdjsonSourceCaps::reader(options),
-            writer_path: None,
-            rows_plan: None,
-            fallback_reason: None,
-        },
+        NdjsonRouteExplain::matches(NdjsonSourceCaps::reader(options)),
         stats,
     ))
 }
@@ -1262,13 +1256,7 @@ where
         writer,
     )?;
     Ok(NdjsonExecutionReport::new(
-        NdjsonRouteExplain {
-            kind: NdjsonRouteKind::Matches,
-            source: NdjsonSourceCaps::file(options),
-            writer_path: None,
-            rows_plan: None,
-            fallback_reason: None,
-        },
+        NdjsonRouteExplain::matches(NdjsonSourceCaps::file(options)),
         stats,
     ))
 }
