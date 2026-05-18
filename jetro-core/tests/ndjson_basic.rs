@@ -636,6 +636,28 @@ fn rows_fanout_requires_file_backed_ndjson_before_scanning_rows() {
 }
 
 #[test]
+fn rows_fanout_with_limit_requires_file_backed_ndjson_before_scanning_rows() {
+    let engine = JetroEngine::new();
+    let input = br#"not-json
+"#;
+    let mut out = Vec::new();
+
+    let err = engine
+        .run_ndjson_limit(
+            Cursor::new(input),
+            r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#,
+            1,
+            &mut out,
+        )
+        .expect_err("reader-backed rows fanout limit should be rejected");
+
+    assert!(err
+        .to_string()
+        .contains("rows plan requires a file-backed NDJSON source"));
+    assert!(out.is_empty());
+}
+
+#[test]
 fn rows_stream_reverse_take_map_runs_from_file_tail() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rows-reverse");
