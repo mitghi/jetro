@@ -388,6 +388,10 @@
   counter paths, with 91 focused NDJSON tests passing after the stats wiring.
 - **Facade and workspace compile validation are green**. Public API tests and
   `cargo check --workspace` pass after the final NDJSON report API additions.
+- **Workspace compile validation remains green after report counter wiring**.
+  `cargo check --workspace` passes after the fanout/subquery report stats
+  changes; the public API integration binary requires a separate rerun because
+  it stalled before listing tests in the local validation environment.
 - **README documents NDJSON route/report observability**. The API section now
   shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
   selection and execution counters.
