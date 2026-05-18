@@ -1531,6 +1531,18 @@ where
     P: AsRef<Path>,
     W: Write,
 {
+    if let Some(result) = super::ndjson_parallel::collect_rows_stream_file_with_stats(
+        engine,
+        path.as_ref(),
+        plan,
+        options,
+    )? {
+        let mut stats = result.stats;
+        let emitted = write_collected_rows_stream(result.value, external_limit, options, writer)?;
+        stats.rows_emitted = emitted;
+        return Ok((emitted, stats));
+    }
+
     if plan.direction == RowStreamDirection::Forward {
         let file = File::open(path)?;
         return drive_ndjson_rows_stream_reader_with_stats(
