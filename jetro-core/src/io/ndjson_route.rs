@@ -161,6 +161,22 @@ pub struct NdjsonExecutionReport {
     pub stats: NdjsonExecutionStats,
 }
 
+impl NdjsonExecutionReport {
+    pub fn new(route: NdjsonRouteExplain, stats: NdjsonExecutionStats) -> Self {
+        Self { route, stats }
+    }
+
+    pub fn row_local(route: NdjsonRouteExplain, rows_emitted: usize) -> Self {
+        Self {
+            route,
+            stats: NdjsonExecutionStats {
+                rows_emitted,
+                ..NdjsonExecutionStats::default()
+            },
+        }
+    }
+}
+
 pub(super) enum NdjsonRoutePlan {
     RowLocal {
         explain: NdjsonRouteExplain,

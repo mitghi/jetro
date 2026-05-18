@@ -525,6 +525,30 @@ not-json
 }
 
 #[test]
+fn run_ndjson_with_report_returns_rows_stream_stats() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"active":true}
+{"id":2,"active":false}
+{"id":3,"active":true}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            "$.rows().filter($.active).map($.id)",
+            &mut out,
+        )
+        .expect("rows stream report should run");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.rows_filtered, 1);
+}
+
+#[test]
 fn rows_stream_take_writes_original_rows() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"name":"Ada"}

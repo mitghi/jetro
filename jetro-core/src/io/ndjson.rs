@@ -18,7 +18,10 @@ use super::ndjson_hint::{
 };
 pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, row_parse_error};
 use super::ndjson_rows::NdjsonRowsFilePlan;
-use super::ndjson_route::{ndjson_route_plan, NdjsonRoutePlan, NdjsonSourceMode};
+use super::ndjson_route::{
+    ndjson_route_plan, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain,
+    NdjsonRoutePlan, NdjsonSourceMode,
+};
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
@@ -580,6 +583,52 @@ where
     }
 }
 
+pub fn run_ndjson_with_report<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    run_ndjson_with_report_and_options(engine, reader, query, writer, NdjsonOptions::default())
+}
+
+pub fn run_ndjson_with_report_and_options<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
+    match ndjson_route_plan(engine, NdjsonSourceMode::Reader, query, options)? {
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Stream(plan),
+        } => {
+            let (_, stats) =
+                drive_ndjson_rows_stream_reader_with_stats(engine, reader, &plan, None, options, writer)?;
+            Ok(NdjsonExecutionReport::new(
+                explain,
+                NdjsonExecutionStats::from(&stats),
+            ))
+        }
+        NdjsonRoutePlan::Rows { explain, .. } | NdjsonRoutePlan::Unsupported { explain } => {
+            Err(unsupported_ndjson_route_error(&explain))
+        }
+        NdjsonRoutePlan::RowLocal { explain } => {
+            let rows = drive_ndjson_writer(engine, reader, query, None, options, writer)?;
+            Ok(NdjsonExecutionReport::row_local(explain, rows))
+        }
+    }
+}
+
 pub fn run_ndjson_limit<R, W>(
     engine: &JetroEngine,
     reader: R,
@@ -683,9 +732,7 @@ where
     )
 }
 
-fn unsupported_ndjson_route_error(
-    explain: &super::ndjson_route::NdjsonRouteExplain,
-) -> JetroEngineError {
+fn unsupported_ndjson_route_error(explain: &NdjsonRouteExplain) -> JetroEngineError {
     let message = explain
         .unsupported_message()
         .unwrap_or_else(|| "unsupported NDJSON route".to_string());
