@@ -4,15 +4,14 @@
 //! allocate or populate these structures; callers receive them only through
 //! explicit inspection APIs.
 
+mod inspect;
 mod report;
-#[allow(dead_code)]
 pub(crate) mod physical;
-#[allow(dead_code)]
 pub(crate) mod pipeline;
-#[allow(dead_code)]
 pub(crate) mod ndjson;
 mod render;
 
+pub(crate) use inspect::inspect_query;
 pub use report::{
     BackendInspection, BackendKind, BackendStatus, DirectPlanInspection, ExecutionFactsInspection,
     InspectContext, InspectLevel, InspectOptions, InspectionSummary, LogicalInspection,

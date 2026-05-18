@@ -67,7 +67,6 @@ impl QueryPlan {
 
     /// Returns every physical node id in arena order.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         (0..self.nodes.len()).map(NodeId)
     }
