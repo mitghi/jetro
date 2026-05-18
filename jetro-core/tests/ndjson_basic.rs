@@ -678,6 +678,41 @@ fn run_ndjson_file_with_report_exposes_parallel_partitions() {
 }
 
 #[test]
+fn run_ndjson_file_with_report_keeps_reverse_first_match_sequential() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-file-reverse-first-report");
+    let mut input = Vec::new();
+    for id in 0..64 {
+        let value = if id == 63 { "target" } else { "miss" };
+        input.extend_from_slice(
+            format!(
+                "{{\"id\":{id},\"custom_attributes\":[{{\"attribute_code\":\"k\",\"value\":\"{value}\"}}]}}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    std::fs::write(&path, input).unwrap();
+    let options = NdjsonOptions::default().with_parallel_min_bytes(1);
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_with_report_and_options(
+            &path,
+            r#"$.rows().reverse().find(@.custom_attributes.find(@.value == "target"))"#,
+            &mut out,
+            options,
+        )
+        .expect("reverse first-match rows stream report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert!(String::from_utf8(out).unwrap().contains(r#""id":63"#));
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_scanned, 1);
+    assert_eq!(report.stats.rows_emitted, 1);
+    assert_eq!(report.stats.parallel_partitions, 0);
+}
+
+#[test]
 fn run_ndjson_source_with_report_dispatches_file_source() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-source-report");
