@@ -713,6 +713,35 @@ fn run_ndjson_file_with_report_keeps_reverse_first_match_sequential() {
 }
 
 #[test]
+fn run_ndjson_file_with_report_keeps_reverse_filter_take_sequential() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-file-reverse-filter-take-report");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":false}\n{\"id\":2,\"active\":true}\n{\"id\":3,\"active\":false}\n{\"id\":4,\"active\":false}\n",
+    )
+    .unwrap();
+    let options = NdjsonOptions::default().with_parallel_min_bytes(1);
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_with_report_and_options(
+            &path,
+            "$.rows().reverse().filter($.active).take(1).map($.id)",
+            &mut out,
+            options,
+        )
+        .expect("reverse filter/take rows stream report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "2\n");
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.rows_emitted, 1);
+    assert_eq!(report.stats.rows_filtered, 2);
+    assert_eq!(report.stats.parallel_partitions, 0);
+}
+
+#[test]
 fn run_ndjson_source_with_report_dispatches_file_source() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-source-report");
