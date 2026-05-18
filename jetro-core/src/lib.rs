@@ -57,6 +57,7 @@ pub(crate) mod builtins;
 pub(crate) mod compile;
 pub(crate) mod data;
 pub(crate) mod exec;
+pub mod introspect;
 pub mod io;
 pub(crate) mod ir;
 pub(crate) mod parse;
