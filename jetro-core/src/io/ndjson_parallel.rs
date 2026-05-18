@@ -50,25 +50,122 @@ where
     P: AsRef<Path>,
 {
     let metadata = std::fs::metadata(path.as_ref())?;
-    let Some(limit) = parallel_collection_limit(plan, options, metadata.len()) else {
-        return Ok(None);
-    };
+    let partition_available = partition_available(options, metadata.len());
+    match plan.file_strategy(partition_available) {
+        RowStreamFileStrategy::OrderedPartitionSearch { retained_limit, .. } => {
+            return collect_ordered_partition_search(
+                engine,
+                path.as_ref(),
+                plan,
+                options,
+                retained_limit,
+            );
+        }
+        RowStreamFileStrategy::Partitioned { retained_limit } => {
+            return collect_partition_filter(engine, path.as_ref(), plan, options, retained_limit);
+        }
+        RowStreamFileStrategy::Sequential => {}
+    }
+    Ok(None)
+}
 
-    let bytes = Arc::new(MappedBytes::open(path.as_ref())?);
+fn partition_available(options: NdjsonOptions, file_len: u64) -> bool {
+    if options.parallelism == NdjsonParallelism::Off {
+        return false;
+    }
+    file_len >= options.parallel_min_bytes && rayon::current_num_threads() > 1
+}
+
+fn collect_partition_filter(
+    engine: &JetroEngine,
+    path: &Path,
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+    limit: usize,
+) -> Result<Option<ParallelRowsResult>, JetroEngineError> {
+    let bytes = Arc::new(MappedBytes::open(path)?);
     let ranges = split_line_aligned_ranges(bytes.as_slice(), TARGET_RANGES_PER_THREAD);
     if ranges.len() <= 1 {
         return Ok(None);
     }
 
-    let mut parts = ranges
-        .into_par_iter()
-        .map(|range| scan_partition(engine, bytes.clone(), range, plan, options))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut parts = scan_partitions(engine, bytes, ranges, plan, options)?;
     parts.sort_by_key(|part| part.ordinal);
     if plan.direction == RowStreamDirection::Reverse {
         parts.reverse();
     }
 
+    Ok(Some(merge_partition_outputs(plan, parts, limit)))
+}
+
+fn collect_ordered_partition_search(
+    engine: &JetroEngine,
+    path: &Path,
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+    limit: usize,
+) -> Result<Option<ParallelRowsResult>, JetroEngineError> {
+    let bytes = Arc::new(MappedBytes::open(path)?);
+    let mut ranges = split_line_aligned_ranges(bytes.as_slice(), TARGET_RANGES_PER_THREAD);
+    if ranges.len() <= 1 {
+        return Ok(None);
+    }
+    if plan.direction == RowStreamDirection::Reverse {
+        ranges.reverse();
+    }
+
+    let wave_size = rayon::current_num_threads().max(1);
+    let mut out = Vec::new();
+    let mut stats = RowStreamStats {
+        source: plan.source,
+        direction: plan.direction,
+        ..RowStreamStats::default()
+    };
+
+    for wave in ranges.chunks(wave_size) {
+        let mut parts = scan_partitions(engine, bytes.clone(), wave.to_vec(), plan, options)?;
+        parts.sort_by_key(|part| part.ordinal);
+        if plan.direction == RowStreamDirection::Reverse {
+            parts.reverse();
+        }
+        stats.parallel_partitions += parts.len();
+        for mut part in parts {
+            stats.merge_partition(&part.stats);
+            out.append(&mut part.values);
+            if out.len() >= limit {
+                out.truncate(limit);
+                return Ok(Some(ParallelRowsResult {
+                    value: value_from_partition_rows(out, limit),
+                    stats,
+                }));
+            }
+        }
+    }
+
+    Ok(Some(ParallelRowsResult {
+        value: value_from_partition_rows(out, limit),
+        stats,
+    }))
+}
+
+fn scan_partitions(
+    engine: &JetroEngine,
+    bytes: Arc<MappedBytes>,
+    ranges: Vec<Range<usize>>,
+    plan: &RowStreamPlan,
+    options: NdjsonOptions,
+) -> Result<Vec<PartitionOutput>, JetroEngineError> {
+    ranges
+        .into_par_iter()
+        .map(|range| scan_partition(engine, bytes.clone(), range, plan, options))
+        .collect()
+}
+
+fn merge_partition_outputs(
+    plan: &RowStreamPlan,
+    parts: Vec<PartitionOutput>,
+    limit: usize,
+) -> ParallelRowsResult {
     let mut out = Vec::new();
     let mut stats = RowStreamStats {
         source: plan.source,
@@ -85,30 +182,17 @@ where
         }
     }
 
-    let value = if limit == 1 {
+    ParallelRowsResult {
+        value: value_from_partition_rows(out, limit),
+        stats,
+    }
+}
+
+fn value_from_partition_rows(out: Vec<Val>, limit: usize) -> Val {
+    if limit == 1 {
         out.into_iter().next().unwrap_or(Val::Null)
     } else {
         Val::Arr(Arc::new(out))
-    };
-    Ok(Some(ParallelRowsResult { value, stats }))
-}
-
-fn parallel_collection_limit(
-    plan: &RowStreamPlan,
-    options: NdjsonOptions,
-    file_len: u64,
-) -> Option<usize> {
-    if options.parallelism == NdjsonParallelism::Off {
-        return None;
-    }
-    if file_len < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
-        return None;
-    }
-    match plan.file_strategy(true) {
-        RowStreamFileStrategy::Partitioned { retained_limit } => Some(retained_limit),
-        RowStreamFileStrategy::OrderedPartitionSearch { .. } | RowStreamFileStrategy::Sequential => {
-            None
-        }
     }
 }
 
@@ -233,12 +317,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            parallel_collection_limit(
-                &plan,
+            plan.file_strategy(partition_available(
                 super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
                 1024,
-            ),
-            None
+            )),
+            RowStreamFileStrategy::OrderedPartitionSearch {
+                direction: RowStreamDirection::Reverse,
+                retained_limit: 1,
+            }
         );
     }
 
@@ -283,7 +369,10 @@ mod tests {
         .unwrap();
 
         let _ = std::fs::remove_file(&path);
-        assert!(value.is_none());
+        assert_eq!(
+            serde_json::Value::from(value.expect("ordered partition search should run")),
+            json!({"id": 2, "name": "target"})
+        );
     }
 
     #[test]
@@ -326,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_map_take_stays_sequential() {
+    fn retained_reverse_map_take_uses_ordered_partition_search() {
         let engine = JetroEngine::new();
         let path = std::env::temp_dir().join(format!(
             "jetro-parallel-{}-{}.ndjson",
@@ -350,7 +439,10 @@ mod tests {
         .unwrap();
 
         let _ = std::fs::remove_file(&path);
-        assert!(value.is_none());
+        assert_eq!(
+            serde_json::Value::from(value.expect("ordered partition search should run")),
+            json!([4, 3, 2])
+        );
     }
 
     #[test]
