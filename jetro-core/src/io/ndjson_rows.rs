@@ -9,6 +9,20 @@ pub(super) enum NdjsonRowsFilePlan {
     Subquery(RowStreamSubqueryPlan),
 }
 
+impl NdjsonRowsFilePlan {
+    pub(super) fn kind(&self) -> NdjsonRowsPlanKind {
+        match self {
+            Self::Stream(_) => NdjsonRowsPlanKind::Stream,
+            Self::Fanout(_) => NdjsonRowsPlanKind::Fanout,
+            Self::Subquery(_) => NdjsonRowsPlanKind::Subquery,
+        }
+    }
+
+    pub(super) fn requires_file_backed_source(&self) -> bool {
+        matches!(self, Self::Fanout(_) | Self::Subquery(_))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NdjsonRowsPlanKind {
     Stream,
@@ -27,11 +41,7 @@ impl std::fmt::Display for NdjsonRowsPlanKind {
 }
 
 pub fn ndjson_rows_plan_kind(query: &str) -> Result<Option<NdjsonRowsPlanKind>, JetroEngineError> {
-    Ok(ndjson_rows_file_plan(query)?.map(|plan| match plan {
-        NdjsonRowsFilePlan::Stream(_) => NdjsonRowsPlanKind::Stream,
-        NdjsonRowsFilePlan::Fanout(_) => NdjsonRowsPlanKind::Fanout,
-        NdjsonRowsFilePlan::Subquery(_) => NdjsonRowsPlanKind::Subquery,
-    }))
+    Ok(ndjson_rows_file_plan(query)?.map(|plan| plan.kind()))
 }
 
 pub(super) fn ndjson_rows_stream_plan(

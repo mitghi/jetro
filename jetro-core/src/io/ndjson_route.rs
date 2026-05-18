@@ -1,6 +1,6 @@
 use super::ndjson::{ndjson_writer_path_kind, NdjsonOptions, NdjsonWriterPathKind};
 use super::ndjson_frame::NdjsonRowFrame;
-use super::ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
+use super::ndjson_rows::{ndjson_rows_file_plan, NdjsonRowsFilePlan, NdjsonRowsPlanKind};
 use crate::{JetroEngine, JetroEngineError};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,6 +121,30 @@ pub struct NdjsonRouteExplain {
     pub fallback_reason: Option<NdjsonFallbackReason>,
 }
 
+pub(super) enum NdjsonRoutePlan {
+    RowLocal {
+        explain: NdjsonRouteExplain,
+    },
+    Rows {
+        explain: NdjsonRouteExplain,
+        plan: NdjsonRowsFilePlan,
+    },
+    Unsupported {
+        explain: NdjsonRouteExplain,
+    },
+}
+
+impl NdjsonRoutePlan {
+    pub(super) fn explain(&self) -> &NdjsonRouteExplain {
+        match self {
+            Self::RowLocal { explain }
+            | Self::Rows { explain, .. }
+            | Self::Unsupported { explain } => explain,
+        }
+    }
+
+}
+
 impl NdjsonRouteExplain {
     pub fn is_rows_route(&self) -> bool {
         self.rows_plan.is_some()
@@ -142,49 +166,67 @@ impl NdjsonRouteExplain {
     }
 }
 
+pub(super) fn ndjson_route_plan(
+    engine: &JetroEngine,
+    source: NdjsonSourceMode,
+    query: &str,
+    options: NdjsonOptions,
+) -> Result<NdjsonRoutePlan, JetroEngineError> {
+    let source = NdjsonSourceCaps::for_mode(source, options);
+    let Some(plan) = ndjson_rows_file_plan(query)? else {
+        return Ok(NdjsonRoutePlan::RowLocal {
+            explain: NdjsonRouteExplain {
+                kind: NdjsonRouteKind::RowLocal,
+                source,
+                writer_path: ndjson_writer_path_kind(engine, query),
+                rows_plan: None,
+                fallback_reason: None,
+            },
+        });
+    };
+
+    let rows_plan = plan.kind();
+    if plan.requires_file_backed_source() && source.mode == NdjsonSourceMode::Reader {
+        return Ok(NdjsonRoutePlan::Unsupported {
+            explain: NdjsonRouteExplain {
+                kind: NdjsonRouteKind::UnsupportedRows,
+                source,
+                writer_path: None,
+                rows_plan: Some(rows_plan),
+                fallback_reason: Some(NdjsonFallbackReason::FileBackedRowsRequired),
+            },
+        });
+    }
+
+    Ok(NdjsonRoutePlan::Rows {
+        explain: NdjsonRouteExplain {
+            kind: route_kind_for_rows_plan(rows_plan),
+            source,
+            writer_path: None,
+            rows_plan: Some(rows_plan),
+            fallback_reason: None,
+        },
+        plan,
+    })
+}
+
 pub fn ndjson_explain(
     engine: &JetroEngine,
     source: NdjsonSourceMode,
     query: &str,
     options: NdjsonOptions,
 ) -> Result<NdjsonRouteExplain, JetroEngineError> {
-    let source = NdjsonSourceCaps::for_mode(source, options);
-    let rows_plan = ndjson_rows_plan_kind(query)?;
-    if let Some(rows_plan) = rows_plan {
-        let file_required = matches!(
-            rows_plan,
-            NdjsonRowsPlanKind::Fanout | NdjsonRowsPlanKind::Subquery
-        );
-        if file_required && source.mode == NdjsonSourceMode::Reader {
-            return Ok(NdjsonRouteExplain {
-                kind: NdjsonRouteKind::UnsupportedRows,
-                source,
-                writer_path: None,
-                rows_plan: Some(rows_plan),
-                fallback_reason: Some(NdjsonFallbackReason::FileBackedRowsRequired),
-            });
-        }
-        let kind = match rows_plan {
-            NdjsonRowsPlanKind::Stream => NdjsonRouteKind::RowsStream,
-            NdjsonRowsPlanKind::Fanout => NdjsonRouteKind::RowsFanout,
-            NdjsonRowsPlanKind::Subquery => NdjsonRouteKind::RowsSubquery,
-        };
-        return Ok(NdjsonRouteExplain {
-            kind,
-            source,
-            writer_path: None,
-            rows_plan: Some(rows_plan),
-            fallback_reason: None,
-        });
-    }
+    Ok(ndjson_route_plan(engine, source, query, options)?
+        .explain()
+        .clone())
+}
 
-    Ok(NdjsonRouteExplain {
-        kind: NdjsonRouteKind::RowLocal,
-        source,
-        writer_path: ndjson_writer_path_kind(engine, query),
-        rows_plan: None,
-        fallback_reason: None,
-    })
+fn route_kind_for_rows_plan(plan: NdjsonRowsPlanKind) -> NdjsonRouteKind {
+    match plan {
+        NdjsonRowsPlanKind::Stream => NdjsonRouteKind::RowsStream,
+        NdjsonRowsPlanKind::Fanout => NdjsonRouteKind::RowsFanout,
+        NdjsonRowsPlanKind::Subquery => NdjsonRouteKind::RowsSubquery,
+    }
 }
 
 #[cfg(test)]

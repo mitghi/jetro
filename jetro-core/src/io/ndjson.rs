@@ -17,10 +17,8 @@ use super::ndjson_hint::{
     NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
 };
 pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, row_parse_error};
-use super::ndjson_rows::{
-    ndjson_rows_file_plan, ndjson_rows_stream_plan, NdjsonRowsFilePlan,
-};
-use super::ndjson_route::{ndjson_explain, NdjsonSourceMode};
+use super::ndjson_rows::NdjsonRowsFilePlan;
+use super::ndjson_route::{ndjson_route_plan, NdjsonRoutePlan, NdjsonSourceMode};
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
@@ -537,8 +535,14 @@ where
     W: Write,
 {
     let path = path.as_ref();
-    if let Some(plan) = ndjson_rows_file_plan(query)? {
-        return drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer);
+    match ndjson_route_plan(engine, NdjsonSourceMode::File, query, options)? {
+        NdjsonRoutePlan::Rows { plan, .. } => {
+            return drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer);
+        }
+        NdjsonRoutePlan::Unsupported { explain } => {
+            return Err(unsupported_ndjson_route_error(&explain));
+        }
+        NdjsonRoutePlan::RowLocal { .. } => {}
     }
 
     let file = File::open(path)?;
@@ -562,12 +566,18 @@ where
     R: BufRead,
     W: Write,
 {
-    if let Some(plan) = ndjson_rows_stream_plan(query)? {
-        return drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer);
+    match ndjson_route_plan(engine, NdjsonSourceMode::Reader, query, options)? {
+        NdjsonRoutePlan::Rows {
+            plan: NdjsonRowsFilePlan::Stream(plan),
+            ..
+        } => drive_ndjson_rows_stream_reader(engine, reader, &plan, None, options, writer),
+        NdjsonRoutePlan::Rows { explain, .. } | NdjsonRoutePlan::Unsupported { explain } => {
+            Err(unsupported_ndjson_route_error(&explain))
+        }
+        NdjsonRoutePlan::RowLocal { .. } => {
+            drive_ndjson_writer(engine, reader, query, None, options, writer)
+        }
     }
-    reject_unsupported_reader_rows(engine, query, options)?;
-
-    drive_ndjson_writer(engine, reader, query, None, options, writer)
 }
 
 pub fn run_ndjson_limit<R, W>(
@@ -607,31 +617,18 @@ where
         return Ok(0);
     }
 
-    if let Some(plan) = ndjson_rows_stream_plan(query)? {
-        return drive_ndjson_rows_stream_reader(
-            engine,
-            reader,
-            &plan,
-            Some(limit),
-            options,
-            writer,
-        );
+    match ndjson_route_plan(engine, NdjsonSourceMode::Reader, query, options)? {
+        NdjsonRoutePlan::Rows {
+            plan: NdjsonRowsFilePlan::Stream(plan),
+            ..
+        } => drive_ndjson_rows_stream_reader(engine, reader, &plan, Some(limit), options, writer),
+        NdjsonRoutePlan::Rows { explain, .. } | NdjsonRoutePlan::Unsupported { explain } => {
+            Err(unsupported_ndjson_route_error(&explain))
+        }
+        NdjsonRoutePlan::RowLocal { .. } => {
+            drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
+        }
     }
-    reject_unsupported_reader_rows(engine, query, options)?;
-
-    drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)
-}
-
-fn reject_unsupported_reader_rows(
-    engine: &JetroEngine,
-    query: &str,
-    options: NdjsonOptions,
-) -> Result<(), JetroEngineError> {
-    let route = ndjson_explain(engine, NdjsonSourceMode::Reader, query, options)?;
-    if let Some(message) = route.unsupported_message() {
-        return Err(JetroEngineError::Eval(EvalError(message)));
-    }
-    Ok(())
 }
 
 pub fn run_ndjson_file_limit<P, W>(
@@ -665,8 +662,14 @@ where
         return Ok(0);
     }
     let path = path.as_ref();
-    if let Some(plan) = ndjson_rows_file_plan(query)? {
-        return drive_ndjson_rows_file_plan(engine, path, &plan, Some(limit), options, writer);
+    match ndjson_route_plan(engine, NdjsonSourceMode::File, query, options)? {
+        NdjsonRoutePlan::Rows { plan, .. } => {
+            return drive_ndjson_rows_file_plan(engine, path, &plan, Some(limit), options, writer);
+        }
+        NdjsonRoutePlan::Unsupported { explain } => {
+            return Err(unsupported_ndjson_route_error(&explain));
+        }
+        NdjsonRoutePlan::RowLocal { .. } => {}
     }
 
     let file = File::open(path)?;
@@ -678,6 +681,15 @@ where
         writer,
         options,
     )
+}
+
+fn unsupported_ndjson_route_error(
+    explain: &super::ndjson_route::NdjsonRouteExplain,
+) -> JetroEngineError {
+    let message = explain
+        .unsupported_message()
+        .unwrap_or_else(|| "unsupported NDJSON route".to_string());
+    JetroEngineError::Eval(EvalError(message))
 }
 
 pub fn run_ndjson_source<W>(
@@ -3458,7 +3470,7 @@ mod tests {
     #[test]
     fn rows_stream_driver_reports_direct_stage_stats() {
         let engine = crate::JetroEngine::new();
-        let plan = super::ndjson_rows_stream_plan(
+        let plan = super::super::ndjson_rows::ndjson_rows_stream_plan(
             "$.rows().filter($.active == true).distinct_by($.id).take(2).map($.id)",
         )
         .unwrap()
