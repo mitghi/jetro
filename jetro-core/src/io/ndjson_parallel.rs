@@ -106,7 +106,9 @@ fn parallel_collection_limit(
     }
     match plan.file_strategy(true) {
         RowStreamFileStrategy::Partitioned { retained_limit } => Some(retained_limit),
-        RowStreamFileStrategy::Sequential => None,
+        RowStreamFileStrategy::OrderedPartitionSearch { .. } | RowStreamFileStrategy::Sequential => {
+            None
+        }
     }
 }
 
@@ -200,6 +202,24 @@ mod tests {
         assert_eq!(
             plan.file_strategy(true),
             RowStreamFileStrategy::Partitioned { retained_limit: 3 }
+        );
+    }
+
+    #[test]
+    fn reverse_filter_take_uses_ordered_partition_strategy() {
+        let plan = lower_root_rows_query(
+            r#"$.rows().reverse().filter($.active).take(3)"#,
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            plan.file_strategy(true),
+            RowStreamFileStrategy::OrderedPartitionSearch {
+                direction: RowStreamDirection::Reverse,
+                retained_limit: 3,
+            }
         );
     }
 

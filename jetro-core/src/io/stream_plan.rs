@@ -120,16 +120,31 @@ pub(super) enum RowStreamParallelism {
 pub(super) enum RowStreamFileStrategy {
     Sequential,
     Partitioned { retained_limit: usize },
+    OrderedPartitionSearch {
+        direction: RowStreamDirection,
+        retained_limit: usize,
+    },
 }
 
 impl RowStreamPlan {
     pub(super) fn file_strategy(&self, partition_available: bool) -> RowStreamFileStrategy {
         if partition_available {
+            if let Some(retained_limit) = self.ordered_partition_retained_limit() {
+                return RowStreamFileStrategy::OrderedPartitionSearch {
+                    direction: self.direction,
+                    retained_limit,
+                };
+            }
             if let Some(retained_limit) = self.partition_retained_limit() {
                 return RowStreamFileStrategy::Partitioned { retained_limit };
             }
         }
         RowStreamFileStrategy::Sequential
+    }
+
+    fn ordered_partition_retained_limit(&self) -> Option<usize> {
+        (self.direction == RowStreamDirection::Reverse && self.demand.ordered_early_stop)
+            .then_some(self.demand.retained_limit?)
     }
 
     fn partition_retained_limit(&self) -> Option<usize> {
