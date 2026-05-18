@@ -1,6 +1,6 @@
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
-use crate::parse::ast::{Expr, Step};
+use crate::parse::ast::{Arg, BinOp, Expr, Step};
 use crate::plan::physical::{plan_ast_with_context, PlanningContext};
 use crate::JetroEngine;
 use std::sync::Arc;
@@ -381,6 +381,10 @@ pub(super) enum NdjsonDirectPredicate {
         element: NdjsonDirectElement,
         suffix_steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
+    },
+    ArrayAny {
+        source_steps: NdjsonPhysicalPath,
+        predicate: NdjsonDirectItemPredicate,
     },
     ViewPipeline {
         source_steps: NdjsonPhysicalPath,
@@ -775,6 +779,163 @@ pub(super) fn direct_tape_predicate(
 pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_predicate_from_plan(&plan)
+}
+
+fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
+    use crate::builtins::BuiltinMethod;
+
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    let (last, prefix) = steps.split_last()?;
+    let Step::Method(name, args) = last else {
+        return None;
+    };
+    if !matches!(
+        BuiltinMethod::from_name(name),
+        BuiltinMethod::Find | BuiltinMethod::FindFirst
+    ) {
+        return None;
+    }
+    let [Arg::Pos(predicate_expr)] = args.as_slice() else {
+        return None;
+    };
+    let mut source_steps = direct_current_or_root_path_expr(base)?;
+    source_steps.extend(physical_path_from_steps(prefix)?);
+    let predicate = direct_item_predicate_from_expr(predicate_expr)?;
+    if !item_predicate_guarantees_object_match(&predicate) {
+        return None;
+    }
+    Some(NdjsonDirectPredicate::ArrayAny {
+        source_steps,
+        predicate,
+    })
+}
+
+fn direct_current_or_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
+    match expr {
+        Expr::Current | Expr::Root => Some(Vec::new()),
+        Expr::Chain(base, steps) => {
+            let mut path = direct_current_or_root_path_expr(base)?;
+            path.extend(physical_path_from_steps(steps)?);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredicate> {
+    match expr {
+        Expr::Bool(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Bool(*value))),
+        Expr::Null => Some(NdjsonDirectItemPredicate::Literal(Val::Null)),
+        Expr::Int(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Int(*value))),
+        Expr::Float(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Float(*value))),
+        Expr::Str(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Str(Arc::from(
+            value.as_str(),
+        )))),
+        Expr::Current | Expr::Ident(_) | Expr::Chain(_, _) => direct_item_path_expr(expr)
+            .map(NdjsonDirectItemPredicate::Path),
+        Expr::BinOp(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
+            Some(NdjsonDirectItemPredicate::Binary {
+                lhs: Box::new(direct_item_predicate_from_expr(lhs)?),
+                op: *op,
+                rhs: Box::new(direct_item_predicate_from_expr(rhs)?),
+            })
+        }
+        Expr::BinOp(lhs, op, rhs) if is_direct_cmp_op(*op) => {
+            if let (Some(lhs), Some(lit)) = (direct_item_path_expr(lhs), literal_val_expr(rhs)) {
+                return Some(NdjsonDirectItemPredicate::CmpLit { lhs, op: *op, lit });
+            }
+            if let (Some(lit), Some(lhs)) = (literal_val_expr(lhs), direct_item_path_expr(rhs)) {
+                return Some(NdjsonDirectItemPredicate::CmpLit {
+                    lhs,
+                    op: flip_cmp_op(*op)?,
+                    lit,
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn direct_item_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
+    match expr {
+        Expr::Current => Some(Vec::new()),
+        Expr::Ident(name) => Some(vec![PhysicalPathStep::Field(Arc::from(name.as_str()))]),
+        Expr::Chain(base, steps) => {
+            let mut path = match base.as_ref() {
+                Expr::Current => Vec::new(),
+                Expr::Ident(name) => vec![PhysicalPathStep::Field(Arc::from(name.as_str()))],
+                _ => return None,
+            };
+            path.extend(physical_path_from_steps(steps)?);
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn physical_path_from_steps(steps: &[Step]) -> Option<NdjsonPhysicalPath> {
+    steps
+        .iter()
+        .map(|step| match step {
+            Step::Field(name) | Step::OptField(name) => {
+                Some(PhysicalPathStep::Field(Arc::from(name.as_str())))
+            }
+            Step::Index(index) => Some(PhysicalPathStep::Index(*index)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn literal_val_expr(expr: &Expr) -> Option<Val> {
+    match expr {
+        Expr::Null => Some(Val::Null),
+        Expr::Bool(value) => Some(Val::Bool(*value)),
+        Expr::Int(value) => Some(Val::Int(*value)),
+        Expr::Float(value) => Some(Val::Float(*value)),
+        Expr::Str(value) => Some(Val::Str(Arc::from(value.as_str()))),
+        _ => None,
+    }
+}
+
+fn is_direct_cmp_op(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte
+    )
+}
+
+fn flip_cmp_op(op: BinOp) -> Option<BinOp> {
+    Some(match op {
+        BinOp::Eq => BinOp::Eq,
+        BinOp::Neq => BinOp::Neq,
+        BinOp::Lt => BinOp::Gt,
+        BinOp::Lte => BinOp::Gte,
+        BinOp::Gt => BinOp::Lt,
+        BinOp::Gte => BinOp::Lte,
+        _ => return None,
+    })
+}
+
+fn item_predicate_guarantees_object_match(predicate: &NdjsonDirectItemPredicate) -> bool {
+    match predicate {
+        NdjsonDirectItemPredicate::CmpLit { lhs, .. }
+        | NdjsonDirectItemPredicate::Path(lhs)
+        | NdjsonDirectItemPredicate::ViewScalarCall {
+            suffix_steps: lhs, ..
+        } => !lhs.is_empty(),
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
+            item_predicate_guarantees_object_match(lhs)
+                || item_predicate_guarantees_object_match(rhs)
+        }
+        NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::Or => {
+            item_predicate_guarantees_object_match(lhs)
+                && item_predicate_guarantees_object_match(rhs)
+        }
+        _ => false,
+    }
 }
 
 fn direct_tape_predicate_inner(
@@ -1325,4 +1486,54 @@ fn physical_chain_to_path(
             crate::ir::physical::PhysicalChainStep::DynIndex(_) => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_array_find_field_comparison_predicate() {
+        let expr = crate::parse::parser::parse(r#"@.custom_attributes.find(@.value == "z")"#)
+            .expect("parse");
+        let Some(NdjsonDirectPredicate::ArrayAny {
+            source_steps,
+            predicate,
+        }) = direct_array_any_predicate_expr(&expr)
+        else {
+            panic!("expected array-any predicate");
+        };
+
+        assert!(matches!(
+            source_steps.as_slice(),
+            [PhysicalPathStep::Field(name)] if name.as_ref() == "custom_attributes"
+        ));
+        assert!(matches!(
+            predicate,
+            NdjsonDirectItemPredicate::CmpLit {
+                ref lhs,
+                op: BinOp::Eq,
+                lit: Val::Str(ref value),
+            } if matches!(
+                lhs.as_slice(),
+                [PhysicalPathStep::Field(name)] if name.as_ref() == "value"
+            ) && value.as_ref() == "z"
+        ));
+    }
+
+    #[test]
+    fn recognizes_array_find_bare_field_comparison_predicate() {
+        let expr = crate::parse::parser::parse(r#"@.custom_attributes.find(value == "z")"#)
+            .expect("parse");
+        assert!(matches!(
+            direct_array_any_predicate_expr(&expr),
+            Some(NdjsonDirectPredicate::ArrayAny { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_array_find_scalar_current_predicate() {
+        let expr = crate::parse::parser::parse(r#"@.items.find(@ == 0)"#).expect("parse");
+        assert!(direct_array_any_predicate_expr(&expr).is_none());
+    }
 }

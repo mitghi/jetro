@@ -1273,6 +1273,7 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
             call.try_apply_json_view(value)
                 .map(|value| crate::util::is_truthy(&value))
         }
+        NdjsonDirectPredicate::ArrayAny { .. } => None,
         NdjsonDirectPredicate::ViewPipeline { .. } => None,
     }
 }

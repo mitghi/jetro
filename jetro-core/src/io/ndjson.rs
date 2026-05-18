@@ -2897,6 +2897,11 @@ pub(super) fn eval_tape_predicate(
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| call.try_apply_json_view(value))
             .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ArrayAny { .. } => {
+            return Err(crate::EvalError(
+                "array-any predicate requires VM state".to_string(),
+            ));
+        }
         NdjsonDirectPredicate::ViewPipeline { source_steps, body } => {
             let (Some(vm), Some(env)) = (vm.as_deref_mut(), env) else {
                 return Err(crate::EvalError(
@@ -2918,7 +2923,7 @@ pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
         NdjsonDirectPredicate::Binary { lhs, rhs, .. } => {
             predicate_needs_vm(lhs) || predicate_needs_vm(rhs)
         }
-        NdjsonDirectPredicate::ViewPipeline { .. } => true,
+        NdjsonDirectPredicate::ArrayAny { .. } | NdjsonDirectPredicate::ViewPipeline { .. } => true,
         NdjsonDirectPredicate::Path(_)
         | NdjsonDirectPredicate::Literal(_)
         | NdjsonDirectPredicate::ViewScalarCall { .. }
