@@ -597,7 +597,7 @@ where
         }
         NdjsonRoutePlan::Rows { explain, plan } => {
             let rows = drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer)?;
-            Ok(NdjsonExecutionReport::row_local(explain, rows))
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
         }
         NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
         NdjsonRoutePlan::RowLocal { explain } => {
@@ -610,7 +610,7 @@ where
                 options,
                 writer,
             )?;
-            Ok(NdjsonExecutionReport::row_local(explain, rows))
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
         }
     }
 }
@@ -681,7 +681,7 @@ where
         }
         NdjsonRoutePlan::RowLocal { explain } => {
             let rows = drive_ndjson_writer(engine, reader, query, None, options, writer)?;
-            Ok(NdjsonExecutionReport::row_local(explain, rows))
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
         }
     }
 }

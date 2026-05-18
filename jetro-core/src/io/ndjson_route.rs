@@ -166,7 +166,7 @@ impl NdjsonExecutionReport {
         Self { route, stats }
     }
 
-    pub fn row_local(route: NdjsonRouteExplain, rows_emitted: usize) -> Self {
+    pub fn emitted_only(route: NdjsonRouteExplain, rows_emitted: usize) -> Self {
         Self {
             route,
             stats: NdjsonExecutionStats {
