@@ -374,6 +374,10 @@
 - **Reverse report validation is green**. Focused tests cover reverse match
   reports, facade-level NDJSON report exports, route metadata invariants, and
   core compile health after the reverse report additions.
+- **The full NDJSON integration suite is green**. `cargo test -p jetro-core
+  --test ndjson_basic -- --nocapture` passes after the route/report expansion,
+  covering row-local, rows-stream, match, reverse, framed payload, source
+  dispatch, parallel, and distinct paths together.
 - **README documents NDJSON route/report observability**. The API section now
   shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
   selection and execution counters.
