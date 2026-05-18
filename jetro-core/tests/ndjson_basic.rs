@@ -549,6 +549,24 @@ fn run_ndjson_with_report_returns_rows_stream_stats() {
 }
 
 #[test]
+fn run_ndjson_with_report_keeps_row_local_route() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+{"id":2}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(Cursor::new(input), "$.id", &mut out)
+        .expect("row-local report should run");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
+    assert_eq!(report.route.kind.to_string(), "row-local");
+    assert_eq!(report.route.writer_path, Some(NdjsonWriterPathKind::ByteExpr));
+    assert_eq!(report.stats.rows_emitted, 2);
+}
+
+#[test]
 fn run_ndjson_file_with_report_returns_file_route_stats() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-file-report");
