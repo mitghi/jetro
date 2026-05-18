@@ -28,7 +28,9 @@ pub(super) use super::ndjson_write::{
     write_val_line_with_options,
 };
 use super::stream_exec::CompiledRowStream;
-use super::stream_fanout::drive_ndjson_rows_fanout_file;
+use super::stream_fanout::{
+    drive_ndjson_rows_fanout_file, drive_ndjson_rows_fanout_file_with_stats,
+};
 #[cfg(test)]
 use super::stream_plan::RowStreamSourceKind;
 use super::stream_plan::{RowStreamDirection, RowStreamPlan};
@@ -592,6 +594,14 @@ where
                 drive_ndjson_rows_stream_file_with_stats(engine, path, &plan, None, options, writer)?;
             Ok(row_stream_report(explain, stats))
         }
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Fanout(plan),
+        } => {
+            let (_, stats) =
+                drive_ndjson_rows_fanout_file_with_stats(engine, path, &plan, options, writer)?;
+            Ok(row_stream_report(explain, stats))
+        }
         NdjsonRoutePlan::Rows { explain, plan } => {
             let rows = drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer)?;
             Ok(NdjsonExecutionReport::emitted_only(explain, rows))
@@ -910,6 +920,14 @@ where
                 options,
                 writer,
             )?;
+            Ok(row_stream_report(explain, stats))
+        }
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Fanout(plan),
+        } => {
+            let (_, stats) =
+                drive_ndjson_rows_fanout_file_with_stats(engine, path, &plan, options, writer)?;
             Ok(row_stream_report(explain, stats))
         }
         NdjsonRoutePlan::Rows { explain, plan } => {

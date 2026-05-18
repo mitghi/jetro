@@ -741,6 +741,7 @@ fn run_ndjson_file_with_report_covers_fanout_route() {
     assert_eq!(String::from_utf8(out).unwrap(), "{\"head\":1,\"total\":2}\n");
     assert_eq!(report.route.kind.to_string(), "rows-fanout");
     assert_eq!(report.stats.rows_emitted, 1);
+    assert_eq!(report.stats.rows_scanned, 2);
 }
 
 #[test]

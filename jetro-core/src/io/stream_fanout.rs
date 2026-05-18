@@ -17,6 +17,7 @@ use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
     RowStreamSourceKind, RowStreamStage,
 };
+use super::stream_types::RowStreamStats;
 use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
@@ -450,26 +451,50 @@ where
     P: AsRef<std::path::Path>,
     W: Write,
 {
-    let value = collect_ndjson_rows_fanout_file(engine, path, plan, options)?;
+    let (value, _) = collect_ndjson_rows_fanout_file_with_stats(engine, path, plan, options)?;
     let mut writer = ndjson_writer_with_options(writer, options);
     let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
     writer.flush()?;
     Ok(emitted)
 }
 
-fn collect_ndjson_rows_fanout_file<P>(
+pub(super) fn drive_ndjson_rows_fanout_file_with_stats<P, W>(
     engine: &JetroEngine,
     path: P,
     plan: &RowStreamFanoutPlan,
     options: NdjsonOptions,
-) -> Result<Val, JetroEngineError>
+    writer: W,
+) -> Result<(usize, RowStreamStats), JetroEngineError>
+where
+    P: AsRef<std::path::Path>,
+    W: Write,
+{
+    let (value, mut stats) = collect_ndjson_rows_fanout_file_with_stats(engine, path, plan, options)?;
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
+    stats.rows_emitted = emitted;
+    writer.flush()?;
+    Ok((emitted, stats))
+}
+
+fn collect_ndjson_rows_fanout_file_with_stats<P>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamFanoutPlan,
+    options: NdjsonOptions,
+) -> Result<(Val, RowStreamStats), JetroEngineError>
 where
     P: AsRef<std::path::Path>,
 {
+    let mut stats = RowStreamStats {
+        source: plan.source.source,
+        direction: plan.source.direction,
+        ..RowStreamStats::default()
+    };
     if let Some(value) =
         collect_parallel_direct_reducer_fanout(engine, path.as_ref(), plan, options)?
     {
-        return Ok(value);
+        return Ok((value, stats));
     }
 
     let mut consumers: Vec<_> = plan
@@ -501,6 +526,7 @@ where
             let Some((line_no, row)) = driver.read_next_owned(&mut buf)? else {
                 break;
             };
+            stats.rows_scanned += 1;
             apply_fanout_row(engine, line_no, row, &mut consumers)?;
         }
     } else {
@@ -509,12 +535,14 @@ where
             let Some((line_no, row)) = driver.next_line_with_reverse_no()? else {
                 break;
             };
+            stats.rows_scanned += 1;
             apply_fanout_row(engine, line_no, row, &mut consumers)?;
         }
     }
 
     let mut env = Env::new(Val::Null);
     for consumer in consumers {
+        merge_fanout_consumer_stats(&mut stats, consumer.stream.stats());
         let value = if let Some(value) = consumer.finish_value() {
             value
         } else if consumer.scalar {
@@ -528,7 +556,20 @@ where
     engine
         .lock_vm()
         .exec_in_env(&body, &env)
+        .map(|value| (value, stats))
         .map_err(JetroEngineError::Eval)
+}
+
+fn merge_fanout_consumer_stats(stats: &mut RowStreamStats, consumer: &RowStreamStats) {
+    stats.rows_emitted += consumer.rows_emitted;
+    stats.rows_filtered += consumer.rows_filtered;
+    stats.duplicate_rows += consumer.duplicate_rows;
+    stats.direct_filter_rows += consumer.direct_filter_rows;
+    stats.fallback_filter_rows += consumer.fallback_filter_rows;
+    stats.direct_key_rows += consumer.direct_key_rows;
+    stats.fallback_key_rows += consumer.fallback_key_rows;
+    stats.direct_project_rows += consumer.direct_project_rows;
+    stats.fallback_project_rows += consumer.fallback_project_rows;
 }
 
 struct RunningConsumer {
