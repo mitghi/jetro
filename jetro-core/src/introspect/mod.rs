@@ -7,6 +7,8 @@
 mod report;
 #[allow(dead_code)]
 pub(crate) mod physical;
+#[allow(dead_code)]
+pub(crate) mod pipeline;
 
 pub use report::{
     BackendInspection, BackendKind, BackendStatus, DirectPlanInspection, ExecutionFactsInspection,
