@@ -383,6 +383,9 @@
   --test ndjson_basic -- --nocapture` passes after the route/report expansion,
   covering row-local, rows-stream, match, reverse, framed payload, source
   dispatch, parallel, and distinct paths together.
+- **NDJSON report integration validation is green**. The full
+  `ndjson_basic` integration suite now includes the fanout and subquery report
+  counter paths, with 91 focused NDJSON tests passing after the stats wiring.
 - **Facade and workspace compile validation are green**. Public API tests and
   `cargo check --workspace` pass after the final NDJSON report API additions.
 - **README documents NDJSON route/report observability**. The API section now
