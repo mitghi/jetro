@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.12
+
+### Release focus
+
+- _Unreleased._
+
 ## 0.5.11
 
 ### Release focus
