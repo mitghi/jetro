@@ -347,6 +347,17 @@
   family, writer family, rows scanned/emitted/filtered, duplicate drops, direct
   versus fallback stage counters, and partition count where the executor
   provides those stats.
+- **NDJSON reports now cover row-local, match, and reverse distinct execution**.
+  Direct byte/tape row-local writers report scanned/emitted rows, direct
+  projection rows, fallback projection rows, and structural hint activity;
+  match-limited original-row output reports scanned/emitted/filtered rows and
+  direct versus fallback predicate evaluation; reverse `distinct_by` exposes
+  duplicate drops and direct/fallback key/project counters through the shared
+  report shape.
+- **File-backed stream reports preserve partition stats**. Reported file-backed
+  `$.rows()` streams now reuse the same generic partition executor as the
+  normal run path when eligible, carrying partition count and merged stage
+  counters into the public report instead of bypassing the parallel path.
 - **NDJSON report coverage spans hot and whole-stream routes**. Regression
   tests cover row-local byte projections, rows-stream filtering/projection,
   file-backed fanout, source dispatch, framed payload route capabilities, and
