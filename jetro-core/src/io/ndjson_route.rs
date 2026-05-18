@@ -285,4 +285,36 @@ mod tests {
             "rows plan requires a file-backed NDJSON source"
         );
     }
+
+    #[test]
+    fn route_explain_marks_reader_rows_fanout_unsupported() {
+        let engine = JetroEngine::new();
+        let query =
+            r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#;
+
+        let reader = ndjson_explain(
+            &engine,
+            NdjsonSourceMode::Reader,
+            query,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(reader.kind, NdjsonRouteKind::UnsupportedRows);
+        assert_eq!(reader.rows_plan, Some(NdjsonRowsPlanKind::Fanout));
+        assert_eq!(
+            reader.fallback_reason,
+            Some(NdjsonFallbackReason::FileBackedRowsRequired)
+        );
+
+        let file = ndjson_explain(
+            &engine,
+            NdjsonSourceMode::File,
+            query,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(file.kind, NdjsonRouteKind::RowsFanout);
+        assert!(file.is_supported());
+        assert!(file.fallback_reason.is_none());
+    }
 }
