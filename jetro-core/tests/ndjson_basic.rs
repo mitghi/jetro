@@ -678,7 +678,7 @@ fn run_ndjson_file_with_report_exposes_parallel_partitions() {
 }
 
 #[test]
-fn run_ndjson_file_with_report_keeps_reverse_first_match_sequential() {
+fn run_ndjson_file_with_report_uses_ordered_reverse_first_match() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-file-reverse-first-report");
     let mut input = Vec::new();
@@ -709,11 +709,11 @@ fn run_ndjson_file_with_report_keeps_reverse_first_match_sequential() {
     assert_eq!(report.route.kind.to_string(), "rows-stream");
     assert_eq!(report.stats.rows_scanned, 1);
     assert_eq!(report.stats.rows_emitted, 1);
-    assert_eq!(report.stats.parallel_partitions, 0);
+    assert!(report.stats.parallel_partitions > 0);
 }
 
 #[test]
-fn run_ndjson_file_with_report_keeps_reverse_filter_take_sequential() {
+fn run_ndjson_file_with_report_uses_ordered_reverse_filter_take() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-file-reverse-filter-take-report");
     std::fs::write(
@@ -738,7 +738,7 @@ fn run_ndjson_file_with_report_keeps_reverse_filter_take_sequential() {
     assert_eq!(report.stats.rows_scanned, 3);
     assert_eq!(report.stats.rows_emitted, 1);
     assert_eq!(report.stats.rows_filtered, 2);
-    assert_eq!(report.stats.parallel_partitions, 0);
+    assert!(report.stats.parallel_partitions > 0);
 }
 
 #[test]
