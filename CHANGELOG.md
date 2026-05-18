@@ -354,6 +354,11 @@
   direct versus fallback predicate evaluation; reverse `distinct_by` exposes
   duplicate drops and direct/fallback key/project counters through the shared
   report shape.
+- **Whole-stream fanout and subquery reports now carry executor counters**.
+  File-backed `$.rows()` fanout and embedded subquery routes reuse the same row
+  stream stats collection as their normal execution paths, so reports now
+  expose scanned, emitted, filtered, duplicate, direct/fallback, and partition
+  counters instead of falling back to emitted-row-only accounting.
 - **Reverse match reports use the shared NDJSON report model**.
   `run_ndjson_rev_matches_with_report` reports reverse file source
   capabilities, the `matches` route family, scanned/emitted/filtered rows, and
