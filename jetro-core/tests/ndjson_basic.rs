@@ -570,6 +570,29 @@ fn run_ndjson_with_report_keeps_row_local_route() {
 }
 
 #[test]
+fn run_ndjson_with_report_exposes_hint_stats() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"profile":{"name":"a"}}
+{"id":2,"profile":{"name":"b"}}
+{"id":3,"profile":{"name":"c"}}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"{id: $.id, name: $.profile.name}"#,
+            &mut out,
+        )
+        .expect("hintable row-local report should run");
+
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert!(report.stats.hint_rows >= 1);
+    assert_eq!(report.stats.hint_rejected_rows, 0);
+    assert!(!report.stats.hint_disabled);
+}
+
+#[test]
 fn run_ndjson_limit_with_report_tracks_early_stop() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1}

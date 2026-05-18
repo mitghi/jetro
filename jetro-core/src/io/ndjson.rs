@@ -1857,6 +1857,15 @@ where
         Ok(!limit.is_some_and(|limit| count >= limit))
     })?;
 
+    if let Some(state) = hint_state.as_ref() {
+        let hint_stats = state.stats();
+        stats.hint_learned_rows = hint_stats.learned_rows;
+        stats.hint_rejected_rows = hint_stats.rejected_rows;
+        stats.hint_rows = hint_stats.hinted_rows;
+        stats.hint_layout_misses = hint_stats.layout_misses;
+        stats.hint_disabled = hint_stats.disabled;
+    }
+
     writer.flush()?;
     Ok((count, stats))
 }

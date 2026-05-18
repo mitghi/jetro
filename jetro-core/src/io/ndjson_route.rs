@@ -135,6 +135,11 @@ pub struct NdjsonExecutionStats {
     pub direct_project_rows: usize,
     pub fallback_project_rows: usize,
     pub parallel_partitions: usize,
+    pub hint_learned_rows: usize,
+    pub hint_rejected_rows: usize,
+    pub hint_rows: usize,
+    pub hint_layout_misses: usize,
+    pub hint_disabled: bool,
 }
 
 impl From<&RowStreamStats> for NdjsonExecutionStats {
@@ -151,6 +156,11 @@ impl From<&RowStreamStats> for NdjsonExecutionStats {
             direct_project_rows: stats.direct_project_rows,
             fallback_project_rows: stats.fallback_project_rows,
             parallel_partitions: stats.parallel_partitions,
+            hint_learned_rows: 0,
+            hint_rejected_rows: 0,
+            hint_rows: 0,
+            hint_layout_misses: 0,
+            hint_disabled: false,
         }
     }
 }

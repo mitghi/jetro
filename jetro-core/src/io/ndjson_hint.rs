@@ -467,7 +467,6 @@ impl NdjsonHintState {
         Some(f(root, &matched))
     }
 
-    #[cfg(test)]
     pub(super) fn stats(&self) -> &NdjsonHintStats {
         &self.stats
     }
