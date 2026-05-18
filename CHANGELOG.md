@@ -338,6 +338,20 @@
   partition, and framed-payload capability labels, and unsupported reader
   `$.rows()` fanout/subquery plans fail before scanning input with a shared
   typed file-backed-source reason.
+- **NDJSON routing is centralized behind an internal route plan**. Reader and
+  file execution now consume the same route planner used by public explain,
+  avoiding separate rows-plan rediscovery for stream, fanout, subquery, and
+  row-local dispatch.
+- **NDJSON execution reports are public**. Reader, file, source, and limited
+  run APIs can return a route/counter report with source capabilities, route
+  family, writer family, rows scanned/emitted/filtered, duplicate drops, direct
+  versus fallback stage counters, and partition count where the executor
+  provides those stats.
+- **NDJSON report coverage spans hot and whole-stream routes**. Regression
+  tests cover row-local byte projections, rows-stream filtering/projection,
+  file-backed fanout, source dispatch, framed payload route capabilities, and
+  early-stop limit reports without changing the existing fast `run_ndjson`
+  behavior.
 - **NDJSON route validation is green in release mode**. The focused
   release-mode `io::ndjson` suite and facade-level route-observability test
   pass after the module-boundary and public observability changes.
