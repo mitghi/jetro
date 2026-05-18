@@ -602,9 +602,13 @@ where
                 drive_ndjson_rows_fanout_file_with_stats(engine, path, &plan, options, writer)?;
             Ok(row_stream_report(explain, stats))
         }
-        NdjsonRoutePlan::Rows { explain, plan } => {
-            let rows = drive_ndjson_rows_file_plan(engine, path, &plan, None, options, writer)?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Subquery(plan),
+        } => {
+            let (_, stats) =
+                drive_ndjson_rows_subquery_file_with_stats(engine, path, &plan, options, writer)?;
+            Ok(row_stream_report(explain, stats))
         }
         NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
         NdjsonRoutePlan::RowLocal { explain } => {
@@ -930,10 +934,13 @@ where
                 drive_ndjson_rows_fanout_file_with_stats(engine, path, &plan, options, writer)?;
             Ok(row_stream_report(explain, stats))
         }
-        NdjsonRoutePlan::Rows { explain, plan } => {
-            let rows =
-                drive_ndjson_rows_file_plan(engine, path, &plan, Some(limit), options, writer)?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Subquery(plan),
+        } => {
+            let (_, stats) =
+                drive_ndjson_rows_subquery_file_with_stats(engine, path, &plan, options, writer)?;
+            Ok(row_stream_report(explain, stats))
         }
         NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
         NdjsonRoutePlan::RowLocal { explain } => {
@@ -1424,7 +1431,8 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    let stream_value = collect_ndjson_rows_stream_file(engine, path, &plan.stream, options)?;
+    let (stream_value, _) =
+        collect_ndjson_rows_stream_file_with_stats(engine, path, &plan.stream, options)?;
     let wrapper = Compiler::compile(&plan.wrapper, "<ndjson-rows-wrapper>");
     let env = Env::new(Val::Null).with_var(STREAM_BINDING, stream_value);
     let value = engine
@@ -1437,19 +1445,45 @@ where
     Ok(emitted)
 }
 
-fn collect_ndjson_rows_stream_file<P>(
+fn drive_ndjson_rows_subquery_file_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    plan: &RowStreamSubqueryPlan,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<(usize, RowStreamStats), JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let (stream_value, mut stats) =
+        collect_ndjson_rows_stream_file_with_stats(engine, path, &plan.stream, options)?;
+    let wrapper = Compiler::compile(&plan.wrapper, "<ndjson-rows-wrapper>");
+    let env = Env::new(Val::Null).with_var(STREAM_BINDING, stream_value);
+    let value = engine
+        .lock_vm()
+        .exec_in_env(&wrapper, &env)
+        .map_err(JetroEngineError::Eval)?;
+    let mut writer = ndjson_writer_with_options(writer, options);
+    let emitted = write_val_line_with_options(&mut writer, &value, options)? as usize;
+    stats.rows_emitted = emitted;
+    writer.flush()?;
+    Ok((emitted, stats))
+}
+
+fn collect_ndjson_rows_stream_file_with_stats<P>(
     engine: &JetroEngine,
     path: P,
     plan: &RowStreamPlan,
     options: NdjsonOptions,
-) -> Result<Val, JetroEngineError>
+) -> Result<(Val, RowStreamStats), JetroEngineError>
 where
     P: AsRef<Path>,
 {
-    if let Some(value) =
-        super::ndjson_parallel::collect_rows_stream_file(engine, path.as_ref(), plan, options)?
+    if let Some(result) =
+        super::ndjson_parallel::collect_rows_stream_file_with_stats(engine, path.as_ref(), plan, options)?
     {
-        return Ok(value);
+        return Ok((result.value, result.stats));
     }
 
     let mut executor = CompiledRowStream::new(plan);
@@ -1496,11 +1530,14 @@ where
     }
 
     if let Some(value) = executor.finish() {
-        Ok(value)
+        Ok((value, executor.stats().clone()))
     } else if plan.demand.retained_limit == Some(1) {
-        Ok(out.into_iter().next().unwrap_or(Val::Null))
+        Ok((
+            out.into_iter().next().unwrap_or(Val::Null),
+            executor.stats().clone(),
+        ))
     } else {
-        Ok(Val::Arr(std::sync::Arc::new(out)))
+        Ok((Val::Arr(std::sync::Arc::new(out)), executor.stats().clone()))
     }
 }
 
