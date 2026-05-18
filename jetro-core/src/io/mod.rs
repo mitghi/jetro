@@ -41,6 +41,7 @@ pub use ndjson::{
     for_each_ndjson_source_with_options, for_each_ndjson_until, for_each_ndjson_until_with_options,
     for_each_ndjson_with_options, ndjson_writer_path_kind, run_ndjson, run_ndjson_file,
     run_ndjson_file_limit, run_ndjson_file_limit_with_options, run_ndjson_file_with_options,
+    run_ndjson_file_limit_with_report, run_ndjson_file_limit_with_report_and_options,
     run_ndjson_file_with_report, run_ndjson_file_with_report_and_options, run_ndjson_limit,
     run_ndjson_limit_with_options, run_ndjson_limit_with_report,
     run_ndjson_limit_with_report_and_options, run_ndjson_matches, run_ndjson_matches_file,

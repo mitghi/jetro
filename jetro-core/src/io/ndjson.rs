@@ -857,6 +857,86 @@ where
     )
 }
 
+pub fn run_ndjson_file_limit_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_file_limit_with_report_and_options(
+        engine,
+        path,
+        query,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_file_limit_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        let route = ndjson_route_plan(engine, NdjsonSourceMode::File, query, options)?
+            .explain()
+            .clone();
+        return Ok(NdjsonExecutionReport::emitted_only(route, 0));
+    }
+
+    let path = path.as_ref();
+    match ndjson_route_plan(engine, NdjsonSourceMode::File, query, options)? {
+        NdjsonRoutePlan::Rows {
+            explain,
+            plan: NdjsonRowsFilePlan::Stream(plan),
+        } => {
+            let (_, stats) = drive_ndjson_rows_stream_file_with_stats(
+                engine,
+                path,
+                &plan,
+                Some(limit),
+                options,
+                writer,
+            )?;
+            Ok(NdjsonExecutionReport::new(
+                explain,
+                NdjsonExecutionStats::from(&stats),
+            ))
+        }
+        NdjsonRoutePlan::Rows { explain, plan } => {
+            let rows =
+                drive_ndjson_rows_file_plan(engine, path, &plan, Some(limit), options, writer)?;
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+        }
+        NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
+        NdjsonRoutePlan::RowLocal { explain } => {
+            let file = File::open(path)?;
+            let rows = drive_ndjson_writer(
+                engine,
+                std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
+                query,
+                Some(limit),
+                options,
+                writer,
+            )?;
+            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+        }
+    }
+}
+
 fn unsupported_ndjson_route_error(explain: &NdjsonRouteExplain) -> JetroEngineError {
     let message = explain
         .unsupported_message()

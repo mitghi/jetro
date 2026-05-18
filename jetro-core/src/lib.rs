@@ -471,6 +471,37 @@ impl JetroEngine {
         io::run_ndjson_file_limit_with_options(self, path, query, limit, writer, options)
     }
 
+    /// Evaluate a limited file-backed NDJSON query and return a route/counter report.
+    pub fn run_ndjson_file_limit_with_report<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit_with_report(self, path, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_file_limit_with_report`] with explicit options.
+    pub fn run_ndjson_file_limit_with_report_and_options<P, W>(
+        &self,
+        path: P,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_file_limit_with_report_and_options(self, path, query, limit, writer, options)
+    }
+
     /// Evaluate `query` independently for every row from an [`io::NdjsonSource`].
     pub fn run_ndjson_source<W>(
         &self,

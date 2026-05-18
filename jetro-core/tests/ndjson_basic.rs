@@ -586,6 +586,24 @@ not-json
 }
 
 #[test]
+fn run_ndjson_file_limit_with_report_tracks_file_early_stop() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-file-limit-report");
+    std::fs::write(&path, b"{\"id\":1}\n{\"id\":2}\nnot-json\n").unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_limit_with_report(&path, "$.rows().map($.id)", 2, &mut out)
+        .expect("limited file rows stream report should stop before invalid tail");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
+    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(report.stats.rows_scanned, 2);
+    assert_eq!(report.stats.rows_emitted, 2);
+}
+
+#[test]
 fn run_ndjson_file_with_report_returns_file_route_stats() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-file-report");
