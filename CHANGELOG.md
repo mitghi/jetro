@@ -333,6 +333,11 @@
   a row-local query uses and which `$.rows()` file-plan family an expression
   lowers to, with stable labels for byte expression, byte-writable tape, tape,
   stream, fanout, and subquery routes.
+- **NDJSON route explain now includes source capabilities and typed fallback
+  reasons**. Reader-backed and file-backed routes report reverse, mmap,
+  partition, and framed-payload capability labels, and unsupported reader
+  `$.rows()` fanout/subquery plans fail before scanning input with a shared
+  typed file-backed-source reason.
 - **NDJSON route validation is green in release mode**. The focused
   release-mode `io::ndjson` suite and facade-level route-observability test
   pass after the module-boundary and public observability changes.
