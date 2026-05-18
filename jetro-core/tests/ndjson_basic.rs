@@ -742,6 +742,47 @@ fn run_ndjson_file_with_report_uses_ordered_reverse_filter_take() {
 }
 
 #[test]
+fn ordered_reverse_search_handles_tail_middle_head_and_no_match() {
+    let cases = [
+        ("tail", Some(31usize), "31\n"),
+        ("middle", Some(16usize), "16\n"),
+        ("head", Some(0usize), "0\n"),
+        ("none", None, ""),
+    ];
+
+    for (label, target, expected) in cases {
+        let engine = JetroEngine::new();
+        let path = temp_path(&format!("jetro-ndjson-ordered-reverse-{label}"));
+        let mut input = Vec::new();
+        for id in 0..32 {
+            let active = Some(id) == target;
+            input.extend_from_slice(format!("{{\"id\":{id},\"active\":{active}}}\n").as_bytes());
+        }
+        std::fs::write(&path, input).unwrap();
+        let mut out = Vec::new();
+
+        let report = engine
+            .run_ndjson_file_with_report_and_options(
+                &path,
+                "$.rows().reverse().filter($.active).take(1).map($.id)",
+                &mut out,
+                NdjsonOptions::default().with_parallel_min_bytes(1),
+            )
+            .expect("ordered reverse search should run");
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(String::from_utf8(out).unwrap(), expected, "{label}");
+        assert_eq!(report.route.kind.to_string(), "rows-stream", "{label}");
+        assert!(report.stats.parallel_partitions > 0, "{label}");
+        if target.is_some() {
+            assert_eq!(report.stats.rows_emitted, 1, "{label}");
+        } else {
+            assert_eq!(report.stats.rows_emitted, 0, "{label}");
+        }
+    }
+}
+
+#[test]
 fn run_ndjson_source_with_report_dispatches_file_source() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-source-report");
