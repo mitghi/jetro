@@ -86,6 +86,27 @@ pub struct NdjsonRouteExplain {
     pub fallback_reason: Option<NdjsonFallbackReason>,
 }
 
+impl NdjsonRouteExplain {
+    pub fn is_rows_route(&self) -> bool {
+        self.rows_plan.is_some()
+    }
+
+    pub fn is_supported(&self) -> bool {
+        self.kind != NdjsonRouteKind::UnsupportedRows
+    }
+
+    pub fn unsupported_message(&self) -> Option<String> {
+        if self.is_supported() {
+            return None;
+        }
+        Some(
+            self.fallback_reason
+                .map(|reason| reason.to_string())
+                .unwrap_or_else(|| "unsupported $.rows() NDJSON route".to_string()),
+        )
+    }
+}
+
 pub fn ndjson_explain(
     engine: &JetroEngine,
     source: NdjsonSourceMode,
@@ -180,6 +201,11 @@ mod tests {
         assert_eq!(route.kind.to_string(), "unsupported-rows");
         assert_eq!(
             route.fallback_reason.unwrap().to_string(),
+            "rows plan requires a file-backed NDJSON source"
+        );
+        assert!(!route.is_supported());
+        assert_eq!(
+            route.unsupported_message().unwrap(),
             "rows plan requires a file-backed NDJSON source"
         );
     }

@@ -20,7 +20,7 @@ pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, r
 use super::ndjson_rows::{
     ndjson_rows_file_plan, ndjson_rows_stream_plan, NdjsonRowsFilePlan,
 };
-use super::ndjson_route::{ndjson_explain, NdjsonRouteKind, NdjsonSourceMode};
+use super::ndjson_route::{ndjson_explain, NdjsonSourceMode};
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
@@ -628,11 +628,7 @@ fn reject_unsupported_reader_rows(
     options: NdjsonOptions,
 ) -> Result<(), JetroEngineError> {
     let route = ndjson_explain(engine, NdjsonSourceMode::Reader, query, options)?;
-    if route.kind == NdjsonRouteKind::UnsupportedRows {
-        let message = route
-            .fallback_reason
-            .map(|reason| reason.to_string())
-            .unwrap_or_else(|| "unsupported $.rows() NDJSON reader route".to_string());
+    if let Some(message) = route.unsupported_message() {
         return Err(JetroEngineError::Eval(EvalError(message)));
     }
     Ok(())
