@@ -753,6 +753,44 @@ impl JetroEngine {
         )
     }
 
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by`], returning the shared
+    /// NDJSON execution report shape.
+    pub fn run_ndjson_rev_distinct_by_with_report<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_report(
+            self, path, key_query, query, limit, writer,
+        )
+    }
+
+    /// Like [`JetroEngine::run_ndjson_rev_distinct_by_with_report`] with explicit options.
+    pub fn run_ndjson_rev_distinct_by_with_report_and_options<P, W>(
+        &self,
+        path: P,
+        key_query: &str,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        P: AsRef<std::path::Path>,
+        W: std::io::Write,
+    {
+        io::run_ndjson_rev_distinct_by_with_report_and_options(
+            self, path, key_query, query, limit, writer, options,
+        )
+    }
+
     /// Like [`JetroEngine::run_ndjson`] with explicit NDJSON reader options.
     pub fn run_ndjson_with_options<R, W>(
         &self,

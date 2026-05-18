@@ -1929,6 +1929,31 @@ fn reverse_distinct_by_stats_report_fast_paths_and_duplicates() {
 }
 
 #[test]
+fn reverse_distinct_by_reports_shared_ndjson_execution_stats() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-rev-distinct-by-report");
+    std::fs::write(
+        &path,
+        b"{\"id\":\"a\",\"v\":1}\n{\"id\":\"b\",\"v\":2}\n{\"id\":\"a\",\"v\":3}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_rev_distinct_by_with_report(&path, "id", "v", 10, &mut out)
+        .expect("reverse distinct_by report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
+    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.duplicate_rows, 1);
+    assert_eq!(report.stats.direct_key_rows, 3);
+    assert_eq!(report.stats.direct_project_rows, 2);
+}
+
+#[test]
 fn reverse_distinct_by_stats_report_front_filter_activation() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-rev-distinct-by-front-filter");

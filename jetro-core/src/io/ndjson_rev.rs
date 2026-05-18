@@ -6,6 +6,10 @@ use super::ndjson_distinct::{
     distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
 };
 use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
+use super::ndjson_route::{
+    NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain, NdjsonRouteKind,
+    NdjsonSourceCaps,
+};
 use super::RowError;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
@@ -526,6 +530,66 @@ where
     writer.flush()?;
     stats.front_filter = seen.front_kind();
     Ok(stats)
+}
+
+pub fn run_ndjson_rev_distinct_by_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_report_and_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let stats = run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine, path, key_query, query, limit, writer, options,
+    )?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain {
+            kind: NdjsonRouteKind::RowLocal,
+            source: NdjsonSourceCaps::file(options),
+            writer_path: super::ndjson::ndjson_writer_path_kind(engine, query),
+            rows_plan: None,
+            fallback_reason: None,
+        },
+        NdjsonExecutionStats {
+            rows_scanned: stats.rows_scanned,
+            rows_emitted: stats.emitted,
+            duplicate_rows: stats.duplicate_rows,
+            direct_key_rows: stats.direct_key_rows,
+            fallback_key_rows: stats.fallback_key_rows,
+            direct_project_rows: stats.direct_value_rows,
+            fallback_project_rows: stats.fallback_value_rows,
+            ..NdjsonExecutionStats::default()
+        },
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

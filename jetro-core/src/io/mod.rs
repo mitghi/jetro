@@ -60,6 +60,7 @@ pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
     run_ndjson_rev, run_ndjson_rev_distinct_by, run_ndjson_rev_distinct_by_with_options,
+    run_ndjson_rev_distinct_by_with_report, run_ndjson_rev_distinct_by_with_report_and_options,
     run_ndjson_rev_distinct_by_with_stats, run_ndjson_rev_distinct_by_with_stats_and_options,
     run_ndjson_rev_limit, run_ndjson_rev_limit_with_options, run_ndjson_rev_matches,
     run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonRevDistinctStats,
