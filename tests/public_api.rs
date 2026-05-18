@@ -138,6 +138,20 @@ fn facade_exposes_ndjson_match_and_reverse_report_api() {
     assert_eq!(String::from_utf8(rev_out).unwrap(), "2\n1\n");
     assert_eq!(reverse.stats.rows_scanned, 3);
     assert_eq!(reverse.stats.duplicate_rows, 1);
+
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n{\"id\":3,\"active\":true}\n",
+    )
+    .unwrap();
+    let mut match_out = Vec::new();
+    let reverse_matches = engine
+        .run_ndjson_rev_matches_with_report(&path, "active", 2, &mut match_out)
+        .expect("facade reverse match report API should run");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(reverse_matches.route.kind, NdjsonRouteKind::Matches);
+    assert_eq!(reverse_matches.stats.rows_scanned, 3);
+    assert_eq!(reverse_matches.stats.rows_emitted, 2);
 }
 
 #[test]
