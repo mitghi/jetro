@@ -9,6 +9,8 @@ mod report;
 pub(crate) mod physical;
 #[allow(dead_code)]
 pub(crate) mod pipeline;
+#[allow(dead_code)]
+pub(crate) mod ndjson;
 
 pub use report::{
     BackendInspection, BackendKind, BackendStatus, DirectPlanInspection, ExecutionFactsInspection,

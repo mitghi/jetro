@@ -7,7 +7,7 @@ use crate::parse::ast::{
 pub(super) const STREAM_BINDING: &str = "__jetro_rows_stream_0";
 
 #[derive(Clone, Debug)]
-pub(super) struct RowStreamSubqueryPlan {
+pub(crate) struct RowStreamSubqueryPlan {
     pub stream: RowStreamPlan,
     pub wrapper: Expr,
 }

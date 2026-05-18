@@ -33,7 +33,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-pub(super) struct RowStreamFanoutPlan {
+pub(crate) struct RowStreamFanoutPlan {
     pub source: RowStreamPlan,
     consumers: Vec<RowStreamFanoutConsumer>,
     body: Expr,

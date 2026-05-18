@@ -75,8 +75,14 @@ pub use ndjson_route::{
     ndjson_explain, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonFallbackReason,
     NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps, NdjsonSourceMode,
 };
+pub(crate) use ndjson_route::{ndjson_route_plan, NdjsonRoutePlan};
 pub use ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
+pub(crate) use ndjson_rows::NdjsonRowsFilePlan;
 pub use source::NdjsonSource;
+pub(crate) use stream_plan::{
+    RowStreamDemand, RowStreamDirection, RowStreamFileStrategy, RowStreamParallelism,
+    RowStreamPlan, RowStreamSourceKind, RowStreamStage,
+};
 use std::fmt;
 
 /// Error with enough row context for users to find malformed input quickly.

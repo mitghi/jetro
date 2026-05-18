@@ -189,7 +189,7 @@ impl NdjsonExecutionReport {
     }
 }
 
-pub(super) enum NdjsonRoutePlan {
+pub(crate) enum NdjsonRoutePlan {
     RowLocal {
         explain: NdjsonRouteExplain,
     },
@@ -203,7 +203,7 @@ pub(super) enum NdjsonRoutePlan {
 }
 
 impl NdjsonRoutePlan {
-    pub(super) fn explain(&self) -> &NdjsonRouteExplain {
+    pub(crate) fn explain(&self) -> &NdjsonRouteExplain {
         match self {
             Self::RowLocal { explain }
             | Self::Rows { explain, .. }
@@ -244,7 +244,7 @@ impl NdjsonRouteExplain {
     }
 }
 
-pub(super) fn ndjson_route_plan(
+pub(crate) fn ndjson_route_plan(
     engine: &JetroEngine,
     source: NdjsonSourceMode,
     query: &str,

@@ -3,14 +3,14 @@ use super::stream_plan::{lower_root_rows_query, RowStreamPlan, RowStreamSourceKi
 use super::stream_subquery::{lower_single_rows_subquery, RowStreamSubqueryPlan};
 use crate::{EvalError, JetroEngineError};
 
-pub(super) enum NdjsonRowsFilePlan {
+pub(crate) enum NdjsonRowsFilePlan {
     Stream(RowStreamPlan),
     Fanout(RowStreamFanoutPlan),
     Subquery(RowStreamSubqueryPlan),
 }
 
 impl NdjsonRowsFilePlan {
-    pub(super) fn kind(&self) -> NdjsonRowsPlanKind {
+    pub(crate) fn kind(&self) -> NdjsonRowsPlanKind {
         match self {
             Self::Stream(_) => NdjsonRowsPlanKind::Stream,
             Self::Fanout(_) => NdjsonRowsPlanKind::Fanout,
@@ -18,7 +18,7 @@ impl NdjsonRowsFilePlan {
         }
     }
 
-    pub(super) fn requires_file_backed_source(&self) -> bool {
+    pub(crate) fn requires_file_backed_source(&self) -> bool {
         matches!(self, Self::Fanout(_) | Self::Subquery(_))
     }
 }
@@ -44,14 +44,14 @@ pub fn ndjson_rows_plan_kind(query: &str) -> Result<Option<NdjsonRowsPlanKind>, 
     Ok(ndjson_rows_file_plan(query)?.map(|plan| plan.kind()))
 }
 
-pub(super) fn ndjson_rows_stream_plan(
+pub(crate) fn ndjson_rows_stream_plan(
     query: &str,
 ) -> Result<Option<RowStreamPlan>, JetroEngineError> {
     lower_root_rows_query(query, RowStreamSourceKind::NdjsonRows)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
-pub(super) fn ndjson_rows_file_plan(
+pub(crate) fn ndjson_rows_file_plan(
     query: &str,
 ) -> Result<Option<NdjsonRowsFilePlan>, JetroEngineError> {
     if let Some(plan) = ndjson_rows_stream_plan(query)? {
