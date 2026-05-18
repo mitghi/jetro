@@ -208,6 +208,7 @@ impl NdjsonObjectLayoutHint {
             .map(|field| field.slot)
     }
 
+    #[cfg(test)]
     pub(super) fn match_row<'a, 's>(
         &self,
         row: &'a [u8],
@@ -319,6 +320,7 @@ impl NdjsonSchemaHints {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn root_slot_for(&self, key: &str) -> Option<usize> {
         self.root_object.as_ref()?.slot_for(key)
     }
@@ -435,6 +437,7 @@ impl NdjsonHintState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn schema(&self) -> &NdjsonSchemaHints {
         &self.schema
     }

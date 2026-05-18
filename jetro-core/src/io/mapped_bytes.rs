@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -51,6 +52,31 @@ impl MappedBytes {
             MappedBytesInner::Owned(bytes) => bytes,
         }
     }
+}
+
+pub(super) fn split_line_aligned_ranges(
+    bytes: &[u8],
+    ranges_per_thread: usize,
+) -> Vec<Range<usize>> {
+    let target = rayon::current_num_threads().max(1) * ranges_per_thread.max(1);
+    let approx = (bytes.len() / target.max(1)).max(1);
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+
+    while start < bytes.len() {
+        let mut end = (start + approx).min(bytes.len());
+        if end < bytes.len() {
+            while end < bytes.len() && bytes[end - 1] != b'\n' {
+                end += 1;
+            }
+        }
+        if end > start {
+            ranges.push(start..end);
+        }
+        start = end;
+    }
+
+    ranges
 }
 
 #[cfg(unix)]

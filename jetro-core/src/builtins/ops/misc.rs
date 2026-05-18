@@ -99,7 +99,6 @@ pub fn from_json_apply(recv: &Val) -> Option<Val> {
 /// Fallible variant of [`from_json_apply`]; returns an `EvalError` on invalid JSON.
 #[inline]
 pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
-    #[cfg(feature = "simd-json")]
     {
         let bytes_owned: Vec<u8> = match recv {
             Val::Str(s) => s.as_bytes().to_vec(),
@@ -109,20 +108,6 @@ pub fn try_from_json_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
         return Val::from_json_simd(&mut bytes)
             .map(Some)
             .map_err(|e| EvalError(format!("from_json: {}", e)));
-    }
-    #[cfg(not(feature = "simd-json"))]
-    {
-        match recv {
-            Val::Str(s) => Val::from_json_str(s.as_ref())
-                .map(Some)
-                .map_err(|e| EvalError(format!("from_json: {}", e))),
-            _ => {
-                let s = crate::util::val_to_string(recv);
-                Val::from_json_str(&s)
-                    .map(Some)
-                    .map_err(|e| EvalError(format!("from_json: {}", e)))
-            }
-        }
     }
 }
 
@@ -183,4 +168,3 @@ pub fn includes_apply(recv: &Val, item: &Val) -> Val {
         _ => false,
     })
 }
-

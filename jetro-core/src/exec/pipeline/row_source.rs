@@ -53,7 +53,6 @@ pub(super) enum ValRowsIter<'a> {
 }
 
 /// Row source backed directly by a `simd-json` tape, enabling zero-copy streaming without building a `Val` tree.
-#[cfg(feature = "simd-json")]
 pub(super) enum TapeRowSource<'a> {
     /// The source tape node is an array; iteration yields each element by span.
     Array {
@@ -70,7 +69,6 @@ pub(super) enum TapeRowSource<'a> {
 }
 
 /// Iterator over tape nodes that yields each array element as a `TapeView` without materialisation.
-#[cfg(feature = "simd-json")]
 pub(super) enum TapeRowsIter<'a> {
     /// Advances through array elements by consuming tape spans.
     Array {
@@ -87,7 +85,6 @@ pub(super) enum TapeRowsIter<'a> {
 }
 
 /// Wrapper around `TapeRowsIter` that materialises each `TapeView` into a `Val` on demand.
-#[cfg(feature = "simd-json")]
 pub(super) struct TapeMaterializedRowsIter<'a>(TapeRowsIter<'a>);
 
 impl Iterator for ValRowsIter<'_> {
@@ -108,8 +105,6 @@ impl Iterator for ValRowsIter<'_> {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> Iterator for TapeRowsIter<'a> {
     type Item = crate::data::view::TapeView<'a>;
 
@@ -136,8 +131,6 @@ impl<'a> Iterator for TapeRowsIter<'a> {
         }
     }
 }
-
-#[cfg(feature = "simd-json")]
 impl Iterator for TapeMaterializedRowsIter<'_> {
     type Item = Val;
 
@@ -227,11 +220,12 @@ impl<'a> ValRowSource<'a> {
         matches!(self, Self::ObjVec(_))
     }
 }
-
-#[cfg(feature = "simd-json")]
 impl<'a> TapeRowSource<'a> {
     /// Walks `keys` through `tape` and returns a `TapeRowSource` rooted at the resolved node, or `Missing` when any key is absent.
-    pub(super) fn from_field_chain(tape: &'a crate::data::tape::TapeData, keys: &[Arc<str>]) -> Self {
+    pub(super) fn from_field_chain(
+        tape: &'a crate::data::tape::TapeData,
+        keys: &[Arc<str>],
+    ) -> Self {
         let Some(idx) = tape_walk_field_chain(tape, keys) else {
             return Self::Missing;
         };
@@ -303,7 +297,10 @@ pub(super) fn materialize_source(recv: &Val) -> Vec<Val> {
 
 /// Materialises at most the first `limit` rows from `recv`.
 pub(super) fn materialize_source_prefix(recv: &Val, limit: usize) -> Vec<Val> {
-    ValRowSource::from_receiver(recv).iter().take(limit).collect()
+    ValRowSource::from_receiver(recv)
+        .iter()
+        .take(limit)
+        .collect()
 }
 
 /// Returns the number of rows in `recv`, or `None` when `recv` is a scalar or non-iterable.
@@ -333,7 +330,6 @@ fn objvec_row(data: &ObjVecData, row: usize) -> Val {
 }
 
 // Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
-#[cfg(feature = "simd-json")]
 fn tape_walk_field_chain(tape: &crate::data::tape::TapeData, keys: &[Arc<str>]) -> Option<usize> {
     let mut cur = 0usize;
     for key in keys {
@@ -343,7 +339,6 @@ fn tape_walk_field_chain(tape: &crate::data::tape::TapeData, keys: &[Arc<str>]) 
 }
 
 // Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
-#[cfg(feature = "simd-json")]
 fn tape_field(tape: &crate::data::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
     let crate::data::tape::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
         return None;

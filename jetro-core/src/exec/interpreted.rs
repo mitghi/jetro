@@ -255,7 +255,9 @@ impl ExecCtx<'_, '_> {
     /// root-relative expressions and therefore need the real document root.
     fn view_pipeline_env(&self, body: &pipeline::PipelineBody) -> Result<Env, EvalError> {
         if pipeline_body_has_dynamic_membership_target(body) {
-            self.j.root_val().map(|root| self.env_with_fast_locals(root))
+            self.j
+                .root_val()
+                .map(|root| self.env_with_fast_locals(root))
         } else {
             Ok(self.null_env_with_fast_locals())
         }
@@ -514,14 +516,13 @@ impl ExecCtx<'_, '_> {
         }
     }
 
-    /// Runs the pipeline entirely on the simd-json tape via a zero-copy view; requires
-    /// `simd-json` feature and a live tape, otherwise returns `None`.
+    /// Runs the pipeline entirely on the simd-json tape via a zero-copy view;
+    /// returns `None` when this document has no live tape.
     fn eval_tape_view_pipeline(
         &mut self,
         keys: &[Arc<str>],
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
-        #[cfg(feature = "simd-json")]
         {
             if let Some(tape) = match self.j.lazy_tape() {
                 Ok(tape) => tape,
@@ -552,7 +553,6 @@ impl ExecCtx<'_, '_> {
         keys: &[Arc<str>],
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
-        #[cfg(feature = "simd-json")]
         {
             if let Some(tape) = match self.j.lazy_tape() {
                 Ok(tape) => tape,
@@ -578,7 +578,6 @@ impl ExecCtx<'_, '_> {
         if !body.can_run_with_materialized_receiver() {
             return None;
         }
-        #[cfg(feature = "simd-json")]
         {
             if let Some(tape) = match self.j.lazy_tape() {
                 Ok(tape) => tape,
@@ -637,7 +636,6 @@ impl ExecCtx<'_, '_> {
         &mut self,
         steps: &[PhysicalPathStep],
     ) -> Option<Result<Val, EvalError>> {
-        #[cfg(feature = "simd-json")]
         if let Some(tape) = match self.j.lazy_tape() {
             Ok(tape) => tape,
             Err(err) => return Some(Err(err)),
@@ -804,7 +802,6 @@ impl ExecCtx<'_, '_> {
         call: &crate::builtins::BuiltinCall,
         optional: bool,
     ) -> Option<Result<Val, EvalError>> {
-        #[cfg(feature = "simd-json")]
         {
             let PlanNode::RootPath(steps) = self.plan.node(receiver) else {
                 return None;
@@ -820,11 +817,6 @@ impl ExecCtx<'_, '_> {
                 return Some(Ok(Val::Null));
             }
             call.try_apply_json_view(view.scalar()).map(Ok)
-        }
-        #[cfg(not(feature = "simd-json"))]
-        {
-            let _ = (receiver, call, optional);
-            None
         }
     }
 
@@ -1085,7 +1077,9 @@ mod tests {
         assert!(super::pipeline_body_has_dynamic_membership_target(&dynamic));
 
         let literal = body_with_target(MembershipSinkTarget::Literal(Val::Int(1)));
-        assert!(!super::pipeline_body_has_dynamic_membership_target(&literal));
+        assert!(!super::pipeline_body_has_dynamic_membership_target(
+            &literal
+        ));
 
         let collect = PipelineBody {
             stages: Vec::new(),
@@ -1094,6 +1088,8 @@ mod tests {
             stage_kernels: Vec::<BodyKernel>::new(),
             sink_kernels: Vec::new(),
         };
-        assert!(!super::pipeline_body_has_dynamic_membership_target(&collect));
+        assert!(!super::pipeline_body_has_dynamic_membership_target(
+            &collect
+        ));
     }
 }

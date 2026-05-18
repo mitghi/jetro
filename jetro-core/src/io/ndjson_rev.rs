@@ -1,7 +1,15 @@
+use super::ndjson_byte::{
+    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
+    BytePlanWrite, RawFieldValue,
+};
 use super::ndjson_distinct::{
     distinct_key_bytes, raw_distinct_key_bytes, AdaptiveDistinctKeys, DistinctFrontFilterKind,
 };
 use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
+use super::ndjson_route::{
+    NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain, NdjsonRouteKind,
+    NdjsonSourceCaps,
+};
 use super::RowError;
 use crate::util::is_truthy;
 use crate::{JetroEngine, JetroEngineError};
@@ -12,12 +20,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-
-#[cfg(feature = "simd-json")]
-use super::ndjson_byte::{
-    raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
-    BytePlanWrite, RawFieldValue,
-};
 
 /// Reverse NDJSON line reader over a seekable file.
 ///
@@ -284,7 +286,6 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    #[cfg(feature = "simd-json")]
     if let Some(plan) = super::ndjson::direct_tape_plan(engine, query) {
         return drive_rev_writer_tape(engine, path, &plan, None, options, writer);
     }
@@ -337,8 +338,6 @@ where
     if limit == 0 {
         return Ok(0);
     }
-
-    #[cfg(feature = "simd-json")]
     if let Some(plan) = super::ndjson::direct_tape_plan(engine, query) {
         return drive_rev_writer_tape(engine, path, &plan, Some(limit), options, writer);
     }
@@ -441,10 +440,7 @@ where
     if limit == 0 {
         return Ok(NdjsonRevDistinctStats::default());
     }
-
-    #[cfg(feature = "simd-json")]
     let direct_key_plan = super::ndjson::direct_tape_plan(engine, key_query);
-    #[cfg(feature = "simd-json")]
     let direct_value_plan = super::ndjson::direct_tape_plan(engine, query)
         .filter(|plan| tape_plan_can_write_byte_row(plan));
 
@@ -453,9 +449,7 @@ where
     let mut vm = None;
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
-    #[cfg(feature = "simd-json")]
     let mut byte_scratch = Vec::with_capacity(options.initial_buffer_capacity);
-    #[cfg(feature = "simd-json")]
     let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut seen = AdaptiveDistinctKeys::default();
     let mut stats = NdjsonRevDistinctStats::default();
@@ -464,14 +458,10 @@ where
         stats.rows_scanned += 1;
         let mut row = Some(row);
         let mut document = None;
-
-        #[cfg(feature = "simd-json")]
         let direct_key = direct_key_plan.as_ref().and_then(|plan| {
             row.as_deref()
                 .and_then(|row| distinct_key_direct(row, plan))
         });
-        #[cfg(not(feature = "simd-json"))]
-        let direct_key = None;
 
         let inserted = if let Some(key) = direct_key {
             stats.direct_key_rows += 1;
@@ -496,8 +486,6 @@ where
             stats.duplicate_rows += 1;
             continue;
         }
-
-        #[cfg(feature = "simd-json")]
         if let (Some(plan), Some(row)) = (direct_value_plan.as_ref(), row.as_deref()) {
             byte_scratch.clear();
             out.clear();
@@ -544,6 +532,66 @@ where
     Ok(stats)
 }
 
+pub fn run_ndjson_rev_distinct_by_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_distinct_by_with_report_and_options(
+        engine,
+        path,
+        key_query,
+        query,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_distinct_by_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    key_query: &str,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let stats = run_ndjson_rev_distinct_by_with_stats_and_options(
+        engine, path, key_query, query, limit, writer, options,
+    )?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain {
+            kind: NdjsonRouteKind::RowLocal,
+            source: NdjsonSourceCaps::file(options),
+            writer_path: super::ndjson::ndjson_writer_path_kind(engine, query),
+            rows_plan: None,
+            fallback_reason: None,
+        },
+        NdjsonExecutionStats {
+            rows_scanned: stats.rows_scanned,
+            rows_emitted: stats.emitted,
+            duplicate_rows: stats.duplicate_rows,
+            direct_key_rows: stats.direct_key_rows,
+            fallback_key_rows: stats.fallback_key_rows,
+            direct_project_rows: stats.direct_value_rows,
+            fallback_project_rows: stats.fallback_value_rows,
+            ..NdjsonExecutionStats::default()
+        },
+    ))
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NdjsonRevDistinctStats {
     pub rows_scanned: usize,
@@ -555,8 +603,6 @@ pub struct NdjsonRevDistinctStats {
     pub fallback_value_rows: usize,
     pub front_filter: DistinctFrontFilterKind,
 }
-
-#[cfg(feature = "simd-json")]
 fn distinct_key_direct<'a>(
     row: &'a [u8],
     plan: &super::ndjson::NdjsonDirectTapePlan,
@@ -609,7 +655,46 @@ where
     drive_rev_matches_writer(engine, path, predicate, limit, options, writer)
 }
 
-#[cfg(feature = "simd-json")]
+pub fn run_ndjson_rev_matches_with_report<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    run_ndjson_rev_matches_with_report_and_options(
+        engine,
+        path,
+        predicate,
+        limit,
+        writer,
+        super::ndjson::NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_rev_matches_with_report_and_options<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    writer: W,
+    options: super::ndjson::NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    let (_, stats) =
+        drive_rev_matches_writer_with_stats(engine, path, predicate, limit, options, writer)?;
+    Ok(NdjsonExecutionReport::new(
+        NdjsonRouteExplain::matches(NdjsonSourceCaps::file(options)),
+        stats,
+    ))
+}
 fn drive_rev_writer_tape<P, W>(
     engine: &JetroEngine,
     path: P,
@@ -728,24 +813,43 @@ where
     P: AsRef<Path>,
     W: Write,
 {
-    if limit == 0 {
-        return Ok(0);
-    }
+    Ok(drive_rev_matches_writer_with_stats(engine, path, predicate, limit, options, writer)?.0)
+}
 
-    #[cfg(feature = "simd-json")]
+fn drive_rev_matches_writer_with_stats<P, W>(
+    engine: &JetroEngine,
+    path: P,
+    predicate: &str,
+    limit: usize,
+    options: super::ndjson::NdjsonOptions,
+    writer: W,
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
+where
+    P: AsRef<Path>,
+    W: Write,
+{
+    if limit == 0 {
+        return Ok((0, NdjsonExecutionStats::default()));
+    }
     if let Some(predicate) = super::ndjson::direct_tape_predicate(engine, predicate) {
-        return drive_rev_matches_writer_tape(engine, path, &predicate, limit, options, writer);
+        return drive_rev_matches_writer_tape_with_stats(
+            engine, path, &predicate, limit, options, writer,
+        );
     }
 
     let mut driver = NdjsonReverseFileDriver::with_options(path, options)?;
     let mut executor = super::ndjson::NdjsonRowExecutor::new(engine, predicate);
     let mut writer = super::ndjson::ndjson_writer_with_options(writer, options);
     let mut emitted = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
         let document = executor.parse_owned_row(reverse_row_no, row)?;
         let matched = executor.eval_document(reverse_row_no, &document)?;
+        stats.fallback_filter_rows += 1;
         if !is_truthy(&matched) {
+            stats.rows_filtered += 1;
             continue;
         }
 
@@ -756,24 +860,23 @@ where
             executor.engine(),
         )?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
-
-#[cfg(feature = "simd-json")]
-fn drive_rev_matches_writer_tape<P, W>(
+fn drive_rev_matches_writer_tape_with_stats<P, W>(
     engine: &JetroEngine,
     path: P,
     predicate: &super::ndjson::NdjsonDirectPredicate,
     limit: usize,
     options: super::ndjson::NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     P: AsRef<Path>,
     W: Write,
@@ -787,8 +890,10 @@ where
     let mut vm = needs_vm.then(|| engine.lock_vm());
     let env = needs_vm.then(|| crate::data::context::Env::new(crate::Val::Null));
     let mut predicate_path = super::ndjson::NdjsonPathCache::default();
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((reverse_row_no, row)) = driver.next_line_with_reverse_no()? {
+        stats.rows_scanned += 1;
         scratch.parse_slice(&row).map_err(|message| {
             super::ndjson::row_parse_error(
                 reverse_row_no,
@@ -804,18 +909,22 @@ where
         )
         .map_err(JetroEngineError::Eval)?
         {
+            stats.fallback_filter_rows += 1;
+            stats.rows_filtered += 1;
             continue;
         }
+        stats.fallback_filter_rows += 1;
         writer.write_all(&row)?;
         writer.write_all(b"\n")?;
         emitted += 1;
+        stats.rows_emitted += 1;
         if emitted >= limit {
             break;
         }
     }
 
     writer.flush()?;
-    Ok(emitted)
+    Ok((emitted, stats))
 }
 
 fn trim_line_ending(buf: &mut Vec<u8>) {
@@ -895,8 +1004,6 @@ mod tests {
         );
         let _ = std::fs::remove_file(path);
     }
-
-    #[cfg(feature = "simd-json")]
     #[test]
     fn direct_distinct_key_classifier_rejects_escaped_strings() {
         assert_eq!(

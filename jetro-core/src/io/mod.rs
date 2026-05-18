@@ -6,23 +6,25 @@
 mod document_rows;
 mod mapped_bytes;
 mod ndjson;
-#[cfg(feature = "simd-json")]
 mod ndjson_byte;
-#[cfg(feature = "simd-json")]
 mod ndjson_direct;
+mod ndjson_driver;
 mod ndjson_distinct;
 mod ndjson_frame;
-#[cfg(feature = "simd-json")]
-#[cfg_attr(not(test), allow(dead_code))]
 mod ndjson_hint;
 mod ndjson_parallel;
 mod ndjson_rev;
-#[cfg(feature = "simd-json")]
+mod ndjson_route;
+mod ndjson_row;
+mod ndjson_rows;
+mod ndjson_scan;
 mod ndjson_stream_cache;
+mod ndjson_write;
 mod source;
 mod stream_direct;
 mod stream_exec;
-#[allow(dead_code)]
+mod stream_fanout;
+mod stream_numeric;
 mod stream_plan;
 mod stream_source;
 mod stream_subquery;
@@ -37,26 +39,43 @@ pub use ndjson::{
     collect_ndjson_with_options, for_each_ndjson, for_each_ndjson_source,
     for_each_ndjson_source_until, for_each_ndjson_source_until_with_options,
     for_each_ndjson_source_with_options, for_each_ndjson_until, for_each_ndjson_until_with_options,
-    for_each_ndjson_with_options, run_ndjson, run_ndjson_file, run_ndjson_file_limit,
-    run_ndjson_file_limit_with_options, run_ndjson_file_with_options, run_ndjson_limit,
-    run_ndjson_limit_with_options, run_ndjson_matches, run_ndjson_matches_file,
-    run_ndjson_matches_file_with_options, run_ndjson_matches_source,
-    run_ndjson_matches_source_with_options, run_ndjson_matches_with_options, run_ndjson_source,
+    for_each_ndjson_with_options, ndjson_writer_path_kind, run_ndjson, run_ndjson_file,
+    run_ndjson_file_limit, run_ndjson_file_limit_with_options, run_ndjson_file_with_options,
+    run_ndjson_file_limit_with_report, run_ndjson_file_limit_with_report_and_options,
+    run_ndjson_file_with_report, run_ndjson_file_with_report_and_options, run_ndjson_limit,
+    run_ndjson_limit_with_options, run_ndjson_limit_with_report,
+    run_ndjson_limit_with_report_and_options, run_ndjson_matches, run_ndjson_matches_file,
+    run_ndjson_matches_file_with_options, run_ndjson_matches_file_with_report,
+    run_ndjson_matches_file_with_report_and_options, run_ndjson_matches_source,
+    run_ndjson_matches_source_with_options, run_ndjson_matches_source_with_report,
+    run_ndjson_matches_source_with_report_and_options, run_ndjson_matches_with_options,
+    run_ndjson_source,
+    run_ndjson_matches_with_report, run_ndjson_matches_with_report_and_options,
     run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
-    run_ndjson_with_options, NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonParallelism,
-    NdjsonPerRowDriver,
+    run_ndjson_source_limit_with_report, run_ndjson_source_limit_with_report_and_options,
+    run_ndjson_source_with_report, run_ndjson_source_with_report_and_options,
+    run_ndjson_with_options, run_ndjson_with_report, run_ndjson_with_report_and_options,
+    NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonParallelism, NdjsonWriterPathKind,
 };
+pub use ndjson_driver::NdjsonPerRowDriver;
 pub use ndjson_distinct::DistinctFrontFilterKind;
 pub use ndjson_frame::{NdjsonRowFrame, NullPayload};
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
     collect_ndjson_rev_with_options, for_each_ndjson_rev, for_each_ndjson_rev_with_options,
     run_ndjson_rev, run_ndjson_rev_distinct_by, run_ndjson_rev_distinct_by_with_options,
+    run_ndjson_rev_distinct_by_with_report, run_ndjson_rev_distinct_by_with_report_and_options,
     run_ndjson_rev_distinct_by_with_stats, run_ndjson_rev_distinct_by_with_stats_and_options,
     run_ndjson_rev_limit, run_ndjson_rev_limit_with_options, run_ndjson_rev_matches,
-    run_ndjson_rev_matches_with_options, run_ndjson_rev_with_options, NdjsonRevDistinctStats,
-    NdjsonReverseFileDriver,
+    run_ndjson_rev_matches_with_options, run_ndjson_rev_matches_with_report,
+    run_ndjson_rev_matches_with_report_and_options, run_ndjson_rev_with_options,
+    NdjsonRevDistinctStats, NdjsonReverseFileDriver,
 };
+pub use ndjson_route::{
+    ndjson_explain, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonFallbackReason,
+    NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps, NdjsonSourceMode,
+};
+pub use ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
 pub use source::NdjsonSource;
 use std::fmt;
 

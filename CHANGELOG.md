@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.11
+
+### Release focus
+
+- **Ordered reverse row search**. File-backed
+  `$.rows().reverse().find(...)` and equivalent `filter(...).take(1)` plans can
+  search line-aligned partitions in semantic reverse order, preserving early
+  stop while still using the shared row-stream executor.
+- **Byte-native nested array predicates**. Row filters can evaluate generic
+  object-field `.find(...)` predicates such as
+  `@.custom_attributes.find(@.value == "z")` directly on row bytes, including
+  bare-field and `null` literal comparisons.
+
+### NDJSON
+
+- Added `RowStreamFileStrategy::OrderedPartitionSearch` for ordered early-stop
+  plans when partitioned file execution is available.
+- Ordered partition search processes bounded worker waves, merges partition
+  output in semantic order, and stops once the retained output limit is
+  satisfied.
+- Reverse ordered-search reports now preserve partition counters while still
+  showing bounded scan/emission behavior.
+- Added a reusable `ArrayAny` direct predicate shape so nested array searches
+  are represented as generic predicate metadata rather than query-shape
+  executor fusions.
+- Added an early-exit byte scanner for array item predicates, sharing the
+  existing root-field span optimization used by filtered stream reducers.
+
+### Maintenance
+
+- Kept reverse search and nested predicate execution on the existing
+  row-stream/byte predicate machinery rather than adding shape-specific
+  executors.
+- Added semantic coverage for tail, middle, head, and no-match ordered reverse
+  search positions.
+- Added direct-byte predicate coverage for nested array `.find(...)` matches,
+  misses, and `null` comparisons, plus row-stream stats coverage proving zero
+  filter fallback rows on supported input.
+
+### Validation
+
+- Focused `jetro-core` ordered-search and array-predicate tests pass for this
+  branch.
+
 ## 0.5.10
 
 ### Release focus

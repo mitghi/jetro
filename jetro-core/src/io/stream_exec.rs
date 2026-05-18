@@ -1,22 +1,20 @@
 use super::ndjson::{parse_row, row_eval_error};
+use super::ndjson_byte::eval_ndjson_byte_predicate_row;
+use super::ndjson_direct::{
+    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan,
+};
 use super::ndjson_distinct::{distinct_key_bytes, AdaptiveDistinctKeys};
+use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, write_direct_map};
+use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
+use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
 use crate::vm::opcode::Program;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
-
-#[cfg(feature = "simd-json")]
-use super::ndjson_byte::eval_ndjson_byte_predicate_row;
-#[cfg(feature = "simd-json")]
-use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, write_direct_map};
-#[cfg(feature = "simd-json")]
-use super::ndjson_direct::{
-    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
-    NdjsonDirectTapePlan,
-};
 
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
@@ -65,12 +63,7 @@ impl CompiledRowStream {
         let mut vm = None;
         for stage in &mut self.stages {
             match stage {
-                CompiledRowStreamStage::Filter {
-                    program,
-                    #[cfg(feature = "simd-json")]
-                    direct,
-                } => {
-                    #[cfg(feature = "simd-json")]
+                CompiledRowStreamStage::Filter { program, direct } => {
                     if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
                             self.stats.direct_filter_rows += 1;
@@ -102,10 +95,8 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::DistinctBy {
                     program,
                     seen,
-                    #[cfg(feature = "simd-json")]
                     direct,
                 } => {
-                    #[cfg(feature = "simd-json")]
                     if let (Some(plan), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
                         if let Some(inserted) = insert_direct_distinct_key(seen, raw_row, plan) {
                             self.stats.direct_key_rows += 1;
@@ -145,12 +136,102 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
-                CompiledRowStreamStage::Map {
+                CompiledRowStreamStage::Last { value: last } => {
+                    *last = Some(ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?);
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Count { count } => {
+                    *count += 1;
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Numeric { acc } => {
+                    let value = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
+                    acc.add_val(&value);
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Any {
                     program,
-                    #[cfg(feature = "simd-json")]
+                    matched,
                     direct,
                 } => {
-                    #[cfg(feature = "simd-json")]
+                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+                            self.stats.direct_filter_rows += 1;
+                            if keep {
+                                *matched = true;
+                                self.exhausted = true;
+                                return Ok(RowStreamRowResult::Stop);
+                            }
+                            return Ok(RowStreamRowResult::Skip);
+                        }
+                    }
+                    let value = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
+                    let keep = vm
+                        .execute_val_raw_fresh_root(program, value)
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                    self.stats.fallback_filter_rows += 1;
+                    if is_truthy(&keep) {
+                        *matched = true;
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::All {
+                    program,
+                    failed,
+                    direct,
+                } => {
+                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+                            self.stats.direct_filter_rows += 1;
+                            if !keep {
+                                *failed = true;
+                                self.exhausted = true;
+                                return Ok(RowStreamRowResult::Stop);
+                            }
+                            return Ok(RowStreamRowResult::Skip);
+                        }
+                    }
+                    let value = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
+                    let keep = vm
+                        .execute_val_raw_fresh_root(program, value)
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                    self.stats.fallback_filter_rows += 1;
+                    if !is_truthy(&keep) {
+                        *failed = true;
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Map { program, direct } => {
                     if let Some(raw_row) = row.as_deref() {
                         if let Some(bytes) = write_direct_map(raw_row, direct.as_ref())? {
                             self.stats.direct_project_rows += 1;
@@ -187,7 +268,6 @@ impl CompiledRowStream {
         Ok(RowStreamRowResult::Emit(value))
     }
 
-    #[allow(dead_code)]
     pub(super) fn apply_val_row(
         &mut self,
         vm: &mut VM,
@@ -224,6 +304,42 @@ impl CompiledRowStream {
                         self.exhausted = true;
                     }
                 }
+                CompiledRowStreamStage::Last { value: last } => {
+                    *last = Some(value);
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Count { count } => {
+                    *count += 1;
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Numeric { acc } => {
+                    acc.add_val(&value);
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::Any {
+                    program, matched, ..
+                } => {
+                    let keep = vm.execute_val_raw_fresh_root(program, value)?;
+                    self.stats.fallback_filter_rows += 1;
+                    if is_truthy(&keep) {
+                        *matched = true;
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
+                CompiledRowStreamStage::All {
+                    program, failed, ..
+                } => {
+                    let keep = vm.execute_val_raw_fresh_root(program, value)?;
+                    self.stats.fallback_filter_rows += 1;
+                    if !is_truthy(&keep) {
+                        *failed = true;
+                        self.exhausted = true;
+                        return Ok(RowStreamRowResult::Stop);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Map { program, .. } => {
                     value = vm.execute_val_raw_fresh_root(program, value)?;
                     self.stats.fallback_project_rows += 1;
@@ -232,6 +348,17 @@ impl CompiledRowStream {
         }
         self.stats.rows_emitted += 1;
         Ok(RowStreamRowResult::Emit(value))
+    }
+
+    pub(super) fn finish(&self) -> Option<Val> {
+        self.stages.iter().find_map(|stage| match stage {
+            CompiledRowStreamStage::Last { value } => Some(value.clone().unwrap_or(Val::Null)),
+            CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
+            CompiledRowStreamStage::Numeric { acc } => Some(acc.value()),
+            CompiledRowStreamStage::Any { matched, .. } => Some(Val::Bool(*matched)),
+            CompiledRowStreamStage::All { failed, .. } => Some(Val::Bool(!*failed)),
+            _ => None,
+        })
     }
 }
 
@@ -263,22 +390,38 @@ fn ensure_row_stream_value(
 enum CompiledRowStreamStage {
     Filter {
         program: Program,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectPredicate>,
     },
     DistinctBy {
         program: Program,
         seen: AdaptiveDistinctKeys,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectTapePlan>,
     },
     Take {
         limit: usize,
         seen: usize,
     },
+    Last {
+        value: Option<Val>,
+    },
+    Count {
+        count: usize,
+    },
+    Numeric {
+        acc: NumericAccumulator,
+    },
+    Any {
+        program: Program,
+        matched: bool,
+        direct: Option<NdjsonDirectPredicate>,
+    },
+    All {
+        program: Program,
+        failed: bool,
+        direct: Option<NdjsonDirectPredicate>,
+    },
     Map {
         program: Program,
-        #[cfg(feature = "simd-json")]
         direct: Option<NdjsonDirectTapePlan>,
     },
 }
@@ -288,22 +431,43 @@ impl CompiledRowStreamStage {
         match stage {
             RowStreamStage::Filter(expr) => Self::Filter {
                 program: Compiler::compile(expr, "<ndjson-rows-filter>"),
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_predicate_for_expr(expr),
             },
             RowStreamStage::DistinctBy(expr) => Self::DistinctBy {
                 program: Compiler::compile(expr, "<ndjson-rows-distinct-by>"),
                 seen: AdaptiveDistinctKeys::default(),
-                #[cfg(feature = "simd-json")]
                 direct: direct_tape_plan_for_expr(expr),
             },
             RowStreamStage::Take(limit) => Self::Take {
                 limit: *limit,
                 seen: 0,
             },
+            RowStreamStage::Last => Self::Last { value: None },
+            RowStreamStage::Count => Self::Count { count: 0 },
+            RowStreamStage::Sum => Self::Numeric {
+                acc: NumericAccumulator::new(BuiltinMethod::Sum),
+            },
+            RowStreamStage::Avg => Self::Numeric {
+                acc: NumericAccumulator::new(BuiltinMethod::Avg),
+            },
+            RowStreamStage::Min => Self::Numeric {
+                acc: NumericAccumulator::new(BuiltinMethod::Min),
+            },
+            RowStreamStage::Max => Self::Numeric {
+                acc: NumericAccumulator::new(BuiltinMethod::Max),
+            },
+            RowStreamStage::Any(expr) => Self::Any {
+                program: Compiler::compile(expr, "<ndjson-rows-any>"),
+                matched: false,
+                direct: direct_tape_predicate_for_expr(expr),
+            },
+            RowStreamStage::All(expr) => Self::All {
+                program: Compiler::compile(expr, "<ndjson-rows-all>"),
+                failed: false,
+                direct: direct_tape_predicate_for_expr(expr),
+            },
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
-                #[cfg(feature = "simd-json")]
                 direct: is_last
                     .then(|| direct_tape_plan_for_expr(expr).filter(direct_map_can_write))
                     .flatten(),
@@ -319,7 +483,6 @@ mod tests {
     use crate::parse::parser::parse;
 
     #[test]
-    #[cfg(feature = "simd-json")]
     fn stats_track_direct_and_fallback_stage_paths() {
         let expr = parse("$.rows().filter($.active).distinct_by($.id).map($.id)").unwrap();
         let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)

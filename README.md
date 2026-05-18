@@ -59,7 +59,7 @@ let report = jetro.collect(r#"
 
 ```toml
 [dependencies]
-jetro = "0.5.10"
+jetro = "0.5.11"
 ```
 
 ## Why Jetro?
@@ -178,6 +178,32 @@ engine for cached plans, reusable VM state, and NDJSON processing.
 
 NDJSON APIs evaluate each non-empty line as an independent JSON document while
 reusing one prepared query plan for the stream.
+
+For observability, `ndjson_explain` reports the selected route before running,
+and `run_ndjson_*_with_report` variants return the route plus execution
+counters after running. Reports cover row-local byte/tape writers,
+expression-level `$.rows()` streams, match-limited scans, reverse scans, and
+reverse `distinct_by` compaction.
+
+```rust
+use jetro::io::{ndjson_explain, NdjsonSourceMode};
+
+let route = ndjson_explain(
+    &engine,
+    NdjsonSourceMode::File,
+    "$.rows().reverse().distinct_by($.id).take(100)",
+    Default::default(),
+)?;
+
+let mut out = Vec::new();
+let report = engine.run_ndjson_file_with_report(
+    "events.ndjson",
+    "$.rows().filter(level == \"error\").take(10)",
+    &mut out,
+)?;
+
+assert_eq!(report.route.kind.to_string(), "rows-stream");
+```
 
 ## Quick Language Preview
 

@@ -10,14 +10,12 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
-#[cfg(not(feature = "simd-json"))]
-use serde::Deserialize;
 
-use crate::parse::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
 use crate::builtins::registry::{self, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinStructural};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
+use crate::parse::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
 
 /// A compiled structural deep-search plan. Carried inside `PlanNode::Structural`
 /// and evaluated by `physical_eval` against a `StructuralIndex`.
@@ -176,7 +174,11 @@ fn run_deep_match(
     env: &crate::data::context::Env,
 ) -> Result<Val, EvalError> {
     let Some(anchor_tok) = anchor_token(idx, anchor) else {
-        return Ok(if early_stop { Val::Null } else { Val::arr(Vec::new()) });
+        return Ok(if early_stop {
+            Val::Null
+        } else {
+            Val::arr(Vec::new())
+        });
     };
     let mut seen = HashSet::new();
     let mut hits: Vec<Val> = Vec::new();
@@ -604,25 +606,14 @@ fn literal_matches(
     }
 }
 
-/// Deserialise the byte span of `tok` into a `Val` using either `simd-json`
-/// (when the `simd-json` feature is enabled) or `serde_json`. Returns an error
-/// when the span does not contain valid JSON.
+/// Deserialise the byte span of `tok` into a `Val` using simd-json. Returns an
+/// error when the span does not contain valid JSON.
 fn materialize_token(idx: &StructuralIndex, bytes: &[u8], tok: TokenId) -> Result<Val, EvalError> {
     let span = idx.byte_span_in(tok, bytes);
     let raw = span.slice(bytes);
-    #[cfg(feature = "simd-json")]
     {
         let mut owned = raw.to_vec();
         return Val::from_json_simd(&mut owned)
             .map_err(|err| EvalError(format!("Invalid JSON subtree: {err}")));
-    }
-    #[cfg(not(feature = "simd-json"))]
-    {
-        let mut de = serde_json::Deserializer::from_slice(raw);
-        let v = Val::deserialize(&mut de)
-            .map_err(|err| EvalError(format!("Invalid JSON subtree: {err}")))?;
-        de.end()
-            .map_err(|err| EvalError(format!("Invalid JSON subtree: {err}")))?;
-        Ok(v)
     }
 }

@@ -1,21 +1,13 @@
-#[cfg(feature = "simd-json")]
 use super::ndjson_byte::{
     raw_json_byte_path_value, tape_plan_can_write_byte_row, write_ndjson_byte_tape_plan_row,
     BytePlanWrite, RawFieldValue,
 };
-#[cfg(feature = "simd-json")]
 use super::ndjson_direct::NdjsonDirectTapePlan;
-#[cfg(feature = "simd-json")]
 use super::ndjson_distinct::{raw_distinct_key_bytes, AdaptiveDistinctKeys};
-#[cfg(feature = "simd-json")]
 use crate::JetroEngineError;
-
-#[cfg(feature = "simd-json")]
 pub(super) fn direct_map_can_write(plan: &NdjsonDirectTapePlan) -> bool {
     tape_plan_can_write_byte_row(plan)
 }
-
-#[cfg(feature = "simd-json")]
 pub(super) fn insert_direct_distinct_key(
     seen: &mut AdaptiveDistinctKeys,
     row: &[u8],
@@ -36,8 +28,6 @@ pub(super) fn insert_direct_distinct_key(
         std::borrow::Cow::Owned(key) => seen.insert(key),
     })
 }
-
-#[cfg(feature = "simd-json")]
 pub(super) fn write_direct_map(
     row: &[u8],
     direct: Option<&NdjsonDirectTapePlan>,
