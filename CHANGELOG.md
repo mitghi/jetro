@@ -354,6 +354,10 @@
   direct versus fallback predicate evaluation; reverse `distinct_by` exposes
   duplicate drops and direct/fallback key/project counters through the shared
   report shape.
+- **Reverse match reports use the shared NDJSON report model**.
+  `run_ndjson_rev_matches_with_report` reports reverse file source
+  capabilities, the `matches` route family, scanned/emitted/filtered rows, and
+  predicate direct/fallback counters while preserving newest-to-oldest output.
 - **File-backed stream reports preserve partition stats**. Reported file-backed
   `$.rows()` streams now reuse the same generic partition executor as the
   normal run path when eligible, carrying partition count and merged stage
@@ -367,6 +371,9 @@
   rows-stream, match-limited, source/file, parallel partition, structural hint,
   and reverse distinct report paths, with `cargo check -p jetro-core` passing
   after the report expansion.
+- **README documents NDJSON route/report observability**. The API section now
+  shows `ndjson_explain` and `run_ndjson_file_with_report` usage for route
+  selection and execution counters.
 - **NDJSON route validation is green in release mode**. The focused
   release-mode `io::ndjson` suite and facade-level route-observability test
   pass after the module-boundary and public observability changes.
