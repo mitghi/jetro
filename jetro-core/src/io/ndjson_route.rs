@@ -82,6 +82,7 @@ impl std::fmt::Display for NdjsonSourceCaps {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NdjsonRouteKind {
     RowLocal,
+    Matches,
     RowsStream,
     RowsFanout,
     RowsSubquery,
@@ -92,6 +93,7 @@ impl std::fmt::Display for NdjsonRouteKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::RowLocal => "row-local",
+            Self::Matches => "matches",
             Self::RowsStream => "rows-stream",
             Self::RowsFanout => "rows-fanout",
             Self::RowsSubquery => "rows-subquery",

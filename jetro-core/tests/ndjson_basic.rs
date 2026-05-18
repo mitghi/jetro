@@ -544,6 +544,7 @@ fn run_ndjson_with_report_returns_rows_stream_stats() {
     assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
     assert_eq!(report.route.kind.to_string(), "rows-stream");
     assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.route.kind.to_string(), "matches");
     assert_eq!(report.stats.rows_emitted, 2);
     assert_eq!(report.stats.rows_filtered, 1);
 }

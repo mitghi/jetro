@@ -1163,7 +1163,7 @@ where
         drive_ndjson_matches_writer_with_stats(engine, reader, predicate, limit, options, writer)?;
     Ok(NdjsonExecutionReport::new(
         NdjsonRouteExplain {
-            kind: NdjsonRouteKind::RowLocal,
+            kind: NdjsonRouteKind::Matches,
             source: NdjsonSourceCaps::reader(options),
             writer_path: None,
             rows_plan: None,
@@ -1263,7 +1263,7 @@ where
     )?;
     Ok(NdjsonExecutionReport::new(
         NdjsonRouteExplain {
-            kind: NdjsonRouteKind::RowLocal,
+            kind: NdjsonRouteKind::Matches,
             source: NdjsonSourceCaps::file(options),
             writer_path: None,
             rows_plan: None,
