@@ -127,7 +127,12 @@ pub struct BackendInspection {
 pub enum BackendKind {
     ByteNative,
     StructuralIndex,
+    TapePath,
     ViewPipeline,
+    TapeRows,
+    ValView,
+    MaterializedSource,
+    FastChildren,
     Pipeline,
     Interpreted,
     Vm,

@@ -5,6 +5,8 @@
 //! explicit inspection APIs.
 
 mod report;
+#[allow(dead_code)]
+pub(crate) mod physical;
 
 pub use report::{
     BackendInspection, BackendKind, BackendStatus, DirectPlanInspection, ExecutionFactsInspection,
