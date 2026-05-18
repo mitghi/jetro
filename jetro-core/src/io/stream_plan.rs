@@ -116,6 +116,36 @@ pub(super) enum RowStreamParallelism {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RowStreamFileStrategy {
+    Sequential,
+    Partitioned { retained_limit: usize },
+}
+
+impl RowStreamPlan {
+    pub(super) fn file_strategy(&self, partition_available: bool) -> RowStreamFileStrategy {
+        if partition_available {
+            if let Some(retained_limit) = self.partition_retained_limit() {
+                return RowStreamFileStrategy::Partitioned { retained_limit };
+            }
+        }
+        RowStreamFileStrategy::Sequential
+    }
+
+    fn partition_retained_limit(&self) -> Option<usize> {
+        if self.direction == RowStreamDirection::Reverse && self.demand.ordered_early_stop {
+            return None;
+        }
+        match self.demand.parallel {
+            RowStreamParallelism::PartitionFilter {
+                retained_limit: Some(limit),
+                ..
+            } if limit > 0 => Some(limit),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RowStreamPlanError {
     message: String,

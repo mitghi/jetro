@@ -39,6 +39,10 @@
   capabilities.
 - Parallel file-backed stream reports preserve partition execution and merge
   per-partition stats into the public report.
+- File-backed reverse `$.rows()` plans with ordered early-stop demand now use
+  the existing tail-first stream driver instead of partition collection, so
+  `reverse().find(...)` and equivalent `filter(...).take(1)` plans can stop as
+  soon as the semantic winner is found.
 - Reverse match reports use the shared NDJSON report shape while preserving
   newest-to-oldest output.
 - Row-local direct byte/tape writers, match-limited scans, reverse distinct

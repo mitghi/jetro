@@ -2,7 +2,7 @@ use super::mapped_bytes::{split_line_aligned_ranges, MappedBytes};
 use super::ndjson::{collect_row_stream_result, NdjsonOptions, NdjsonParallelism};
 use super::ndjson_scan::{for_each_framed_payload_in_range, framed_payload_ranges_in_range};
 use super::stream_exec::CompiledRowStream;
-use super::stream_plan::{RowStreamDirection, RowStreamParallelism, RowStreamPlan};
+use super::stream_plan::{RowStreamDirection, RowStreamFileStrategy, RowStreamPlan};
 use super::stream_types::RowStreamStats;
 use crate::data::value::Val;
 use crate::{JetroEngine, JetroEngineError};
@@ -93,16 +93,6 @@ where
     Ok(Some(ParallelRowsResult { value, stats }))
 }
 
-fn parallel_limit(plan: &RowStreamPlan) -> Option<usize> {
-    match plan.demand.parallel {
-        RowStreamParallelism::PartitionFilter {
-            retained_limit: Some(limit),
-            ..
-        } if limit > 0 => Some(limit),
-        _ => None,
-    }
-}
-
 fn parallel_collection_limit(
     plan: &RowStreamPlan,
     options: NdjsonOptions,
@@ -114,10 +104,10 @@ fn parallel_collection_limit(
     if file_len < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
         return None;
     }
-    if plan.direction == RowStreamDirection::Reverse && plan.demand.ordered_early_stop {
-        return None;
+    match plan.file_strategy(true) {
+        RowStreamFileStrategy::Partitioned { retained_limit } => Some(retained_limit),
+        RowStreamFileStrategy::Sequential => None,
     }
-    parallel_limit(plan)
 }
 
 struct PartitionOutput {
@@ -199,15 +189,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parallel_limit_uses_generic_demand_metadata() {
+    fn forward_filter_take_uses_partition_strategy() {
         let plan = lower_root_rows_query(
-            r#"$.rows().reverse().find($.name == "Ada").first()"#,
+            r#"$.rows().filter($.active).take(3)"#,
             RowStreamSourceKind::NdjsonRows,
         )
         .unwrap()
         .unwrap();
 
-        assert_eq!(parallel_limit(&plan), Some(1));
+        assert_eq!(
+            plan.file_strategy(true),
+            RowStreamFileStrategy::Partitioned { retained_limit: 3 }
+        );
     }
 
     #[test]
