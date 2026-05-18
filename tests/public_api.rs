@@ -2,7 +2,7 @@ use jetro::{
     io::{
         ndjson_explain, ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind,
         NdjsonFallbackReason, NdjsonRouteKind, NdjsonRowsPlanKind, NdjsonSource,
-        NdjsonSourceMode, NdjsonWriterPathKind,
+        NdjsonSourceMode, NdjsonWriterPathKind, NdjsonOptions, NdjsonRowFrame, NullPayload,
     },
     JetroEngine,
 };
@@ -42,6 +42,19 @@ fn facade_exposes_ndjson_route_observability() {
         unsupported.fallback_reason,
         Some(NdjsonFallbackReason::FileBackedRowsRequired)
     );
+
+    let framed = ndjson_explain(
+        &engine,
+        NdjsonSourceMode::File,
+        "$.rows().take(1)",
+        NdjsonOptions::default().with_row_frame(NdjsonRowFrame::DelimitedPayload {
+            separator: b'|',
+            null_payload: NullPayload::Skip,
+        }),
+    )
+    .unwrap();
+    assert!(framed.source.framed_payload);
+    assert!(framed.source.to_string().contains("framed-payload"));
 }
 
 #[test]
