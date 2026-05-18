@@ -647,6 +647,29 @@ fn run_ndjson_source_with_report_dispatches_file_source() {
 }
 
 #[test]
+fn run_ndjson_source_limit_with_report_dispatches_reader_source() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1}
+{"id":2}
+not-json
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_source_limit_with_report(
+            NdjsonSource::reader(Cursor::new(input)),
+            "$.rows().map($.id)",
+            2,
+            &mut out,
+        )
+        .expect("source limit report should dispatch to reader route");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
+    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::Reader);
+    assert_eq!(report.stats.rows_scanned, 2);
+}
+
+#[test]
 fn run_ndjson_file_with_report_covers_fanout_route() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-fanout-report");

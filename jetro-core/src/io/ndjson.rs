@@ -1049,6 +1049,47 @@ where
     }
 }
 
+pub fn run_ndjson_source_limit_with_report<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    limit: usize,
+    writer: W,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    run_ndjson_source_limit_with_report_and_options(
+        engine,
+        source,
+        query,
+        limit,
+        writer,
+        NdjsonOptions::default(),
+    )
+}
+
+pub fn run_ndjson_source_limit_with_report_and_options<W>(
+    engine: &JetroEngine,
+    source: NdjsonSource,
+    query: &str,
+    limit: usize,
+    writer: W,
+    options: NdjsonOptions,
+) -> Result<NdjsonExecutionReport, JetroEngineError>
+where
+    W: Write,
+{
+    match source {
+        NdjsonSource::File(path) => {
+            run_ndjson_file_limit_with_report_and_options(engine, path, query, limit, writer, options)
+        }
+        NdjsonSource::Reader(reader) => {
+            run_ndjson_limit_with_report_and_options(engine, reader, query, limit, writer, options)
+        }
+    }
+}
+
 pub fn run_ndjson_matches<R, W>(
     engine: &JetroEngine,
     reader: R,

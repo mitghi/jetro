@@ -586,6 +586,37 @@ impl JetroEngine {
         io::run_ndjson_source_limit_with_options(self, source, query, limit, writer, options)
     }
 
+    /// Evaluate a limited [`io::NdjsonSource`] query and return a route/counter report.
+    pub fn run_ndjson_source_limit_with_report<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit_with_report(self, source, query, limit, writer)
+    }
+
+    /// Like [`JetroEngine::run_ndjson_source_limit_with_report`] with explicit options.
+    pub fn run_ndjson_source_limit_with_report_and_options<W>(
+        &self,
+        source: io::NdjsonSource,
+        query: &str,
+        limit: usize,
+        writer: W,
+        options: io::NdjsonOptions,
+    ) -> std::result::Result<io::NdjsonExecutionReport, JetroEngineError>
+    where
+        W: std::io::Write,
+    {
+        io::run_ndjson_source_limit_with_report_and_options(
+            self, source, query, limit, writer, options,
+        )
+    }
+
     /// Read an NDJSON file from tail to head and write one query result per row.
     pub fn run_ndjson_rev<P, W>(
         &self,
