@@ -65,6 +65,12 @@ impl QueryPlan {
         &self.nodes[id.0].kind
     }
 
+    /// Returns every physical node id in arena order.
+    #[inline]
+    pub(crate) fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        (0..self.nodes.len()).map(NodeId)
+    }
+
     /// Returns the ordered backend preference slice for node `id` as set by the planner.
     #[inline]
     pub(crate) fn backend_preferences(&self, id: NodeId) -> &[BackendPreference] {
@@ -95,7 +101,6 @@ impl QueryPlan {
             },
         }
     }
-
 }
 
 /// Selects the execution entry point for a `QueryPlan`.

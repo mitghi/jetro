@@ -4,7 +4,7 @@
 //! provides the byte-oriented `Jetro` handle plus `JetroEngine` for long-lived
 //! plan/VM reuse and NDJSON processing.
 
-pub use jetro_core::{io, EvalError, JetroEngine, JetroEngineError};
+pub use jetro_core::{introspect, io, EvalError, JetroEngine, JetroEngineError};
 
 /// Byte-oriented query handle. Wraps `jetro_core::Jetro` and exposes document
 /// parsing plus query collection.

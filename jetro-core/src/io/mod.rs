@@ -8,8 +8,8 @@ mod mapped_bytes;
 mod ndjson;
 mod ndjson_byte;
 mod ndjson_direct;
-mod ndjson_driver;
 mod ndjson_distinct;
+mod ndjson_driver;
 mod ndjson_frame;
 mod ndjson_hint;
 mod ndjson_parallel;
@@ -40,8 +40,8 @@ pub use ndjson::{
     for_each_ndjson_source_until, for_each_ndjson_source_until_with_options,
     for_each_ndjson_source_with_options, for_each_ndjson_until, for_each_ndjson_until_with_options,
     for_each_ndjson_with_options, ndjson_writer_path_kind, run_ndjson, run_ndjson_file,
-    run_ndjson_file_limit, run_ndjson_file_limit_with_options, run_ndjson_file_with_options,
-    run_ndjson_file_limit_with_report, run_ndjson_file_limit_with_report_and_options,
+    run_ndjson_file_limit, run_ndjson_file_limit_with_options, run_ndjson_file_limit_with_report,
+    run_ndjson_file_limit_with_report_and_options, run_ndjson_file_with_options,
     run_ndjson_file_with_report, run_ndjson_file_with_report_and_options, run_ndjson_limit,
     run_ndjson_limit_with_options, run_ndjson_limit_with_report,
     run_ndjson_limit_with_report_and_options, run_ndjson_matches, run_ndjson_matches_file,
@@ -49,16 +49,16 @@ pub use ndjson::{
     run_ndjson_matches_file_with_report_and_options, run_ndjson_matches_source,
     run_ndjson_matches_source_with_options, run_ndjson_matches_source_with_report,
     run_ndjson_matches_source_with_report_and_options, run_ndjson_matches_with_options,
-    run_ndjson_source,
-    run_ndjson_matches_with_report, run_ndjson_matches_with_report_and_options,
-    run_ndjson_source_limit, run_ndjson_source_limit_with_options, run_ndjson_source_with_options,
+    run_ndjson_matches_with_report, run_ndjson_matches_with_report_and_options, run_ndjson_source,
+    run_ndjson_source_limit, run_ndjson_source_limit_with_options,
     run_ndjson_source_limit_with_report, run_ndjson_source_limit_with_report_and_options,
-    run_ndjson_source_with_report, run_ndjson_source_with_report_and_options,
-    run_ndjson_with_options, run_ndjson_with_report, run_ndjson_with_report_and_options,
-    NdjsonControl, NdjsonNullOutput, NdjsonOptions, NdjsonParallelism, NdjsonWriterPathKind,
+    run_ndjson_source_with_options, run_ndjson_source_with_report,
+    run_ndjson_source_with_report_and_options, run_ndjson_with_options, run_ndjson_with_report,
+    run_ndjson_with_report_and_options, NdjsonControl, NdjsonNullOutput, NdjsonOptions,
+    NdjsonParallelism, NdjsonWriterPathKind,
 };
-pub use ndjson_driver::NdjsonPerRowDriver;
 pub use ndjson_distinct::DistinctFrontFilterKind;
+pub use ndjson_driver::NdjsonPerRowDriver;
 pub use ndjson_frame::{NdjsonRowFrame, NullPayload};
 pub use ndjson_rev::{
     collect_ndjson_rev, collect_ndjson_rev_matches, collect_ndjson_rev_matches_with_options,
@@ -75,9 +75,15 @@ pub use ndjson_route::{
     ndjson_explain, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonFallbackReason,
     NdjsonRouteExplain, NdjsonRouteKind, NdjsonSourceCaps, NdjsonSourceMode,
 };
+pub(crate) use ndjson_route::{ndjson_route_plan, NdjsonRoutePlan};
+pub(crate) use ndjson_rows::NdjsonRowsFilePlan;
 pub use ndjson_rows::{ndjson_rows_plan_kind, NdjsonRowsPlanKind};
 pub use source::NdjsonSource;
 use std::fmt;
+pub(crate) use stream_plan::{
+    RowStreamDemand, RowStreamDirection, RowStreamFileStrategy, RowStreamParallelism,
+    RowStreamPlan, RowStreamSourceKind, RowStreamStage,
+};
 
 /// Error with enough row context for users to find malformed input quickly.
 #[derive(Debug)]

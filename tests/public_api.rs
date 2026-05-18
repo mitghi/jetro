@@ -1,8 +1,9 @@
 use jetro::{
+    introspect::{InspectContext, InspectOptions},
     io::{
         ndjson_explain, ndjson_rows_plan_kind, ndjson_writer_path_kind, DistinctFrontFilterKind,
-        NdjsonFallbackReason, NdjsonRouteKind, NdjsonRowsPlanKind, NdjsonSource,
-        NdjsonSourceMode, NdjsonWriterPathKind, NdjsonOptions, NdjsonRowFrame, NullPayload,
+        NdjsonFallbackReason, NdjsonOptions, NdjsonRouteKind, NdjsonRowFrame, NdjsonRowsPlanKind,
+        NdjsonSource, NdjsonSourceMode, NdjsonWriterPathKind, NullPayload,
     },
     JetroEngine,
 };
@@ -55,6 +56,21 @@ fn facade_exposes_ndjson_route_observability() {
     .unwrap();
     assert!(framed.source.framed_payload);
     assert!(framed.source.to_string().contains("framed-payload"));
+}
+
+#[test]
+fn facade_exposes_query_introspection_api() {
+    let engine = JetroEngine::new();
+    let report = engine
+        .inspect_query(
+            "$.items.filter(price > 10).map(name)",
+            InspectOptions::detailed(InspectContext::Bytes),
+        )
+        .expect("facade introspection API should run");
+
+    assert!(report.physical.is_some());
+    assert!(report.pipeline.is_some());
+    assert!(report.format_tree().contains("pipeline:"));
 }
 
 #[test]

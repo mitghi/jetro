@@ -59,7 +59,7 @@ let report = jetro.collect(r#"
 
 ```toml
 [dependencies]
-jetro = "0.5.11"
+jetro = "0.5.12"
 ```
 
 ## Why Jetro?

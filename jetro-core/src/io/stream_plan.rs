@@ -10,13 +10,13 @@ use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RowStreamSourceKind {
+pub(crate) enum RowStreamSourceKind {
     DocumentRows,
     NdjsonRows,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RowStreamDirection {
+pub(crate) enum RowStreamDirection {
     Forward,
     Reverse,
 }
@@ -28,7 +28,7 @@ impl Default for RowStreamDirection {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct RowStreamPlan {
+pub(crate) struct RowStreamPlan {
     pub source: RowStreamSourceKind,
     pub direction: RowStreamDirection,
     pub stages: Vec<RowStreamStage>,
@@ -51,7 +51,7 @@ impl RowStreamPlan {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct RowStreamDemand {
+pub(crate) struct RowStreamDemand {
     pub retained_limit: Option<usize>,
     pub scalar_output: bool,
     pub predicate_count: usize,
@@ -63,7 +63,7 @@ pub(super) struct RowStreamDemand {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum RowStreamStage {
+pub(crate) enum RowStreamStage {
     Filter(Expr),
     DistinctBy(Expr),
     Take(usize),
@@ -107,7 +107,7 @@ impl RowStreamStage {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum RowStreamParallelism {
+pub(crate) enum RowStreamParallelism {
     #[default]
     Sequential,
     PartitionFilter {
@@ -117,9 +117,11 @@ pub(super) enum RowStreamParallelism {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RowStreamFileStrategy {
+pub(crate) enum RowStreamFileStrategy {
     Sequential,
-    Partitioned { retained_limit: usize },
+    Partitioned {
+        retained_limit: usize,
+    },
     OrderedPartitionSearch {
         direction: RowStreamDirection,
         retained_limit: usize,
@@ -127,7 +129,7 @@ pub(super) enum RowStreamFileStrategy {
 }
 
 impl RowStreamPlan {
-    pub(super) fn file_strategy(&self, partition_available: bool) -> RowStreamFileStrategy {
+    pub(crate) fn file_strategy(&self, partition_available: bool) -> RowStreamFileStrategy {
         if partition_available {
             if let Some(retained_limit) = self.ordered_partition_retained_limit() {
                 return RowStreamFileStrategy::OrderedPartitionSearch {

@@ -189,7 +189,7 @@ impl NdjsonExecutionReport {
     }
 }
 
-pub(super) enum NdjsonRoutePlan {
+pub(crate) enum NdjsonRoutePlan {
     RowLocal {
         explain: NdjsonRouteExplain,
     },
@@ -203,14 +203,13 @@ pub(super) enum NdjsonRoutePlan {
 }
 
 impl NdjsonRoutePlan {
-    pub(super) fn explain(&self) -> &NdjsonRouteExplain {
+    pub(crate) fn explain(&self) -> &NdjsonRouteExplain {
         match self {
             Self::RowLocal { explain }
             | Self::Rows { explain, .. }
             | Self::Unsupported { explain } => explain,
         }
     }
-
 }
 
 impl NdjsonRouteExplain {
@@ -244,7 +243,7 @@ impl NdjsonRouteExplain {
     }
 }
 
-pub(super) fn ndjson_route_plan(
+pub(crate) fn ndjson_route_plan(
     engine: &JetroEngine,
     source: NdjsonSourceMode,
     query: &str,
@@ -367,8 +366,7 @@ mod tests {
     #[test]
     fn route_explain_marks_reader_rows_fanout_unsupported() {
         let engine = JetroEngine::new();
-        let query =
-            r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#;
+        let query = r#"let stream = $.rows(), a = stream.take(1), b = stream.count() in {a, b}"#;
 
         let reader = ndjson_explain(
             &engine,

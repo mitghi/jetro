@@ -57,6 +57,7 @@ pub(crate) mod builtins;
 pub(crate) mod compile;
 pub(crate) mod data;
 pub(crate) mod exec;
+pub mod introspect;
 pub mod io;
 pub(crate) mod ir;
 pub(crate) mod parse;
@@ -244,6 +245,38 @@ impl Default for JetroEngine {
 impl JetroEngine {
     /// Default maximum plan-cache size; the cache is cleared wholesale when reached.
     const DEFAULT_PLAN_CACHE_LIMIT: usize = 256;
+
+    /// Inspect how a query parses, plans, and selects execution metadata.
+    ///
+    /// This is an explicit developer API. Normal query execution does not
+    /// allocate or populate introspection reports.
+    pub fn inspect_query(
+        &self,
+        query: &str,
+        options: introspect::InspectOptions,
+    ) -> std::result::Result<introspect::QueryInspection, JetroEngineError> {
+        introspect::inspect_query(self, query, options, io::NdjsonOptions::default())
+    }
+
+    /// Inspect an NDJSON query with explicit NDJSON source options.
+    pub fn inspect_ndjson_query_with_options(
+        &self,
+        query: &str,
+        source: io::NdjsonSourceMode,
+        ndjson_options: io::NdjsonOptions,
+        level: introspect::InspectLevel,
+    ) -> std::result::Result<introspect::QueryInspection, JetroEngineError> {
+        let context = match source {
+            io::NdjsonSourceMode::Reader => introspect::InspectContext::NdjsonReader,
+            io::NdjsonSourceMode::File => introspect::InspectContext::NdjsonFile,
+        };
+        introspect::inspect_query(
+            self,
+            query,
+            introspect::InspectOptions { level, context },
+            ndjson_options,
+        )
+    }
 
     /// Create a `JetroEngine` with the default plan-cache limit of 256 entries.
     pub fn new() -> Self {
@@ -767,9 +800,7 @@ impl JetroEngine {
         P: AsRef<std::path::Path>,
         W: std::io::Write,
     {
-        io::run_ndjson_rev_distinct_by_with_report(
-            self, path, key_query, query, limit, writer,
-        )
+        io::run_ndjson_rev_distinct_by_with_report(self, path, key_query, query, limit, writer)
     }
 
     /// Like [`JetroEngine::run_ndjson_rev_distinct_by_with_report`] with explicit options.

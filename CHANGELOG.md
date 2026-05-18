@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.12
+
+### Release focus
+
+- **Opt-in query introspection**. Added explicit developer inspection APIs for
+  tracing how a query parses, lowers, plans, and selects execution metadata
+  without adding instrumentation to normal execution.
+
+### Introspection
+
+- Added `jetro_core::introspect` report types with structured, serde-friendly
+  output for summaries, logical shape, physical plans, pipeline stages, NDJSON
+  routing, row-stream plans, and direct execution hints.
+- Added `JetroEngine::inspect_query(...)` for static value/bytes inspection.
+- Added `JetroEngine::inspect_ndjson_query_with_options(...)` for static
+  NDJSON reader/file inspection with explicit source capabilities.
+- Physical plan inspection exports node ids, node kinds, child edges,
+  execution facts, backend preference order, selected first preference, and VM
+  fallback markers.
+- Pipeline inspection exports source, stages, sink, source demand, selected
+  physical execution path, and fallback/materialization boundary.
+- NDJSON inspection reuses the existing route and row-stream planners to report
+  route kind, source capabilities, writer path, row-stream direction, demand,
+  file strategy, stages, and sink.
+- Added `QueryInspection::format_tree()` for compact developer-facing output
+  while preserving structured report data as the primary API.
+
+### Maintenance
+
+- Kept introspection read-only and opt-in. Normal query execution does not
+  allocate or populate inspection reports.
+- Re-exported `introspect` from the facade crate.
+
 ## 0.5.11
 
 ### Release focus
