@@ -58,6 +58,7 @@ pub(super) struct RowStreamDemand {
     pub key_count: usize,
     pub projector_count: usize,
     pub late_projection: bool,
+    pub ordered_early_stop: bool,
     pub parallel: RowStreamParallelism,
 }
 
@@ -266,6 +267,8 @@ impl RowStreamDemand {
         }
         demand.retained_limit = seen_take;
         demand.late_projection = first_projector_is_after_row_selection(&plan.stages);
+        demand.ordered_early_stop =
+            demand.retained_limit.is_some() && preserves_source_order_until_limit(&plan.stages);
         demand.parallel = classify_parallelism(plan, demand.retained_limit);
         demand
     }
@@ -313,6 +316,19 @@ fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
         ) || stage.retained_limit().is_some()
             || stage.scalar_sink()
     })
+}
+
+fn preserves_source_order_until_limit(stages: &[RowStreamStage]) -> bool {
+    for stage in stages {
+        if stage.retained_limit().is_some() {
+            return true;
+        }
+        match stage {
+            RowStreamStage::Filter(_) | RowStreamStage::Map(_) => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 pub(super) fn lower_root_rows_query(

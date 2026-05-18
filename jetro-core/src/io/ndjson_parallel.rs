@@ -114,6 +114,9 @@ fn parallel_collection_limit(
     if file_len < options.parallel_min_bytes || rayon::current_num_threads() <= 1 {
         return None;
     }
+    if plan.direction == RowStreamDirection::Reverse && plan.demand.ordered_early_stop {
+        return None;
+    }
     parallel_limit(plan)
 }
 
@@ -208,6 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn reverse_ordered_early_stop_declines_partition_collection() {
+        let plan = lower_root_rows_query(
+            r#"$.rows().reverse().find($.name == "Ada").first()"#,
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            parallel_collection_limit(
+                &plan,
+                super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
+                1024,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn line_ranges_preserve_reverse_partition_order() {
         let rows = collect_line_ranges(
             b"{\"a\":1}\n{\"a\":2}\n",
@@ -220,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_parallel_collects_reverse_first_match() {
+    fn reverse_first_match_uses_sequential_file_driver() {
         let engine = JetroEngine::new();
         let path = std::env::temp_dir().join(format!(
             "jetro-parallel-{}-{}.ndjson",
@@ -245,14 +267,10 @@ mod tests {
             &plan,
             super::super::ndjson::NdjsonOptions::default().with_parallel_min_bytes(0),
         )
-        .unwrap()
-        .expect("forced parallel path should run");
+        .unwrap();
 
         let _ = std::fs::remove_file(&path);
-        assert_eq!(
-            serde_json::Value::from(value),
-            json!({"id": 2, "name": "target"})
-        );
+        assert!(value.is_none());
     }
 
     #[test]
