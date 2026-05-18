@@ -602,7 +602,7 @@ where
         NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
         NdjsonRoutePlan::RowLocal { explain } => {
             let file = File::open(path)?;
-            let rows = drive_ndjson_writer(
+            let (_, stats) = drive_ndjson_writer_with_stats(
                 engine,
                 std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
                 query,
@@ -610,7 +610,7 @@ where
                 options,
                 writer,
             )?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+            Ok(NdjsonExecutionReport::new(explain, stats))
         }
     }
 }
@@ -680,8 +680,9 @@ where
             Err(unsupported_ndjson_route_error(&explain))
         }
         NdjsonRoutePlan::RowLocal { explain } => {
-            let rows = drive_ndjson_writer(engine, reader, query, None, options, writer)?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+            let (_, stats) =
+                drive_ndjson_writer_with_stats(engine, reader, query, None, options, writer)?;
+            Ok(NdjsonExecutionReport::new(explain, stats))
         }
     }
 }
@@ -799,8 +800,15 @@ where
             Err(unsupported_ndjson_route_error(&explain))
         }
         NdjsonRoutePlan::RowLocal { explain } => {
-            let rows = drive_ndjson_writer(engine, reader, query, Some(limit), options, writer)?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+            let (_, stats) = drive_ndjson_writer_with_stats(
+                engine,
+                reader,
+                query,
+                Some(limit),
+                options,
+                writer,
+            )?;
+            Ok(NdjsonExecutionReport::new(explain, stats))
         }
     }
 }
@@ -924,7 +932,7 @@ where
         NdjsonRoutePlan::Unsupported { explain } => Err(unsupported_ndjson_route_error(&explain)),
         NdjsonRoutePlan::RowLocal { explain } => {
             let file = File::open(path)?;
-            let rows = drive_ndjson_writer(
+            let (_, stats) = drive_ndjson_writer_with_stats(
                 engine,
                 std::io::BufReader::with_capacity(options.reader_buffer_capacity, file),
                 query,
@@ -932,7 +940,7 @@ where
                 options,
                 writer,
             )?;
-            Ok(NdjsonExecutionReport::emitted_only(explain, rows))
+            Ok(NdjsonExecutionReport::new(explain, stats))
         }
     }
 }
@@ -1620,6 +1628,21 @@ where
     R: BufRead,
     W: Write,
 {
+    Ok(drive_ndjson_writer_with_stats(engine, reader, query, limit, options, writer)?.0)
+}
+
+fn drive_ndjson_writer_with_stats<R, W>(
+    engine: &JetroEngine,
+    reader: R,
+    query: &str,
+    limit: Option<usize>,
+    options: NdjsonOptions,
+    writer: W,
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
+where
+    R: BufRead,
+    W: Write,
+{
     if let Some((byte_plan, tape_plan)) = direct_writer_plans(engine, query) {
         if let Some(byte_plan) = byte_plan {
             return drive_ndjson_byte_writer(
@@ -1639,11 +1662,15 @@ where
     let mut writer = ndjson_writer_with_options(writer, options);
     let mut buf = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((line_no, row)) = driver.read_next_owned(&mut buf)? {
+        stats.rows_scanned += 1;
         let value = executor.eval_owned_row(line_no, row)?;
+        stats.fallback_project_rows += 1;
         if write_val_line_with_options(&mut writer, &value, options)? {
             count += 1;
+            stats.rows_emitted += 1;
         }
         if limit.is_some_and(|limit| count >= limit) {
             break;
@@ -1651,7 +1678,7 @@ where
     }
 
     writer.flush()?;
-    Ok(count)
+    Ok((count, stats))
 }
 fn drive_ndjson_byte_writer<R, W>(
     engine: &JetroEngine,
@@ -1661,7 +1688,7 @@ fn drive_ndjson_byte_writer<R, W>(
     limit: Option<usize>,
     options: NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     R: BufRead,
     W: Write,
@@ -1674,12 +1701,17 @@ where
         crate::data::tape::TapeScratch::with_capacity(options.initial_buffer_capacity);
     let mut tape_runner = NdjsonTapeWriterRunner::new(engine, tape_plan);
     let mut count = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
+        stats.rows_scanned += 1;
         out.clear();
         match write_ndjson_byte_plan_row(&mut out, row, byte_plan)? {
-            BytePlanWrite::Done => {}
+            BytePlanWrite::Done => {
+                stats.direct_project_rows += 1;
+            }
             BytePlanWrite::Fallback => {
+                stats.fallback_project_rows += 1;
                 scratch.parse_slice(row).map_err(|message| {
                     row_parse_error(
                         line_no,
@@ -1693,12 +1725,13 @@ where
         }
         if write_json_bytes_line_with_options(&mut writer, &out, options)? {
             count += 1;
+            stats.rows_emitted += 1;
         }
         Ok(!limit.is_some_and(|limit| count >= limit))
     })?;
 
     writer.flush()?;
-    Ok(count)
+    Ok((count, stats))
 }
 fn drive_ndjson_tape_byte_writer<R, W>(
     engine: &JetroEngine,
@@ -1707,7 +1740,7 @@ fn drive_ndjson_tape_byte_writer<R, W>(
     limit: Option<usize>,
     options: NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     R: BufRead,
     W: Write,
@@ -1757,13 +1790,17 @@ where
         )
     });
     let mut count = 0usize;
+    let mut stats = NdjsonExecutionStats::default();
 
     visit_ndjson_borrowed_rows(&mut driver, &mut line, |line_no, row| {
+        stats.rows_scanned += 1;
         out.clear();
         if let Some(write) = constant_stream_cache.write_row(&mut out, row, tape_plan)? {
             if matches!(write, BytePlanWrite::Done) {
+                stats.direct_project_rows += 1;
                 if write_json_bytes_line_with_options(&mut writer, &out, options)? {
                     count += 1;
+                    stats.rows_emitted += 1;
                 }
                 return Ok(!limit.is_some_and(|limit| count >= limit));
             }
@@ -1797,8 +1834,11 @@ where
             None => write_ndjson_byte_tape_plan_row(&mut out, row, tape_plan, &mut byte_scratch),
         };
         match write? {
-            BytePlanWrite::Done => {}
+            BytePlanWrite::Done => {
+                stats.direct_project_rows += 1;
+            }
             BytePlanWrite::Fallback => {
+                stats.fallback_project_rows += 1;
                 scratch.parse_slice(row).map_err(|message| {
                     row_parse_error(
                         line_no,
@@ -1812,12 +1852,13 @@ where
         }
         if write_json_bytes_line_with_options(&mut writer, &out, options)? {
             count += 1;
+            stats.rows_emitted += 1;
         }
         Ok(!limit.is_some_and(|limit| count >= limit))
     })?;
 
     writer.flush()?;
-    Ok(count)
+    Ok((count, stats))
 }
 fn visit_ndjson_borrowed_rows<R, F>(
     driver: &mut NdjsonPerRowDriver<R>,
@@ -1908,7 +1949,7 @@ fn drive_ndjson_tape_writer<R, W>(
     limit: Option<usize>,
     options: NdjsonOptions,
     writer: W,
-) -> Result<usize, JetroEngineError>
+) -> Result<(usize, NdjsonExecutionStats), JetroEngineError>
 where
     R: BufRead,
     W: Write,
@@ -1921,8 +1962,10 @@ where
     let mut out = Vec::with_capacity(options.initial_buffer_capacity);
     let mut count = 0usize;
     let mut runner = NdjsonTapeWriterRunner::new(engine, plan);
+    let mut stats = NdjsonExecutionStats::default();
 
     while let Some((line_no, row)) = driver.read_next_nonempty(&mut line)? {
+        stats.rows_scanned += 1;
         out.clear();
         scratch.parse_slice(row).map_err(|message| {
             row_parse_error(
@@ -1931,8 +1974,10 @@ where
             )
         })?;
         runner.write_row(&scratch, &mut out)?;
+        stats.fallback_project_rows += 1;
         if write_json_bytes_line_with_options(&mut writer, &out, options)? {
             count += 1;
+            stats.rows_emitted += 1;
         }
         if limit.is_some_and(|limit| count >= limit) {
             break;
@@ -1940,7 +1985,7 @@ where
     }
 
     writer.flush()?;
-    Ok(count)
+    Ok((count, stats))
 }
 pub(super) struct NdjsonTapeWriterRunner<'a, 'p> {
     plan: &'p NdjsonDirectTapePlan,

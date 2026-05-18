@@ -563,7 +563,10 @@ fn run_ndjson_with_report_keeps_row_local_route() {
     assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
     assert_eq!(report.route.kind.to_string(), "row-local");
     assert_eq!(report.route.writer_path, Some(NdjsonWriterPathKind::ByteExpr));
+    assert_eq!(report.stats.rows_scanned, 2);
     assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
 }
 
 #[test]
