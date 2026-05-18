@@ -610,6 +610,28 @@ fn run_ndjson_source_with_report_dispatches_file_source() {
 }
 
 #[test]
+fn run_ndjson_file_with_report_covers_fanout_route() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-fanout-report");
+    std::fs::write(&path, b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n")
+        .unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_with_report(
+            &path,
+            r#"let stream = $.rows(), head = stream.take(1).map($.id), total = stream.count() in {head, total}"#,
+            &mut out,
+        )
+        .expect("file-backed fanout report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "{\"head\":1,\"total\":2}\n");
+    assert_eq!(report.route.kind.to_string(), "rows-fanout");
+    assert_eq!(report.stats.rows_emitted, 1);
+}
+
+#[test]
 fn rows_stream_take_writes_original_rows() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"name":"Ada"}
