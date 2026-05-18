@@ -363,6 +363,10 @@
   file-backed fanout, source dispatch, framed payload route capabilities, and
   early-stop limit reports without changing the existing fast `run_ndjson`
   behavior.
+- **NDJSON report validation is green**. Focused tests now cover row-local,
+  rows-stream, match-limited, source/file, parallel partition, structural hint,
+  and reverse distinct report paths, with `cargo check -p jetro-core` passing
+  after the report expansion.
 - **NDJSON route validation is green in release mode**. The focused
   release-mode `io::ndjson` suite and facade-level route-observability test
   pass after the module-boundary and public observability changes.
