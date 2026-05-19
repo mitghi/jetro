@@ -12,6 +12,167 @@ use std::sync::Arc;
 use crate::data::value::Val;
 use crate::util::JsonView;
 
+trait TapeLike {
+    fn nodes(&self) -> &[crate::data::tape::TapeNode];
+    fn str_at(&self, i: usize) -> &str;
+    fn span(&self, i: usize) -> usize;
+    fn materialize_at(&self, idx: &mut usize) -> Val;
+}
+
+impl TapeLike for crate::data::tape::TapeData {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, i: usize) -> &str {
+        self.str_at(i)
+    }
+
+    #[inline]
+    fn span(&self, i: usize) -> usize {
+        self.span(i)
+    }
+
+    #[inline]
+    fn materialize_at(&self, idx: &mut usize) -> Val {
+        TapeView::materialize_at(self, idx)
+    }
+}
+
+impl TapeLike for crate::data::tape::TapeScratch {
+    #[inline]
+    fn nodes(&self) -> &[crate::data::tape::TapeNode] {
+        &self.nodes
+    }
+
+    #[inline]
+    fn str_at(&self, i: usize) -> &str {
+        self.str_at(i)
+    }
+
+    #[inline]
+    fn span(&self, i: usize) -> usize {
+        self.span(i)
+    }
+
+    #[inline]
+    fn materialize_at(&self, idx: &mut usize) -> Val {
+        TapeScratchView::materialize_at(self, idx)
+    }
+}
+
+fn tape_object_keys<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut out = Vec::with_capacity(len);
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        out.push(Val::Str(Arc::from(tape.str_at(cur))));
+        cur += 1;
+        cur += tape.span(cur);
+    }
+    Some(Val::arr(out))
+}
+
+fn tape_object_values<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut out = Vec::with_capacity(len);
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        cur += 1;
+        let mut value_idx = cur;
+        out.push(tape.materialize_at(&mut value_idx));
+        cur += tape.span(cur);
+    }
+    Some(Val::arr(out))
+}
+
+fn tape_object_entries<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut out = Vec::with_capacity(len);
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        let key = Arc::from(tape.str_at(cur));
+        cur += 1;
+        let mut value_idx = cur;
+        out.push(Val::arr(vec![
+            Val::Str(key),
+            tape.materialize_at(&mut value_idx),
+        ]));
+        cur += tape.span(cur);
+    }
+    Some(Val::arr(out))
+}
+
+fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut out = indexmap::IndexMap::with_capacity(keys.len());
+    let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        let current_key = tape.str_at(cur);
+        cur += 1;
+        if remaining.remove(current_key) {
+            let mut value_idx = cur;
+            out.insert(
+                crate::data::value::intern_key(current_key),
+                tape.materialize_at(&mut value_idx),
+            );
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        cur += tape.span(cur);
+    }
+    Some(Val::obj(out))
+}
+
+fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+    let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        let current_key = tape.str_at(cur);
+        cur += 1;
+        if !omitted.contains(current_key) {
+            let mut value_idx = cur;
+            out.insert(
+                crate::data::value::intern_key(current_key),
+                tape.materialize_at(&mut value_idx),
+            );
+        }
+        cur += tape.span(cur);
+    }
+    Some(Val::obj(out))
+}
+
 /// Navigation interface shared by all document representations.
 /// Implementations exist for `ValView` (in-memory `Val` tree) and `TapeView`
 /// (borrowed simd-json tape nodes).
@@ -453,132 +614,42 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn object_keys(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            out.push(Val::Str(Arc::from(tape.str_at(cur))));
-            cur += 1;
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_keys(*tape, *idx)
     }
 
     #[inline]
     fn object_values(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            cur += 1;
-            let mut value_idx = cur;
-            out.push(Self::materialize_at(tape, &mut value_idx));
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_values(*tape, *idx)
     }
 
     #[inline]
     fn object_entries(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let key = Arc::from(tape.str_at(cur));
-            cur += 1;
-            let mut value_idx = cur;
-            out.push(Val::arr(vec![
-                Val::Str(key),
-                Self::materialize_at(tape, &mut value_idx),
-            ]));
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_entries(*tape, *idx)
     }
 
     #[inline]
     fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = indexmap::IndexMap::with_capacity(keys.len());
-        let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if remaining.remove(current_key) {
-                let mut value_idx = cur;
-                out.insert(
-                    crate::data::value::intern_key(current_key),
-                    Self::materialize_at(tape, &mut value_idx),
-                );
-                if remaining.is_empty() {
-                    break;
-                }
-            }
-            cur += tape.span(cur);
-        }
-        Some(Val::obj(out))
+        tape_pick_keys(*tape, *idx, keys)
     }
 
     #[inline]
     fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
-        let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if !omitted.contains(current_key) {
-                let mut value_idx = cur;
-                out.insert(
-                    crate::data::value::intern_key(current_key),
-                    Self::materialize_at(tape, &mut value_idx),
-                );
-            }
-            cur += tape.span(cur);
-        }
-        Some(Val::obj(out))
+        tape_omit_keys(*tape, *idx, keys)
     }
 
     #[inline]
@@ -780,132 +851,42 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
 
     #[inline]
     fn object_keys(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            out.push(Val::Str(Arc::from(tape.str_at(cur))));
-            cur += 1;
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_keys(*tape, *idx)
     }
 
     #[inline]
     fn object_values(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            cur += 1;
-            let mut value_idx = cur;
-            out.push(Self::materialize_at(tape, &mut value_idx));
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_values(*tape, *idx)
     }
 
     #[inline]
     fn object_entries(&self) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = Vec::with_capacity(len);
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let key = Arc::from(tape.str_at(cur));
-            cur += 1;
-            let mut value_idx = cur;
-            out.push(Val::arr(vec![
-                Val::Str(key),
-                Self::materialize_at(tape, &mut value_idx),
-            ]));
-            cur += tape.span(cur);
-        }
-        Some(Val::arr(out))
+        tape_object_entries(*tape, *idx)
     }
 
     #[inline]
     fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut out = indexmap::IndexMap::with_capacity(keys.len());
-        let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if remaining.remove(current_key) {
-                let mut value_idx = cur;
-                out.insert(
-                    crate::data::value::intern_key(current_key),
-                    Self::materialize_at(tape, &mut value_idx),
-                );
-                if remaining.is_empty() {
-                    break;
-                }
-            }
-            cur += tape.span(cur);
-        }
-        Some(Val::obj(out))
+        tape_pick_keys(*tape, *idx, keys)
     }
 
     #[inline]
     fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
-        let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if !omitted.contains(current_key) {
-                let mut value_idx = cur;
-                out.insert(
-                    crate::data::value::intern_key(current_key),
-                    Self::materialize_at(tape, &mut value_idx),
-                );
-            }
-            cur += tape.span(cur);
-        }
-        Some(Val::obj(out))
+        tape_omit_keys(*tape, *idx, keys)
     }
 
     #[inline]
