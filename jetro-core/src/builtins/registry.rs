@@ -223,7 +223,11 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             ..downstream
         },
         BuiltinDemandLaw::Slice => Demand {
-            value: downstream.value.merge(ValueNeed::Whole),
+            value: if downstream.value.requires_payload() {
+                ValueNeed::Whole
+            } else {
+                downstream.value
+            },
             ..downstream
         },
         BuiltinDemandLaw::FlatMapLike => Demand {

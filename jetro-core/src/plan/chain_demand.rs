@@ -549,5 +549,9 @@ mod tests {
         let ops = [op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.value, ValueNeed::CountOnly);
+
+        let ops = [op(BuiltinMethod::Slice), op(BuiltinMethod::Count)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.value, ValueNeed::CountOnly);
     }
 }
