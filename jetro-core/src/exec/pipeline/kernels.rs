@@ -131,6 +131,19 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
     }
 }
 
+fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
+    let key = match (call.method, &call.args) {
+        (BuiltinMethod::HasKey | BuiltinMethod::Missing, crate::builtins::BuiltinArgs::Str(key)) => {
+            key
+        }
+        _ => return None,
+    };
+    match receiver {
+        BodyKernel::Current => Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key)))),
+        _ => None,
+    }
+}
+
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
 #[derive(Debug, Clone)]
 pub struct FStringKernel {
@@ -534,7 +547,10 @@ impl BodyKernel {
             Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => {
                 FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
             }
-            Self::BuiltinCall { receiver, .. } => receiver.field_demand(),
+            Self::BuiltinCall { receiver, call } => {
+                object_key_call_field_demand(receiver, call)
+                    .unwrap_or_else(|| receiver.field_demand())
+            }
             Self::Compose { first, then } => compose_field_demand(first, then),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
@@ -2660,6 +2676,16 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn object_key_calls_on_current_have_field_demand() {
+        assert_eq!(field_paths(&key_call(BuiltinMethod::HasKey, "isbn")), vec!["isbn"]);
+        assert_eq!(
+            field_paths(&key_call(BuiltinMethod::Missing, "title")),
+            vec!["title"]
+        );
+        assert_eq!(field_paths(&key_call(BuiltinMethod::Has, "isbn")), vec!["*"]);
     }
 
     #[test]
