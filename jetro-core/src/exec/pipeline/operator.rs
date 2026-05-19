@@ -46,8 +46,6 @@ pub struct MembershipSinkSpec {
     pub op: MembershipSinkOp,
     /// Value compared against each row.
     pub target: MembershipSinkTarget,
-    /// Original builtin method used for scalar fallback.
-    pub method: BuiltinMethod,
 }
 
 /// Target value source for value-membership terminal sinks.
@@ -174,7 +172,6 @@ impl MembershipSinkSpec {
                 method,
             ))?),
             target,
-            method,
         })
     }
 
@@ -405,7 +402,6 @@ mod tests {
         let membership = MembershipSinkSpec {
             op: MembershipSinkOp::Includes,
             target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
-            method: BuiltinMethod::Includes,
         }
         .demand();
         assert_eq!(membership.pull, PullDemand::All);
@@ -415,7 +411,6 @@ mod tests {
             MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
-                method: BuiltinMethod::Includes,
             }
             .sink_result_demand(),
             SinkResultDemand::UntilMatch

@@ -1002,7 +1002,6 @@ mod tests {
             Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: BuiltinMethod::Includes,
             })
             .view_capability(&[]),
             Some(ViewSinkCapability::Membership {
@@ -1017,7 +1016,6 @@ mod tests {
                     Vec::new(),
                     ""
                 ))),
-                method: BuiltinMethod::Includes,
             })
             .view_capability(&[]),
             Some(ViewSinkCapability::Membership {

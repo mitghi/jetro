@@ -1673,7 +1673,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: crate::builtins::BuiltinMethod::Includes,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
@@ -1695,7 +1694,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: crate::builtins::BuiltinMethod::Index,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
@@ -1931,7 +1929,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: crate::builtins::BuiltinMethod::Includes,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
@@ -1949,7 +1946,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(4)),
-                method: crate::builtins::BuiltinMethod::Index,
             }),
             ..includes_body
         };
@@ -1966,7 +1962,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::IndicesOf,
                 target: MembershipSinkTarget::Literal(Val::Int(1)),
-                method: crate::builtins::BuiltinMethod::IndicesOf,
             }),
             ..index_body
         };
@@ -1994,7 +1989,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Program(Arc::clone(&target)),
-                method: crate::builtins::BuiltinMethod::Includes,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
@@ -2018,7 +2012,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Index,
                 target: MembershipSinkTarget::Program(Arc::clone(&target)),
-                method: crate::builtins::BuiltinMethod::Index,
             }),
             ..includes_body
         };
@@ -2036,7 +2029,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::IndicesOf,
                 target: MembershipSinkTarget::Program(target),
-                method: crate::builtins::BuiltinMethod::IndicesOf,
             }),
             ..index_body
         };

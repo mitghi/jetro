@@ -1343,7 +1343,7 @@ fn direct_tape_predicate_membership_sink(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectPredicate> {
-    use crate::builtins::{BuiltinArgs, BuiltinCall};
+    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::exec::pipeline::{MembershipSinkOp, MembershipSinkTarget, Sink};
 
     if !body.stages.is_empty() {
@@ -1358,7 +1358,7 @@ fn direct_tape_predicate_membership_sink(
     let MembershipSinkTarget::Literal(target) = &spec.target else {
         return None;
     };
-    let call = BuiltinCall::new(spec.method, BuiltinArgs::Val(target.clone()));
+    let call = BuiltinCall::new(BuiltinMethod::Includes, BuiltinArgs::Val(target.clone()));
     direct_tape_predicate_source_scalar_call(plan, source, call)
 }
 

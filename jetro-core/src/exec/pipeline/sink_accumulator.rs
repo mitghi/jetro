@@ -544,7 +544,6 @@ fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
 mod tests {
     use std::{cell::Cell, sync::Arc};
 
-    use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::{MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
     use crate::vm::Program;
 
@@ -565,7 +564,6 @@ mod tests {
         Sink::Membership(MembershipSinkSpec {
             op,
             target: MembershipSinkTarget::Literal(Val::Int(7)),
-            method: BuiltinMethod::Includes,
         })
     }
 

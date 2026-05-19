@@ -1062,7 +1062,6 @@ mod tests {
             sink: Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target,
-                method: crate::builtins::BuiltinMethod::Includes,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),

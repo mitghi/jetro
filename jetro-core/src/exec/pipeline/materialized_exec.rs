@@ -18,8 +18,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
-    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, Stage, StageFlow, StageStrategy,
-    TerminalMapCollector,
+    is_truthy, BodyKernel, MembershipSinkOp, Pipeline, PipelineBody, Sink, Source, Stage,
+    StageFlow, StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::registry::{
@@ -615,15 +615,14 @@ fn eval_membership_target(
 }
 
 fn apply_membership_scalar_sink(spec: &super::MembershipSinkSpec, target: &Val, recv: &Val) -> Val {
-    match spec.method {
-        crate::builtins::BuiltinMethod::Includes => crate::builtins::includes_apply(recv, target),
-        crate::builtins::BuiltinMethod::Index => {
+    match spec.op {
+        MembershipSinkOp::Includes => crate::builtins::includes_apply(recv, target),
+        MembershipSinkOp::Index => {
             crate::builtins::index_value_apply(recv, target).unwrap_or(Val::Null)
         }
-        crate::builtins::BuiltinMethod::IndicesOf => {
+        MembershipSinkOp::IndicesOf => {
             crate::builtins::indices_of_apply(recv, target).unwrap_or(Val::Null)
         }
-        _ => Val::Null,
     }
 }
 
@@ -840,7 +839,6 @@ mod tests {
             Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: crate::builtins::BuiltinMethod::Includes,
             }),
             Vec::new(),
         );
@@ -860,7 +858,6 @@ mod tests {
             Sink::Membership(MembershipSinkSpec {
                 op: MembershipSinkOp::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
-                method: crate::builtins::BuiltinMethod::Index,
             }),
             Vec::new(),
         );
