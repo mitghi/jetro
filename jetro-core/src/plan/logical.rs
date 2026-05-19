@@ -7,9 +7,8 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{
-    registry::{logical_shape, pipeline_accepts_arity, BuiltinId, BuiltinLogicalShape},
-    BuiltinMethod,
+use crate::builtins::registry::{
+    by_name, logical_shape, pipeline_accepts_arity, BuiltinLogicalShape,
 };
 use crate::exec::pipeline::{SortSpec, Source};
 use crate::ir::logical::LogicalPlan;
@@ -79,11 +78,7 @@ fn apply_method(
     args: &[Arg],
     is_last: bool,
 ) -> Option<LogicalPlan> {
-    let method = BuiltinMethod::from_name(name);
-    if method == BuiltinMethod::Unknown {
-        return None;
-    }
-    let id = BuiltinId::from_method(method);
+    let id = by_name(name)?;
     if !pipeline_accepts_arity(id, args.len(), is_last) {
         return None;
     }
