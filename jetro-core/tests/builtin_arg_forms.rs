@@ -717,9 +717,11 @@ fn has_array_rhs_forms() {
     assert_eq!(run(r#"$.text has ["hello", "missing"]"#, &d), "false");
     assert_eq!(run(r#"$.tags has ["x", "y"]"#, &d), "true");
     assert_eq!(run(r#"$.tags has ["x", "q"]"#, &d), "false");
+    assert_eq!(run(r#"$.tags.has_all(["q", "y"])"#, &d), "false");
     assert_eq!(run(r#"$.nums has [1, 2]"#, &d), "true");
     assert_eq!(run(r#"$.obj has ["x", "y"]"#, &d), "true");
     assert_eq!(run(r#"$.obj has ["x", "z"]"#, &d), "false");
+    assert_eq!(run(r#"$.obj.has_all(["z", "y"])"#, &d), "false");
     assert_eq!(run(r#"$.obj has []"#, &d), "true");
 }
 
