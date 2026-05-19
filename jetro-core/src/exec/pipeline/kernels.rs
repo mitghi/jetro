@@ -117,6 +117,19 @@ pub enum BodyKernel {
     NestedPlan(Arc<super::Plan>),
 }
 
+fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
+    match then.field_demand() {
+        FieldDemand::None => FieldDemand::None,
+        FieldDemand::Whole => first.field_demand(),
+        FieldDemand::Fields(fields) => match first {
+            BodyKernel::Current => FieldDemand::Fields(fields),
+            BodyKernel::FieldRead(key) => FieldDemand::Fields(fields.prefixed(&[Arc::clone(key)])),
+            BodyKernel::FieldChain(keys) => FieldDemand::Fields(fields.prefixed(keys)),
+            _ => first.field_demand(),
+        },
+    }
+}
+
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
 #[derive(Debug, Clone)]
 pub struct FStringKernel {
@@ -523,7 +536,7 @@ impl BodyKernel {
                 FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
             }
             Self::BuiltinCall { receiver, .. } => receiver.field_demand(),
-            Self::Compose { first, then } => first.field_demand().merge(then.field_demand()),
+            Self::Compose { first, then } => compose_field_demand(first, then),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ArraySelect { array, .. } => array.field_demand(),
@@ -2617,6 +2630,24 @@ mod tests {
         }
     }
 
+    fn field_paths(kernel: &BodyKernel) -> Vec<String> {
+        match kernel.field_demand() {
+            crate::plan::demand::FieldDemand::None => Vec::new(),
+            crate::plan::demand::FieldDemand::Whole => vec!["*".to_string()],
+            crate::plan::demand::FieldDemand::Fields(fields) => fields
+                .paths()
+                .iter()
+                .map(|path| {
+                    path.keys()
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn arithmetic_kernels_run_on_value_views() {
         let expr = parse("qty * price").expect("parse arithmetic");
@@ -2718,6 +2749,26 @@ mod tests {
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Str(Arc::from("delivered")))
         );
+    }
+
+    #[test]
+    fn composed_field_demand_prefixes_downstream_paths() {
+        let kernel = BodyKernel::Compose {
+            first: Box::new(BodyKernel::FieldRead(Arc::from("user"))),
+            then: Box::new(BodyKernel::FieldRead(Arc::from("name"))),
+        };
+
+        assert_eq!(field_paths(&kernel), vec!["user.name"]);
+
+        let computed_receiver = BodyKernel::Compose {
+            first: Box::new(BodyKernel::ArraySelect {
+                array: Box::new(BodyKernel::FieldRead(Arc::from("events"))),
+                selector: super::ArraySelector::Last,
+            }),
+            then: Box::new(BodyKernel::FieldRead(Arc::from("kind"))),
+        };
+
+        assert_eq!(field_paths(&computed_receiver), vec!["events"]);
     }
 
     #[test]
