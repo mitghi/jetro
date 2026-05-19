@@ -2144,7 +2144,10 @@ impl BuiltinCall {
     /// registered pipeline element method, returning `None` otherwise.
     pub fn from_pipeline_literal_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
-        call.method.is_pipeline_element_method().then_some(call)
+        crate::builtins::registry::pipeline_element(
+            crate::builtins::registry::BuiltinId::from_method(call.method),
+        )
+        .then_some(call)
     }
 
     /// Evaluates this builtin directly on a zero-copy `JsonView` without materialising a `Val`.
@@ -3111,18 +3114,6 @@ pub(crate) fn eval_builtin_no_args(recv: Val, name: &str) -> Result<Val, EvalErr
         |_, _, _| Err(EvalError(format!("{}: unexpected pair evaluation", name))),
     )
 }
-
-impl BuiltinMethod {
-    /// Returns true if this method is registered as a pipeline element method.
-    /// Pipeline element methods operate on individual values and can run in-stream.
-    #[inline]
-    pub fn is_pipeline_element_method(self) -> bool {
-        crate::builtins::registry::pipeline_element(crate::builtins::registry::BuiltinId::from_method(
-            self,
-        ))
-    }
-}
-
 
 pub mod ops;
 

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     builtin_category, builtin_sink, cancellation as builtin_cancellation, pipeline_accepts_arity,
-    pipeline_lowering, view_stage, BuiltinId,
+    pipeline_element, pipeline_lowering, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
@@ -561,7 +561,7 @@ pub(super) fn lower_method_from_registry(
                     stages.push(Stage::Reverse(cancel));
                 }
                 BuiltinMethod::Unique => stages.push(Stage::UniqueBy(None)),
-                _ if method.is_pipeline_element_method() => {
+                _ if pipeline_element(BuiltinId::from_method(method)) => {
                     stages.push(Stage::Builtin(crate::builtins::BuiltinCall::new(
                         method,
                         crate::builtins::BuiltinArgs::None,
