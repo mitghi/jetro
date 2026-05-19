@@ -327,43 +327,59 @@ mod tests {
     }
 
     #[test]
-    fn scalar_has_preserves_positional_demand() {
+    fn scalar_has_preserves_positional_predicate_demand() {
         let ops = [op(BuiltinMethod::Has), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::Predicate);
     }
 
     #[test]
-    fn scalar_has_all_preserves_positional_demand() {
+    fn scalar_has_all_preserves_positional_predicate_demand() {
         let ops = [op(BuiltinMethod::HasAll), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::Predicate);
     }
 
     #[test]
-    fn scalar_has_key_preserves_positional_demand() {
+    fn scalar_has_key_preserves_positional_predicate_demand() {
         let ops = [op(BuiltinMethod::HasKey), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::Predicate);
     }
 
     #[test]
-    fn scalar_has_path_preserves_positional_demand() {
+    fn scalar_has_path_preserves_positional_predicate_demand() {
         let ops = [op(BuiltinMethod::HasPath), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::Predicate);
     }
 
     #[test]
-    fn scalar_missing_preserves_positional_demand() {
+    fn scalar_missing_preserves_positional_predicate_demand() {
         let ops = [op(BuiltinMethod::Missing), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::Predicate);
+    }
+
+    #[test]
+    fn scalar_predicate_maps_do_not_force_payload_when_counted() {
+        for method in [
+            BuiltinMethod::Has,
+            BuiltinMethod::HasAll,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::HasPath,
+            BuiltinMethod::Missing,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Count)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::CountOnly, "{method:?}");
+        }
     }
 
     #[test]

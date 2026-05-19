@@ -210,6 +210,14 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             value: downstream.value.merge(ValueNeed::Whole),
             ..downstream
         },
+        BuiltinDemandLaw::PredicateMapLike => Demand {
+            value: if downstream.value.requires_payload() {
+                ValueNeed::Predicate
+            } else {
+                downstream.value
+            },
+            ..downstream
+        },
         BuiltinDemandLaw::Slice => Demand {
             value: downstream.value.merge(ValueNeed::Whole),
             ..downstream
@@ -1108,12 +1116,7 @@ mod tests {
             BuiltinMethod::TransformValues,
             BuiltinMethod::FilterKeys,
             BuiltinMethod::FilterValues,
-            BuiltinMethod::Has,
-            BuiltinMethod::HasAll,
-            BuiltinMethod::HasKey,
-            BuiltinMethod::Missing,
             BuiltinMethod::GetPath,
-            BuiltinMethod::HasPath,
             BuiltinMethod::Pick,
             BuiltinMethod::Omit,
             BuiltinMethod::Keys,
@@ -1127,6 +1130,23 @@ mod tests {
             );
             assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
             assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
+
+        for method in [
+            BuiltinMethod::Has,
+            BuiltinMethod::HasAll,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::Missing,
+            BuiltinMethod::HasPath,
+        ] {
+            let demand = propagate_demand(
+                BuiltinId::from_method(method),
+                BuiltinDemandArg::None,
+                downstream,
+            );
+            assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Predicate, "{method:?}");
             assert!(demand.order, "{method:?}");
         }
     }

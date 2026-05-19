@@ -2133,7 +2133,9 @@ pub(crate) struct HasPath;
 impl Builtin for HasPath {
     const METHOD: BuiltinMethod = BuiltinMethod::HasPath;
     const NAME: &'static str = "has_path";
-    fn spec() -> BuiltinSpec { path_element_spec() }
+    fn spec() -> BuiltinSpec {
+        path_element_spec().demand_law(BuiltinDemandLaw::PredicateMapLike)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2842,7 +2844,7 @@ impl Builtin for Missing {
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Missing)
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
@@ -3071,7 +3073,7 @@ impl Builtin for Has {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
@@ -3099,7 +3101,7 @@ impl Builtin for HasAll {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }
@@ -3126,7 +3128,7 @@ impl Builtin for HasKey {
             .indexed()
             .view_native()
             .view_scalar()
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }
