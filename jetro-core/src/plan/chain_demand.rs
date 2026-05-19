@@ -544,7 +544,7 @@ mod tests {
         let ops = [op(BuiltinMethod::Map), op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::All);
-        assert_eq!(demand.value, ValueNeed::Whole);
+        assert_eq!(demand.value, ValueNeed::CountOnly);
 
         let ops = [op(BuiltinMethod::Count)];
         let demand = source_demand(&ops, Demand::RESULT);
