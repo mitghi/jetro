@@ -14,8 +14,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builtins::{
-    registry::{numeric_reducer as builtin_numeric_reducer, view_stage, BuiltinId},
-    BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
+    registry::{
+        keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
+        view_stage, BuiltinId,
+    },
+    BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+    BuiltinViewStage,
 };
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
@@ -319,19 +323,13 @@ fn run_barrier(
             cmp::barrier_unique_by(buf, &key)
         }
         Stage::ExprBuiltin { method, .. }
-            if matches!(
-                method,
-                crate::builtins::BuiltinMethod::GroupBy
-                    | crate::builtins::BuiltinMethod::CountBy
-                    | crate::builtins::BuiltinMethod::IndexBy
-            ) =>
+            if builtin_keyed_reducer(BuiltinId::from_method(*method)).is_some() =>
         {
             let key = key_from_kernel(kernel)?;
-            let value = match method {
-                crate::builtins::BuiltinMethod::GroupBy => cmp::barrier_group_by(buf, &key),
-                crate::builtins::BuiltinMethod::CountBy => cmp::barrier_count_by(buf, &key),
-                crate::builtins::BuiltinMethod::IndexBy => cmp::barrier_index_by(buf, &key),
-                _ => unreachable!("keyed reducer match guard"),
+            let value = match builtin_keyed_reducer(BuiltinId::from_method(*method))? {
+                BuiltinKeyedReducer::Group => cmp::barrier_group_by(buf, &key),
+                BuiltinKeyedReducer::Count => cmp::barrier_count_by(buf, &key),
+                BuiltinKeyedReducer::Index => cmp::barrier_index_by(buf, &key),
             };
             if matches!(sink, Sink::Collect) && is_terminal {
                 return Some(BarrierOutput::Done(value));
