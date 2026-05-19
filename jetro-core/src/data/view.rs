@@ -63,6 +63,30 @@ impl TapeLike for crate::data::tape::TapeScratch {
     }
 }
 
+fn tape_field_idx<T: TapeLike>(tape: &T, idx: usize, key: &str) -> Option<Option<usize>> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        let current_key = tape.str_at(cur);
+        cur += 1;
+        if current_key == key {
+            return Some(Some(cur));
+        }
+        cur += tape.span(cur);
+    }
+    Some(None)
+}
+
+#[inline]
+fn tape_has_key<T: TapeLike>(tape: &T, idx: usize, key: &str) -> Option<bool> {
+    tape_field_idx(tape, idx, key).map(|found| found.is_some())
+}
+
 fn tape_object_keys<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     use crate::data::tape::TapeNode;
 
@@ -568,48 +592,24 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn field(&self, key: &str) -> Self {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return Self::Missing;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return Self::Missing;
-        };
-
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if current_key == key {
-                return Self::Node { tape, idx: cur };
-            }
-            cur += tape.span(cur);
+        if let Some(Some(field_idx)) = tape_field_idx(*tape, *idx, key) {
+            return Self::Node {
+                tape,
+                idx: field_idx,
+            };
         }
         Self::Missing
     }
 
     #[inline]
     fn has_key(&self, key: &str) -> Option<bool> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if current_key == key {
-                return Some(true);
-            }
-            cur += tape.span(cur);
-        }
-        Some(false)
+        tape_has_key(*tape, *idx, key)
     }
 
     #[inline]
@@ -806,47 +806,24 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
 
     #[inline]
     fn field(&self, key: &str) -> Self {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return Self::Missing;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return Self::Missing;
-        };
-
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if current_key == key {
-                return Self::Node { tape, idx: cur };
-            }
-            cur += tape.span(cur);
+        if let Some(Some(field_idx)) = tape_field_idx(*tape, *idx, key) {
+            return Self::Node {
+                tape,
+                idx: field_idx,
+            };
         }
         Self::Missing
     }
 
     #[inline]
     fn has_key(&self, key: &str) -> Option<bool> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-        let mut cur = *idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if current_key == key {
-                return Some(true);
-            }
-            cur += tape.span(cur);
-        }
-        Some(false)
+        tape_has_key(*tape, *idx, key)
     }
 
     #[inline]
