@@ -541,6 +541,14 @@ pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
     id.method().and_then(|method| method.spec().view_stage)
 }
 
+/// Return true when builtin `id` can be composed into a view-native projection
+/// kernel without materialising the receiver row.
+#[inline]
+pub(crate) fn view_projection(id: BuiltinId) -> bool {
+    id.method()
+        .is_some_and(|method| method.is_view_projection_method())
+}
+
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
 /// registry metadata wins; optionally, pure one-to-one builtins may be treated
 /// as order-preserving by callers that allow this conservative fallback.

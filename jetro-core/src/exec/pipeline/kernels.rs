@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{numeric_reducer, BuiltinId};
+use crate::builtins::registry::{numeric_reducer, view_projection, BuiltinId};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
@@ -489,7 +489,7 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                         .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
                         .unwrap_or(BodyKernel::Generic);
                 };
-                if !call.method.is_view_projection_method() {
+                if !view_projection(BuiltinId::from_method(call.method)) {
                     return super::lower::try_decode_map_body(&nested_arg)
                         .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
                         .unwrap_or(BodyKernel::Generic);
@@ -700,7 +700,7 @@ impl BodyKernel {
         match self {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
-                receiver.is_view_native() && call.method.is_view_projection_method()
+                receiver.is_view_native() && view_projection(BuiltinId::from_method(call.method))
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -1332,7 +1332,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)] if call.method.is_view_projection_method() => {
+        [receiver @ .., Opcode::CallMethod(call)]
+            if view_projection(BuiltinId::from_method(call.method)) =>
+        {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
             } else {
@@ -1361,7 +1363,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
                 .ok()
                 .flatten()?
             };
-            if !builtin_call.method.is_view_projection_method() {
+            if !view_projection(BuiltinId::from_method(builtin_call.method)) {
                 return None;
             }
             Some(BodyKernel::BuiltinCall {
