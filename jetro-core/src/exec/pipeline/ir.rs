@@ -9,8 +9,10 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    effective_pipeline_order_effect, participates_in_demand, pipeline_composed_barrier,
-    pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
+    builtin_cardinality, builtin_demand_law, builtin_sink,
+    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
+    participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
+    pipeline_shape, pipeline_streams, stage_merge as builtin_stage_merge,
     sink_demand as builtin_sink_demand, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
@@ -284,14 +286,16 @@ impl Sink {
     /// for `Sink::Collect` which has no associated spec.
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
         match self {
-            Sink::Terminal(method) => method.spec().sink,
+            Sink::Terminal(method) => builtin_sink(BuiltinId::from_method(*method)),
             Sink::Nth(_) => None,
             Sink::SelectMany { .. } => None,
             Sink::Predicate(_) => None,
             Sink::Membership(_) => None,
             Sink::ArgExtreme(_) => None,
-            Sink::Reducer(spec) => spec.method()?.spec().sink,
-            Sink::ApproxCountDistinct => BuiltinMethod::ApproxCountDistinct.spec().sink,
+            Sink::Reducer(spec) => builtin_sink(BuiltinId::from_method(spec.method()?)),
+            Sink::ApproxCountDistinct => {
+                builtin_sink(BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct))
+            }
             Sink::Collect => None,
         }
     }
@@ -486,7 +490,8 @@ impl<'a> StageDescriptor<'a> {
     /// Returns the columnar-stage metadata for the method, if it supports columnar execution.
     #[inline]
     pub(crate) fn columnar_stage(self) -> Option<crate::builtins::BuiltinColumnarStage> {
-        self.method.and_then(|method| method.spec().columnar_stage)
+        self.method
+            .and_then(|method| builtin_columnar_stage(BuiltinId::from_method(method)))
     }
 
     /// Returns how this stage affects the sort order of its input stream.
@@ -940,7 +945,7 @@ impl Stage {
             Stage::UsizeBuiltin { method, value } => Some(UsizeStageMergeParts {
                 value: *value,
                 stage: builtin_view_stage(BuiltinId::from_method(*method))?,
-                merge: method.spec().stage_merge?,
+                merge: builtin_stage_merge(BuiltinId::from_method(*method))?,
             }),
             _ => None,
         }
@@ -1429,7 +1434,10 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             result_need: map_lane_payload(&downstream.result_need, kernel),
         },
         Stage::ExprBuiltin { method, .. }
-            if matches!(method.spec().demand_law, BuiltinDemandLaw::KeyOnlyReducer) =>
+            if matches!(
+                builtin_demand_law(BuiltinId::from_method(*method)),
+                BuiltinDemandLaw::KeyOnlyReducer
+            ) =>
         {
             DemandLanes {
                 scan_need: kernel.field_demand(),
@@ -1437,7 +1445,10 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             }
         }
         Stage::ExprBuiltin { method, .. }
-            if matches!(method.spec().demand_law, BuiltinDemandLaw::RowKeyedReducer) =>
+            if matches!(
+                builtin_demand_law(BuiltinId::from_method(*method)),
+                BuiltinDemandLaw::RowKeyedReducer
+            ) =>
         {
             DemandLanes {
                 scan_need: FieldDemand::Whole,
@@ -1445,7 +1456,8 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             }
         }
         Stage::Builtin(call)
-            if call.method.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
+            if builtin_cardinality(BuiltinId::from_method(call.method))
+                == Some(BuiltinCardinality::OneToOne) =>
         {
             if downstream.scan_need.is_none() && downstream.result_need.is_none() {
                 downstream

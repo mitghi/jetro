@@ -7,9 +7,9 @@
 
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod,
+        BuiltinCardinality, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinMethod,
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinPipelineShape, BuiltinSinkAccumulator,
+        BuiltinPipelineShape, BuiltinSinkAccumulator, BuiltinStageMerge,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
         BuiltinViewStage,
     },
@@ -427,6 +427,31 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     id.method().map(|m| m.spec().pipeline_shape).flatten()
 }
 
+/// Return the columnar-stage metadata for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn columnar_stage(id: BuiltinId) -> Option<BuiltinColumnarStage> {
+    id.method().and_then(|method| method.spec().columnar_stage)
+}
+
+/// Return the stage-merge metadata for builtin `id`, if adjacent stages of the
+/// same kind can be merged.
+#[inline]
+pub(crate) fn stage_merge(id: BuiltinId) -> Option<BuiltinStageMerge> {
+    id.method().and_then(|method| method.spec().stage_merge)
+}
+
+/// Return the builtin demand law for `id`.
+#[inline]
+pub(crate) fn builtin_demand_law(id: BuiltinId) -> BuiltinDemandLaw {
+    demand_law(id)
+}
+
+/// Return the builtin sink metadata for `id`, if the builtin is a terminal sink.
+#[inline]
+pub(crate) fn builtin_sink(id: BuiltinId) -> Option<BuiltinSinkSpec> {
+    id.method().and_then(|method| method.spec().sink)
+}
+
 /// Return the builtin category for planner classification.
 #[inline]
 #[cfg(test)]
@@ -436,7 +461,6 @@ pub(crate) fn builtin_category(id: BuiltinId) -> Option<BuiltinCategory> {
 
 /// Return the builtin cardinality for planner classification.
 #[inline]
-#[cfg(test)]
 pub(crate) fn builtin_cardinality(id: BuiltinId) -> Option<BuiltinCardinality> {
     id.method().map(|m| m.spec().cardinality)
 }
