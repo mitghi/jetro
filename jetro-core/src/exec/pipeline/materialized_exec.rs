@@ -22,6 +22,7 @@ use super::{
     TerminalMapCollector,
 };
 
+use crate::builtins::registry::{keyed_reducer, BuiltinId};
 use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
 use crate::plan::demand::PullDemand;
 
@@ -150,7 +151,7 @@ pub(super) fn run(
         .and_then(Stage::descriptor)
         .is_some_and(|desc| {
             desc.method
-                .is_some_and(|method| method.spec().keyed_reducer.is_some())
+                .is_some_and(|method| keyed_reducer(BuiltinId::from_method(method)).is_some())
         });
     sink_acc.finish_result(unwrap_single_collect_obj)
 }

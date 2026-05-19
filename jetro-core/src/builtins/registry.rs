@@ -5,18 +5,18 @@
 //! alias for the same set, stable across refactors, that new planner and
 //! analysis code carries without depending on the legacy enum directly.
 
+#[cfg(test)]
+use crate::builtins::BuiltinCategory;
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinMethod,
-        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinPipelineShape, BuiltinSinkAccumulator, BuiltinStageMerge,
-        BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
-        BuiltinViewStage,
+        BuiltinCardinality, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer,
+        BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
+        BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
-#[cfg(test)]
-use crate::builtins::BuiltinCategory;
 
 /// Compact, stable numeric identity for a builtin. One-to-one with
 /// `BuiltinMethod`; used by planner/analysis to avoid re-matching names.
@@ -115,15 +115,13 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
     let method = id.method()?;
     match method {
         BuiltinMethod::Filter | BuiltinMethod::FindAll => Some(BuiltinLogicalShape::Filter),
-        BuiltinMethod::Find | BuiltinMethod::FindFirst => {
-            matches!(
-                pipeline_lowering(id),
-                Some(BuiltinPipelineLowering::TerminalExprArg {
-                    terminal: BuiltinMethod::First,
-                })
-            )
-            .then_some(BuiltinLogicalShape::FilterThenFirst)
-        }
+        BuiltinMethod::Find | BuiltinMethod::FindFirst => matches!(
+            pipeline_lowering(id),
+            Some(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+        )
+        .then_some(BuiltinLogicalShape::FilterThenFirst),
         BuiltinMethod::Map => Some(BuiltinLogicalShape::Map),
         BuiltinMethod::FlatMap => Some(BuiltinLogicalShape::FlatMap),
         BuiltinMethod::Take => Some(BuiltinLogicalShape::Take),
@@ -142,24 +140,20 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
         BuiltinMethod::Unique => Some(BuiltinLogicalShape::Unique),
         BuiltinMethod::UniqueBy => Some(BuiltinLogicalShape::UniqueBy),
         BuiltinMethod::GroupBy => Some(BuiltinLogicalShape::GroupBy),
-        BuiltinMethod::CountBy => {
-            matches!(
-                pipeline_lowering(id),
-                Some(BuiltinPipelineLowering::TerminalExprArg {
-                    terminal: BuiltinMethod::First,
-                })
-            )
-            .then_some(BuiltinLogicalShape::CountBy)
-        }
-        BuiltinMethod::IndexBy => {
-            matches!(
-                pipeline_lowering(id),
-                Some(BuiltinPipelineLowering::TerminalExprArg {
-                    terminal: BuiltinMethod::First,
-                })
-            )
-            .then_some(BuiltinLogicalShape::IndexBy)
-        }
+        BuiltinMethod::CountBy => matches!(
+            pipeline_lowering(id),
+            Some(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+        )
+        .then_some(BuiltinLogicalShape::CountBy),
+        BuiltinMethod::IndexBy => matches!(
+            pipeline_lowering(id),
+            Some(BuiltinPipelineLowering::TerminalExprArg {
+                terminal: BuiltinMethod::First,
+            })
+        )
+        .then_some(BuiltinLogicalShape::IndexBy),
         BuiltinMethod::ApproxCountDistinct => Some(BuiltinLogicalShape::ApproxCountDistinct),
         _ => None,
     }
@@ -450,6 +444,18 @@ pub(crate) fn builtin_demand_law(id: BuiltinId) -> BuiltinDemandLaw {
 #[inline]
 pub(crate) fn builtin_sink(id: BuiltinId) -> Option<BuiltinSinkSpec> {
     id.method().and_then(|method| method.spec().sink)
+}
+
+/// Return keyed reducer metadata for builtin `id`, if the builtin groups rows by a key.
+#[inline]
+pub(crate) fn keyed_reducer(id: BuiltinId) -> Option<BuiltinKeyedReducer> {
+    id.method().and_then(|method| method.spec().keyed_reducer)
+}
+
+/// Return numeric reducer metadata for builtin `id`, if the builtin reduces rows numerically.
+#[inline]
+pub(crate) fn numeric_reducer(id: BuiltinId) -> Option<BuiltinNumericReducer> {
+    id.method().and_then(|method| method.spec().numeric_reducer)
 }
 
 /// Return whether builtin `id` should bypass streaming and run as a direct
@@ -1141,7 +1147,9 @@ mod tests {
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
             BuiltinPipelineMaterialization::Streaming
         );
-        assert!(pipeline_streams(BuiltinId::from_method(BuiltinMethod::TakeWhile)));
+        assert!(pipeline_streams(BuiltinId::from_method(
+            BuiltinMethod::TakeWhile
+        )));
         assert!(pipeline_composed_barrier(BuiltinId::from_method(
             BuiltinMethod::Sort
         )));

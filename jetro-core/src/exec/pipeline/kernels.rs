@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::registry::{numeric_reducer, BuiltinId};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
@@ -353,10 +354,8 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
         return None;
     }
     let method = BuiltinMethod::from_name(name.as_str());
-    let op = method
-        .spec()
-        .numeric_reducer
-        .map(super::NumOp::from_builtin_reducer);
+    let op =
+        numeric_reducer(BuiltinId::from_method(method)).map(super::NumOp::from_builtin_reducer);
 
     let (source_steps, map) = match prefix.split_last() {
         Some((Step::Method(map_name, map_args), source_steps))

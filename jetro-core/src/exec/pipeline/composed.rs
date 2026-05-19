@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::builtins::{
-    registry::{view_stage, BuiltinId},
+    registry::{numeric_reducer as builtin_numeric_reducer, view_stage, BuiltinId},
     BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::data::context::{Env, EvalError};
@@ -453,7 +453,7 @@ where
 }
 
 fn numeric_reducer(sink: &Sink) -> Option<BuiltinNumericReducer> {
-    sink.reducer_spec()?.method()?.spec().numeric_reducer
+    builtin_numeric_reducer(BuiltinId::from_method(sink.reducer_spec()?.method()?))
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +502,14 @@ fn run_inner(
 ) -> Option<Result<Val, EvalError>> {
     let (eff_stages, eff_kernels, eff_sink) = pipeline.canonical();
     let stage_builder = ComposedStageBuilder::new(base_env, vm);
-    let result = run_with_builder(pipeline, root, &eff_stages, &eff_kernels, &eff_sink, &stage_builder);
+    let result = run_with_builder(
+        pipeline,
+        root,
+        &eff_stages,
+        &eff_kernels,
+        &eff_sink,
+        &stage_builder,
+    );
     stage_builder.restore_vm(vm);
     result
 }

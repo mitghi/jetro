@@ -11,9 +11,10 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_cardinality, builtin_demand_law, builtin_sink,
     columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
-    pipeline_shape, pipeline_streams, stage_merge as builtin_stage_merge,
-    sink_demand as builtin_sink_demand, view_stage as builtin_view_stage, BuiltinId,
+    keyed_reducer as builtin_keyed_reducer, participates_in_demand, pipeline_composed_barrier,
+    pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
+    sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
+    view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineOrderEffect,
@@ -617,7 +618,7 @@ impl Stage {
         if stage == BuiltinViewStage::KeyedReduce {
             return match (desc.method, desc.body) {
                 (Some(method), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
-                    let kind = method.spec().keyed_reducer?;
+                    let kind = builtin_keyed_reducer(BuiltinId::from_method(method))?;
                     Some(ViewStageCapability::KeyedReduce { kind, kernel: idx })
                 }
                 _ => None,

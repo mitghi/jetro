@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::registry::{numeric_reducer, BuiltinId};
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
 use crate::plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed};
@@ -144,10 +145,7 @@ impl PredicateSinkSpec {
 
 impl MembershipSinkSpec {
     /// Constructs a membership terminal sink from the builtin method.
-    pub(crate) fn from_method(
-        method: BuiltinMethod,
-        target: MembershipSinkTarget,
-    ) -> Option<Self> {
+    pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
         Some(Self {
             op: match method {
                 BuiltinMethod::Includes => MembershipSinkOp::Includes,
@@ -266,7 +264,9 @@ impl ReducerSpec {
         projection_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
         Some(Self {
-            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(method.spec().numeric_reducer?)),
+            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(numeric_reducer(
+                BuiltinId::from_method(method),
+            )?)),
             predicate: None,
             projection,
             predicate_expr: None,
