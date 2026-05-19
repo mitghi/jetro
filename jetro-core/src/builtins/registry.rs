@@ -750,12 +750,29 @@ pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
     id.method().and_then(|method| method.spec().view_stage)
 }
 
+/// Return true for object/path membership helpers that can execute on a
+/// borrowed `JsonView` without materialising the receiver object.
+#[inline]
+pub(crate) fn view_object_key_projection(id: BuiltinId) -> bool {
+    matches!(
+        id.method(),
+        Some(
+            BuiltinMethod::Has
+                | BuiltinMethod::HasKey
+                | BuiltinMethod::Missing
+                | BuiltinMethod::GetPath
+                | BuiltinMethod::HasPath
+        )
+    )
+}
+
 /// Return true when builtin `id` can be composed into a view-native projection
 /// kernel without materialising the receiver row.
 #[inline]
 pub(crate) fn view_projection(id: BuiltinId) -> bool {
     id.method()
-        .is_some_and(|method| method.is_view_projection_method())
+        .is_some_and(|method| method.spec().view_scalar)
+        || view_object_key_projection(id)
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
@@ -1848,6 +1865,27 @@ mod tests {
         ] {
             assert!(!pipeline_element(BuiltinId::from_method(method)));
         }
+    }
+
+    #[test]
+    fn registry_drives_view_projection_classification() {
+        for method in [
+            BuiltinMethod::Has,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::Missing,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::HasPath,
+        ] {
+            let id = BuiltinId::from_method(method);
+            assert!(view_object_key_projection(id), "{method:?}");
+            assert!(view_projection(id), "{method:?}");
+        }
+
+        assert!(view_projection(BuiltinId::from_method(BuiltinMethod::Upper)));
+        assert!(!view_object_key_projection(BuiltinId::from_method(
+            BuiltinMethod::Upper
+        )));
+        assert!(!view_projection(BuiltinId::from_method(BuiltinMethod::Sort)));
     }
 
     #[test]
