@@ -779,6 +779,28 @@ mod tests {
     }
 
     #[test]
+    fn registry_accessors_match_builtin_specs() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert_eq!(builtin_category(id), Some(spec.category), "{method:?}");
+            assert_eq!(builtin_cardinality(id), Some(spec.cardinality), "{method:?}");
+            assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
+            assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
+            assert_eq!(builtin_sink(id), spec.sink, "{method:?}");
+            assert_eq!(keyed_reducer(id), spec.keyed_reducer, "{method:?}");
+            assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
+            assert_eq!(is_pure(id), spec.pure, "{method:?}");
+            assert_eq!(cancellation(id), spec.cancellation, "{method:?}");
+            assert_eq!(
+                dispatches_scalar_direct(id),
+                spec.dispatches_scalar_direct(),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
         let map = BuiltinId::from_method(BuiltinMethod::Map);
