@@ -31,13 +31,6 @@ pub(crate) enum BuiltinDemandArg {
     None,
     /// A specific count (e.g. the `n` in `.take(n)` or `.skip(n)`).
     Usize(usize),
-    /// A non-lambda integer range (e.g. `.slice(start, end?)`).
-    IntRange {
-        /// Inclusive zero-based start offset.
-        start: i64,
-        /// Exclusive end offset; `None` means open-ended.
-        end: Option<i64>,
-    },
 }
 
 /// Canonical argument-count contract for pipeline lowering. This keeps
@@ -229,7 +222,14 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             },
             ..downstream
         },
-        BuiltinDemandLaw::Slice => propagate_slice_demand(arg, downstream),
+        BuiltinDemandLaw::Slice => Demand {
+            value: if downstream.value.requires_payload() {
+                ValueNeed::Whole
+            } else {
+                downstream.value
+            },
+            ..downstream
+        },
         BuiltinDemandLaw::FlatMapLike => Demand {
             order: downstream.order || pull_is_positional(downstream.pull),
             ..Demand::all(ValueNeed::Whole)
@@ -239,7 +239,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 pull: downstream.pull.cap_inputs(n),
                 ..downstream
             },
-            _ => downstream,
+            BuiltinDemandArg::None => downstream,
         },
         BuiltinDemandLaw::Skip => match arg {
             BuiltinDemandArg::Usize(n) => Demand {
@@ -252,7 +252,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 },
                 ..downstream
             },
-            _ => downstream,
+            BuiltinDemandArg::None => downstream,
         },
         BuiltinDemandLaw::Chunk => match arg {
             BuiltinDemandArg::Usize(n) => {
@@ -271,7 +271,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                     order: true,
                 }
             }
-            _ => Demand::all(ValueNeed::Whole),
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
         BuiltinDemandLaw::Window => match arg {
             BuiltinDemandArg::Usize(n) => {
@@ -288,7 +288,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                     order: true,
                 }
             }
-            _ => Demand::all(ValueNeed::Whole),
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
         BuiltinDemandLaw::First => Demand::first(ValueNeed::Whole),
         BuiltinDemandLaw::Last => Demand {
@@ -302,7 +302,7 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
                 value: ValueNeed::Whole,
                 order: false,
             },
-            _ => Demand::all(ValueNeed::Whole),
+            BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
         BuiltinDemandLaw::Count => Demand {
             pull: PullDemand::All,
@@ -345,56 +345,6 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
 #[inline(always)]
 fn pull_is_positional(pull: PullDemand) -> bool {
     !matches!(pull, PullDemand::All)
-}
-
-fn propagate_slice_demand(arg: BuiltinDemandArg, downstream: Demand) -> Demand {
-    let value = if downstream.value.requires_payload() {
-        ValueNeed::Whole
-    } else {
-        downstream.value
-    };
-    let BuiltinDemandArg::IntRange { start, end } = arg else {
-        return Demand {
-            value,
-            ..downstream
-        };
-    };
-    if start < 0 || end.is_some_and(|end| end < 0) {
-        return Demand {
-            pull: PullDemand::All,
-            value,
-            order: downstream.order || pull_is_positional(downstream.pull),
-        };
-    }
-    let start = start as usize;
-    let end = end.map(|end| end as usize);
-    let pull = match (downstream.pull, end) {
-        (_, Some(end)) if end <= start => PullDemand::FirstInput(0),
-        (PullDemand::All, Some(end)) => PullDemand::FirstInput(end),
-        (PullDemand::All, None) => PullDemand::All,
-        (PullDemand::FirstInput(n) | PullDemand::UntilOutput(n), Some(end)) => {
-            PullDemand::FirstInput(start.saturating_add(n.min(end.saturating_sub(start))))
-        }
-        (PullDemand::FirstInput(n) | PullDemand::UntilOutput(n), None) => {
-            PullDemand::FirstInput(start.saturating_add(n))
-        }
-        (PullDemand::NthInput(i), Some(end)) => {
-            let source_index = start.saturating_add(i);
-            if source_index < end {
-                PullDemand::NthInput(source_index)
-            } else {
-                PullDemand::FirstInput(end)
-            }
-        }
-        (PullDemand::NthInput(i), None) => PullDemand::NthInput(start.saturating_add(i)),
-        (PullDemand::LastInput(_), Some(end)) => PullDemand::FirstInput(end),
-        (PullDemand::LastInput(_), None) => PullDemand::All,
-    };
-    Demand {
-        pull,
-        value,
-        order: downstream.order || pull_is_positional(downstream.pull),
-    }
 }
 
 /// Convert builtin terminal-sink metadata into the shared planner demand model.
@@ -1092,39 +1042,6 @@ mod tests {
         assert_eq!(demand.pull, PullDemand::LastInput(1));
         assert_eq!(demand.value, ValueNeed::Whole);
         assert!(demand.order);
-
-        let downstream = Demand {
-            pull: PullDemand::FirstInput(3),
-            value: ValueNeed::CountOnly,
-            order: false,
-        };
-        let demand = propagate_demand(
-            slice,
-            BuiltinDemandArg::IntRange {
-                start: 10,
-                end: Some(20),
-            },
-            downstream,
-        );
-        assert_eq!(demand.pull, PullDemand::FirstInput(13));
-        assert_eq!(demand.value, ValueNeed::CountOnly);
-        assert!(demand.order);
-
-        let downstream = Demand {
-            pull: PullDemand::NthInput(4),
-            value: ValueNeed::Whole,
-            order: false,
-        };
-        let demand = propagate_demand(
-            slice,
-            BuiltinDemandArg::IntRange {
-                start: 10,
-                end: Some(20),
-            },
-            downstream,
-        );
-        assert_eq!(demand.pull, PullDemand::NthInput(14));
-        assert_eq!(demand.value, ValueNeed::Whole);
 
         let downstream = Demand {
             pull: PullDemand::FirstInput(3),
