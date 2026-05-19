@@ -1146,6 +1146,8 @@ mod tests {
             BuiltinMethod::StartsWith,
             BuiltinMethod::EndsWith,
             BuiltinMethod::Matches,
+            BuiltinMethod::ContainsAny,
+            BuiltinMethod::ContainsAll,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
