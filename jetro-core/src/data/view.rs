@@ -778,29 +778,134 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
         Some(false)
     }
 
+    #[inline]
     fn object_keys(&self) -> Option<Val> {
-        let materialized = self.materialize();
-        ValView::new(&materialized).object_keys()
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            out.push(Val::Str(Arc::from(tape.str_at(cur))));
+            cur += 1;
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
     }
 
+    #[inline]
     fn object_values(&self) -> Option<Val> {
-        let materialized = self.materialize();
-        ValView::new(&materialized).object_values()
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            cur += 1;
+            let mut value_idx = cur;
+            out.push(Self::materialize_at(tape, &mut value_idx));
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
     }
 
+    #[inline]
     fn object_entries(&self) -> Option<Val> {
-        let materialized = self.materialize();
-        ValView::new(&materialized).object_entries()
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = Vec::with_capacity(len);
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let key = Arc::from(tape.str_at(cur));
+            cur += 1;
+            let mut value_idx = cur;
+            out.push(Val::arr(vec![
+                Val::Str(key),
+                Self::materialize_at(tape, &mut value_idx),
+            ]));
+            cur += tape.span(cur);
+        }
+        Some(Val::arr(out))
     }
 
+    #[inline]
     fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        let materialized = self.materialize();
-        ValView::new(&materialized).pick_keys(keys)
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let mut out = indexmap::IndexMap::with_capacity(keys.len());
+        let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if remaining.remove(current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    Self::materialize_at(tape, &mut value_idx),
+                );
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+            cur += tape.span(cur);
+        }
+        Some(Val::obj(out))
     }
 
+    #[inline]
     fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
-        let materialized = self.materialize();
-        ValView::new(&materialized).omit_keys(keys)
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+
+        let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+        let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
+        let mut cur = *idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if !omitted.contains(current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    Self::materialize_at(tape, &mut value_idx),
+                );
+            }
+            cur += tape.span(cur);
+        }
+        Some(Val::obj(out))
     }
 
     #[inline]
@@ -1031,6 +1136,56 @@ mod tests {
                 .map(serde_json::Value::from)
         );
     }
+
+    #[test]
+    fn tape_scratch_view_object_helpers_match_val_view() {
+        use super::{TapeScratchView, TapeView};
+
+        let mut scratch = crate::data::tape::TapeScratch::with_capacity(128);
+        scratch
+            .parse_slice(br#"{"book":{"title":"Dune","score":901,"debug":true}}"#)
+            .unwrap();
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"book":{"title":"Dune","score":901,"debug":true}}"#.to_vec(),
+        )
+        .unwrap();
+        let tape_book = TapeScratchView::Node {
+            tape: &scratch,
+            idx: 0,
+        }
+        .field("book");
+        let stable_tape_book = TapeView::root(&tape).field("book");
+
+        assert_eq!(
+            tape_book.object_keys().map(serde_json::Value::from),
+            stable_tape_book.object_keys().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book.object_values().map(serde_json::Value::from),
+            stable_tape_book.object_values().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book.object_entries().map(serde_json::Value::from),
+            stable_tape_book.object_entries().map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book
+                .pick_keys(&[Arc::from("score")])
+                .map(serde_json::Value::from),
+            stable_tape_book
+                .pick_keys(&[Arc::from("score")])
+                .map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book
+                .omit_keys(&[Arc::from("debug")])
+                .map(serde_json::Value::from),
+            stable_tape_book
+                .omit_keys(&[Arc::from("debug")])
+                .map(serde_json::Value::from)
+        );
+    }
+
     #[test]
     fn tape_view_materializes_current_subtree_only() {
         use super::TapeView;
