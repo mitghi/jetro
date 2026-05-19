@@ -22,8 +22,10 @@ use super::{
     TerminalMapCollector,
 };
 
-use crate::builtins::registry::{keyed_reducer, BuiltinId};
-use crate::builtins::{replace_apply, slice_apply, split_apply, BuiltinMethod};
+use crate::builtins::registry::{keyed_reducer, view_stage as builtin_view_stage, BuiltinId};
+use crate::builtins::{
+    replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinViewStage,
+};
 use crate::plan::demand::PullDemand;
 
 /// Runs the pipeline against `root`, materialising barrier stages then streaming the rest.
@@ -441,11 +443,17 @@ fn apply_adapter_materialized(
     // Remaining barrier dispatch by Stage variant — all other variants are handled
     // above by Builtin::apply_barrier trait dispatch and never reach this point.
     match stage {
-        Stage::Builtin(call) if call.method == BuiltinMethod::Compact => {
+        Stage::Builtin(call)
+            if builtin_view_stage(BuiltinId::from_method(call.method))
+                == Some(BuiltinViewStage::Compact) =>
+        {
             buf.retain(|v| !matches!(v, Val::Null));
             Some(Ok(()))
         }
-        Stage::Builtin(call) if call.method == BuiltinMethod::Remove => {
+        Stage::Builtin(call)
+            if builtin_view_stage(BuiltinId::from_method(call.method))
+                == Some(BuiltinViewStage::RemoveValue) =>
+        {
             if let crate::builtins::BuiltinArgs::Val(target) = &call.args {
                 buf.retain(|v| !crate::util::vals_eq(v, target));
             }
