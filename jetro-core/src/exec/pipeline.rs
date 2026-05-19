@@ -840,6 +840,14 @@ mod tests {
     }
 
     #[test]
+    fn terminal_expr_arg_builtins_only_lower_at_chain_end() {
+        assert!(lower_query("$.books.find(price > 20)").is_some());
+        assert!(lower_query("$.books.find(price > 20).map(isbn)").is_none());
+        assert!(lower_query("$.books.count_by(active)").is_some());
+        assert!(lower_query("$.books.count_by(active).entries()").is_none());
+    }
+
+    #[test]
     fn debug_filter_pred_shape() {
         let expr = crate::parse::parser::parse("@.total > 100").unwrap();
         let prog = crate::compile::compiler::Compiler::compile(&expr, "");

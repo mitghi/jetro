@@ -541,13 +541,11 @@ pub(super) fn lower_method_from_registry(
             push_expr_stage(method, &args[0], stages, stage_exprs)
         }
         BuiltinPipelineLowering::TerminalExprArg { terminal } => {
-            if args.len() != 1 {
+            if args.len() != 1 || !is_last {
                 return None;
             }
             push_expr_stage(method, &args[0], stages, stage_exprs)?;
-            if is_last {
-                set_terminal_sink(terminal, sink)?;
-            }
+            set_terminal_sink(terminal, sink)?;
             Some(())
         }
         BuiltinPipelineLowering::Nullary => {
