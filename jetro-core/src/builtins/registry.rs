@@ -458,6 +458,15 @@ pub(crate) fn effective_pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineS
     })
 }
 
+/// Return the relative builtin execution cost used by heuristic analysis.
+#[cfg(test)]
+#[inline]
+pub(crate) fn heuristic_cost(id: BuiltinId) -> u32 {
+    effective_pipeline_shape(id)
+        .map(|shape| shape.cost.round().max(1.0) as u32)
+        .unwrap_or(8)
+}
+
 /// Return the columnar-stage metadata for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn columnar_stage(id: BuiltinId) -> Option<BuiltinColumnarStage> {

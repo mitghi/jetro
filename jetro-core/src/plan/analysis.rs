@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{registry::BuiltinId, BuiltinMethod};
 use crate::parse::ast::KindType;
 #[cfg(test)]
 use crate::vm::CompiledPipeStep;
@@ -1197,13 +1197,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::TryExpr { body, default } => 2 + program_cost(body) + program_cost(default),
         Opcode::InlineFilter(p) | Opcode::DynIndex(p) => 10 + program_cost(p),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
-            let base = match c.method {
-                BuiltinMethod::Filter | BuiltinMethod::Map | BuiltinMethod::FlatMap => 10,
-                BuiltinMethod::Sort => 30,
-                BuiltinMethod::GroupBy | BuiltinMethod::IndexBy => 25,
-                BuiltinMethod::Len | BuiltinMethod::Count => 2,
-                _ => 8,
-            };
+            let base = crate::builtins::registry::heuristic_cost(BuiltinId::from_method(c.method));
             base + c.sub_progs.iter().map(|p| program_cost(p)).sum::<u32>()
         }
         Opcode::MakeObj(entries) => {
