@@ -3,7 +3,11 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{numeric_reducer, BuiltinId};
+use crate::builtins::registry::{
+    arg_extreme_sink as builtin_arg_extreme_sink, membership_sink as builtin_membership_sink,
+    numeric_reducer, predicate_sink as builtin_predicate_sink, BuiltinArgExtremeSink, BuiltinId,
+    BuiltinMembershipSink, BuiltinPredicateSink,
+};
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
 use crate::plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed};
@@ -79,6 +83,19 @@ pub enum PredicateSinkOp {
     FindOne,
 }
 
+impl PredicateSinkOp {
+    #[inline]
+    fn from_builtin(kind: BuiltinPredicateSink) -> Self {
+        match kind {
+            BuiltinPredicateSink::Any => Self::Any,
+            BuiltinPredicateSink::All => Self::All,
+            BuiltinPredicateSink::FindIndex => Self::FindIndex,
+            BuiltinPredicateSink::IndicesWhere => Self::IndicesWhere,
+            BuiltinPredicateSink::FindOne => Self::FindOne,
+        }
+    }
+}
+
 /// Value-membership terminal operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MembershipSinkOp {
@@ -90,18 +107,24 @@ pub enum MembershipSinkOp {
     IndicesOf,
 }
 
+impl MembershipSinkOp {
+    #[inline]
+    fn from_builtin(kind: BuiltinMembershipSink) -> Self {
+        match kind {
+            BuiltinMembershipSink::Includes => Self::Includes,
+            BuiltinMembershipSink::Index => Self::Index,
+            BuiltinMembershipSink::IndicesOf => Self::IndicesOf,
+        }
+    }
+}
+
 impl PredicateSinkSpec {
     /// Constructs a predicate terminal sink from the builtin method.
     pub(crate) fn from_method(method: BuiltinMethod, predicate: Arc<Program>) -> Option<Self> {
         Some(Self {
-            op: match method {
-                BuiltinMethod::Any => PredicateSinkOp::Any,
-                BuiltinMethod::All => PredicateSinkOp::All,
-                BuiltinMethod::FindIndex => PredicateSinkOp::FindIndex,
-                BuiltinMethod::IndicesWhere => PredicateSinkOp::IndicesWhere,
-                BuiltinMethod::FindOne => PredicateSinkOp::FindOne,
-                _ => return None,
-            },
+            op: PredicateSinkOp::from_builtin(builtin_predicate_sink(BuiltinId::from_method(
+                method,
+            ))?),
             predicate,
         })
     }
@@ -147,12 +170,9 @@ impl MembershipSinkSpec {
     /// Constructs a membership terminal sink from the builtin method.
     pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
         Some(Self {
-            op: match method {
-                BuiltinMethod::Includes => MembershipSinkOp::Includes,
-                BuiltinMethod::Index => MembershipSinkOp::Index,
-                BuiltinMethod::IndicesOf => MembershipSinkOp::IndicesOf,
-                _ => return None,
-            },
+            op: MembershipSinkOp::from_builtin(builtin_membership_sink(BuiltinId::from_method(
+                method,
+            ))?),
             target,
             method,
         })
@@ -193,10 +213,9 @@ impl ArgExtremeSinkSpec {
     /// Constructs an arg-extreme sink from the terminal builtin method.
     pub(crate) fn from_method(method: BuiltinMethod, key: Arc<Program>) -> Option<Self> {
         Some(Self {
-            want_max: match method {
-                BuiltinMethod::MaxBy => true,
-                BuiltinMethod::MinBy => false,
-                _ => return None,
+            want_max: match builtin_arg_extreme_sink(BuiltinId::from_method(method))? {
+                BuiltinArgExtremeSink::MaxBy => true,
+                BuiltinArgExtremeSink::MinBy => false,
             },
             key,
         })

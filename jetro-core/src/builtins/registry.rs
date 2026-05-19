@@ -108,6 +108,41 @@ pub(crate) enum BuiltinLogicalShape {
     ApproxCountDistinct,
 }
 
+/// Predicate terminal sink behavior for builtins with a predicate argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinPredicateSink {
+    /// Returns true when any row matches the predicate.
+    Any,
+    /// Returns true when every row matches the predicate.
+    All,
+    /// Returns the zero-based index of the first matching row, or null.
+    FindIndex,
+    /// Returns all zero-based indices whose rows match.
+    IndicesWhere,
+    /// Returns exactly one matching row, erroring on zero or multiple matches.
+    FindOne,
+}
+
+/// Membership terminal sink behavior for builtins with a target value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinMembershipSink {
+    /// Returns true when any row equals the target.
+    Includes,
+    /// Returns the zero-based index of the first matching row, or null.
+    Index,
+    /// Returns all zero-based indices matching the target.
+    IndicesOf,
+}
+
+/// Arg-extreme terminal sink behavior for builtins with a key expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinArgExtremeSink {
+    /// Keep the row with the largest key.
+    MaxBy,
+    /// Keep the row with the smallest key.
+    MinBy,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -154,6 +189,40 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
         )
         .then_some(BuiltinLogicalShape::IndexBy),
         BuiltinMethod::ApproxCountDistinct => Some(BuiltinLogicalShape::ApproxCountDistinct),
+        _ => None,
+    }
+}
+
+/// Return predicate terminal-sink behavior for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
+    match id.method()? {
+        BuiltinMethod::Any => Some(BuiltinPredicateSink::Any),
+        BuiltinMethod::All => Some(BuiltinPredicateSink::All),
+        BuiltinMethod::FindIndex => Some(BuiltinPredicateSink::FindIndex),
+        BuiltinMethod::IndicesWhere => Some(BuiltinPredicateSink::IndicesWhere),
+        BuiltinMethod::FindOne => Some(BuiltinPredicateSink::FindOne),
+        _ => None,
+    }
+}
+
+/// Return membership terminal-sink behavior for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
+    match id.method()? {
+        BuiltinMethod::Includes => Some(BuiltinMembershipSink::Includes),
+        BuiltinMethod::Index => Some(BuiltinMembershipSink::Index),
+        BuiltinMethod::IndicesOf => Some(BuiltinMembershipSink::IndicesOf),
+        _ => None,
+    }
+}
+
+/// Return arg-extreme terminal-sink behavior for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
+    match id.method()? {
+        BuiltinMethod::MaxBy => Some(BuiltinArgExtremeSink::MaxBy),
+        BuiltinMethod::MinBy => Some(BuiltinArgExtremeSink::MinBy),
         _ => None,
     }
 }
