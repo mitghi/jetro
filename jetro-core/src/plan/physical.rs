@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::registry::{dispatches_scalar_direct, BuiltinId};
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
@@ -382,7 +383,7 @@ fn is_scalar_unwrap_stages(
             | Stage::ExprBuiltin { method, .. } => *method,
             _ => return false,
         };
-        method.spec().dispatches_scalar_direct()
+        dispatches_scalar_direct(BuiltinId::from_method(method))
     })
 }
 

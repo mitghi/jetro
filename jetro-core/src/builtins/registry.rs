@@ -452,6 +452,14 @@ pub(crate) fn builtin_sink(id: BuiltinId) -> Option<BuiltinSinkSpec> {
     id.method().and_then(|method| method.spec().sink)
 }
 
+/// Return whether builtin `id` should bypass streaming and run as a direct
+/// scalar/object call on the receiver produced by the chain.
+#[inline]
+pub(crate) fn dispatches_scalar_direct(id: BuiltinId) -> bool {
+    id.method()
+        .is_some_and(|method| method.spec().dispatches_scalar_direct())
+}
+
 /// Return the builtin category for planner classification.
 #[inline]
 #[cfg(test)]
