@@ -87,6 +87,11 @@ fn tape_has_key<T: TapeLike>(tape: &T, idx: usize, key: &str) -> Option<bool> {
     tape_field_idx(tape, idx, key).map(|found| found.is_some())
 }
 
+#[inline]
+fn key_slice_contains(keys: &[Arc<str>], needle: &str) -> bool {
+    keys.iter().any(|key| key.as_ref() == needle)
+}
+
 fn tape_object_keys<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     use crate::data::tape::TapeNode;
 
@@ -151,6 +156,27 @@ fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
         return None;
     };
 
+    if keys.len() <= 4 {
+        let mut out = indexmap::IndexMap::with_capacity(keys.len());
+        let mut cur = idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if key_slice_contains(keys, current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    tape.materialize_at(&mut value_idx),
+                );
+                if out.len() == keys.len() {
+                    break;
+                }
+            }
+            cur += tape.span(cur);
+        }
+        return Some(Val::obj(out));
+    }
+
     let mut out = indexmap::IndexMap::with_capacity(keys.len());
     let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
     let mut cur = idx + 1;
@@ -178,6 +204,24 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
     let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
         return None;
     };
+
+    if keys.len() <= 4 {
+        let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(keys.len()));
+        let mut cur = idx + 1;
+        for _ in 0..len {
+            let current_key = tape.str_at(cur);
+            cur += 1;
+            if !key_slice_contains(keys, current_key) {
+                let mut value_idx = cur;
+                out.insert(
+                    crate::data::value::intern_key(current_key),
+                    tape.materialize_at(&mut value_idx),
+                );
+            }
+            cur += tape.span(cur);
+        }
+        return Some(Val::obj(out));
+    }
 
     let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
     let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
@@ -382,6 +426,25 @@ impl<'a> ValueView<'a> for ValView<'a> {
 
     #[inline]
     fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        if keys.len() <= 4 {
+            return match self.value() {
+                Val::Obj(map) => Some(Val::obj(
+                    map.iter()
+                        .filter(|(key, _)| !key_slice_contains(keys, key.as_ref()))
+                        .map(|(key, value)| (Arc::clone(key), value.clone()))
+                        .collect(),
+                )),
+                Val::ObjSmall(pairs) => Some(Val::obj(
+                    pairs
+                        .iter()
+                        .filter(|(key, _)| !key_slice_contains(keys, key.as_ref()))
+                        .map(|(key, value)| (Arc::clone(key), value.clone()))
+                        .collect(),
+                )),
+                _ => None,
+            };
+        }
+
         let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
         match self.value() {
             Val::Obj(map) => Some(Val::obj(
@@ -1092,6 +1155,22 @@ mod tests {
             val_book
                 .omit_keys(&[Arc::from("title")])
                 .map(serde_json::Value::from)
+        );
+
+        let many_keys = [
+            Arc::from("missing_a"),
+            Arc::from("score"),
+            Arc::from("missing_b"),
+            Arc::from("title"),
+            Arc::from("missing_c"),
+        ];
+        assert_eq!(
+            tape_book.pick_keys(&many_keys).map(serde_json::Value::from),
+            val_book.pick_keys(&many_keys).map(serde_json::Value::from)
+        );
+        assert_eq!(
+            tape_book.omit_keys(&many_keys).map(serde_json::Value::from),
+            val_book.omit_keys(&many_keys).map(serde_json::Value::from)
         );
     }
 
