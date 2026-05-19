@@ -2558,7 +2558,12 @@ fn view_has_all<'a, V>(view: &V, keys: &[Arc<str>]) -> Option<bool>
 where
     V: ValueView<'a>,
 {
-    keys.iter().try_fold(true, |_, key| view_has(view, key.as_ref()))
+    for key in keys {
+        if !view_has(view, key.as_ref())? {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 #[inline]
@@ -2612,6 +2617,16 @@ mod tests {
         BodyKernel::BuiltinCall {
             receiver: Box::new(BodyKernel::Current),
             call: BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(key))),
+        }
+    }
+
+    fn key_vec_call(method: BuiltinMethod, keys: &[&str]) -> BodyKernel {
+        BodyKernel::BuiltinCall {
+            receiver: Box::new(BodyKernel::Current),
+            call: BuiltinCall::new(
+                method,
+                BuiltinArgs::StrVec(keys.iter().map(|key| Arc::from(*key)).collect()),
+            ),
         }
     }
 
@@ -2911,6 +2926,20 @@ mod tests {
             )),
             Some(false)
         );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_vec_call(BuiltinMethod::HasAll, &["isbn", "score"]),
+                &view
+            )),
+            Some(true)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_vec_call(BuiltinMethod::HasAll, &["title", "score"]),
+                &view
+            )),
+            Some(false)
+        );
     }
 
     #[test]
@@ -3030,6 +3059,13 @@ mod tests {
         assert_eq!(
             owned_bool(eval_view_kernel(
                 &key_call(BuiltinMethod::HasKey, "sf"),
+                &tags_view
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            owned_bool(eval_view_kernel(
+                &key_vec_call(BuiltinMethod::HasAll, &["missing", "hugo"]),
                 &tags_view
             )),
             Some(false)
