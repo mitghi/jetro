@@ -143,6 +143,21 @@ pub(crate) enum BuiltinArgExtremeSink {
     MinBy,
 }
 
+/// Concrete pipeline stage shape for builtins with one expression argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinExprStage {
+    /// Predicate filter stage.
+    Filter,
+    /// One-to-one map stage.
+    Map,
+    /// Expanding flat-map stage.
+    FlatMap,
+    /// Deduplicate by key stage.
+    UniqueBy,
+    /// Generic expression-bearing builtin stage.
+    ExprBuiltin,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -223,6 +238,29 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
     match id.method()? {
         BuiltinMethod::MaxBy => Some(BuiltinArgExtremeSink::MaxBy),
         BuiltinMethod::MinBy => Some(BuiltinArgExtremeSink::MinBy),
+        _ => None,
+    }
+}
+
+/// Return the concrete pipeline stage shape for an expression-argument builtin.
+#[inline]
+pub(crate) fn expr_stage(id: BuiltinId) -> Option<BuiltinExprStage> {
+    match id.method()? {
+        BuiltinMethod::Filter
+        | BuiltinMethod::Find
+        | BuiltinMethod::FindAll
+        | BuiltinMethod::FindFirst => Some(BuiltinExprStage::Filter),
+        BuiltinMethod::Map => Some(BuiltinExprStage::Map),
+        BuiltinMethod::FlatMap => Some(BuiltinExprStage::FlatMap),
+        BuiltinMethod::UniqueBy => Some(BuiltinExprStage::UniqueBy),
+        method if matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::ExprArg)
+                | Some(BuiltinPipelineLowering::TerminalExprArg { .. })
+        ) =>
+        {
+            Some(BuiltinExprStage::ExprBuiltin)
+        }
         _ => None,
     }
 }
@@ -1422,6 +1460,35 @@ mod tests {
             pipeline_lowering(BuiltinId::from_method(BuiltinMethod::Count)),
             Some(BuiltinPipelineLowering::TerminalSink)
         );
+    }
+
+    #[test]
+    fn registry_drives_expression_stage_shapes() {
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinExprStage::Filter)
+        );
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::Find)),
+            Some(BuiltinExprStage::Filter)
+        );
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinExprStage::Map)
+        );
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::FlatMap)),
+            Some(BuiltinExprStage::FlatMap)
+        );
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::UniqueBy)),
+            Some(BuiltinExprStage::UniqueBy)
+        );
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::TransformKeys)),
+            Some(BuiltinExprStage::ExprBuiltin)
+        );
+        assert_eq!(expr_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
     }
 
     #[test]

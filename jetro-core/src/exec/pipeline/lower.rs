@@ -10,8 +10,9 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_category, builtin_sink, cancellation as builtin_cancellation, pipeline_accepts_arity,
-    pipeline_element, pipeline_lowering, view_stage, BuiltinId,
+    builtin_category, builtin_sink, cancellation as builtin_cancellation, expr_stage,
+    pipeline_accepts_arity, pipeline_element, pipeline_lowering, view_stage, BuiltinExprStage,
+    BuiltinId,
 };
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
@@ -660,18 +661,15 @@ fn push_expr_stage(
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    match method {
-        BuiltinMethod::Filter
-        | BuiltinMethod::Find
-        | BuiltinMethod::FindAll
-        | BuiltinMethod::FindFirst => {
+    match expr_stage(BuiltinId::from_method(method))? {
+        BuiltinExprStage::Filter => {
             stages.push(Stage::Filter(
                 compile_subexpr(arg)?,
                 BuiltinViewStage::Filter,
             ));
             stage_exprs.push(arg_expr(arg));
         }
-        BuiltinMethod::Map => match try_decode_map_body(arg) {
+        BuiltinExprStage::Map => match try_decode_map_body(arg) {
             Some(plan) => {
                 stages.push(Stage::CompiledMap(Arc::new(plan)));
                 stage_exprs.push(arg_expr(arg));
@@ -681,21 +679,21 @@ fn push_expr_stage(
                 stage_exprs.push(arg_expr(arg));
             }
         },
-        BuiltinMethod::FlatMap => {
+        BuiltinExprStage::FlatMap => {
             stages.push(Stage::FlatMap(
                 compile_subexpr(arg)?,
                 BuiltinViewStage::FlatMap,
             ));
             stage_exprs.push(arg_expr(arg));
         }
-        BuiltinMethod::UniqueBy => {
+        BuiltinExprStage::UniqueBy => {
             stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
             stage_exprs.push(arg_expr(arg));
         }
         // Remaining expression-argument lowerings route through the generic
         // ExprBuiltin stage. The caller has already checked registry lowering
         // metadata, so new supported builtins do not need another list here.
-        _ => {
+        BuiltinExprStage::ExprBuiltin => {
             push_expr_builtin(method, arg, stages, stage_exprs)?;
         }
     }
