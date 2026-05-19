@@ -1425,6 +1425,53 @@ mod tests {
     }
 
     #[test]
+    fn registry_drives_terminal_sink_classification() {
+        assert_eq!(
+            predicate_sink(BuiltinId::from_method(BuiltinMethod::Any)),
+            Some(BuiltinPredicateSink::Any)
+        );
+        assert_eq!(
+            predicate_sink(BuiltinId::from_method(BuiltinMethod::All)),
+            Some(BuiltinPredicateSink::All)
+        );
+        assert_eq!(
+            predicate_sink(BuiltinId::from_method(BuiltinMethod::FindOne)),
+            Some(BuiltinPredicateSink::FindOne)
+        );
+        assert_eq!(predicate_sink(BuiltinId::from_method(BuiltinMethod::Count)), None);
+
+        assert_eq!(
+            membership_sink(BuiltinId::from_method(BuiltinMethod::Includes)),
+            Some(BuiltinMembershipSink::Includes)
+        );
+        assert_eq!(
+            membership_sink(BuiltinId::from_method(BuiltinMethod::Index)),
+            Some(BuiltinMembershipSink::Index)
+        );
+        assert_eq!(
+            membership_sink(BuiltinId::from_method(BuiltinMethod::IndicesOf)),
+            Some(BuiltinMembershipSink::IndicesOf)
+        );
+        assert_eq!(
+            membership_sink(BuiltinId::from_method(BuiltinMethod::Has)),
+            None
+        );
+
+        assert_eq!(
+            arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::MaxBy)),
+            Some(BuiltinArgExtremeSink::MaxBy)
+        );
+        assert_eq!(
+            arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::MinBy)),
+            Some(BuiltinArgExtremeSink::MinBy)
+        );
+        assert_eq!(
+            arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::Max)),
+            None
+        );
+    }
+
+    #[test]
     fn registry_drives_logical_shapes() {
         assert_eq!(
             logical_shape(BuiltinId::from_method(BuiltinMethod::Filter)),
