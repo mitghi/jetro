@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     builtin_category, builtin_sink, cancellation as builtin_cancellation, expr_stage,
-    pipeline_accepts_arity, pipeline_element, pipeline_lowering, view_stage, BuiltinExprStage,
-    BuiltinId,
+    nullary_stage, pipeline_accepts_arity, pipeline_lowering, view_stage, BuiltinExprStage,
+    BuiltinId, BuiltinNullaryStage,
 };
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
@@ -553,20 +553,19 @@ pub(super) fn lower_method_from_registry(
             if !args.is_empty() {
                 return None;
             }
-            match method {
-                BuiltinMethod::Reverse => {
+            match nullary_stage(BuiltinId::from_method(method))? {
+                BuiltinNullaryStage::Reverse => {
                     let cancel = builtin_cancellation(BuiltinId::from_method(method))
                         .expect("reverse builtin must define cancellation metadata");
                     stages.push(Stage::Reverse(cancel));
                 }
-                BuiltinMethod::Unique => stages.push(Stage::UniqueBy(None)),
-                _ if pipeline_element(BuiltinId::from_method(method)) => {
+                BuiltinNullaryStage::Unique => stages.push(Stage::UniqueBy(None)),
+                BuiltinNullaryStage::Element => {
                     stages.push(Stage::Builtin(crate::builtins::BuiltinCall::new(
                         method,
                         crate::builtins::BuiltinArgs::None,
                     )));
                 }
-                _ => return None,
             }
             stage_exprs.push(None);
             Some(())

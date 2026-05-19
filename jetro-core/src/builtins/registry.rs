@@ -158,6 +158,17 @@ pub(crate) enum BuiltinExprStage {
     ExprBuiltin,
 }
 
+/// Concrete pipeline stage shape for nullary stage builtins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinNullaryStage {
+    /// Reverse stage with cancellation metadata.
+    Reverse,
+    /// Deduplicate by full row value.
+    Unique,
+    /// Generic no-argument element builtin.
+    Element,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -260,6 +271,24 @@ pub(crate) fn expr_stage(id: BuiltinId) -> Option<BuiltinExprStage> {
         ) =>
         {
             Some(BuiltinExprStage::ExprBuiltin)
+        }
+        _ => None,
+    }
+}
+
+/// Return the concrete pipeline stage shape for a nullary pipeline builtin.
+#[inline]
+pub(crate) fn nullary_stage(id: BuiltinId) -> Option<BuiltinNullaryStage> {
+    match id.method()? {
+        BuiltinMethod::Reverse => Some(BuiltinNullaryStage::Reverse),
+        BuiltinMethod::Unique => Some(BuiltinNullaryStage::Unique),
+        method
+            if matches!(
+                pipeline_lowering(BuiltinId::from_method(method)),
+                Some(BuiltinPipelineLowering::Nullary)
+            ) && pipeline_element(BuiltinId::from_method(method)) =>
+        {
+            Some(BuiltinNullaryStage::Element)
         }
         _ => None,
     }
@@ -1489,6 +1518,20 @@ mod tests {
             Some(BuiltinExprStage::ExprBuiltin)
         );
         assert_eq!(expr_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
+    }
+
+    #[test]
+    fn registry_drives_nullary_stage_shapes() {
+        assert_eq!(
+            nullary_stage(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            Some(BuiltinNullaryStage::Reverse)
+        );
+        assert_eq!(
+            nullary_stage(BuiltinId::from_method(BuiltinMethod::Unique)),
+            Some(BuiltinNullaryStage::Unique)
+        );
+        assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Keys)), None);
+        assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
     }
 
     #[test]
