@@ -396,6 +396,24 @@ pub(crate) fn expr_payload(id: BuiltinId) -> Option<BuiltinExprPayload> {
     }
 }
 
+/// Return true when an expression-bearing stage can be elided if downstream
+/// demand proves its output value is unused.
+#[inline]
+pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
+    let Some(method) = id.method() else {
+        return false;
+    };
+    matches!(
+        method,
+        BuiltinMethod::TransformKeys
+            | BuiltinMethod::TransformValues
+            | BuiltinMethod::FilterKeys
+            | BuiltinMethod::FilterValues
+    ) && is_pure(id)
+        && builtin_cardinality(id) == Some(BuiltinCardinality::OneToOne)
+        && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
+}
+
 /// Return true when a count-like terminal sink accepts a predicate argument.
 #[inline]
 pub(crate) fn count_sink_accepts_predicate(id: BuiltinId) -> bool {
@@ -1722,6 +1740,27 @@ mod tests {
             Some(BuiltinExprPayload::RowKeyedReducer)
         );
         assert_eq!(expr_payload(BuiltinId::from_method(BuiltinMethod::Take)), None);
+    }
+
+    #[test]
+    fn registry_drives_unused_expression_stage_elision() {
+        for method in [
+            BuiltinMethod::TransformKeys,
+            BuiltinMethod::TransformValues,
+            BuiltinMethod::FilterKeys,
+            BuiltinMethod::FilterValues,
+        ] {
+            assert!(
+                expr_stage_elidable_when_value_unused(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+        assert!(!expr_stage_elidable_when_value_unused(BuiltinId::from_method(
+            BuiltinMethod::TakeWhile
+        )));
+        assert!(!expr_stage_elidable_when_value_unused(BuiltinId::from_method(
+            BuiltinMethod::GroupBy
+        )));
     }
 
     #[test]

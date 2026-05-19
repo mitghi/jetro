@@ -10,10 +10,11 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
-    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect, expr_payload,
-    effective_pipeline_shape, is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
-    participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
-    pipeline_streams, sink_demand as builtin_sink_demand,
+    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
+    expr_payload, expr_stage_elidable_when_value_unused, effective_pipeline_shape,
+    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
+    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_streams,
+    sink_demand as builtin_sink_demand,
     stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinExprPayload,
     BuiltinId,
 };
@@ -765,14 +766,9 @@ impl Stage {
                 desc.method
                     .is_some_and(|m| builtin_is_pure(BuiltinId::from_method(m)))
             }
-            Stage::ExprBuiltin {
-                method:
-                    BuiltinMethod::TransformKeys
-                    | BuiltinMethod::TransformValues
-                    | BuiltinMethod::FilterKeys
-                    | BuiltinMethod::FilterValues,
-                ..
-            } => true,
+            Stage::ExprBuiltin { method, .. } => {
+                expr_stage_elidable_when_value_unused(BuiltinId::from_method(*method))
+            }
             _ => false,
         }
     }
