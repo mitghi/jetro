@@ -374,11 +374,36 @@ mod tests {
             BuiltinMethod::HasKey,
             BuiltinMethod::HasPath,
             BuiltinMethod::Missing,
+            BuiltinMethod::IsBlank,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::IsAlpha,
+            BuiltinMethod::IsAscii,
+            BuiltinMethod::StartsWith,
+            BuiltinMethod::EndsWith,
+            BuiltinMethod::Matches,
         ] {
             let ops = [op(method), op(BuiltinMethod::Count)];
             let demand = source_demand(&ops, Demand::RESULT);
             assert_eq!(demand.pull, PullDemand::All, "{method:?}");
             assert_eq!(demand.value, ValueNeed::CountOnly, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn scalar_view_predicates_request_predicate_payload_for_positional_output() {
+        for method in [
+            BuiltinMethod::IsBlank,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::IsAlpha,
+            BuiltinMethod::IsAscii,
+            BuiltinMethod::StartsWith,
+            BuiltinMethod::EndsWith,
+            BuiltinMethod::Matches,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Predicate, "{method:?}");
         }
     }
 

@@ -2508,6 +2508,17 @@ fn scalar_view_scalar_element_spec() -> BuiltinSpec {
         .element()
 }
 
+#[inline]
+fn scalar_view_predicate_element_spec() -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native()
+        .view_scalar()
+        .demand_law(BuiltinDemandLaw::PredicateMapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .element()
+}
+
 // Native-element (no view_scalar):
 // `apply` clause wraps with recv.clone() fallback so trait dispatch fully owns this method
 // (no fall-through to legacy match on type mismatch).
@@ -2545,6 +2556,28 @@ macro_rules! scalar_view_scalar_element {
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
+                $(
+                    #[inline]
+                    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+                        Some(super::$apply(recv).unwrap_or_else(|| recv.clone()))
+                    }
+                )?
+            }
+        )*
+    };
+}
+
+macro_rules! scalar_view_predicate_element {
+    ( $( $ty:ident => $variant:ident, $name:literal
+         $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
+         $( , apply: $apply:ident )? ; )* ) => {
+        $(
+            pub(crate) struct $ty;
+            impl Builtin for $ty {
+                const METHOD: BuiltinMethod = BuiltinMethod::$variant;
+                const NAME: &'static str = $name;
+                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
+                fn spec() -> BuiltinSpec { scalar_view_predicate_element_spec() }
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2633,18 +2666,21 @@ scalar_view_scalar_element! {
     Trim => Trim, "trim", apply: trim_apply;
     TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], apply: trim_left_apply;
     TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], apply: trim_right_apply;
+    ToNumber => ToNumber, "to_number";
+    ToBool => ToBool, "to_bool";
+    IndexOf => IndexOf, "index_of";
+    LastIndexOf => LastIndexOf, "last_index_of";
+    ByteLen => ByteLen, "byte_len";
+}
+
+scalar_view_predicate_element! {
     IsBlank => IsBlank, "is_blank";
     IsNumeric => IsNumeric, "is_numeric";
     IsAlpha => IsAlpha, "is_alpha";
     IsAscii => IsAscii, "is_ascii";
-    ToNumber => ToNumber, "to_number";
-    ToBool => ToBool, "to_bool";
     StartsWith => StartsWith, "starts_with";
     EndsWith => EndsWith, "ends_with";
-    IndexOf => IndexOf, "index_of";
-    LastIndexOf => LastIndexOf, "last_index_of";
     Matches => Matches, "matches";
-    ByteLen => ByteLen, "byte_len";
 }
 
 // ── Scalar with pipeline lowerings ───────────────────────────────────────────

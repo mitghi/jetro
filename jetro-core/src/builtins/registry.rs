@@ -1139,6 +1139,13 @@ mod tests {
             BuiltinMethod::HasKey,
             BuiltinMethod::Missing,
             BuiltinMethod::HasPath,
+            BuiltinMethod::IsBlank,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::IsAlpha,
+            BuiltinMethod::IsAscii,
+            BuiltinMethod::StartsWith,
+            BuiltinMethod::EndsWith,
+            BuiltinMethod::Matches,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
