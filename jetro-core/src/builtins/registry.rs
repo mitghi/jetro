@@ -169,6 +169,16 @@ pub(crate) enum BuiltinNullaryStage {
     Element,
 }
 
+/// Concrete pipeline stage behavior for builtins with two string arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinStringPairStage {
+    /// String replacement; `all` selects first-hit vs all-hit replacement.
+    Replace {
+        /// Replace every occurrence when true, otherwise only the first.
+        all: bool,
+    },
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -290,6 +300,16 @@ pub(crate) fn nullary_stage(id: BuiltinId) -> Option<BuiltinNullaryStage> {
         {
             Some(BuiltinNullaryStage::Element)
         }
+        _ => None,
+    }
+}
+
+/// Return concrete behavior for a two-string-argument pipeline builtin.
+#[inline]
+pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage> {
+    match id.method()? {
+        BuiltinMethod::Replace => Some(BuiltinStringPairStage::Replace { all: false }),
+        BuiltinMethod::ReplaceAll => Some(BuiltinStringPairStage::Replace { all: true }),
         _ => None,
     }
 }
@@ -1532,6 +1552,22 @@ mod tests {
         );
         assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Keys)), None);
         assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
+    }
+
+    #[test]
+    fn registry_drives_string_pair_stage_shapes() {
+        assert_eq!(
+            string_pair_stage(BuiltinId::from_method(BuiltinMethod::Replace)),
+            Some(BuiltinStringPairStage::Replace { all: false })
+        );
+        assert_eq!(
+            string_pair_stage(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
+            Some(BuiltinStringPairStage::Replace { all: true })
+        );
+        assert_eq!(
+            string_pair_stage(BuiltinId::from_method(BuiltinMethod::Split)),
+            None
+        );
     }
 
     #[test]

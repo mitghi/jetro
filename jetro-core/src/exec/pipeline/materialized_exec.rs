@@ -22,7 +22,10 @@ use super::{
     TerminalMapCollector,
 };
 
-use crate::builtins::registry::{keyed_reducer, view_stage as builtin_view_stage, BuiltinId};
+use crate::builtins::registry::{
+    keyed_reducer, string_pair_stage as builtin_string_pair_stage,
+    view_stage as builtin_view_stage, BuiltinId, BuiltinStringPairStage,
+};
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinViewStage,
 };
@@ -519,15 +522,12 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
             method,
             first,
             second,
-        } if matches!(*method, BuiltinMethod::Replace | BuiltinMethod::ReplaceAll) => {
-            replace_apply(
-                v.clone(),
-                first,
-                second,
-                *method == BuiltinMethod::ReplaceAll,
-            )
-            .unwrap_or(v)
-        }
+        } => match builtin_string_pair_stage(BuiltinId::from_method(*method)) {
+            Some(BuiltinStringPairStage::Replace { all }) => {
+                replace_apply(v.clone(), first, second, all).unwrap_or(v)
+            }
+            None => v,
+        },
         Stage::Builtin(call) => call.apply(&v).unwrap_or(v),
         _ => v,
     }
