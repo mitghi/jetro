@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_category, builtin_sink, cancellation as builtin_cancellation,
+    builtin_category, builtin_sink, by_name, cancellation as builtin_cancellation,
     count_sink_accepts_predicate, expr_stage, nullary_stage, pipeline_accepts_arity,
     pipeline_lowering, view_stage, BuiltinExprStage, BuiltinId, BuiltinNullaryStage,
 };
@@ -123,12 +123,7 @@ impl Pipeline {
 
 // Returns `true` when `name`/`arity` is a builtin that can open a receiver-based pipeline.
 fn is_receiver_pipeline_start_method(name: &str, arity: usize) -> bool {
-    let method = BuiltinMethod::from_name(name);
-    if method == BuiltinMethod::Unknown {
-        return false;
-    }
-
-    pipeline_accepts_arity(BuiltinId::from_method(method), arity, true)
+    by_name(name).is_some_and(|id| pipeline_accepts_arity(id, arity, true))
 }
 
 /// Decodes a `map(expr)` argument as a nested pipeline `Plan`, enabling the `CompiledMap` stage optimisation.
@@ -193,9 +188,7 @@ fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> boo
             return false;
         };
         matches!(
-            builtin_category(BuiltinId::from_method(BuiltinMethod::from_name(
-                name.as_str(),
-            ))),
+            by_name(name.as_str()).and_then(builtin_category),
             Some(
                 BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
@@ -229,9 +222,10 @@ fn decode_method_chain(
                     stage_exprs.push(None);
                     continue;
                 }
-                let method = BuiltinMethod::from_name(name.as_str());
+                let id = by_name(name.as_str())?;
+                let method = id.method()?;
                 if matches!(
-                    view_stage(BuiltinId::from_method(method)),
+                    view_stage(id),
                     Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
                 ) {
                     if let Some(call) =
