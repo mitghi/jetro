@@ -132,14 +132,20 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
 }
 
 fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
-    let key = match (call.method, &call.args) {
+    if !matches!(receiver, BodyKernel::Current) {
+        return None;
+    }
+    match (call.method, &call.args) {
         (BuiltinMethod::HasKey | BuiltinMethod::Missing, crate::builtins::BuiltinArgs::Str(key)) => {
-            key
+            Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key))))
         }
-        _ => return None,
-    };
-    match receiver {
-        BodyKernel::Current => Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key)))),
+        (BuiltinMethod::Missing, crate::builtins::BuiltinArgs::StrVec(keys)) => {
+            let mut fields = FieldSet::new();
+            for key in keys {
+                fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
+            }
+            Some(FieldDemand::Fields(fields))
+        }
         _ => None,
     }
 }
@@ -2684,6 +2690,10 @@ mod tests {
         assert_eq!(
             field_paths(&key_call(BuiltinMethod::Missing, "title")),
             vec!["title"]
+        );
+        assert_eq!(
+            field_paths(&key_vec_call(BuiltinMethod::Missing, &["title", "isbn"])),
+            vec!["title", "isbn"]
         );
         assert_eq!(field_paths(&key_call(BuiltinMethod::Has, "isbn")), vec!["*"]);
     }
