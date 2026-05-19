@@ -8,8 +8,9 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    expr_stage, numeric_reducer, view_object_projection, view_projection, BuiltinExprStage,
-    BuiltinId, BuiltinViewObjectProjection,
+    array_selector as builtin_array_selector, expr_stage, numeric_reducer,
+    view_object_projection, view_projection, BuiltinArraySelector, BuiltinExprStage, BuiltinId,
+    BuiltinViewObjectProjection,
 };
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::data::context::EvalError;
@@ -1436,17 +1437,16 @@ fn static_positional_pick_call(call: &crate::vm::CompiledCall) -> Option<Builtin
 }
 
 fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> {
-    match call.method {
-        crate::builtins::BuiltinMethod::First => Some(ArraySelector::First),
-        crate::builtins::BuiltinMethod::Last => Some(ArraySelector::Last),
-        crate::builtins::BuiltinMethod::Nth => match call.sub_progs.as_ref() {
+    match builtin_array_selector(BuiltinId::from_method(call.method))? {
+        BuiltinArraySelector::First => Some(ArraySelector::First),
+        BuiltinArraySelector::Last => Some(ArraySelector::Last),
+        BuiltinArraySelector::Nth => match call.sub_progs.as_ref() {
             [prog] => match static_prog_val(prog)? {
                 Val::Int(index) if index >= 0 => Some(ArraySelector::Nth(index as usize)),
                 _ => None,
             },
             _ => None,
         },
-        _ => None,
     }
 }
 

@@ -219,6 +219,17 @@ pub(crate) enum BuiltinViewObjectProjection {
     Omit,
 }
 
+/// Positional array element selector builtin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinArraySelector {
+    /// First array element.
+    First,
+    /// Last array element.
+    Last,
+    /// Nth array element; caller extracts the numeric index argument.
+    Nth,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -808,6 +819,17 @@ pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectP
         BuiltinMethod::Entries => Some(BuiltinViewObjectProjection::Entries),
         BuiltinMethod::Pick => Some(BuiltinViewObjectProjection::Pick),
         BuiltinMethod::Omit => Some(BuiltinViewObjectProjection::Omit),
+        _ => None,
+    }
+}
+
+/// Return positional array selector behavior for builtin `id`, if any.
+#[inline]
+pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
+    match id.method()? {
+        BuiltinMethod::First => Some(BuiltinArraySelector::First),
+        BuiltinMethod::Last => Some(BuiltinArraySelector::Last),
+        BuiltinMethod::Nth => Some(BuiltinArraySelector::Nth),
         _ => None,
     }
 }
@@ -1956,6 +1978,23 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None
         );
+    }
+
+    #[test]
+    fn registry_drives_array_selector_classification() {
+        assert_eq!(
+            array_selector(BuiltinId::from_method(BuiltinMethod::First)),
+            Some(BuiltinArraySelector::First)
+        );
+        assert_eq!(
+            array_selector(BuiltinId::from_method(BuiltinMethod::Last)),
+            Some(BuiltinArraySelector::Last)
+        );
+        assert_eq!(
+            array_selector(BuiltinId::from_method(BuiltinMethod::Nth)),
+            Some(BuiltinArraySelector::Nth)
+        );
+        assert_eq!(array_selector(BuiltinId::from_method(BuiltinMethod::Take)), None);
     }
 
     #[test]
