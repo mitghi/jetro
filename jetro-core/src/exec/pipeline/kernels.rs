@@ -146,7 +146,28 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
             }
             Some(FieldDemand::Fields(fields))
         }
+        (BuiltinMethod::GetPath | BuiltinMethod::HasPath, crate::builtins::BuiltinArgs::Str(path)) => {
+            path_field_demand(&crate::builtins::parse_path_segs(path.as_ref()))
+        }
+        (BuiltinMethod::GetPath | BuiltinMethod::HasPath, crate::builtins::BuiltinArgs::Path(path)) => {
+            path_field_demand(path)
+        }
         _ => None,
+    }
+}
+
+fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
+    let mut keys: Vec<Arc<str>> = Vec::new();
+    for segment in path {
+        match segment {
+            crate::builtins::PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
+            crate::builtins::PathSeg::Index(_) => break,
+        }
+    }
+    match keys.len() {
+        0 => None,
+        1 => Some(FieldDemand::Fields(FieldSet::single(keys.remove(0)))),
+        _ => Some(FieldDemand::Fields(FieldSet::chain(keys.into()))),
     }
 }
 
@@ -2652,6 +2673,13 @@ mod tests {
         }
     }
 
+    fn path_call(method: BuiltinMethod, path: &str) -> BodyKernel {
+        BodyKernel::BuiltinCall {
+            receiver: Box::new(BodyKernel::Current),
+            call: BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(path))),
+        }
+    }
+
     fn owned_bool(value: Option<ViewKernelValue<ValView<'_>>>) -> Option<bool> {
         match value? {
             ViewKernelValue::Owned(Val::Bool(value)) => Some(value),
@@ -2694,6 +2722,14 @@ mod tests {
         assert_eq!(
             field_paths(&key_vec_call(BuiltinMethod::Missing, &["title", "isbn"])),
             vec!["title", "isbn"]
+        );
+        assert_eq!(
+            field_paths(&path_call(BuiltinMethod::HasPath, "user.name")),
+            vec!["user.name"]
+        );
+        assert_eq!(
+            field_paths(&path_call(BuiltinMethod::GetPath, "items[0].price")),
+            vec!["items"]
         );
         assert_eq!(field_paths(&key_call(BuiltinMethod::Has, "isbn")), vec!["*"]);
     }
