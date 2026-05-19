@@ -11,10 +11,10 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_cardinality, builtin_demand_law, builtin_sink, cancellation as builtin_cancellation,
     columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
-    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
-    sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
-    view_stage as builtin_view_stage, BuiltinId,
+    effective_pipeline_shape, is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
+    participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
+    pipeline_streams, sink_demand as builtin_sink_demand,
+    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineOrderEffect,
@@ -380,26 +380,13 @@ impl StageShape {
     }
 
     pub(crate) fn from_builtin(method: BuiltinMethod) -> Self {
-        use crate::builtins::BuiltinCategory;
-
-        let spec = method.spec();
-        if let Some(shape) = pipeline_shape(BuiltinId::from_method(method)) {
-            return Self {
-                cardinality: shape.cardinality,
-                can_indexed: shape.can_indexed,
-                cost: shape.cost,
-                selectivity: shape.selectivity,
-            };
-        }
+        let shape = effective_pipeline_shape(BuiltinId::from_method(method))
+            .expect("builtin methods must have registry shape metadata");
         Self {
-            cardinality: spec.cardinality,
-            can_indexed: spec.can_indexed,
-            cost: spec.cost,
-            selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
-                0.5
-            } else {
-                1.0
-            },
+            cardinality: shape.cardinality,
+            can_indexed: shape.can_indexed,
+            cost: shape.cost,
+            selectivity: shape.selectivity,
         }
     }
 }

@@ -420,6 +420,28 @@ pub(crate) fn pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
     id.method().map(|m| m.spec().pipeline_shape).flatten()
 }
 
+/// Return the effective pipeline shape for builtin `id`, using explicit shape
+/// metadata when present and otherwise deriving the conservative default from
+/// the builtin spec.
+#[inline]
+pub(crate) fn effective_pipeline_shape(id: BuiltinId) -> Option<BuiltinPipelineShape> {
+    let method = id.method()?;
+    if let Some(shape) = pipeline_shape(id) {
+        return Some(shape);
+    }
+    let spec = method.spec();
+    Some(BuiltinPipelineShape {
+        cardinality: spec.cardinality,
+        can_indexed: spec.can_indexed,
+        cost: spec.cost,
+        selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
+            0.5
+        } else {
+            1.0
+        },
+    })
+}
+
 /// Return the columnar-stage metadata for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn columnar_stage(id: BuiltinId) -> Option<BuiltinColumnarStage> {
@@ -792,6 +814,19 @@ mod tests {
             assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
             assert_eq!(is_pure(id), spec.pure, "{method:?}");
             assert_eq!(cancellation(id), spec.cancellation, "{method:?}");
+            let effective_shape =
+                effective_pipeline_shape(id).expect("registered builtin should have shape");
+            let expected_shape = pipeline_shape(id).unwrap_or(BuiltinPipelineShape {
+                cardinality: spec.cardinality,
+                can_indexed: spec.can_indexed,
+                cost: spec.cost,
+                selectivity: if matches!(spec.category, BuiltinCategory::StreamingFilter) {
+                    0.5
+                } else {
+                    1.0
+                },
+            });
+            assert_eq!(effective_shape, expected_shape, "{method:?}");
             assert_eq!(
                 dispatches_scalar_direct(id),
                 spec.dispatches_scalar_direct(),
