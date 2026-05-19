@@ -9,16 +9,17 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_cardinality, builtin_demand_law, builtin_sink, cancellation as builtin_cancellation,
-    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
+    builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
+    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect, expr_payload,
     effective_pipeline_shape, is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
     participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
     pipeline_streams, sink_demand as builtin_sink_demand,
-    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinId,
+    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinExprPayload,
+    BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -1402,48 +1403,8 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             lanes.merge_scan(FieldDemand::Whole);
             lanes
         }
-        Stage::ExprBuiltin { method, .. }
-            if matches!(
-                method,
-                BuiltinMethod::TakeWhile | BuiltinMethod::DropWhile | BuiltinMethod::FilterKeys
-            ) =>
-        {
-            let mut lanes = downstream;
-            lanes.merge_scan(kernel.field_demand());
-            lanes
-        }
-        Stage::ExprBuiltin {
-            method:
-                BuiltinMethod::Map
-                | BuiltinMethod::TransformKeys
-                | BuiltinMethod::TransformValues
-                | BuiltinMethod::FilterValues,
-            ..
-        } => DemandLanes {
-            scan_need: map_lane_payload(&downstream.scan_need, kernel),
-            result_need: map_lane_payload(&downstream.result_need, kernel),
-        },
-        Stage::ExprBuiltin { method, .. }
-            if matches!(
-                builtin_demand_law(BuiltinId::from_method(*method)),
-                BuiltinDemandLaw::KeyOnlyReducer
-            ) =>
-        {
-            DemandLanes {
-                scan_need: kernel.field_demand(),
-                result_need: FieldDemand::None,
-            }
-        }
-        Stage::ExprBuiltin { method, .. }
-            if matches!(
-                builtin_demand_law(BuiltinId::from_method(*method)),
-                BuiltinDemandLaw::RowKeyedReducer
-            ) =>
-        {
-            DemandLanes {
-                scan_need: FieldDemand::Whole,
-                result_need: FieldDemand::None,
-            }
+        Stage::ExprBuiltin { method, .. } => {
+            expr_builtin_payload_lanes(*method, kernel, downstream)
         }
         Stage::Builtin(call)
             if builtin_cardinality(BuiltinId::from_method(call.method))
@@ -1483,6 +1444,42 @@ fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
             _ => kernel.field_demand(),
         },
         FieldDemand::Whole => kernel.field_demand(),
+    }
+}
+
+fn expr_builtin_payload_lanes(
+    method: BuiltinMethod,
+    kernel: &BodyKernel,
+    downstream: DemandLanes,
+) -> DemandLanes {
+    match expr_payload(BuiltinId::from_method(method)) {
+        Some(BuiltinExprPayload::PredicateScan) => {
+            let mut lanes = downstream;
+            lanes.merge_scan(kernel.field_demand());
+            lanes
+        }
+        Some(BuiltinExprPayload::Projection) => DemandLanes {
+            scan_need: map_lane_payload(&downstream.scan_need, kernel),
+            result_need: map_lane_payload(&downstream.result_need, kernel),
+        },
+        Some(BuiltinExprPayload::KeyOnlyReducer) => DemandLanes {
+            scan_need: kernel.field_demand(),
+            result_need: FieldDemand::None,
+        },
+        Some(BuiltinExprPayload::RowKeyedReducer) => DemandLanes {
+            scan_need: FieldDemand::Whole,
+            result_need: FieldDemand::None,
+        },
+        None => {
+            if downstream.scan_need.is_none() && downstream.result_need.is_none() {
+                downstream
+            } else {
+                DemandLanes {
+                    scan_need: FieldDemand::Whole,
+                    result_need: downstream.result_need,
+                }
+            }
+        }
     }
 }
 

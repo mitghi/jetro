@@ -179,6 +179,19 @@ pub(crate) enum BuiltinStringPairStage {
     },
 }
 
+/// Payload-demand behavior for expression-bearing pipeline stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinExprPayload {
+    /// The expression is used only to decide scan-time membership/prefix state.
+    PredicateScan,
+    /// The expression is a one-to-one projection that can rewrite downstream field demand.
+    Projection,
+    /// The expression computes an aggregate key; retained rows are not emitted downstream.
+    KeyOnlyReducer,
+    /// The expression computes a row-retaining aggregate key and therefore needs whole rows.
+    RowKeyedReducer,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -310,6 +323,37 @@ pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage>
     match id.method()? {
         BuiltinMethod::Replace => Some(BuiltinStringPairStage::Replace { all: false }),
         BuiltinMethod::ReplaceAll => Some(BuiltinStringPairStage::Replace { all: true }),
+        _ => None,
+    }
+}
+
+/// Return payload-demand behavior for expression-bearing builtin stages.
+#[inline]
+pub(crate) fn expr_payload(id: BuiltinId) -> Option<BuiltinExprPayload> {
+    match id.method()? {
+        BuiltinMethod::TakeWhile | BuiltinMethod::DropWhile | BuiltinMethod::FilterKeys => {
+            Some(BuiltinExprPayload::PredicateScan)
+        }
+        BuiltinMethod::Map
+        | BuiltinMethod::TransformKeys
+        | BuiltinMethod::TransformValues
+        | BuiltinMethod::FilterValues => Some(BuiltinExprPayload::Projection),
+        method
+            if matches!(
+                demand_law(BuiltinId::from_method(method)),
+                BuiltinDemandLaw::KeyOnlyReducer
+            ) =>
+        {
+            Some(BuiltinExprPayload::KeyOnlyReducer)
+        }
+        method
+            if matches!(
+                demand_law(BuiltinId::from_method(method)),
+                BuiltinDemandLaw::RowKeyedReducer
+            ) =>
+        {
+            Some(BuiltinExprPayload::RowKeyedReducer)
+        }
         _ => None,
     }
 }
@@ -640,12 +684,6 @@ pub(crate) fn columnar_stage(id: BuiltinId) -> Option<BuiltinColumnarStage> {
 #[inline]
 pub(crate) fn stage_merge(id: BuiltinId) -> Option<BuiltinStageMerge> {
     id.method().and_then(|method| method.spec().stage_merge)
-}
-
-/// Return the builtin demand law for `id`.
-#[inline]
-pub(crate) fn builtin_demand_law(id: BuiltinId) -> BuiltinDemandLaw {
-    demand_law(id)
 }
 
 /// Return the builtin sink metadata for `id`, if the builtin is a terminal sink.
@@ -1574,6 +1612,31 @@ mod tests {
             string_pair_stage(BuiltinId::from_method(BuiltinMethod::Split)),
             None
         );
+    }
+
+    #[test]
+    fn registry_drives_expression_payload_behavior() {
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
+            Some(BuiltinExprPayload::PredicateScan)
+        );
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::FilterKeys)),
+            Some(BuiltinExprPayload::PredicateScan)
+        );
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::TransformValues)),
+            Some(BuiltinExprPayload::Projection)
+        );
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::CountBy)),
+            Some(BuiltinExprPayload::KeyOnlyReducer)
+        );
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::GroupBy)),
+            Some(BuiltinExprPayload::RowKeyedReducer)
+        );
+        assert_eq!(expr_payload(BuiltinId::from_method(BuiltinMethod::Take)), None);
     }
 
     #[test]
