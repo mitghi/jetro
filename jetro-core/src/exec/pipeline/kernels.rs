@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    expr_stage, numeric_reducer, view_projection, BuiltinExprStage, BuiltinId,
+    expr_stage, numeric_reducer, view_object_projection, view_projection, BuiltinExprStage,
+    BuiltinId, BuiltinViewObjectProjection,
 };
 use crate::builtins::{BuiltinCall, BuiltinMethod};
 use crate::data::context::EvalError;
@@ -137,23 +138,33 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
     if !matches!(receiver, BodyKernel::Current) {
         return None;
     }
-    match (call.method, &call.args) {
-        (BuiltinMethod::HasKey | BuiltinMethod::Missing, crate::builtins::BuiltinArgs::Str(key)) => {
+    match (
+        view_object_projection(BuiltinId::from_method(call.method))?,
+        &call.args,
+    ) {
+        (
+            BuiltinViewObjectProjection::HasKey | BuiltinViewObjectProjection::Missing,
+            crate::builtins::BuiltinArgs::Str(key),
+        ) => {
             Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key))))
         }
-        (BuiltinMethod::Missing, crate::builtins::BuiltinArgs::StrVec(keys)) => {
+        (BuiltinViewObjectProjection::Missing, crate::builtins::BuiltinArgs::StrVec(keys)) => {
             let mut fields = FieldSet::new();
             for key in keys {
                 fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
             }
             Some(FieldDemand::Fields(fields))
         }
-        (BuiltinMethod::GetPath | BuiltinMethod::HasPath, crate::builtins::BuiltinArgs::Str(path)) => {
+        (
+            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
+            crate::builtins::BuiltinArgs::Str(path),
+        ) => {
             path_field_demand(&crate::builtins::parse_path_segs(path.as_ref()))
         }
-        (BuiltinMethod::GetPath | BuiltinMethod::HasPath, crate::builtins::BuiltinArgs::Path(path)) => {
-            path_field_demand(path)
-        }
+        (
+            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
+            crate::builtins::BuiltinArgs::Path(path),
+        ) => path_field_demand(path),
         _ => None,
     }
 }
@@ -2377,24 +2388,27 @@ where
             .ok()
             .map(ViewKernelValue::Owned),
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm.as_deref_mut())? {
-            ViewKernelValue::View(view) => match (call.method, &call.args) {
-                (crate::builtins::BuiltinMethod::Has, crate::builtins::BuiltinArgs::Str(key)) => {
+            ViewKernelValue::View(view) => match (
+                view_object_projection(BuiltinId::from_method(call.method)),
+                &call.args,
+            ) {
+                (Some(BuiltinViewObjectProjection::Has), crate::builtins::BuiltinArgs::Str(key)) => {
                     view_has(&view, key.as_ref())
                         .map(|found| ViewKernelValue::Owned(Val::Bool(found)))
                 }
                 (
-                    crate::builtins::BuiltinMethod::HasAll,
+                    Some(BuiltinViewObjectProjection::HasAll),
                     crate::builtins::BuiltinArgs::StrVec(keys),
                 ) => view_has_all(&view, keys)
                     .map(|found| ViewKernelValue::Owned(Val::Bool(found))),
                 (
-                    crate::builtins::BuiltinMethod::HasKey,
+                    Some(BuiltinViewObjectProjection::HasKey),
                     crate::builtins::BuiltinArgs::Str(key),
                 ) => Some(ViewKernelValue::Owned(Val::Bool(
                     view.has_key(key.as_ref()).unwrap_or(false),
                 ))),
                 (
-                    crate::builtins::BuiltinMethod::Missing,
+                    Some(BuiltinViewObjectProjection::Missing),
                     crate::builtins::BuiltinArgs::Str(key),
                 ) => view.has_key(key.as_ref()).map(|present| {
                     let missing =
@@ -2402,18 +2416,18 @@ where
                     ViewKernelValue::Owned(Val::Bool(missing))
                 }),
                 (
-                    crate::builtins::BuiltinMethod::GetPath,
+                    Some(BuiltinViewObjectProjection::GetPath),
                     crate::builtins::BuiltinArgs::Str(path),
                 ) => Some(ViewKernelValue::View(walk_view_path(
                     view,
                     &crate::builtins::parse_path_segs(path.as_ref()),
                 ))),
                 (
-                    crate::builtins::BuiltinMethod::GetPath,
+                    Some(BuiltinViewObjectProjection::GetPath),
                     crate::builtins::BuiltinArgs::Path(path),
                 ) => Some(ViewKernelValue::View(walk_view_path(view, path))),
                 (
-                    crate::builtins::BuiltinMethod::HasPath,
+                    Some(BuiltinViewObjectProjection::HasPath),
                     crate::builtins::BuiltinArgs::Str(path),
                 ) => {
                     let found = !matches!(
@@ -2424,27 +2438,27 @@ where
                     Some(ViewKernelValue::Owned(Val::Bool(found)))
                 }
                 (
-                    crate::builtins::BuiltinMethod::HasPath,
+                    Some(BuiltinViewObjectProjection::HasPath),
                     crate::builtins::BuiltinArgs::Path(path),
                 ) => {
                     let found = !matches!(walk_view_path(view, path).scalar(), JsonView::Null);
                     Some(ViewKernelValue::Owned(Val::Bool(found)))
                 }
-                (crate::builtins::BuiltinMethod::Keys, crate::builtins::BuiltinArgs::None) => {
+                (Some(BuiltinViewObjectProjection::Keys), crate::builtins::BuiltinArgs::None) => {
                     view.object_keys().map(ViewKernelValue::Owned)
                 }
-                (crate::builtins::BuiltinMethod::Values, crate::builtins::BuiltinArgs::None) => {
+                (Some(BuiltinViewObjectProjection::Values), crate::builtins::BuiltinArgs::None) => {
                     view.object_values().map(ViewKernelValue::Owned)
                 }
-                (crate::builtins::BuiltinMethod::Entries, crate::builtins::BuiltinArgs::None) => {
+                (Some(BuiltinViewObjectProjection::Entries), crate::builtins::BuiltinArgs::None) => {
                     view.object_entries().map(ViewKernelValue::Owned)
                 }
                 (
-                    crate::builtins::BuiltinMethod::Pick,
+                    Some(BuiltinViewObjectProjection::Pick),
                     crate::builtins::BuiltinArgs::StrVec(keys),
                 ) => view.pick_keys(keys).map(ViewKernelValue::Owned),
                 (
-                    crate::builtins::BuiltinMethod::Omit,
+                    Some(BuiltinViewObjectProjection::Omit),
                     crate::builtins::BuiltinArgs::StrVec(keys),
                 ) => view.omit_keys(keys).map(ViewKernelValue::Owned),
                 _ => call

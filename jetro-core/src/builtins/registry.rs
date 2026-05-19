@@ -192,6 +192,33 @@ pub(crate) enum BuiltinExprPayload {
     RowKeyedReducer,
 }
 
+/// View-native object/path projection operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinViewObjectProjection {
+    /// Broad membership check (`has`).
+    Has,
+    /// All listed keys/items must be present.
+    HasAll,
+    /// Object-key-only existence check.
+    HasKey,
+    /// Object key/path is missing or null.
+    Missing,
+    /// Return a nested path view.
+    GetPath,
+    /// Test whether a nested path exists.
+    HasPath,
+    /// Return object keys.
+    Keys,
+    /// Return object values.
+    Values,
+    /// Return object entries.
+    Entries,
+    /// Keep selected keys.
+    Pick,
+    /// Drop selected keys.
+    Omit,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -755,15 +782,34 @@ pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
 #[inline]
 pub(crate) fn view_object_key_projection(id: BuiltinId) -> bool {
     matches!(
-        id.method(),
+        view_object_projection(id),
         Some(
-            BuiltinMethod::Has
-                | BuiltinMethod::HasKey
-                | BuiltinMethod::Missing
-                | BuiltinMethod::GetPath
-                | BuiltinMethod::HasPath
+            BuiltinViewObjectProjection::Has
+                | BuiltinViewObjectProjection::HasKey
+                | BuiltinViewObjectProjection::Missing
+                | BuiltinViewObjectProjection::GetPath
+                | BuiltinViewObjectProjection::HasPath
         )
     )
+}
+
+/// Return the view-native object/path operation for builtin `id`, if any.
+#[inline]
+pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectProjection> {
+    match id.method()? {
+        BuiltinMethod::Has => Some(BuiltinViewObjectProjection::Has),
+        BuiltinMethod::HasAll => Some(BuiltinViewObjectProjection::HasAll),
+        BuiltinMethod::HasKey => Some(BuiltinViewObjectProjection::HasKey),
+        BuiltinMethod::Missing => Some(BuiltinViewObjectProjection::Missing),
+        BuiltinMethod::GetPath => Some(BuiltinViewObjectProjection::GetPath),
+        BuiltinMethod::HasPath => Some(BuiltinViewObjectProjection::HasPath),
+        BuiltinMethod::Keys => Some(BuiltinViewObjectProjection::Keys),
+        BuiltinMethod::Values => Some(BuiltinViewObjectProjection::Values),
+        BuiltinMethod::Entries => Some(BuiltinViewObjectProjection::Entries),
+        BuiltinMethod::Pick => Some(BuiltinViewObjectProjection::Pick),
+        BuiltinMethod::Omit => Some(BuiltinViewObjectProjection::Omit),
+        _ => None,
+    }
 }
 
 /// Return true when builtin `id` can be composed into a view-native projection
@@ -1886,6 +1932,30 @@ mod tests {
             BuiltinMethod::Upper
         )));
         assert!(!view_projection(BuiltinId::from_method(BuiltinMethod::Sort)));
+    }
+
+    #[test]
+    fn registry_drives_view_object_projection_ops() {
+        assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::Has)),
+            Some(BuiltinViewObjectProjection::Has)
+        );
+        assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::HasAll)),
+            Some(BuiltinViewObjectProjection::HasAll)
+        );
+        assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::Keys)),
+            Some(BuiltinViewObjectProjection::Keys)
+        );
+        assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::Pick)),
+            Some(BuiltinViewObjectProjection::Pick)
+        );
+        assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
+            None
+        );
     }
 
     #[test]
