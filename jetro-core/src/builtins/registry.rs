@@ -5,12 +5,11 @@
 //! alias for the same set, stable across refactors, that new planner and
 //! analysis code carries without depending on the legacy enum directly.
 
-#[cfg(test)]
-use crate::builtins::BuiltinCategory;
 use crate::{
     builtins::{
-        BuiltinCardinality, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer,
-        BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
+        BuiltinCancellation, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
+        BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
+        BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
         BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
@@ -458,6 +457,18 @@ pub(crate) fn numeric_reducer(id: BuiltinId) -> Option<BuiltinNumericReducer> {
     id.method().and_then(|method| method.spec().numeric_reducer)
 }
 
+/// Return whether builtin `id` is pure and can participate in pure-stage rewrites.
+#[inline]
+pub(crate) fn is_pure(id: BuiltinId) -> bool {
+    id.method().is_some_and(|method| method.spec().pure)
+}
+
+/// Return algebraic cancellation metadata for builtin `id`, if it has one.
+#[inline]
+pub(crate) fn cancellation(id: BuiltinId) -> Option<BuiltinCancellation> {
+    id.method().and_then(|method| method.spec().cancellation)
+}
+
 /// Return whether builtin `id` should bypass streaming and run as a direct
 /// scalar/object call on the receiver produced by the chain.
 #[inline]
@@ -468,7 +479,6 @@ pub(crate) fn dispatches_scalar_direct(id: BuiltinId) -> bool {
 
 /// Return the builtin category for planner classification.
 #[inline]
-#[cfg(test)]
 pub(crate) fn builtin_category(id: BuiltinId) -> Option<BuiltinCategory> {
     id.method().map(|m| m.spec().category)
 }

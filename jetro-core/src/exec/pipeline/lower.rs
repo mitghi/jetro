@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    pipeline_accepts_arity, pipeline_lowering, view_stage, BuiltinId,
+    builtin_category, builtin_sink, cancellation as builtin_cancellation, pipeline_accepts_arity,
+    pipeline_lowering, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
@@ -191,15 +192,19 @@ fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> boo
             return false;
         };
         matches!(
-            BuiltinMethod::from_name(name.as_str()).spec().category,
-            BuiltinCategory::StreamingOneToOne
-                | BuiltinCategory::StreamingFilter
-                | BuiltinCategory::StreamingExpand
-                | BuiltinCategory::Reducer
-                | BuiltinCategory::Positional
-                | BuiltinCategory::Barrier
-                | BuiltinCategory::Deep
-                | BuiltinCategory::Relational
+            builtin_category(BuiltinId::from_method(BuiltinMethod::from_name(
+                name.as_str(),
+            ))),
+            Some(
+                BuiltinCategory::StreamingOneToOne
+                    | BuiltinCategory::StreamingFilter
+                    | BuiltinCategory::StreamingExpand
+                    | BuiltinCategory::Reducer
+                    | BuiltinCategory::Positional
+                    | BuiltinCategory::Barrier
+                    | BuiltinCategory::Deep
+                    | BuiltinCategory::Relational,
+            )
         )
     })
 }
@@ -551,9 +556,7 @@ pub(super) fn lower_method_from_registry(
             }
             match method {
                 BuiltinMethod::Reverse => {
-                    let cancel = method
-                        .spec()
-                        .cancellation
+                    let cancel = builtin_cancellation(BuiltinId::from_method(method))
                         .expect("reverse builtin must define cancellation metadata");
                     stages.push(Stage::Reverse(cancel));
                 }
@@ -771,8 +774,8 @@ fn terminal_sink_for_method(
     if let Some(sink) = arg_extreme_sink_for_method(method, args) {
         return Some(sink);
     }
-    let spec = method.spec();
-    match spec.sink?.accumulator {
+    let spec = builtin_sink(BuiltinId::from_method(method))?;
+    match spec.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
             Some(Sink::ApproxCountDistinct)
         }

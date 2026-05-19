@@ -9,10 +9,10 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_cardinality, builtin_demand_law, builtin_sink,
+    builtin_cardinality, builtin_demand_law, builtin_sink, cancellation as builtin_cancellation,
     columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    keyed_reducer as builtin_keyed_reducer, participates_in_demand, pipeline_composed_barrier,
-    pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
+    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
+    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     view_stage as builtin_view_stage, BuiltinId,
 };
@@ -774,7 +774,8 @@ impl Stage {
         // ObjectLambda variants (TransformKeys/TransformValues/FilterKeys/FilterValues): always droppable.
         match self {
             Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
-                desc.method.is_some_and(|m| m.spec().pure)
+                desc.method
+                    .is_some_and(|m| builtin_is_pure(BuiltinId::from_method(m)))
             }
             Stage::ExprBuiltin {
                 method:
@@ -974,7 +975,7 @@ impl Stage {
     fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
         match self {
             Stage::Reverse(cancel) => Some(*cancel),
-            Stage::Builtin(call) => call.spec().cancellation,
+            Stage::Builtin(call) => builtin_cancellation(BuiltinId::from_method(call.method)),
             _ => None,
         }
     }
@@ -1311,9 +1312,10 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
             kernel.is_view_native().then(|| kernel.clone())
         }
         Stage::Builtin(call)
-            if call.spec().pure
+            if builtin_is_pure(BuiltinId::from_method(call.method))
                 && call.method.is_view_projection_method()
-                && call.spec().cardinality == crate::builtins::BuiltinCardinality::OneToOne =>
+                && builtin_cardinality(BuiltinId::from_method(call.method))
+                    == Some(BuiltinCardinality::OneToOne) =>
         {
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
