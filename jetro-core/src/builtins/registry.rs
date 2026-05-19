@@ -314,6 +314,12 @@ pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage>
     }
 }
 
+/// Return true when a count-like terminal sink accepts a predicate argument.
+#[inline]
+pub(crate) fn count_sink_accepts_predicate(id: BuiltinId) -> bool {
+    matches!(id.method(), Some(BuiltinMethod::Count))
+}
+
 /// Compute the upstream `Demand` that builtin `id` must place on its source
 /// given the `downstream` demand from the next stage and optional numeric `arg`.
 #[inline]
@@ -1568,6 +1574,19 @@ mod tests {
             string_pair_stage(BuiltinId::from_method(BuiltinMethod::Split)),
             None
         );
+    }
+
+    #[test]
+    fn registry_drives_count_predicate_support() {
+        assert!(count_sink_accepts_predicate(BuiltinId::from_method(
+            BuiltinMethod::Count
+        )));
+        assert!(!count_sink_accepts_predicate(BuiltinId::from_method(
+            BuiltinMethod::ApproxCountDistinct
+        )));
+        assert!(!count_sink_accepts_predicate(BuiltinId::from_method(
+            BuiltinMethod::Sum
+        )));
     }
 
     #[test]

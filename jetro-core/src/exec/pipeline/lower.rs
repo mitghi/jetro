@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_category, builtin_sink, cancellation as builtin_cancellation, expr_stage,
-    nullary_stage, pipeline_accepts_arity, pipeline_lowering, view_stage, BuiltinExprStage,
-    BuiltinId, BuiltinNullaryStage,
+    builtin_category, builtin_sink, cancellation as builtin_cancellation,
+    count_sink_accepts_predicate, expr_stage, nullary_stage, pipeline_accepts_arity,
+    pipeline_lowering, view_stage, BuiltinExprStage, BuiltinId, BuiltinNullaryStage,
 };
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
@@ -776,7 +776,7 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Some(Sink::Reducer(ReducerSpec::count())),
-            [arg] if method == BuiltinMethod::Count => Some(Sink::Reducer(
+            [arg] if count_sink_accepts_predicate(BuiltinId::from_method(method)) => Some(Sink::Reducer(
                 ReducerSpec::count_with_predicate(compile_subexpr(arg)?, arg_expr(arg)),
             )),
             _ => None,
