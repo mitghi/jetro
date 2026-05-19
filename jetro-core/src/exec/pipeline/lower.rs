@@ -9,13 +9,15 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{pipeline_accepts_arity, pipeline_lowering, BuiltinId};
+use crate::builtins::registry::{
+    pipeline_accepts_arity, pipeline_lowering, view_stage, BuiltinId,
+};
 use crate::builtins::{
     BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
     BuiltinSinkAccumulator, BuiltinViewStage,
 };
-use crate::parse::ast::Expr;
 use crate::data::value::Val;
+use crate::parse::ast::Expr;
 
 use super::{
     expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
@@ -223,7 +225,7 @@ fn decode_method_chain(
                 }
                 let method = BuiltinMethod::from_name(name.as_str());
                 if matches!(
-                    method.spec().view_stage,
+                    view_stage(BuiltinId::from_method(method)),
                     Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
                 ) {
                     if let Some(call) =

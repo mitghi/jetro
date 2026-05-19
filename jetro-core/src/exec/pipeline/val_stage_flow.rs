@@ -3,6 +3,10 @@
 //! items using the builtins-layer primitives.
 
 use crate::{
+    builtins::{
+        registry::{view_stage, BuiltinId},
+        BuiltinViewStage,
+    },
     data::context::{Env, EvalError},
     data::value::Val,
 };
@@ -69,7 +73,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     // All other variants pass through (barriers handled by materialised path).
     match stage {
         Stage::Builtin(call)
-            if call.method.spec().view_stage == Some(crate::builtins::BuiltinViewStage::Compact) =>
+            if view_stage(BuiltinId::from_method(call.method)) == Some(BuiltinViewStage::Compact) =>
         {
             if matches!(item, Val::Null) {
                 Ok(StageFlow::SkipRow)
@@ -78,8 +82,8 @@ pub(super) fn apply_adapter_streaming<'a>(
             }
         }
         Stage::Builtin(call)
-            if call.method.spec().view_stage
-                == Some(crate::builtins::BuiltinViewStage::RemoveValue) =>
+            if view_stage(BuiltinId::from_method(call.method))
+                == Some(BuiltinViewStage::RemoveValue) =>
         {
             match &call.args {
                 crate::builtins::BuiltinArgs::Val(target)

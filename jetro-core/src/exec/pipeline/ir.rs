@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     effective_pipeline_order_effect, participates_in_demand, pipeline_composed_barrier,
     pipeline_legacy_materialized, pipeline_shape, pipeline_streams,
-    sink_demand as builtin_sink_demand, BuiltinId,
+    sink_demand as builtin_sink_demand, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinDemandLaw, BuiltinMethod, BuiltinPipelineOrderEffect,
@@ -477,8 +477,10 @@ impl<'a> StageDescriptor<'a> {
     /// or falling back to the method's registered view stage.
     #[inline]
     pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
-        self.view_stage_override
-            .or_else(|| self.method.and_then(|method| method.spec().view_stage))
+        self.view_stage_override.or_else(|| {
+            self.method
+                .and_then(|method| builtin_view_stage(BuiltinId::from_method(method)))
+        })
     }
 
     /// Returns the columnar-stage metadata for the method, if it supports columnar execution.
@@ -937,7 +939,7 @@ impl Stage {
         match self {
             Stage::UsizeBuiltin { method, value } => Some(UsizeStageMergeParts {
                 value: *value,
-                stage: method.spec().view_stage?,
+                stage: builtin_view_stage(BuiltinId::from_method(*method))?,
                 merge: method.spec().stage_merge?,
             }),
             _ => None,

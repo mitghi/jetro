@@ -11,6 +11,7 @@ use crate::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
         BuiltinPipelineShape, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStructural,
+        BuiltinViewStage,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
@@ -445,6 +446,13 @@ pub(crate) fn builtin_cardinality(id: BuiltinId) -> Option<BuiltinCardinality> {
 #[inline]
 pub(crate) fn pipeline_order_effect(id: BuiltinId) -> Option<BuiltinPipelineOrderEffect> {
     id.method().map(|m| m.spec().order_effect).flatten()
+}
+
+/// Return the view-stage lowering tag for builtin `id`, if the builtin can be
+/// represented as a borrowed `ValueView` pipeline stage.
+#[inline]
+pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
+    id.method().and_then(|method| method.spec().view_stage)
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit

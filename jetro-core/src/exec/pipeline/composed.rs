@@ -13,7 +13,10 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator};
+use crate::builtins::{
+    registry::{view_stage, BuiltinId},
+    BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
+};
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
 use crate::exec::composed as cmp;
@@ -96,14 +99,14 @@ impl<'a> ComposedStageBuilder<'a> {
                 remaining: Cell::new(*value),
             }),
             (Stage::Builtin(call), _)
-                if call.method.spec().view_stage
-                    == Some(crate::builtins::BuiltinViewStage::Compact) =>
+                if view_stage(BuiltinId::from_method(call.method))
+                    == Some(BuiltinViewStage::Compact) =>
             {
                 Box::new(cmp::CompactFilterStage)
             }
             (Stage::Builtin(call), _)
-                if call.method.spec().view_stage
-                    == Some(crate::builtins::BuiltinViewStage::RemoveValue) =>
+                if view_stage(BuiltinId::from_method(call.method))
+                    == Some(BuiltinViewStage::RemoveValue) =>
             {
                 match &call.args {
                     crate::builtins::BuiltinArgs::Val(target) => {
