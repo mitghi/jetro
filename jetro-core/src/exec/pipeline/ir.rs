@@ -801,6 +801,9 @@ impl Stage {
         let desc = self.descriptor()?;
         let method = desc.method?;
         match self {
+            Stage::IntRangeBuiltin { start, end, .. } => {
+                Some(ChainOp::builtin_int_range(method, *start, *end))
+            }
             _ if desc.usize_arg.is_some() => Some(ChainOp::builtin_usize(method, desc.usize_arg?)),
             Stage::Builtin(_) => Some(ChainOp::builtin(method)),
             _ if participates_in_demand(BuiltinId::from_method(method)) => {

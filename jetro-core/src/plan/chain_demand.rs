@@ -164,6 +164,10 @@ mod tests {
         ChainOp::builtin_usize(method, n)
     }
 
+    fn op_range(method: BuiltinMethod, start: i64, end: Option<i64>) -> ChainOp {
+        ChainOp::builtin_int_range(method, start, end)
+    }
+
     fn match_op(role: MatchRole) -> ChainOp {
         ChainOp::match_role(role)
     }
@@ -323,6 +327,14 @@ mod tests {
         let ops = [op(BuiltinMethod::Slice), op(BuiltinMethod::Last)];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
+    fn bounded_slice_offsets_positional_demand() {
+        let ops = [op_range(BuiltinMethod::Slice, 10, Some(20)), op_usize(BuiltinMethod::Nth, 2)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::NthInput(12));
         assert_eq!(demand.value, ValueNeed::Whole);
     }
 

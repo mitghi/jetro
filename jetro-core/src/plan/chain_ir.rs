@@ -58,6 +58,14 @@ impl ChainOp {
         }
     }
 
+    /// Construct a `ChainOp::Builtin` from a `BuiltinMethod` with an integer range argument.
+    pub fn builtin_int_range(method: BuiltinMethod, start: i64, end: Option<i64>) -> Self {
+        Self::Builtin {
+            id: BuiltinId::from_method(method),
+            demand_arg: BuiltinDemandArg::IntRange { start, end },
+        }
+    }
+
     /// Construct a `ChainOp::Match` for the given `role`.
     pub fn match_role(role: MatchRole) -> Self {
         Self::Match { role }
