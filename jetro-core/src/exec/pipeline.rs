@@ -1535,6 +1535,9 @@ mod tests {
 
     #[test]
     fn late_projection_accepts_nested_compiled_map() {
+        use serde_json::json;
+
+        let query = "$.books.map(items.filter(price > 20).map(isbn).last()).last()";
         let p = lower_query("$.books.map(items.filter(price > 20).map(isbn).last()).last()")
             .unwrap();
         let demand = p.payload_demand();
@@ -1552,6 +1555,15 @@ mod tests {
             p.late_projection.as_ref().map(|projection| &projection.kernel),
             Some(BodyKernel::NestedPlan(_))
         ));
+        assert_pipeline_matches_vm(
+            query,
+            json!({
+                "books": [
+                    {"items": [{"price": 10, "isbn": "a"}, {"price": 30, "isbn": "b"}]},
+                    {"items": [{"price": 25, "isbn": "c"}, {"price": 15, "isbn": "d"}]}
+                ]
+            }),
+        );
     }
 
     #[test]
