@@ -7,7 +7,7 @@
 
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
-    BuiltinArgExtremeSink, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
+    BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
     BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNumericReducer,
     BuiltinPipelineLowering, BuiltinPredicateSink,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
@@ -412,6 +412,7 @@ impl Builtin for First {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
+            .array_selector(BuiltinArraySelector::First)
             .select_one_sink(BuiltinSelectionPosition::First)
             .demand_law(BuiltinDemandLaw::First)
             .lowering(BuiltinPipelineLowering::TerminalSink)
@@ -434,6 +435,7 @@ impl Builtin for Last {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
+            .array_selector(BuiltinArraySelector::Last)
             .select_one_sink(BuiltinSelectionPosition::Last)
             .demand_law(BuiltinDemandLaw::Last)
             .lowering(BuiltinPipelineLowering::TerminalSink)
@@ -1068,6 +1070,7 @@ impl Builtin for Nth {
     const NAME: &'static str = "nth";
     fn spec() -> BuiltinSpec {
         positional_native_spec()
+            .array_selector(BuiltinArraySelector::Nth)
             .demand_law(BuiltinDemandLaw::Nth)
             .lowering(BuiltinPipelineLowering::TerminalUsizeSink { min: 0 })
     }

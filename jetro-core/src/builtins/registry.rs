@@ -7,7 +7,7 @@
 
 use crate::{
     builtins::{
-        BuiltinArgExtremeSink, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
+        BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
         BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
         BuiltinMembershipSink, BuiltinPredicateSink,
         BuiltinPipelineLowering,
@@ -231,17 +231,6 @@ pub(crate) enum BuiltinViewObjectProjection {
     Pick,
     /// Drop selected keys.
     Omit,
-}
-
-/// Positional array element selector builtin.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinArraySelector {
-    /// First array element.
-    First,
-    /// Last array element.
-    Last,
-    /// Nth array element; caller extracts the numeric index argument.
-    Nth,
 }
 
 /// Raw-byte JSON scalar operation that can be executed before building a
@@ -890,12 +879,7 @@ pub(crate) fn view_object_items_projection(id: BuiltinId) -> bool {
 /// Return positional array selector behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
-    match id.method()? {
-        BuiltinMethod::First => Some(BuiltinArraySelector::First),
-        BuiltinMethod::Last => Some(BuiltinArraySelector::Last),
-        BuiltinMethod::Nth => Some(BuiltinArraySelector::Nth),
-        _ => None,
-    }
+    Some(id.method()?.spec().array_selector?)
 }
 
 /// Return terminal select-one position for sinks such as `first` and `last`.

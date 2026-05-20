@@ -644,6 +644,8 @@ pub struct BuiltinSpec {
     pub predicate_sink: Option<BuiltinPredicateSink>,
     /// Membership terminal sink kind, used by target-value reducers.
     pub membership_sink: Option<BuiltinMembershipSink>,
+    /// Array selector kind, used for direct element projection.
+    pub array_selector: Option<BuiltinArraySelector>,
     /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
@@ -856,6 +858,17 @@ pub enum BuiltinMembershipSink {
     Index,
     /// Returns all zero-based indices matching the target.
     IndicesOf,
+}
+
+/// Builtin array-child selector behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinArraySelector {
+    /// First child.
+    First,
+    /// Last child.
+    Last,
+    /// Index supplied by an argument.
+    Nth,
 }
 
 /// Which end of the stream the `SelectOne` sink picks.
@@ -1242,6 +1255,7 @@ impl BuiltinSpec {
             arg_extreme_sink: None,
             predicate_sink: None,
             membership_sink: None,
+            array_selector: None,
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
@@ -1378,6 +1392,12 @@ impl BuiltinSpec {
     /// Attaches a membership terminal sink kind.
     fn membership_sink(mut self, sink: BuiltinMembershipSink) -> Self {
         self.membership_sink = Some(sink);
+        self
+    }
+
+    /// Attaches direct array-child selector metadata.
+    fn array_selector(mut self, selector: BuiltinArraySelector) -> Self {
+        self.array_selector = Some(selector);
         self
     }
 

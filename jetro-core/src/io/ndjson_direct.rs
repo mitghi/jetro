@@ -1,9 +1,9 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
     terminal_selection_position, view_object_items_projection, view_scalar_projection,
-    BuiltinArraySelector, BuiltinId, BuiltinLogicalShape,
+    BuiltinId, BuiltinLogicalShape,
 };
-use crate::builtins::BuiltinSelectionPosition;
+use crate::builtins::{BuiltinArraySelector, BuiltinSelectionPosition};
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
