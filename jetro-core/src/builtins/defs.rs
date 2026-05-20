@@ -237,8 +237,8 @@ impl Builtin for Map {
             ctx.terminal_map_collect
                 .as_mut()
                 .expect("terminal map collector")
-                .push_val_row(&item, ctx.kernel, |it| {
-                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                .push_val_row(&item, ctx.kernel, ctx.vm, |it, vm| {
+                    crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
                 })?;
             return Ok(crate::exec::pipeline::StageFlow::TerminalCollected);
         }

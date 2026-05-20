@@ -66,14 +66,17 @@ impl<'a> TerminalCollector<'a> {
         &mut self,
         item: &Val,
         kernel: &BodyKernel,
+        vm: &mut crate::vm::VM,
         fallback: F,
     ) -> Result<(), crate::data::context::EvalError>
     where
-        F: FnOnce(&Val) -> Result<Val, crate::data::context::EvalError>,
+        F: FnOnce(&Val, &mut crate::vm::VM) -> Result<Val, crate::data::context::EvalError>,
     {
         match self {
-            Self::Values(values) => values.push(super::eval_kernel(kernel, item, fallback)?),
-            Self::UniformObject(collector) => collector.push_val_row(item),
+            Self::Values(values) => {
+                values.push(super::eval_kernel_with_vm(kernel, item, vm, fallback)?)
+            }
+            Self::UniformObject(collector) => collector.push_val_row(item, vm),
         }
         Ok(())
     }
@@ -107,14 +110,14 @@ impl<'a> UniformObjectCollector<'a> {
         Some(())
     }
 
-    fn push_val_row(&mut self, item: &Val) {
+    fn push_val_row(&mut self, item: &Val, vm: &mut crate::vm::VM) {
         if let Some(rows) = self.rows.as_mut() {
-            rows.push(self.object.eval_val(item));
+            rows.push(self.object.eval_val_with_vm(item, vm));
             return;
         }
 
-        if !self.object.eval_val_row_cells(item, &mut self.cells) {
-            self.flush_cells_to_rows_with(self.object.eval_val(item));
+        if !self.object.eval_val_row_cells_with_vm(item, &mut self.cells, vm) {
+            self.flush_cells_to_rows_with(self.object.eval_val_with_vm(item, vm));
         }
     }
 

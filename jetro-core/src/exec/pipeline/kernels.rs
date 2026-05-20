@@ -313,11 +313,17 @@ impl ObjectKernel {
         Some(true)
     }
 
-    /// Evaluates each entry against `item`, appending to `cells`; returns `false` on null-optional skip.
-    pub(crate) fn eval_val_row_cells(&self, item: &Val, cells: &mut Vec<Val>) -> bool {
+    /// Evaluates each entry against `item` using caller-owned VM state, appending to `cells`;
+    /// returns `false` on null-optional skip.
+    pub(crate) fn eval_val_row_cells_with_vm(
+        &self,
+        item: &Val,
+        cells: &mut Vec<Val>,
+        vm: &mut crate::vm::VM,
+    ) -> bool {
         let start = cells.len();
         for entry in self.entries.iter() {
-            let value = eval_native_kernel(&entry.value, item).unwrap_or(Val::Null);
+            let value = eval_native_kernel_with_vm(&entry.value, item, vm).unwrap_or(Val::Null);
             if (entry.optional || entry.omit_null) && value.is_null() {
                 cells.truncate(start);
                 return false;
@@ -327,9 +333,11 @@ impl ObjectKernel {
         true
     }
 
-    /// Evaluates all entries against `item` into a `Val::ObjSmall`, returning `Val::Null` on sub-kernel failure.
-    pub(crate) fn eval_val(&self, item: &Val) -> Val {
-        eval_object_kernel(self, |kernel| eval_native_kernel(kernel, item)).unwrap_or(Val::Null)
+    /// Evaluates all entries against `item` using caller-owned VM state into a `Val::ObjSmall`,
+    /// returning `Val::Null` on sub-kernel failure.
+    pub(crate) fn eval_val_with_vm(&self, item: &Val, vm: &mut crate::vm::VM) -> Val {
+        eval_object_kernel(self, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
+            .unwrap_or(Val::Null)
     }
 
     /// Returns the source-row field payload needed to evaluate every value entry.
