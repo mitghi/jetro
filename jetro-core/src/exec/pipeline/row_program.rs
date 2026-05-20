@@ -6,12 +6,16 @@
 //! already the generic row IR for field reads, scalar calls, object shaping,
 //! f-strings, arithmetic, comparisons, and match expressions.
 
+use crate::data::view::ValueView;
+#[cfg(test)]
 use crate::{
-    data::{context::EvalError, value::Val, view::ValueView},
+    data::{context::EvalError, value::Val},
     vm::Program,
 };
 
-use super::{eval_kernel, eval_view_kernel, BodyKernel, ViewKernelValue};
+use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
+#[cfg(test)]
+use super::eval_kernel;
 
 /// A compiled row-local expression that can evaluate on owned values or borrowed views.
 #[derive(Debug, Clone)]
@@ -26,7 +30,7 @@ impl RowProgram {
     }
 
     /// Classifies a VM program as a row program when it has a native kernel representation.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn classify(program: &Program) -> Option<Self> {
         Self::from_kernel(BodyKernel::classify(program))
     }
@@ -44,7 +48,7 @@ impl RowProgram {
     }
 
     /// Evaluates this row program against an owned/materialized row.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn eval_val(&self, row: &Val) -> Result<Val, EvalError> {
         eval_kernel(&self.kernel, row, |_| {
             Err(EvalError(
