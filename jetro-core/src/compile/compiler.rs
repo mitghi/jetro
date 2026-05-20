@@ -1993,12 +1993,6 @@ struct SlotAlloc {
 }
 
 impl SlotAlloc {
-    /// Create a fresh allocator that will hand out slots starting at index 1.
-    #[allow(dead_code)]
-    fn new() -> Self {
-        Self::starting_at(1)
-    }
-
     /// Create an allocator whose next slot index is `start`. Used when a
     /// match-level prelude has already populated some slots that should
     /// not collide with arm-local sub-projections.
