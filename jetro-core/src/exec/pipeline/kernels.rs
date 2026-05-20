@@ -43,6 +43,17 @@ impl NestedPlanKernel {
     pub(crate) fn run(&self, seed: Val) -> Result<Val, EvalError> {
         self.prepared.run(seed)
     }
+
+    pub(crate) fn run_view<'a, V>(
+        &self,
+        seed: &V,
+        vm: &mut crate::vm::VM,
+    ) -> Option<Result<Val, EvalError>>
+    where
+        V: ValueView<'a>,
+    {
+        super::nested::run_plan_view(&self.plan, seed, vm)
+    }
 }
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
@@ -2327,6 +2338,20 @@ where
     eval_view_kernel_inner(kernel, item, None)
 }
 
+/// Evaluates `kernel` on a borrowed view using caller-owned VM state for nested
+/// fallback paths.
+#[inline]
+pub(crate) fn eval_view_kernel_with_vm<'a, V>(
+    kernel: &BodyKernel,
+    item: &V,
+    vm: &mut crate::vm::VM,
+) -> Option<ViewKernelValue<V>>
+where
+    V: ValueView<'a>,
+{
+    eval_view_kernel_inner(kernel, item, Some(vm))
+}
+
 fn eval_view_kernel_inner<'a, V>(
     kernel: &BodyKernel,
     item: &V,
@@ -2399,10 +2424,17 @@ where
             eval_nested_array_count_view(source, predicate.as_deref(), item)
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::NestedPlan(plan) => super::nested::run_plan_view(&plan.plan, item)
-            .unwrap_or_else(|| plan.run(item.materialize()))
-            .ok()
-            .map(ViewKernelValue::Owned),
+        BodyKernel::NestedPlan(plan) => {
+            let result = match vm.as_deref_mut() {
+                Some(vm) => plan.run_view(item, vm),
+                None => {
+                    let mut local_vm = crate::vm::VM::new();
+                    plan.run_view(item, &mut local_vm)
+                }
+            }
+            .unwrap_or_else(|| plan.run(item.materialize()));
+            result.ok().map(ViewKernelValue::Owned)
+        }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm.as_deref_mut())? {
             ViewKernelValue::View(view) => match (
                 view_object_projection(BuiltinId::from_method(call.method)),

@@ -56,7 +56,11 @@ fn body_from_plan(plan: &Plan) -> PipelineBody {
 /// Runs a nested plan against a borrowed row view when the plan can be evaluated
 /// without reading the materialised outer root. Returns `None` when a fallback
 /// path would need root/current VM semantics that require ownership.
-pub(super) fn run_plan_view<'a, V>(plan: &Plan, seed: &V) -> Option<Result<Val, EvalError>>
+pub(super) fn run_plan_view<'a, V>(
+    plan: &Plan,
+    seed: &V,
+    vm: &mut crate::vm::VM,
+) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
 {
@@ -69,6 +73,5 @@ where
         Source::FieldChain { keys } => crate::exec::view::walk_fields(seed.clone(), keys),
     };
     let env = Env::new(Val::Null);
-    let mut vm = crate::vm::VM::new();
-    crate::exec::view::run_with_env_and_vm(source, &body, None, &env, &mut vm)
+    crate::exec::view::run_with_env_and_vm(source, &body, None, &env, vm)
 }

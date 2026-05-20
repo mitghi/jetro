@@ -120,7 +120,7 @@ where
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -156,6 +156,7 @@ fn observe_view_sink<'a, V>(
     sink: &pipeline::ViewSinkCapability,
     sink_acc: &mut pipeline::SinkAccumulator,
     sink_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
 ) -> Option<ViewRowAction>
 where
     V: ValueView<'a>,
@@ -175,7 +176,7 @@ where
             project_kernel,
             ..
         } => {
-            if !view_sink_predicate_matches(item, *predicate_kernel, sink_kernels)? {
+            if !view_sink_predicate_matches(item, *predicate_kernel, sink_kernels, vm)? {
                 return Some(ViewRowAction::Skip);
             }
             let sink_done = sink_acc.observe_builtin_lazy(
@@ -184,7 +185,7 @@ where
                 || {
                     let kernel = (*project_kernel)?;
                     let kernel = sink_kernels.get(kernel)?;
-                    eval_owned_scalar_or_value_kernel(item, kernel)
+                    eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm)
                 },
                 || Some(eval_view_key(item, None)?.object_key().to_string()),
             )?;
@@ -207,7 +208,7 @@ where
             predicate_kernel,
         } => {
             let kernel = sink_kernels.get(*predicate_kernel)?;
-            let matched = eval_filter_kernel(item, kernel)?;
+            let matched = eval_filter_kernel_with_vm(item, kernel, vm)?;
             let sink_done = sink_acc
                 .observe_predicate_lazy(*op, matched, || item.materialize())
                 .ok()?;
@@ -237,7 +238,7 @@ where
             want_max,
             key_kernel,
         } => {
-            let key = view_arg_extreme_key(item, sink_kernels.get(*key_kernel)?)?;
+            let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(*key_kernel)?, vm)?;
             sink_acc.observe_arg_extreme_lazy(*want_max, key, || item.materialize());
             Some(ViewRowAction::Emit)
         }
@@ -277,11 +278,15 @@ where
     crate::util::vals_eq(&item.materialize(), target)
 }
 
-fn view_arg_extreme_key<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
+fn view_arg_extreme_key_with_vm<'a, V>(
+    item: &V,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    match pipeline::eval_view_kernel(kernel, item)? {
+    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }
@@ -296,6 +301,7 @@ fn view_sink_predicate_matches<'a, V>(
     item: &V,
     predicate_kernel: Option<usize>,
     sink_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
 ) -> Option<bool>
 where
     V: ValueView<'a>,
@@ -304,7 +310,7 @@ where
         return Some(true);
     };
     let kernel = sink_kernels.get(kernel_idx)?;
-    eval_filter_kernel(item, kernel)
+    eval_filter_kernel_with_vm(item, kernel, vm)
 }
 
 /// Runs as many leading stages as possible in the view domain, materialises the
@@ -1085,7 +1091,7 @@ where
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -1151,7 +1157,7 @@ where
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels),
+        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -1331,6 +1337,20 @@ where
     }
 }
 
+fn eval_filter_kernel_with_vm<'a, V>(
+    item: &V,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+        pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
+        pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
+    }
+}
+
 /// Evaluates `kernel` against `item` as a view-domain projection, returning the
 /// result as a `V` subview. Returns `None` when the kernel produces an owned
 /// value (requiring materialisation) rather than a borrowed view.
@@ -1368,6 +1388,22 @@ where
     V: ValueView<'a>,
 {
     match pipeline::eval_view_kernel(kernel, item)? {
+        pipeline::ViewKernelValue::View(view) => {
+            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
+        }
+        pipeline::ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+fn eval_owned_scalar_or_value_kernel_with_vm<'a, V>(
+    item: &V,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: ValueView<'a>,
+{
+    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }
