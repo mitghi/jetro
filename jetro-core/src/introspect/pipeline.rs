@@ -29,7 +29,7 @@ pub(crate) fn inspect_pipeline(
             .collect(),
         sink: sink_label(&pipeline.sink).to_string(),
         source_demand: format!("{:?}", pipeline.source_demand.chain.pull),
-        payload_demand: format!("{:?}", pipeline.payload_demand),
+        payload_demand: format!("{:?}", pipeline.payload_demand()),
         source_access: format!("{:?}", pipeline.source_access),
         source_capabilities: format!("{:?}", pipeline.source_capabilities),
         payload_lanes_supported: pipeline.source_payload_lanes_supported,

@@ -1224,7 +1224,6 @@ impl Pipeline {
     }
 
     /// Computes precise payload demand at this pipeline's source.
-    #[allow(dead_code)]
     pub fn payload_demand(&self) -> PayloadDemand {
         self.payload_demand.clone()
     }
