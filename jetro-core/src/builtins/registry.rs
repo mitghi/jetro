@@ -841,6 +841,20 @@ pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectP
     }
 }
 
+/// Return true when builtin `id` enumerates object keys, values, or entries in
+/// a view-native path.
+#[inline]
+pub(crate) fn view_object_items_projection(id: BuiltinId) -> bool {
+    matches!(
+        view_object_projection(id),
+        Some(
+            BuiltinViewObjectProjection::Keys
+                | BuiltinViewObjectProjection::Values
+                | BuiltinViewObjectProjection::Entries
+        )
+    )
+}
+
 /// Return positional array selector behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
@@ -2009,10 +2023,22 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Keys)),
             Some(BuiltinViewObjectProjection::Keys)
         );
+        assert!(view_object_items_projection(BuiltinId::from_method(
+            BuiltinMethod::Keys
+        )));
+        assert!(view_object_items_projection(BuiltinId::from_method(
+            BuiltinMethod::Values
+        )));
+        assert!(view_object_items_projection(BuiltinId::from_method(
+            BuiltinMethod::Entries
+        )));
         assert_eq!(
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Pick)),
             Some(BuiltinViewObjectProjection::Pick)
         );
+        assert!(!view_object_items_projection(BuiltinId::from_method(
+            BuiltinMethod::Pick
+        )));
         assert_eq!(
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None

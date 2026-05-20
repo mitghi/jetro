@@ -4,6 +4,7 @@ use crate::parse::ast::{Arg, BinOp, Expr, Step};
 use crate::plan::physical::{plan_ast_with_context, PlanningContext};
 use crate::JetroEngine;
 use std::sync::Arc;
+use crate::builtins::registry::{view_object_items_projection, BuiltinId};
 
 /// Planner-side description of NDJSON row work that can run directly on
 /// simd-json tape scratch. Execution stays in `ndjson.rs`; this module owns
@@ -224,11 +225,8 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             call,
             optional,
         } if !*optional
-            && (call.spec().view_scalar || call.method == BuiltinMethod::Len)
-            && !matches!(
-                call.method,
-                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
-            ) =>
+            && call.spec().view_scalar
+            && !view_object_items_projection(BuiltinId::from_method(call.method)) =>
         {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
@@ -242,11 +240,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional
-            && matches!(
-                call.method,
-                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
-            ) =>
+        } if !*optional && view_object_items_projection(BuiltinId::from_method(call.method)) =>
         {
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
@@ -512,10 +506,7 @@ fn direct_tape_plan_for_node(
             call,
             optional,
         } if call.spec().view_scalar
-            && !matches!(
-                call.method,
-                BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
-            ) =>
+            && !view_object_items_projection(BuiltinId::from_method(call.method)) =>
         {
             if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
@@ -539,10 +530,8 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if matches!(
-            call.method,
-            BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries
-        ) && matches!(call.args, BuiltinArgs::None)
+        } if view_object_items_projection(BuiltinId::from_method(call.method))
+            && matches!(call.args, BuiltinArgs::None)
             && !*optional =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
