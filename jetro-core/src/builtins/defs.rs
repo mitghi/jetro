@@ -515,8 +515,8 @@ impl Builtin for TakeWhile {
     ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
         let prog = body.expect("take_while body");
         let pass = super::take_while_one(&item, |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |it| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
             })
         })?;
         Ok(if pass {
@@ -534,8 +534,8 @@ impl Builtin for TakeWhile {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::take_while_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -590,8 +590,8 @@ impl Builtin for DropWhile {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::drop_while_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -760,8 +760,8 @@ impl Builtin for FindIndex {
         let mut found: crate::data::value::Val = crate::data::value::Val::Null;
         for (i, v) in buf.iter().enumerate() {
             match super::filter_one(v, |item| {
-                crate::exec::pipeline::eval_kernel(ctx.kernel, item, |it| {
-                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, item, ctx.vm, |it, vm| {
+                    crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
                 })
             }) {
                 Ok(true) => {
@@ -797,8 +797,8 @@ impl Builtin for IndicesWhere {
         let mut out: Vec<i64> = Vec::new();
         for (i, v) in buf.iter().enumerate() {
             match super::filter_one(v, |item| {
-                crate::exec::pipeline::eval_kernel(ctx.kernel, item, |it| {
-                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, it, prog)
+                crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, item, ctx.vm, |it, vm| {
+                    crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
                 })
             }) {
                 Ok(true) => out.push(i as i64),
@@ -825,15 +825,15 @@ fn arg_extreme_apply_barrier(
         return Some(Ok(()));
     }
     let mut best_idx = 0usize;
-    let mut best_key = match crate::exec::pipeline::eval_kernel(ctx.kernel, &buf[0], |item| {
-        crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+    let mut best_key = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &buf[0], ctx.vm, |item, vm| {
+        crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
     }) {
         Ok(key) => key,
         Err(err) => return Some(Err(err)),
     };
     for i in 1..buf.len() {
-        let key = match crate::exec::pipeline::eval_kernel(ctx.kernel, &buf[i], |item| {
-            crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+        let key = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &buf[i], ctx.vm, |item, vm| {
+            crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
         }) {
             Ok(key) => key,
             Err(err) => return Some(Err(err)),
@@ -1184,8 +1184,8 @@ impl Builtin for Sort {
                 let key_prog = prog.clone();
                 crate::exec::pipeline::bounded_sort_by_key(
                     std::mem::take(buf), descending, strategy, |v| {
-                        Ok(crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                            crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, &key_prog)
+                        Ok(crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                            crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, &key_prog)
                         }).unwrap_or(crate::data::value::Val::Null))
                     },
                 )
@@ -1393,8 +1393,8 @@ impl Builtin for GroupBy {
             None => return Some(Ok(())),
         };
         let result = super::group_by_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1439,8 +1439,8 @@ impl Builtin for CountBy {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::count_by_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1485,8 +1485,8 @@ impl Builtin for IndexBy {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         let prog = body?;
         let result = super::index_by_apply(std::mem::take(buf), |v| {
-            crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
             })
         });
         match result {
@@ -1533,8 +1533,8 @@ fn unique_apply_barrier(
             let mut seen: std::collections::HashSet<String> = Default::default();
             let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
             for v in buf.iter() {
-                let key = crate::exec::pipeline::eval_kernel(ctx.kernel, v, |item| {
-                    crate::exec::pipeline::apply_item_in_env(ctx.vm, ctx.env, item, prog)
+                let key = crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
+                    crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
                 })
                 .unwrap_or(crate::data::value::Val::Null);
                 keep.push(seen.insert(format!("{:?}", key)));
