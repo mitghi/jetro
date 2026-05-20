@@ -1,10 +1,11 @@
-use crate::builtins::BuiltinMethod;
+use crate::builtins::registry::{numeric_reducer, BuiltinId};
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
 use crate::data::value::Val;
 use crate::util::JsonView;
 
 #[derive(Clone, Debug)]
 pub(super) struct NumericAccumulator {
-    method: BuiltinMethod,
+    reducer: BuiltinNumericReducer,
     int_acc: i64,
     float_acc: f64,
     floated: bool,
@@ -15,8 +16,10 @@ pub(super) struct NumericAccumulator {
 
 impl NumericAccumulator {
     pub(super) fn new(method: BuiltinMethod) -> Self {
+        let reducer = numeric_reducer(BuiltinId::from_method(method))
+            .expect("numeric accumulator requires numeric reducer metadata");
         Self {
-            method,
+            reducer,
             int_acc: 0,
             float_acc: 0.0,
             floated: false,
@@ -89,15 +92,15 @@ impl NumericAccumulator {
     }
 
     pub(super) fn value(&self) -> Val {
-        match self.method {
-            BuiltinMethod::Sum => {
+        match self.reducer {
+            BuiltinNumericReducer::Sum => {
                 if self.floated {
                     Val::Float(self.float_acc)
                 } else {
                     Val::Int(self.int_acc)
                 }
             }
-            BuiltinMethod::Avg => {
+            BuiltinNumericReducer::Avg => {
                 if self.count == 0 {
                     Val::Null
                 } else {
@@ -109,15 +112,16 @@ impl NumericAccumulator {
                     Val::Float(sum / self.count as f64)
                 }
             }
-            BuiltinMethod::Min | BuiltinMethod::Max => self.best.clone().unwrap_or(Val::Null),
-            _ => Val::Null,
+            BuiltinNumericReducer::Min | BuiltinNumericReducer::Max => {
+                self.best.clone().unwrap_or(Val::Null)
+            }
         }
     }
 
     pub(super) fn merge(&mut self, other: &Self) {
-        debug_assert_eq!(self.method, other.method);
-        match self.method {
-            BuiltinMethod::Sum | BuiltinMethod::Avg => {
+        debug_assert_eq!(self.reducer, other.reducer);
+        match self.reducer {
+            BuiltinNumericReducer::Sum | BuiltinNumericReducer::Avg => {
                 if self.floated || other.floated {
                     if !self.floated {
                         self.float_acc = self.int_acc as f64;
@@ -133,12 +137,16 @@ impl NumericAccumulator {
                 }
                 self.count += other.count;
             }
-            BuiltinMethod::Min | BuiltinMethod::Max => {
+            BuiltinNumericReducer::Min | BuiltinNumericReducer::Max => {
                 if let Some(best) = other.best.as_ref() {
-                    let replace = match self.method {
-                        BuiltinMethod::Min => self.best.is_none() || other.best_f64 < self.best_f64,
-                        BuiltinMethod::Max => self.best.is_none() || other.best_f64 > self.best_f64,
-                        _ => false,
+                    let replace = match self.reducer {
+                        BuiltinNumericReducer::Min => {
+                            self.best.is_none() || other.best_f64 < self.best_f64
+                        }
+                        BuiltinNumericReducer::Max => {
+                            self.best.is_none() || other.best_f64 > self.best_f64
+                        }
+                        _ => unreachable!("sum/avg handled above"),
                     };
                     if replace {
                         self.best = Some(best.clone());
@@ -147,18 +155,20 @@ impl NumericAccumulator {
                 }
                 self.count += other.count;
             }
-            _ => {}
         }
     }
 
     fn add_extreme(&mut self, number: f64, value: impl FnOnce() -> Val) -> bool {
-        if !matches!(self.method, BuiltinMethod::Min | BuiltinMethod::Max) {
+        if !matches!(
+            self.reducer,
+            BuiltinNumericReducer::Min | BuiltinNumericReducer::Max
+        ) {
             return false;
         }
-        let replace = match self.method {
-            BuiltinMethod::Min => self.best.is_none() || number < self.best_f64,
-            BuiltinMethod::Max => self.best.is_none() || number > self.best_f64,
-            _ => false,
+        let replace = match self.reducer {
+            BuiltinNumericReducer::Min => self.best.is_none() || number < self.best_f64,
+            BuiltinNumericReducer::Max => self.best.is_none() || number > self.best_f64,
+            _ => unreachable!("non-extreme reducers returned above"),
         };
         if replace {
             self.best = Some(value());
