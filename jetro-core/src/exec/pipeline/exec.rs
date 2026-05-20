@@ -1,7 +1,7 @@
 //! Physical execution dispatch — routes each pipeline to the right backend
 //! without runtime fallthrough. `exec_path` is computed once at lower time by
-//! `select_exec_path`; `run_with_env` does a single match and never re-examines
-//! the stage list.
+//! `select_exec_path`; `run_with_env_and_vm` does a single match and never
+//! re-examines the stage list.
 
 use crate::{
     data::context::{Env, EvalError},
