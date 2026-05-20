@@ -11,7 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
-use crate::builtins::{registry::BuiltinId, BuiltinMethod};
+use crate::builtins::{
+    registry::{
+        builtin_cardinality, effective_pipeline_order_effect, BuiltinId,
+    },
+    BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect,
+};
 use crate::parse::ast::KindType;
 #[cfg(test)]
 use crate::vm::CompiledPipeStep;
@@ -1296,9 +1301,19 @@ impl Monotonicity {
                     Monotonicity::Desc => Monotonicity::Asc,
                     x => x,
                 },
-                BuiltinMethod::Filter => self, // Filter preserves order.
-                BuiltinMethod::Map => Monotonicity::Unknown, // Map may reorder.
-                _ => Monotonicity::Unknown,
+                method => {
+                    let id = BuiltinId::from_method(method);
+                    if builtin_cardinality(id) == Some(BuiltinCardinality::Filtering)
+                        && !matches!(
+                            effective_pipeline_order_effect(id, false),
+                            BuiltinPipelineOrderEffect::Blocks
+                        )
+                    {
+                        self
+                    } else {
+                        Monotonicity::Unknown
+                    }
+                }
             },
             Opcode::MakeArr(_) | Opcode::ListComp(_) => Monotonicity::Unknown,
             _ => self,
