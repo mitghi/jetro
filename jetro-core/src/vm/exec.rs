@@ -3378,7 +3378,7 @@ impl VM {
         lam_param: Option<&str>,
         scratch: &mut Env,
     ) -> Result<Val, EvalError> {
-        use crate::exec::pipeline::{eval_kernel, BodyKernel};
+        use crate::exec::pipeline::{eval_kernel_with_vm, BodyKernel};
         // The kernel path treats `item` as `@` and resolves bare names
         // as fields on it. Safe whenever:
         //   - the env has no let-bindings (otherwise a let-shadowed
@@ -3400,9 +3400,9 @@ impl VM {
             && !starts_with_load_ident
             && !matches!(kernel, BodyKernel::Generic)
         {
-            return eval_kernel(kernel, item, |fallback_item| {
+            return eval_kernel_with_vm(kernel, item, self, |fallback_item, vm| {
                 let frame = scratch.push_lam(None, fallback_item.clone());
-                let result = self.exec(prog, scratch);
+                let result = vm.exec(prog, scratch);
                 scratch.pop_lam(frame);
                 result
             });

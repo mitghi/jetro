@@ -1535,6 +1535,7 @@ fn cmp_to_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
 }
 
 /// Evaluates `kernel` against `item`, invoking `fallback` for VM re-entry only on `Generic`.
+#[cfg(test)]
 #[inline]
 pub fn eval_kernel<F>(kernel: &BodyKernel, item: &Val, fallback: F) -> Result<Val, EvalError>
 where

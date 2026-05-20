@@ -239,7 +239,7 @@ fn apply_compiled_item(
     arg: &Arg,
     env: &mut Env,
 ) -> Result<Val, EvalError> {
-    use crate::exec::pipeline::{eval_kernel, BodyKernel};
+    use crate::exec::pipeline::{eval_kernel_with_vm, BodyKernel};
 
     let idx = arg_index(call.orig_args.as_ref(), arg)
         .ok_or_else(|| EvalError(format!("{}: argument lookup failed", call.name)))?;
@@ -267,7 +267,7 @@ fn apply_compiled_item(
             let starts_with_load_ident =
                 matches!(prog.ops.first(), Some(crate::vm::Opcode::LoadIdent(_)));
             if !starts_with_load_ident {
-                return eval_kernel(k, &item, |fallback_item| {
+                return eval_kernel_with_vm(k, &item, vm, |fallback_item, vm| {
                     let frame = env.push_lam(None, fallback_item.clone());
                     let result = vm.exec_in_env(prog, env);
                     env.pop_lam(frame);
