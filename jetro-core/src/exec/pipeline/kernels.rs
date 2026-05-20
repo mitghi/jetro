@@ -579,7 +579,7 @@ impl BodyKernel {
     /// Returns the field payload needed from the current row to evaluate this kernel.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
-            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) | Self::NestedPlan(_) => {
+            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) => {
                 FieldDemand::Whole
             }
             Self::FieldRead(key) | Self::FieldCmpLit(key, _, _) => {
@@ -638,6 +638,7 @@ impl BodyKernel {
                     None => need,
                 }
             }
+            Self::NestedPlan(plan) => plan.parent_field_demand(),
             Self::ConstBool(_) | Self::Const(_) => FieldDemand::None,
         }
     }
@@ -2861,6 +2862,16 @@ mod tests {
         };
 
         assert_eq!(field_paths(&computed_receiver), vec!["events"]);
+    }
+
+    #[test]
+    fn nested_plan_field_demand_prefixes_inner_payload() {
+        let expr =
+            parse("items.filter(price > 20).map(isbn).last()").expect("parse nested pipeline");
+        let kernel = BodyKernel::classify_expr(&expr);
+
+        assert!(matches!(kernel, BodyKernel::NestedPlan(_)), "{kernel:#?}");
+        assert_eq!(field_paths(&kernel), vec!["items.price", "items.isbn"]);
     }
 
     #[test]

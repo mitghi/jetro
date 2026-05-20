@@ -537,6 +537,9 @@ macro_rules! method_stage_descriptor {
 impl Stage {
     /// Classifies the stage body program, returning `Generic` for stages without a body.
     pub(crate) fn body_kernel(&self) -> BodyKernel {
+        if let Stage::CompiledMap(plan) = self {
+            return BodyKernel::NestedPlan(Arc::clone(plan));
+        }
         self.body_program()
             .map(BodyKernel::classify)
             .unwrap_or(BodyKernel::Generic)
@@ -1175,6 +1178,37 @@ impl PipelineBody {
     /// Returns only the pull lane of this body's source demand.
     pub(crate) fn pull_demand(&self) -> PullDemand {
         Pipeline::segment_pull_demand(&self.stages, &self.sink)
+    }
+}
+
+impl Plan {
+    /// Computes payload demand for this reusable source-independent plan.
+    pub(crate) fn payload_demand(&self) -> PayloadDemand {
+        Pipeline::segment_payload_demand(
+            &self.stages,
+            &self.stage_kernels,
+            &self.sink,
+            &self.sink_kernels,
+        )
+    }
+
+    /// Returns the fields needed from the parent row when this plan is used as
+    /// a nested projection kernel.
+    pub(crate) fn parent_field_demand(&self) -> FieldDemand {
+        let payload = self.payload_demand();
+        let source_need = payload.scan_need.merge(payload.result_need);
+        match &self.source {
+            super::Source::Receiver(_) => match source_need {
+                FieldDemand::None => FieldDemand::Whole,
+                need => need,
+            },
+            super::Source::FieldChain { keys } => match source_need {
+                FieldDemand::None | FieldDemand::Whole => {
+                    FieldDemand::Fields(crate::plan::demand::FieldSet::chain(Arc::clone(keys)))
+                }
+                FieldDemand::Fields(fields) => FieldDemand::Fields(fields.prefixed(keys)),
+            },
+        }
     }
 }
 
