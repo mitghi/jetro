@@ -968,8 +968,7 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
 /// `JsonView` without materialising the receiver.
 #[inline]
 pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
-    id.method()
-        .is_some_and(BuiltinMethod::is_view_scalar_method)
+    id.method().is_some_and(|method| method.spec().view_scalar)
 }
 
 /// Return raw-byte scalar execution support for builtin `id`, if the operation
