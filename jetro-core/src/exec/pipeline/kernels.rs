@@ -2298,20 +2298,6 @@ where
     eval_view_kernel_inner(kernel, item, None)
 }
 
-/// Evaluates `kernel` on a borrowed view with caller-owned VM state for match kernels.
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn eval_view_kernel_with_vm<'a, V>(
-    kernel: &BodyKernel,
-    item: &V,
-    vm: &mut crate::vm::VM,
-) -> Option<ViewKernelValue<V>>
-where
-    V: ValueView<'a>,
-{
-    eval_view_kernel_inner(kernel, item, Some(vm))
-}
-
 fn eval_view_kernel_inner<'a, V>(
     kernel: &BodyKernel,
     item: &V,
