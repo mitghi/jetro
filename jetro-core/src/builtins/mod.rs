@@ -1485,6 +1485,7 @@ impl BuiltinCall {
     /// Returns the capability descriptor for this call, potentially overriding the
     /// method-level spec with argument-specific cost or indexability adjustments.
     #[inline]
+    #[cfg(test)]
     pub fn spec(&self) -> BuiltinSpec {
         let mut spec = self.method.spec();
         let (cost, can_indexed) = match self.method {
@@ -2142,7 +2143,7 @@ impl BuiltinCall {
     /// Evaluates this builtin directly on a zero-copy `JsonView` without materialising a `Val`.
     /// Only works for view-scalar methods; returns `None` for all other builtins.
     pub fn try_apply_json_view(&self, recv: crate::util::JsonView<'_>) -> Option<Val> {
-        if !self.spec().view_scalar {
+        if !self.method.is_view_scalar_method() {
             return None;
         }
         match (self.method, &self.args) {
