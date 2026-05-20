@@ -560,7 +560,11 @@ where
         pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
     }
     let items = source.array_iter()?;
-    drive_view_iter(items, stages, stage_kernels, source_demand, vm, observe)
+    let iter_demand = match source_demand {
+        PullDemand::LastInput(_) => PullDemand::All,
+        other => other,
+    };
+    drive_view_iter(items, stages, stage_kernels, iter_demand, vm, observe)
 }
 
 fn index_from_end(len: usize, offset: usize) -> Option<usize> {
@@ -1873,6 +1877,35 @@ mod tests {
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_forward_last_fallback_scans_all_rows() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let mut observed = 0usize;
+        let mut vm = VM::new();
+        let caps = crate::exec::pipeline::SourceCapabilities {
+            reverse_stream: false,
+            indexed_array_child: false,
+            ..crate::exec::pipeline::SourceCapabilities::VIEW_ARRAY
+        };
+
+        super::drive_view_frontier(
+            source.clone(),
+            caps,
+            &[],
+            &[],
+            crate::plan::demand::PullDemand::LastInput(1),
+            &mut vm,
+            |_, _| {
+                observed += 1;
+                Some(super::ViewRowAction::Emit)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed, 4);
+        assert_eq!(source.array_iter_reads(), 1);
     }
 
     #[test]
