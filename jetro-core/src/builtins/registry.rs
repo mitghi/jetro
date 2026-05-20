@@ -8,9 +8,9 @@
 use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
-        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprStage, BuiltinKeyedReducer,
-        BuiltinMethod, BuiltinMembershipSink, BuiltinNullaryStage, BuiltinNumericReducer,
-        BuiltinObjectLambda, BuiltinPredicateSink,
+        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprPayload, BuiltinExprStage,
+        BuiltinKeyedReducer, BuiltinMethod, BuiltinMembershipSink, BuiltinNullaryStage,
+        BuiltinNumericReducer, BuiltinObjectLambda, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -146,19 +146,6 @@ pub(crate) enum BuiltinRowStreamOp {
     Map,
 }
 
-/// Payload-demand behavior for expression-bearing pipeline stages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinExprPayload {
-    /// The expression is used only to decide scan-time membership/prefix state.
-    PredicateScan,
-    /// The expression is a one-to-one projection that can rewrite downstream field demand.
-    Projection,
-    /// The expression computes an aggregate key; retained rows are not emitted downstream.
-    KeyOnlyReducer,
-    /// The expression computes a row-retaining aggregate key and therefore needs whole rows.
-    RowKeyedReducer,
-}
-
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -290,30 +277,14 @@ pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage>
 /// Return payload-demand behavior for expression-bearing builtin stages.
 #[inline]
 pub(crate) fn expr_payload(id: BuiltinId) -> Option<BuiltinExprPayload> {
-    match id.method()? {
-        BuiltinMethod::TakeWhile | BuiltinMethod::DropWhile | BuiltinMethod::FilterKeys => {
-            Some(BuiltinExprPayload::PredicateScan)
-        }
-        BuiltinMethod::Map
-        | BuiltinMethod::TransformKeys
-        | BuiltinMethod::TransformValues
-        | BuiltinMethod::FilterValues => Some(BuiltinExprPayload::Projection),
-        method
-            if matches!(
-                demand_law(BuiltinId::from_method(method)),
-                BuiltinDemandLaw::KeyOnlyReducer
-            ) =>
-        {
-            Some(BuiltinExprPayload::KeyOnlyReducer)
-        }
-        method
-            if matches!(
-                demand_law(BuiltinId::from_method(method)),
-                BuiltinDemandLaw::RowKeyedReducer
-            ) =>
-        {
-            Some(BuiltinExprPayload::RowKeyedReducer)
-        }
+    let method = id.method()?;
+    let spec = method.spec();
+    if let Some(payload) = spec.expr_payload {
+        return Some(payload);
+    }
+    match spec.demand_law {
+        BuiltinDemandLaw::KeyOnlyReducer => Some(BuiltinExprPayload::KeyOnlyReducer),
+        BuiltinDemandLaw::RowKeyedReducer => Some(BuiltinExprPayload::RowKeyedReducer),
         _ => None,
     }
 }

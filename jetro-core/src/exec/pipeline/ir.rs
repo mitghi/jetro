@@ -16,11 +16,11 @@ use crate::builtins::registry::{
     pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_streams,
     sink_demand as builtin_sink_demand,
     stage_merge as builtin_stage_merge, terminal_selection_position,
-    view_stage as builtin_view_stage, BuiltinExprPayload, BuiltinId,
+    view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect, BuiltinSelectionPosition,
-    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinCardinality, BuiltinExprPayload, BuiltinMethod, BuiltinPipelineOrderEffect,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};

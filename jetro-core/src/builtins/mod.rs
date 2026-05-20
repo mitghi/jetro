@@ -642,6 +642,8 @@ pub struct BuiltinSpec {
     pub nullary_stage: Option<BuiltinNullaryStage>,
     /// Expression-argument pipeline stage behavior, if any.
     pub expr_stage: Option<BuiltinExprStage>,
+    /// Payload-demand behavior for expression-bearing stages, if any.
+    pub expr_payload: Option<BuiltinExprPayload>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -828,6 +830,19 @@ pub enum BuiltinExprStage {
     UniqueBy,
     /// Generic expression-bearing builtin stage.
     ExprBuiltin,
+}
+
+/// Payload-demand behavior for expression-bearing pipeline stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinExprPayload {
+    /// The expression is used only to decide scan-time membership/prefix state.
+    PredicateScan,
+    /// The expression is a one-to-one projection that can rewrite downstream field demand.
+    Projection,
+    /// The expression computes an aggregate key; retained rows are not emitted downstream.
+    KeyOnlyReducer,
+    /// The expression computes a row-retaining aggregate key and therefore needs whole rows.
+    RowKeyedReducer,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1354,6 +1369,7 @@ impl BuiltinSpec {
             string_pair_stage: None,
             nullary_stage: None,
             expr_stage: None,
+            expr_payload: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1453,6 +1469,12 @@ impl BuiltinSpec {
     /// Attaches expression-argument pipeline stage behavior.
     fn expr_stage(mut self, stage: BuiltinExprStage) -> Self {
         self.expr_stage = Some(stage);
+        self
+    }
+
+    /// Attaches expression payload-demand behavior.
+    fn expr_payload(mut self, payload: BuiltinExprPayload) -> Self {
+        self.expr_payload = Some(payload);
         self
     }
 

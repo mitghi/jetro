@@ -8,8 +8,8 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinExprStage, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod,
-    BuiltinNullaryStage,
+    BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinMembershipSink,
+    BuiltinMethod, BuiltinNullaryStage,
     BuiltinNumericReducer,
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
@@ -66,6 +66,7 @@ fn filter_spec() -> BuiltinSpec {
         .demand_law(BuiltinDemandLaw::FilterLike)
         .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
         .expr_stage(BuiltinExprStage::Filter)
+        .expr_payload(BuiltinExprPayload::PredicateScan)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -205,6 +206,7 @@ impl Builtin for Map {
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .expr_stage(BuiltinExprStage::Map)
+            .expr_payload(BuiltinExprPayload::Projection)
             .lowering(BuiltinPipelineLowering::ExprArg)
             .element()
     }
@@ -471,6 +473,7 @@ impl Builtin for TakeWhile {
             .view_stage(BuiltinViewStage::TakeWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::TakeWhile)
+            .expr_payload(BuiltinExprPayload::PredicateScan)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
                 true,
@@ -531,6 +534,7 @@ impl Builtin for DropWhile {
             .view_stage(BuiltinViewStage::DropWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::DropWhile)
+            .expr_payload(BuiltinExprPayload::PredicateScan)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -1977,6 +1981,7 @@ impl Builtin for TransformKeys {
     const NAME: &'static str = "transform_keys";
     fn spec() -> BuiltinSpec {
         object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformKeys)
+            .expr_payload(BuiltinExprPayload::Projection)
     }
 
     #[inline]
@@ -2044,6 +2049,7 @@ impl Builtin for TransformValues {
     const NAME: &'static str = "transform_values";
     fn spec() -> BuiltinSpec {
         object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformValues)
+            .expr_payload(BuiltinExprPayload::Projection)
     }
     #[inline]
     fn apply_stream(
@@ -2071,6 +2077,7 @@ impl Builtin for FilterKeys {
     const NAME: &'static str = "filter_keys";
     fn spec() -> BuiltinSpec {
         object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterKeys)
+            .expr_payload(BuiltinExprPayload::PredicateScan)
     }
     #[inline]
     fn apply_stream(
@@ -2098,6 +2105,7 @@ impl Builtin for FilterValues {
     const NAME: &'static str = "filter_values";
     fn spec() -> BuiltinSpec {
         object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterValues)
+            .expr_payload(BuiltinExprPayload::Projection)
     }
     #[inline]
     fn apply_stream(
