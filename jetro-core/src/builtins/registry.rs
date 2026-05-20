@@ -821,6 +821,7 @@ mod tests {
     fn registry_name_lookup_matches_legacy_lookup() {
         for (method, canonical, aliases) in all_method_entries() {
             assert_eq!(by_name(canonical).and_then(BuiltinId::method), Some(method));
+            assert_eq!(canonical_name(BuiltinId::from_method(method)), Some(canonical));
             for alias in aliases {
                 assert_eq!(by_name(alias).and_then(BuiltinId::method), Some(method));
             }
