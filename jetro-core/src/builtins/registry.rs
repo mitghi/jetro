@@ -970,6 +970,14 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
         || view_object_key_projection(id)
 }
 
+/// Return true when builtin `id` can evaluate directly against a scalar
+/// `JsonView` without materialising the receiver.
+#[inline]
+pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
+    id.method()
+        .is_some_and(|method| method.spec().view_scalar)
+}
+
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
 /// registry metadata wins; optionally, pure one-to-one builtins may be treated
 /// as order-preserving by callers that allow this conservative fallback.
@@ -2167,10 +2175,16 @@ mod tests {
         }
 
         assert!(view_projection(BuiltinId::from_method(BuiltinMethod::Upper)));
+        assert!(view_scalar_projection(BuiltinId::from_method(
+            BuiltinMethod::Upper
+        )));
         assert!(!view_object_key_projection(BuiltinId::from_method(
             BuiltinMethod::Upper
         )));
         assert!(!view_projection(BuiltinId::from_method(BuiltinMethod::Sort)));
+        assert!(!view_scalar_projection(BuiltinId::from_method(
+            BuiltinMethod::Sort
+        )));
     }
 
     #[test]

@@ -6,9 +6,9 @@ use super::ndjson_direct::{
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
-    view_object_projection, BuiltinId, BuiltinViewObjectProjection,
+    view_object_projection, view_scalar_projection, BuiltinId, BuiltinViewObjectProjection,
 };
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
@@ -60,7 +60,7 @@ fn write_ndjson_byte_expr<W: Write>(
         NdjsonDirectByteExpr::ScalarCall { value, call } => {
             match raw_json_byte_expr_value(row, value) {
                 RawFieldValue::Found(value) => {
-                    if write_raw_scalar_call(writer, value, call.method).is_err() {
+                    if write_raw_scalar_call(writer, value, call).is_err() {
                         return Ok(BytePlanWrite::Fallback);
                     }
                     Ok(BytePlanWrite::Done)
@@ -198,7 +198,7 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
     match plan {
         NdjsonDirectTapePlan::RootPath(steps) => byte_path_supported(steps),
         NdjsonDirectTapePlan::ViewScalarCall { steps, call, .. } => {
-            byte_path_supported(steps) && byte_scalar_call_supported(call.method)
+            byte_path_supported(steps) && byte_scalar_call_supported(call)
         }
         NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
@@ -213,7 +213,7 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
         } => {
             byte_path_supported(source_steps)
                 && byte_path_supported(suffix_steps)
-                && byte_scalar_call_supported(call.method)
+                && byte_scalar_call_supported(call)
         }
         NdjsonDirectTapePlan::Object(fields) => fields
             .iter()
@@ -223,8 +223,9 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
     }
 }
 
-fn byte_scalar_call_supported(method: BuiltinMethod) -> bool {
-    method == BuiltinMethod::Len || method == BuiltinMethod::Upper || method == BuiltinMethod::Lower
+fn byte_scalar_call_supported(call: &BuiltinCall) -> bool {
+    view_scalar_projection(BuiltinId::from_method(call.method))
+        && matches!(&call.args, BuiltinArgs::None)
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -501,9 +502,7 @@ fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
 fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool {
     match value {
         NdjsonDirectProjectionValue::Path(_) | NdjsonDirectProjectionValue::Literal(_) => true,
-        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => {
-            byte_scalar_call_supported(call.method)
-        }
+        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => byte_scalar_call_supported(call),
         NdjsonDirectProjectionValue::Nested(plan) => tape_plan_can_write_byte_row(plan),
     }
 }
@@ -537,7 +536,7 @@ fn write_hinted_projection_value<W: Write>(
             if *optional && is_json_null(value) {
                 writer.write_all(b"null")?;
             } else {
-                write_raw_scalar_call(writer, value, call.method)?;
+                write_raw_scalar_call(writer, value, call)?;
             }
         }
         NdjsonDirectProjectionValue::Literal(lit) => match lit {
@@ -861,9 +860,9 @@ fn write_json_escaped_ascii_slice<W: Write>(
 fn write_raw_scalar_call<W: Write>(
     writer: &mut W,
     value: &[u8],
-    method: BuiltinMethod,
+    call: &BuiltinCall,
 ) -> Result<(), JetroEngineError> {
-    if write_raw_string_case_call(writer, value, method)? {
+    if write_raw_string_case_call(writer, value, call)? {
         return Ok(());
     }
     let Some(view) = raw_json_view(value) else {
@@ -871,7 +870,7 @@ fn write_raw_scalar_call<W: Write>(
             "unsupported raw scalar call".to_string(),
         )));
     };
-    if method == BuiltinMethod::Len {
+    if call.method == BuiltinMethod::Len && matches!(call.args, BuiltinArgs::None) {
         let Some(len) = raw_json_view_len(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw len call".to_string(),
@@ -879,10 +878,7 @@ fn write_raw_scalar_call<W: Write>(
         };
         write_i64(writer, len)?;
     } else {
-        let Some(value) =
-            crate::builtins::BuiltinCall::new(method, crate::builtins::BuiltinArgs::None)
-                .try_apply_json_view(view)
-        else {
+        let Some(value) = call.try_apply_json_view(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw scalar call".to_string(),
             )));
@@ -1021,8 +1017,12 @@ fn raw_json_simple_string_bytes(value: &[u8]) -> Option<&[u8]> {
 fn write_raw_string_case_call<W: Write>(
     writer: &mut W,
     value: &[u8],
-    method: BuiltinMethod,
+    call: &BuiltinCall,
 ) -> Result<bool, JetroEngineError> {
+    let method = call.method;
+    if !matches!(call.args, BuiltinArgs::None) {
+        return Ok(false);
+    }
     if !matches!(method, BuiltinMethod::Upper | BuiltinMethod::Lower) {
         return Ok(false);
     }
@@ -2253,7 +2253,7 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
             steps,
             call,
             ..
-        }) if byte_scalar_call_supported(call.method) => (steps.as_slice(), Some(call.method)),
+        }) if byte_scalar_call_supported(call) => (steps.as_slice(), Some(call)),
         _ => return Ok(None),
     };
     let [PhysicalPathStep::Field(field)] = steps else {
@@ -2280,8 +2280,8 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        if let Some(method) = call {
-            write_raw_scalar_call(writer, value, method)?;
+        if let Some(call) = call {
+            write_raw_scalar_call(writer, value, call)?;
         } else {
             writer.write_all(value)?;
         }
@@ -2774,7 +2774,7 @@ enum DirectRootProjection<'a> {
     Scalar {
         slot: usize,
         suffix: &'a [PhysicalPathStep],
-        method: BuiltinMethod,
+        call: &'a BuiltinCall,
         optional: bool,
     },
 }
@@ -2821,12 +2821,12 @@ fn direct_root_projection<'a>(
             steps,
             call,
             optional,
-        } if byte_scalar_call_supported(call.method) => {
+        } if byte_scalar_call_supported(call) => {
             let (slot, suffix) = direct_root_path_slot(steps, root_fields)?;
             Some(DirectRootProjection::Scalar {
                 slot,
                 suffix,
-                method: call.method,
+                call,
                 optional: *optional,
             })
         }
@@ -2893,7 +2893,7 @@ fn write_direct_root_projection_value<W: Write>(
         DirectRootProjection::Scalar {
             slot,
             suffix,
-            method,
+            call,
             optional,
         } => {
             let Some(value) = direct_root_slot_value(item, spans, slot, suffix) else {
@@ -2903,7 +2903,7 @@ fn write_direct_root_projection_value<W: Write>(
             if optional && is_json_null(value) {
                 writer.write_all(b"null")?;
             } else {
-                write_raw_scalar_call(writer, value, method)?;
+                write_raw_scalar_call(writer, value, call)?;
             }
             Ok(())
         }
@@ -3091,7 +3091,7 @@ fn write_raw_json_projection_value_from_root_fields<W: Write>(
             if *optional && is_json_null(value) {
                 writer.write_all(b"null")?;
             } else {
-                write_raw_scalar_call(writer, value, call.method)?;
+                write_raw_scalar_call(writer, value, call)?;
             }
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
@@ -3328,7 +3328,7 @@ fn write_raw_json_tape_plan_value<W: Write>(
         }
         NdjsonDirectTapePlan::ViewScalarCall { steps, call, .. } => {
             match raw_json_path_value_demand(row, steps, None) {
-                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call)?,
                 RawFieldValue::Missing => writer.write_all(b"null")?,
                 RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
             }
@@ -3349,7 +3349,7 @@ fn write_raw_json_tape_plan_value<W: Write>(
             call,
         } => {
             match raw_json_array_element_path_value(row, source_steps, *element, suffix_steps) {
-                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call)?,
                 RawFieldValue::Missing => writer.write_all(b"null")?,
                 RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
             }
@@ -3551,7 +3551,7 @@ fn write_raw_json_projection_value<W: Write>(
         }
         NdjsonDirectProjectionValue::ViewScalarCall { steps, call, .. } => {
             match raw_json_path_value_demand(item, steps, None) {
-                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call.method)?,
+                RawFieldValue::Found(value) => write_raw_scalar_call(writer, value, call)?,
                 RawFieldValue::Missing => writer.write_all(b"null")?,
                 RawFieldValue::Fallback => {
                     return Err(JetroEngineError::Eval(crate::EvalError(
