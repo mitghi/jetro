@@ -55,7 +55,6 @@ pub(crate) struct BarrierCtx<'a> {
 /// static dispatch; the trait remains object-free on the hot path.
 pub(crate) trait Builtin {
     /// The `BuiltinMethod` enum variant this struct corresponds to.
-    #[allow(dead_code)]
     const METHOD: BuiltinMethod;
 
     /// Canonical name used in source code (e.g. `"filter"`).

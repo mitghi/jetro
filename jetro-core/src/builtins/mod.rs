@@ -1383,7 +1383,6 @@ impl BuiltinSpec {
     /// pipeline-streaming lowering remains the canonical path for
     /// `$.path.method()`, even when category/cardinality would otherwise be
     /// eligible for direct dispatch.
-    #[allow(dead_code)]
     fn never_unwrap(mut self) -> Self {
         self.never_unwrap = true;
         self
