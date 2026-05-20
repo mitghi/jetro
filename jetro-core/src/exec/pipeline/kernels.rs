@@ -1960,7 +1960,7 @@ where
         }
         match map {
             Some(map) => {
-                if let Some(value) = eval_view_numeric_kernel(map, &child) {
+                if let Some(value) = eval_view_numeric_kernel(map, &child, vm.as_deref_mut()) {
                     fold_numeric_kernel_value(
                         value,
                         &mut acc_i,
@@ -2075,7 +2075,11 @@ where
     }
 }
 
-fn eval_view_numeric_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<NumericKernelValue>
+fn eval_view_numeric_kernel<'a, V>(
+    kernel: &BodyKernel,
+    item: &V,
+    mut vm: Option<&mut crate::vm::VM>,
+) -> Option<NumericKernelValue>
 where
     V: ValueView<'a>,
 {
@@ -2088,15 +2092,21 @@ where
         BodyKernel::Const(Val::Int(value)) => Some(NumericKernelValue::Int(*value)),
         BodyKernel::Const(Val::Float(value)) => Some(NumericKernelValue::Float(*value)),
         BodyKernel::Binary { lhs, op, rhs } => {
-            let lhs = eval_view_numeric_kernel(lhs, item)?;
-            let rhs = eval_view_numeric_kernel(rhs, item)?;
+            let lhs = eval_view_numeric_kernel(lhs, item, vm.as_deref_mut())?;
+            let rhs = eval_view_numeric_kernel(rhs, item, vm.as_deref_mut())?;
             eval_numeric_binary(lhs, *op, rhs)
         }
-        BodyKernel::Compose { first, then } => match eval_view_kernel(first, item)? {
-            ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view),
-            ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
-        },
-        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel(array, item)? {
+        BodyKernel::Compose { first, then } => {
+            match eval_view_kernel_inner(first, item, vm.as_deref_mut())? {
+                ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view, vm),
+                ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
+            }
+        }
+        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel_inner(
+            array,
+            item,
+            vm.as_deref_mut(),
+        )? {
             ViewKernelValue::View(view) => {
                 numeric_from_json_view(eval_array_select_view(view, *selector).scalar())
             }
@@ -2607,7 +2617,7 @@ where
             Some(ViewKernelValue::Owned(Val::Bool(passes)))
         }
         BodyKernel::Binary { lhs, op, rhs } => {
-            if let Some(value) = eval_view_numeric_kernel(kernel, item) {
+            if let Some(value) = eval_view_numeric_kernel(kernel, item, vm.as_deref_mut()) {
                 return Some(ViewKernelValue::Owned(numeric_kernel_value_to_val(value)));
             }
             let lhs = view_kernel_value_to_owned(eval_view_kernel_inner(lhs, item, vm.as_deref_mut())?);
