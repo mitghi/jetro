@@ -8,8 +8,9 @@
 use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
-        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
-        BuiltinMembershipSink, BuiltinObjectLambda, BuiltinPredicateSink,
+        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod,
+        BuiltinMembershipSink, BuiltinNullaryStage, BuiltinNumericReducer,
+        BuiltinObjectLambda, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -160,17 +161,6 @@ pub(crate) enum BuiltinExprStage {
     ExprBuiltin,
 }
 
-/// Concrete pipeline stage shape for nullary stage builtins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinNullaryStage {
-    /// Reverse stage with cancellation metadata.
-    Reverse,
-    /// Deduplicate by full row value.
-    Unique,
-    /// Generic no-argument element builtin.
-    Element,
-}
-
 /// Payload-demand behavior for expression-bearing pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinExprPayload {
@@ -304,19 +294,13 @@ pub(crate) fn expr_stage(id: BuiltinId) -> Option<BuiltinExprStage> {
 /// Return the concrete pipeline stage shape for a nullary pipeline builtin.
 #[inline]
 pub(crate) fn nullary_stage(id: BuiltinId) -> Option<BuiltinNullaryStage> {
-    match id.method()? {
-        BuiltinMethod::Reverse => Some(BuiltinNullaryStage::Reverse),
-        BuiltinMethod::Unique => Some(BuiltinNullaryStage::Unique),
-        method
-            if matches!(
-                pipeline_lowering(BuiltinId::from_method(method)),
-                Some(BuiltinPipelineLowering::Nullary)
-            ) && pipeline_element(BuiltinId::from_method(method)) =>
-        {
-            Some(BuiltinNullaryStage::Element)
-        }
-        _ => None,
+    let method = id.method()?;
+    let spec = method.spec();
+    if let Some(stage) = spec.nullary_stage {
+        return Some(stage);
     }
+    (matches!(spec.lowering, Some(BuiltinPipelineLowering::Nullary)) && spec.is_element)
+        .then_some(BuiltinNullaryStage::Element)
 }
 
 /// Return concrete behavior for a two-string-argument pipeline builtin.

@@ -12,11 +12,11 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_category, builtin_sink, by_name, cancellation as builtin_cancellation,
     count_sink_accepts_predicate, expr_stage, nullary_stage, pipeline_accepts_arity,
-    pipeline_lowering, view_stage, BuiltinExprStage, BuiltinId, BuiltinNullaryStage,
+    pipeline_lowering, view_stage, BuiltinExprStage, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCategory, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
-    BuiltinSinkAccumulator, BuiltinViewStage,
+    BuiltinCategory, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;

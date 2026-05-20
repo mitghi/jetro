@@ -8,7 +8,8 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNumericReducer,
+    BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
+    BuiltinNumericReducer,
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
@@ -1511,7 +1512,9 @@ impl Builtin for Unique {
     const NAME: &'static str = "unique";
     const ALIASES: &'static [&'static str] = &["distinct"];
     fn spec() -> BuiltinSpec {
-        unique_spec().lowering(BuiltinPipelineLowering::Nullary)
+        unique_spec()
+            .nullary_stage(BuiltinNullaryStage::Unique)
+            .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -1559,6 +1562,7 @@ impl Builtin for Reverse {
             .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .nullary_stage(BuiltinNullaryStage::Reverse)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]

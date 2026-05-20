@@ -638,6 +638,8 @@ pub struct BuiltinSpec {
     pub object_lambda: Option<BuiltinObjectLambda>,
     /// Two-string-argument pipeline stage behavior, if any.
     pub string_pair_stage: Option<BuiltinStringPairStage>,
+    /// Nullary pipeline stage behavior, if any.
+    pub nullary_stage: Option<BuiltinNullaryStage>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -798,6 +800,17 @@ pub enum BuiltinStringPairStage {
         /// Replace every occurrence when true, otherwise only the first.
         all: bool,
     },
+}
+
+/// Concrete pipeline stage shape for nullary stage builtins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinNullaryStage {
+    /// Reverse stage with cancellation metadata.
+    Reverse,
+    /// Deduplicate by full row value.
+    Unique,
+    /// Generic no-argument element builtin.
+    Element,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1322,6 +1335,7 @@ impl BuiltinSpec {
             raw_json_scalar: None,
             object_lambda: None,
             string_pair_stage: None,
+            nullary_stage: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1409,6 +1423,12 @@ impl BuiltinSpec {
     /// Attaches two-string-argument pipeline stage behavior.
     fn string_pair_stage(mut self, stage: BuiltinStringPairStage) -> Self {
         self.string_pair_stage = Some(stage);
+        self
+    }
+
+    /// Attaches nullary pipeline stage behavior.
+    fn nullary_stage(mut self, stage: BuiltinNullaryStage) -> Self {
+        self.nullary_stage = Some(stage);
         self
     }
 
