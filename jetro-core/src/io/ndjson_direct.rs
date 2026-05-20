@@ -1,7 +1,8 @@
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, view_object_items_projection, BuiltinArraySelector,
-    BuiltinId,
+    array_selector as builtin_array_selector, terminal_selection_position,
+    view_object_items_projection, BuiltinArraySelector, BuiltinId,
 };
+use crate::builtins::BuiltinSelectionPosition;
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
@@ -657,11 +658,7 @@ fn direct_tape_sort_extreme_plan_for_node(
         if *optional {
             return None;
         }
-        let want_last = match call.method {
-            crate::builtins::BuiltinMethod::Last => true,
-            crate::builtins::BuiltinMethod::First => false,
-            _ => return None,
-        };
+        let want_last = selection_position_wants_last(call.method)?;
         let PlanNode::Pipeline { source, body } = plan.node(*receiver) else {
             return None;
         };
@@ -685,18 +682,23 @@ fn direct_tape_sort_extreme_plan(
     body: &crate::exec::pipeline::PipelineBody,
     suffix_steps: NdjsonPhysicalPath,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::{Sink, Stage};
 
     let [Stage::Sort(_)] = body.stages.as_slice() else {
         return None;
     };
     let want_last = match body.sink {
-        Sink::Terminal(BuiltinMethod::Last) => true,
-        Sink::Terminal(BuiltinMethod::First) => false,
+        Sink::Terminal(method) => selection_position_wants_last(method)?,
         _ => return None,
     };
     direct_tape_sort_extreme_plan_with_position(plan, source, body, suffix_steps, want_last)
+}
+
+fn selection_position_wants_last(method: crate::builtins::BuiltinMethod) -> Option<bool> {
+    match terminal_selection_position(BuiltinId::from_method(method))? {
+        BuiltinSelectionPosition::First => Some(false),
+        BuiltinSelectionPosition::Last => Some(true),
+    }
 }
 
 fn direct_tape_sort_extreme_plan_with_position(

@@ -11,8 +11,8 @@ use crate::{
         BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
-        BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
@@ -862,6 +862,15 @@ pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
         BuiltinMethod::First => Some(BuiltinArraySelector::First),
         BuiltinMethod::Last => Some(BuiltinArraySelector::Last),
         BuiltinMethod::Nth => Some(BuiltinArraySelector::Nth),
+        _ => None,
+    }
+}
+
+/// Return terminal select-one position for sinks such as `first` and `last`.
+#[inline]
+pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelectionPosition> {
+    match builtin_sink(id)?.accumulator {
+        BuiltinSinkAccumulator::SelectOne(position) => Some(position),
         _ => None,
     }
 }
@@ -2060,6 +2069,22 @@ mod tests {
             Some(BuiltinArraySelector::Nth)
         );
         assert_eq!(array_selector(BuiltinId::from_method(BuiltinMethod::Take)), None);
+    }
+
+    #[test]
+    fn registry_drives_terminal_selection_position() {
+        assert_eq!(
+            terminal_selection_position(BuiltinId::from_method(BuiltinMethod::First)),
+            Some(BuiltinSelectionPosition::First)
+        );
+        assert_eq!(
+            terminal_selection_position(BuiltinId::from_method(BuiltinMethod::Last)),
+            Some(BuiltinSelectionPosition::Last)
+        );
+        assert_eq!(
+            terminal_selection_position(BuiltinId::from_method(BuiltinMethod::Count)),
+            None
+        );
     }
 
     #[test]
