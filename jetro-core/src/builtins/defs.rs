@@ -676,10 +676,7 @@ impl Builtin for Any {
     const ALIASES: &'static [&'static str] = &["exists"];
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
-            .view_native()
-            .cost(10.0)
-            .lowering(BuiltinPipelineLowering::TerminalSink)
+        predicate_terminal_sink_spec()
     }
 }
 
@@ -690,10 +687,7 @@ impl Builtin for All {
     const NAME: &'static str = "all";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
-            .view_native()
-            .cost(10.0)
-            .lowering(BuiltinPipelineLowering::TerminalSink)
+        predicate_terminal_sink_spec()
     }
 }
 
