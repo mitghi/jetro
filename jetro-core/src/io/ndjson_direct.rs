@@ -1399,7 +1399,6 @@ fn direct_array_element_source(
     plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
-    use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::Sink;
     use crate::ir::physical::PipelinePlanSource;
 
@@ -1432,8 +1431,13 @@ fn direct_array_element_source(
         return None;
     }
     let element = match body.sink {
-        Sink::Terminal(BuiltinMethod::First) => NdjsonDirectElement::First,
-        Sink::Terminal(BuiltinMethod::Last) => NdjsonDirectElement::Last,
+        Sink::Terminal(method) => {
+            if selection_position_wants_last(method)? {
+                NdjsonDirectElement::Last
+            } else {
+                NdjsonDirectElement::First
+            }
+        }
         Sink::SelectMany {
             n: 1,
             from_end: false,
