@@ -2,11 +2,12 @@
 //!
 //! `Compiler` lowers an `Expr` AST to a flat `Arc<[Opcode]>` program and runs
 //! peephole passes (`RootChain` fusion, `FilterCount` fusion, `ConstFold`,
-//! demand annotation). `VM` owns two caches: a compile cache keyed on the
-//! expression string, and a path-resolution cache keyed on document structure.
-//! Both caches accumulate over the thread's lifetime via the thread-local in
-//! `lib.rs`. The VM is the general scalar fallback; streamable chains are
-//! handled by the pipeline IR in `pipeline.rs` / `composed.rs`.
+//! demand annotation). `VM` owns the compile cache keyed on expression text and
+//! path-resolution caches keyed on document structure. `Jetro` keeps its own
+//! VM instance, while `JetroEngine` shares one VM behind its engine lock for
+//! long-lived multi-document workloads. The VM is the general scalar fallback;
+//! streamable chains are handled by the pipeline IR in `pipeline.rs` /
+//! `composed.rs`.
 
 use indexmap::IndexMap;
 use smallvec::SmallVec;
