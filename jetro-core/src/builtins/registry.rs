@@ -108,6 +108,41 @@ pub(crate) enum BuiltinLogicalShape {
     ApproxCountDistinct,
 }
 
+/// Source-level `$.rows()` stream operation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinRowStreamOp {
+    /// Toggle stream direction.
+    Reverse,
+    /// Keep rows matching the predicate.
+    Filter,
+    /// Keep the first row matching the predicate.
+    FindFirst,
+    /// Deduplicate rows by a key expression.
+    DistinctBy,
+    /// Keep a bounded prefix.
+    Take,
+    /// Keep the first row.
+    First,
+    /// Keep the last row.
+    Last,
+    /// Count retained rows.
+    Count,
+    /// Numeric sum over retained rows.
+    Sum,
+    /// Numeric average over retained rows.
+    Avg,
+    /// Numeric minimum over retained rows.
+    Min,
+    /// Numeric maximum over retained rows.
+    Max,
+    /// Predicate existential sink.
+    Any,
+    /// Predicate universal sink.
+    All,
+    /// Project each retained row.
+    Map,
+}
+
 /// Predicate terminal sink behavior for builtins with a predicate argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinPredicateSink {
@@ -289,6 +324,32 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
         )
         .then_some(BuiltinLogicalShape::IndexBy),
         BuiltinMethod::ApproxCountDistinct => Some(BuiltinLogicalShape::ApproxCountDistinct),
+        _ => None,
+    }
+}
+
+/// Return source-level `$.rows()` stream behavior for builtin `id`, if it is
+/// legal in row-stream position.
+#[inline]
+pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
+    match id.method()? {
+        BuiltinMethod::Reverse => Some(BuiltinRowStreamOp::Reverse),
+        BuiltinMethod::Filter | BuiltinMethod::FindAll => Some(BuiltinRowStreamOp::Filter),
+        BuiltinMethod::Find | BuiltinMethod::FindFirst | BuiltinMethod::FindOne => {
+            Some(BuiltinRowStreamOp::FindFirst)
+        }
+        BuiltinMethod::UniqueBy => Some(BuiltinRowStreamOp::DistinctBy),
+        BuiltinMethod::Take => Some(BuiltinRowStreamOp::Take),
+        BuiltinMethod::First => Some(BuiltinRowStreamOp::First),
+        BuiltinMethod::Last => Some(BuiltinRowStreamOp::Last),
+        BuiltinMethod::Count | BuiltinMethod::Len => Some(BuiltinRowStreamOp::Count),
+        BuiltinMethod::Sum => Some(BuiltinRowStreamOp::Sum),
+        BuiltinMethod::Avg => Some(BuiltinRowStreamOp::Avg),
+        BuiltinMethod::Min => Some(BuiltinRowStreamOp::Min),
+        BuiltinMethod::Max => Some(BuiltinRowStreamOp::Max),
+        BuiltinMethod::Any => Some(BuiltinRowStreamOp::Any),
+        BuiltinMethod::All => Some(BuiltinRowStreamOp::All),
+        BuiltinMethod::Map => Some(BuiltinRowStreamOp::Map),
         _ => None,
     }
 }
@@ -1920,6 +1981,54 @@ mod tests {
         );
         assert_eq!(
             logical_shape(BuiltinId::from_method(BuiltinMethod::FromJson)),
+            None
+        );
+    }
+
+    #[test]
+    fn registry_drives_row_stream_ops() {
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Rows)),
+            None
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Reverse)),
+            Some(BuiltinRowStreamOp::Reverse)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Filter)),
+            Some(BuiltinRowStreamOp::Filter)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Find)),
+            Some(BuiltinRowStreamOp::FindFirst)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::UniqueBy)),
+            Some(BuiltinRowStreamOp::DistinctBy)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Take)),
+            Some(BuiltinRowStreamOp::Take)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::First)),
+            Some(BuiltinRowStreamOp::First)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Last)),
+            Some(BuiltinRowStreamOp::Last)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Len)),
+            Some(BuiltinRowStreamOp::Count)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Map)),
+            Some(BuiltinRowStreamOp::Map)
+        );
+        assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::Sort)),
             None
         );
     }

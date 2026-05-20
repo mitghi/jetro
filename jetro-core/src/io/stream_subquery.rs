@@ -1,6 +1,7 @@
 use super::stream_plan::{
     lower_root_rows_expr, RowStreamPlan, RowStreamPlanError, RowStreamSourceKind,
 };
+use crate::builtins::registry::{by_name as builtin_by_name, row_stream_op, BuiltinId};
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, Step};
 
@@ -133,7 +134,9 @@ fn lift_root_rows_prefix(
     let Some((Step::Method(name, args), _)) = steps.split_first() else {
         return Ok(None);
     };
-    if BuiltinMethod::from_name(name) != BuiltinMethod::Rows || !args.is_empty() {
+    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
+        || !args.is_empty()
+    {
         return Ok(None);
     }
 
@@ -162,18 +165,7 @@ fn lift_root_rows_prefix(
 }
 
 fn is_rows_stream_method(name: &str) -> bool {
-    matches!(
-        BuiltinMethod::from_name(name),
-        BuiltinMethod::Reverse
-            | BuiltinMethod::Filter
-            | BuiltinMethod::Find
-            | BuiltinMethod::FindFirst
-            | BuiltinMethod::FindOne
-            | BuiltinMethod::UniqueBy
-            | BuiltinMethod::Take
-            | BuiltinMethod::First
-            | BuiltinMethod::Map
-    )
+    builtin_by_name(name).is_some_and(|id| row_stream_op(id).is_some())
 }
 
 fn replace_steps(
