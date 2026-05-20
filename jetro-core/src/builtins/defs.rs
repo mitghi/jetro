@@ -676,7 +676,7 @@ impl Builtin for Count {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .view_native()
-            .count_sink()
+            .count_sink_with_predicate()
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::Count)
             .logical_shape(BuiltinLogicalShape::Count)

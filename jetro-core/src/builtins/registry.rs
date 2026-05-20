@@ -141,16 +141,8 @@ pub(crate) fn expr_payload(id: BuiltinId) -> Option<BuiltinExprPayload> {
 /// demand proves its output value is unused.
 #[inline]
 pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
-    let Some(method) = id.method() else {
-        return false;
-    };
-    matches!(
-        method,
-        BuiltinMethod::TransformKeys
-            | BuiltinMethod::TransformValues
-            | BuiltinMethod::FilterKeys
-            | BuiltinMethod::FilterValues
-    ) && is_pure(id)
+    object_lambda(id).is_some()
+        && is_pure(id)
         && builtin_cardinality(id) == Some(BuiltinCardinality::OneToOne)
         && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
 }
@@ -164,7 +156,10 @@ pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {
 /// Return true when a count-like terminal sink accepts a predicate argument.
 #[inline]
 pub(crate) fn count_sink_accepts_predicate(id: BuiltinId) -> bool {
-    matches!(id.method(), Some(BuiltinMethod::Count))
+    id.method()
+        .and_then(|method| method.spec().sink)
+        .map(|sink| sink.accepts_predicate)
+        .unwrap_or(false)
 }
 
 /// Compute the upstream `Demand` that builtin `id` must place on its source
@@ -691,7 +686,7 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
     };
     Some(match sink.accumulator {
         BuiltinSinkAccumulator::Count => {
-            if method == BuiltinMethod::Count {
+            if sink.accepts_predicate {
                 BuiltinPipelineArity::Range { min: 0, max: 1 }
             } else {
                 BuiltinPipelineArity::Exact(0)

@@ -1007,6 +1007,8 @@ pub struct BuiltinSinkSpec {
     pub accumulator: BuiltinSinkAccumulator,
     /// How many rows the sink needs to see before it can emit a result.
     pub demand: BuiltinSinkDemand,
+    /// Whether this sink accepts an optional predicate expression.
+    pub accepts_predicate: bool,
 }
 
 /// The accumulation strategy for a terminal reducing builtin.
@@ -1599,6 +1601,20 @@ impl BuiltinSpec {
                 value: BuiltinSinkValueNeed::None,
                 order: false,
             },
+            accepts_predicate: false,
+        });
+        self
+    }
+
+    /// Configures a count sink that can optionally filter rows with a predicate.
+    fn count_sink_with_predicate(mut self) -> Self {
+        self.sink = Some(BuiltinSinkSpec {
+            accumulator: BuiltinSinkAccumulator::Count,
+            demand: BuiltinSinkDemand::All {
+                value: BuiltinSinkValueNeed::None,
+                order: false,
+            },
+            accepts_predicate: true,
         });
         self
     }
@@ -1615,6 +1631,7 @@ impl BuiltinSpec {
                     value: BuiltinSinkValueNeed::Whole,
                 },
             },
+            accepts_predicate: false,
         });
         self
     }
@@ -1627,6 +1644,7 @@ impl BuiltinSpec {
                 value: BuiltinSinkValueNeed::Numeric,
                 order: false,
             },
+            accepts_predicate: false,
         });
         self.numeric_reducer = Some(reducer);
         self
@@ -1640,6 +1658,7 @@ impl BuiltinSpec {
                 value: BuiltinSinkValueNeed::Whole,
                 order: false,
             },
+            accepts_predicate: false,
         });
         self
     }
