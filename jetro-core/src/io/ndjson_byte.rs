@@ -5,6 +5,9 @@ use super::ndjson_direct::{
     NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
+use crate::builtins::registry::{
+    view_object_projection, BuiltinId, BuiltinViewObjectProjection,
+};
 use crate::builtins::BuiltinMethod;
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
@@ -747,6 +750,9 @@ fn write_json_object_items_raw<W: Write>(
     row: &[u8],
     method: BuiltinMethod,
 ) -> Result<BytePlanWrite, JetroEngineError> {
+    let Some(projection) = view_object_projection(BuiltinId::from_method(method)) else {
+        return Ok(BytePlanWrite::Fallback);
+    };
     let mut pos = skip_json_ws(row, 0);
     if row.get(pos) != Some(&b'{') {
         return Ok(BytePlanWrite::Fallback);
@@ -778,10 +784,10 @@ fn write_json_object_items_raw<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        match method {
-            BuiltinMethod::Keys => write_json_escaped_ascii_slice(writer, key)?,
-            BuiltinMethod::Values => writer.write_all(&row[value_start..value_end])?,
-            BuiltinMethod::Entries => {
+        match projection {
+            BuiltinViewObjectProjection::Keys => write_json_escaped_ascii_slice(writer, key)?,
+            BuiltinViewObjectProjection::Values => writer.write_all(&row[value_start..value_end])?,
+            BuiltinViewObjectProjection::Entries => {
                 writer.write_all(b"[")?;
                 write_json_escaped_ascii_slice(writer, key)?;
                 writer.write_all(b",")?;

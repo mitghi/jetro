@@ -39,6 +39,9 @@ use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
 pub use super::ndjson_driver::NdjsonPerRowDriver;
 use crate::compile::compiler::Compiler;
+use crate::builtins::registry::{
+    view_object_projection, BuiltinId, BuiltinViewObjectProjection,
+};
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
@@ -3645,6 +3648,10 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
     obj_idx: Option<usize>,
     method: crate::builtins::BuiltinMethod,
 ) -> Result<(), JetroEngineError> {
+    let Some(projection) = view_object_projection(BuiltinId::from_method(method)) else {
+        writer.write_all(b"[]")?;
+        return Ok(());
+    };
     let Some(obj_idx) = obj_idx else {
         writer.write_all(b"[]")?;
         return Ok(());
@@ -3661,16 +3668,16 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
         if field_idx > 0 {
             writer.write_all(b",")?;
         }
-        match method {
-            crate::builtins::BuiltinMethod::Keys => {
+        match projection {
+            BuiltinViewObjectProjection::Keys => {
                 write_json_str(writer, tape.str_at(cur))?;
                 cur += 1;
                 cur += tape.span(cur);
             }
-            crate::builtins::BuiltinMethod::Values => {
+            BuiltinViewObjectProjection::Values => {
                 cur = write_json_tape_at(writer, tape, cur + 1)?;
             }
-            crate::builtins::BuiltinMethod::Entries => {
+            BuiltinViewObjectProjection::Entries => {
                 writer.write_all(b"[")?;
                 write_json_str(writer, tape.str_at(cur))?;
                 writer.write_all(b",")?;
