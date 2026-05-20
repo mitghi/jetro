@@ -13,7 +13,7 @@ use crate::{
         BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinSelectionPosition, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStageMerge,
         BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewStage,
     },
@@ -57,41 +57,6 @@ impl BuiltinPipelineArity {
     }
 }
 
-/// Source-level `$.rows()` stream operation behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinRowStreamOp {
-    /// Toggle stream direction.
-    Reverse,
-    /// Keep rows matching the predicate.
-    Filter,
-    /// Keep the first row matching the predicate.
-    FindFirst,
-    /// Deduplicate rows by a key expression.
-    DistinctBy,
-    /// Keep a bounded prefix.
-    Take,
-    /// Keep the first row.
-    First,
-    /// Keep the last row.
-    Last,
-    /// Count retained rows.
-    Count,
-    /// Numeric sum over retained rows.
-    Sum,
-    /// Numeric average over retained rows.
-    Avg,
-    /// Numeric minimum over retained rows.
-    Min,
-    /// Numeric maximum over retained rows.
-    Max,
-    /// Predicate existential sink.
-    Any,
-    /// Predicate universal sink.
-    All,
-    /// Project each retained row.
-    Map,
-}
-
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -102,26 +67,7 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
 /// legal in row-stream position.
 #[inline]
 pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
-    match id.method()? {
-        BuiltinMethod::Reverse => Some(BuiltinRowStreamOp::Reverse),
-        BuiltinMethod::Filter | BuiltinMethod::FindAll => Some(BuiltinRowStreamOp::Filter),
-        BuiltinMethod::Find | BuiltinMethod::FindFirst | BuiltinMethod::FindOne => {
-            Some(BuiltinRowStreamOp::FindFirst)
-        }
-        BuiltinMethod::UniqueBy => Some(BuiltinRowStreamOp::DistinctBy),
-        BuiltinMethod::Take => Some(BuiltinRowStreamOp::Take),
-        BuiltinMethod::First => Some(BuiltinRowStreamOp::First),
-        BuiltinMethod::Last => Some(BuiltinRowStreamOp::Last),
-        BuiltinMethod::Count | BuiltinMethod::Len => Some(BuiltinRowStreamOp::Count),
-        BuiltinMethod::Sum => Some(BuiltinRowStreamOp::Sum),
-        BuiltinMethod::Avg => Some(BuiltinRowStreamOp::Avg),
-        BuiltinMethod::Min => Some(BuiltinRowStreamOp::Min),
-        BuiltinMethod::Max => Some(BuiltinRowStreamOp::Max),
-        BuiltinMethod::Any => Some(BuiltinRowStreamOp::Any),
-        BuiltinMethod::All => Some(BuiltinRowStreamOp::All),
-        BuiltinMethod::Map => Some(BuiltinRowStreamOp::Map),
-        _ => None,
-    }
+    id.method().and_then(|method| method.spec().row_stream_op)
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.

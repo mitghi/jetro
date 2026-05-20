@@ -12,7 +12,7 @@ use super::{
     BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
     BuiltinNumericReducer,
     BuiltinObjectLambda,
-    BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
+    BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
     BuiltinStringPairStage, BuiltinViewObjectProjection, BuiltinViewStage,
@@ -23,11 +23,11 @@ use super::{
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
 #[inline]
 fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
-    let logical = match reducer {
-        BuiltinNumericReducer::Sum => BuiltinLogicalShape::Sum,
-        BuiltinNumericReducer::Avg => BuiltinLogicalShape::Avg,
-        BuiltinNumericReducer::Min => BuiltinLogicalShape::Min,
-        BuiltinNumericReducer::Max => BuiltinLogicalShape::Max,
+    let (logical, row_op) = match reducer {
+        BuiltinNumericReducer::Sum => (BuiltinLogicalShape::Sum, BuiltinRowStreamOp::Sum),
+        BuiltinNumericReducer::Avg => (BuiltinLogicalShape::Avg, BuiltinRowStreamOp::Avg),
+        BuiltinNumericReducer::Min => (BuiltinLogicalShape::Min, BuiltinRowStreamOp::Min),
+        BuiltinNumericReducer::Max => (BuiltinLogicalShape::Max, BuiltinRowStreamOp::Max),
     };
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
@@ -35,6 +35,7 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::NumericReducer)
         .logical_shape(logical)
+        .row_stream_op(row_op)
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -75,6 +76,7 @@ fn filter_spec() -> BuiltinSpec {
         .expr_stage(BuiltinExprStage::Filter)
         .expr_payload(BuiltinExprPayload::PredicateScan)
         .logical_shape(BuiltinLogicalShape::Filter)
+        .row_stream_op(BuiltinRowStreamOp::Filter)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -140,6 +142,7 @@ impl Builtin for Find {
             .demand_law(BuiltinDemandLaw::FilterLike)
             .expr_stage(BuiltinExprStage::Filter)
             .logical_shape(BuiltinLogicalShape::FilterThenFirst)
+            .row_stream_op(BuiltinRowStreamOp::FindFirst)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -217,6 +220,7 @@ impl Builtin for Map {
             .expr_stage(BuiltinExprStage::Map)
             .expr_payload(BuiltinExprPayload::Projection)
             .logical_shape(BuiltinLogicalShape::Map)
+            .row_stream_op(BuiltinRowStreamOp::Map)
             .lowering(BuiltinPipelineLowering::ExprArg)
             .element()
     }
@@ -325,6 +329,7 @@ impl Builtin for Take {
             .demand_law(BuiltinDemandLaw::Take)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .logical_shape(BuiltinLogicalShape::Take)
+            .row_stream_op(BuiltinRowStreamOp::Take)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
 
@@ -439,6 +444,7 @@ impl Builtin for First {
             .select_one_sink(BuiltinSelectionPosition::First)
             .demand_law(BuiltinDemandLaw::First)
             .logical_shape(BuiltinLogicalShape::First)
+            .row_stream_op(BuiltinRowStreamOp::First)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -463,6 +469,7 @@ impl Builtin for Last {
             .select_one_sink(BuiltinSelectionPosition::Last)
             .demand_law(BuiltinDemandLaw::Last)
             .logical_shape(BuiltinLogicalShape::Last)
+            .row_stream_op(BuiltinRowStreamOp::Last)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -607,6 +614,7 @@ impl Builtin for Len {
             .indexed()
             .view_scalar()
             .raw_json_scalar(BuiltinRawJsonScalar::Len)
+            .row_stream_op(BuiltinRowStreamOp::Count)
             .count_sink()
     }
     #[inline]
@@ -672,6 +680,7 @@ impl Builtin for Count {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::Count)
             .logical_shape(BuiltinLogicalShape::Count)
+            .row_stream_op(BuiltinRowStreamOp::Count)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
@@ -715,6 +724,7 @@ impl Builtin for Any {
 
     fn spec() -> BuiltinSpec {
         predicate_terminal_sink_spec(BuiltinPredicateSink::Any)
+            .row_stream_op(BuiltinRowStreamOp::Any)
     }
 }
 
@@ -726,6 +736,7 @@ impl Builtin for All {
 
     fn spec() -> BuiltinSpec {
         predicate_terminal_sink_spec(BuiltinPredicateSink::All)
+            .row_stream_op(BuiltinRowStreamOp::All)
     }
 }
 
@@ -1086,6 +1097,7 @@ impl Builtin for FindOne {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .predicate_sink(BuiltinPredicateSink::FindOne)
             .cost(10.0)
+            .row_stream_op(BuiltinRowStreamOp::FindFirst)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
@@ -1575,6 +1587,7 @@ impl Builtin for UniqueBy {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
             .expr_stage(BuiltinExprStage::UniqueBy)
             .logical_shape(BuiltinLogicalShape::UniqueBy)
+            .row_stream_op(BuiltinRowStreamOp::DistinctBy)
     }
     #[inline]
     fn apply_barrier(
@@ -1601,6 +1614,7 @@ impl Builtin for Reverse {
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .nullary_stage(BuiltinNullaryStage::Reverse)
             .logical_shape(BuiltinLogicalShape::Reverse)
+            .row_stream_op(BuiltinRowStreamOp::Reverse)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]

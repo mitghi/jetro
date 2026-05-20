@@ -5,10 +5,8 @@
 //! It deliberately contains stream semantics only; byte/tape and materialized
 //! execution details live behind source/projector implementations.
 
-use crate::builtins::registry::{
-    by_name as builtin_by_name, row_stream_op, BuiltinId, BuiltinRowStreamOp,
-};
-use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
+use crate::builtins::registry::{by_name as builtin_by_name, row_stream_op, BuiltinId};
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinRowStreamOp};
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
 

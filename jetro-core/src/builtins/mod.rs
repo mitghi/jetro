@@ -646,6 +646,8 @@ pub struct BuiltinSpec {
     pub expr_payload: Option<BuiltinExprPayload>,
     /// Logical planner node shape, if this builtin participates in logical lowering.
     pub logical_shape: Option<BuiltinLogicalShape>,
+    /// Source-level `$.rows()` stream operation behavior, if legal in stream position.
+    pub row_stream_op: Option<BuiltinRowStreamOp>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -899,6 +901,41 @@ pub enum BuiltinLogicalShape {
     IndexBy,
     /// Nullary approximate distinct reducer.
     ApproxCountDistinct,
+}
+
+/// Source-level `$.rows()` stream operation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinRowStreamOp {
+    /// Toggle stream direction.
+    Reverse,
+    /// Keep rows matching the predicate.
+    Filter,
+    /// Keep the first row matching the predicate.
+    FindFirst,
+    /// Deduplicate rows by a key expression.
+    DistinctBy,
+    /// Keep a bounded prefix.
+    Take,
+    /// Keep the first row.
+    First,
+    /// Keep the last row.
+    Last,
+    /// Count retained rows.
+    Count,
+    /// Numeric sum over retained rows.
+    Sum,
+    /// Numeric average over retained rows.
+    Avg,
+    /// Numeric minimum over retained rows.
+    Min,
+    /// Numeric maximum over retained rows.
+    Max,
+    /// Predicate existential sink.
+    Any,
+    /// Predicate universal sink.
+    All,
+    /// Project each retained row.
+    Map,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1427,6 +1464,7 @@ impl BuiltinSpec {
             expr_stage: None,
             expr_payload: None,
             logical_shape: None,
+            row_stream_op: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1538,6 +1576,12 @@ impl BuiltinSpec {
     /// Attaches logical planner node shape.
     fn logical_shape(mut self, shape: BuiltinLogicalShape) -> Self {
         self.logical_shape = Some(shape);
+        self
+    }
+
+    /// Attaches source-level row-stream operation behavior.
+    fn row_stream_op(mut self, op: BuiltinRowStreamOp) -> Self {
+        self.row_stream_op = Some(op);
         self
     }
 
