@@ -12,7 +12,7 @@ use super::{Pipeline, PipelineBody, Plan, Source};
 
 /// Prepared nested plan execution metadata. The physical path and demand annotations are stable
 /// across rows; receiver-sourced plans only swap the receiver value before running.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(super) struct PreparedPlan {
     pipeline: Pipeline,
     receiver_source: bool,

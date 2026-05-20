@@ -56,7 +56,8 @@ pub use ir::{
 };
 pub use kernels::{eval_cmp_op, eval_kernel, BodyKernel};
 pub(crate) use kernels::{
-    eval_kernel_with_vm, eval_view_kernel, CollectLayout, ObjectKernel, ViewKernelValue,
+    eval_kernel_with_vm, eval_view_kernel, CollectLayout, NestedPlanKernel, ObjectKernel,
+    ViewKernelValue,
 };
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{

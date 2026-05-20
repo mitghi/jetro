@@ -21,6 +21,30 @@ use crate::parse::ast::{Expr, ObjField, Step};
 use crate::plan::demand::{FieldDemand, FieldSet};
 use crate::util::JsonView;
 
+/// Prepared nested collection pipeline carried by a classified body kernel.
+/// It keeps the original plan for demand analysis and a reusable prepared
+/// runner for row-by-row execution.
+#[derive(Debug, Clone)]
+pub struct NestedPlanKernel {
+    plan: Arc<super::Plan>,
+    prepared: super::nested::PreparedPlan,
+}
+
+impl NestedPlanKernel {
+    pub(crate) fn new(plan: Arc<super::Plan>) -> Self {
+        let prepared = super::nested::PreparedPlan::new(&plan);
+        Self { plan, prepared }
+    }
+
+    pub(crate) fn parent_field_demand(&self) -> FieldDemand {
+        self.plan.parent_field_demand()
+    }
+
+    pub(crate) fn run(&self, seed: Val) -> Result<Val, EvalError> {
+        self.prepared.run(seed)
+    }
+}
+
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
 #[derive(Debug, Clone)]
 pub enum BodyKernel {
@@ -119,8 +143,8 @@ pub enum BodyKernel {
         /// Optional per-child predicate applied before counting.
         predicate: Option<Box<BodyKernel>>,
     },
-    /// Runs a nested collection pipeline against the current row.
-    NestedPlan(Arc<super::Plan>),
+    /// Runs a prepared nested collection pipeline against the current row.
+    NestedPlan(Arc<NestedPlanKernel>),
 }
 
 fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
@@ -501,12 +525,16 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
             Step::Method(name, args) => {
                 let Some(call) = BuiltinCall::from_literal_ast_args(name.as_str(), args) else {
                     return super::lower::try_decode_map_body(&nested_arg)
-                        .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
+                        .map(|plan| {
+                            BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(plan))))
+                        })
                         .unwrap_or(BodyKernel::Generic);
                 };
                 if !view_projection(BuiltinId::from_method(call.method)) {
                     return super::lower::try_decode_map_body(&nested_arg)
-                        .map(|plan| BodyKernel::NestedPlan(Arc::new(plan)))
+                        .map(|plan| {
+                            BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(plan))))
+                        })
                         .unwrap_or(BodyKernel::Generic);
                 }
                 receiver = BodyKernel::BuiltinCall {
@@ -1562,7 +1590,7 @@ fn eval_native_kernel_with_vm(
         BodyKernel::NestedArrayCount { source, predicate } => {
             eval_nested_array_count_native(source, predicate.as_deref(), item, vm)
         }
-        BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.clone()),
+        BodyKernel::NestedPlan(plan) => plan.run(item.clone()),
         BodyKernel::BuiltinCall { receiver, call } => {
             let recv = eval_native_kernel_with_vm(receiver, item, vm)?;
             call.try_apply(&recv)?
@@ -2371,7 +2399,7 @@ where
             eval_nested_array_count_view(source, predicate.as_deref(), item)
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::NestedPlan(plan) => super::nested::run_plan(plan, item.materialize())
+        BodyKernel::NestedPlan(plan) => plan.run(item.materialize())
             .ok()
             .map(ViewKernelValue::Owned),
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm.as_deref_mut())? {

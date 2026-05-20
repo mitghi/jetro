@@ -550,7 +550,9 @@ impl Stage {
     /// Classifies the stage body program, returning `Generic` for stages without a body.
     pub(crate) fn body_kernel(&self) -> BodyKernel {
         if let Stage::CompiledMap(plan) = self {
-            return BodyKernel::NestedPlan(Arc::clone(plan));
+            return BodyKernel::NestedPlan(Arc::new(super::NestedPlanKernel::new(Arc::clone(
+                plan,
+            ))));
         }
         self.body_program()
             .map(BodyKernel::classify)
@@ -1367,7 +1369,9 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
             let kernel = kernel?;
             kernel.is_view_native().then(|| kernel.clone())
         }
-        Stage::CompiledMap(plan) => Some(BodyKernel::NestedPlan(Arc::clone(plan))),
+        Stage::CompiledMap(plan) => Some(BodyKernel::NestedPlan(Arc::new(
+            super::NestedPlanKernel::new(Arc::clone(plan)),
+        ))),
         Stage::Builtin(call)
             if builtin_is_pure(BuiltinId::from_method(call.method))
                 && crate::builtins::registry::view_projection(BuiltinId::from_method(call.method))
