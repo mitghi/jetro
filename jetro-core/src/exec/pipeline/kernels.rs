@@ -292,13 +292,20 @@ impl ObjectKernel {
     }
 
     /// Evaluates each entry against `item`, appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
-    pub(crate) fn eval_view_row_cells<'a, V>(&self, item: &V, cells: &mut Vec<Val>) -> Option<bool>
+    /// Evaluates each entry against `item` using caller-owned VM state,
+    /// appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
+    pub(crate) fn eval_view_row_cells_with_vm<'a, V>(
+        &self,
+        item: &V,
+        cells: &mut Vec<Val>,
+        vm: &mut crate::vm::VM,
+    ) -> Option<bool>
     where
         V: ValueView<'a>,
     {
         let start = cells.len();
         for entry in self.entries.iter() {
-            let value = match eval_view_kernel(&entry.value, item)? {
+            let value = match eval_view_kernel_with_vm(&entry.value, item, vm)? {
                 ViewKernelValue::View(view) => {
                     scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
                 }

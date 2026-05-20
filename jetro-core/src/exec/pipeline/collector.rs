@@ -45,18 +45,19 @@ impl<'a> TerminalCollector<'a> {
         }
     }
 
-    /// Evaluates `item` via a generic row program on the zero-copy view path.
-    pub(crate) fn push_view_program<'v, V>(
+    /// Evaluates `item` via a row program on the zero-copy view path using caller-owned VM state.
+    pub(crate) fn push_view_program_with_vm<'v, V>(
         &mut self,
         item: &V,
         program: &RowProgram,
+        vm: &mut crate::vm::VM,
     ) -> Option<()>
     where
         V: ValueView<'v>,
     {
         match self {
-            Self::Values(values) => values.push(eval_view_program_value(item, program)?),
-            Self::UniformObject(collector) => collector.push_view_row(item)?,
+            Self::Values(values) => values.push(eval_view_program_value_with_vm(item, program, vm)?),
+            Self::UniformObject(collector) => collector.push_view_row_with_vm(item, vm)?,
         }
         Some(())
     }
@@ -94,18 +95,24 @@ impl<'a> TerminalCollector<'a> {
 pub(crate) type TerminalMapCollector<'a> = TerminalCollector<'a>;
 
 impl<'a> UniformObjectCollector<'a> {
-    // switches to the overflow path when a row breaks shape uniformity
-    fn push_view_row<'v, V>(&mut self, item: &V) -> Option<()>
+    fn push_view_row_with_vm<'v, V>(&mut self, item: &V, vm: &mut crate::vm::VM) -> Option<()>
     where
         V: ValueView<'v>,
     {
         if let Some(rows) = self.rows.as_mut() {
-            rows.push(eval_view_object_value(item, self.object)?);
+            rows.push(eval_view_object_value_with_vm(item, self.object, vm)?);
             return Some(());
         }
 
-        if !self.object.eval_view_row_cells(item, &mut self.cells)? {
-            self.flush_cells_to_rows_with(eval_view_object_value(item, self.object)?);
+        if !self
+            .object
+            .eval_view_row_cells_with_vm(item, &mut self.cells, vm)?
+        {
+            self.flush_cells_to_rows_with(eval_view_object_value_with_vm(
+                item,
+                self.object,
+                vm,
+            )?);
         }
         Some(())
     }
@@ -144,11 +151,15 @@ impl<'a> UniformObjectCollector<'a> {
     }
 }
 
-fn eval_view_value<'a, V>(item: &V, kernel: &BodyKernel) -> Option<Val>
+fn eval_view_program_value_with_vm<'a, V>(
+    item: &V,
+    program: &RowProgram,
+    vm: &mut crate::vm::VM,
+) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    match super::eval_view_kernel(kernel, item)? {
+    match program.eval_view_with_vm(item, vm)? {
         ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }
@@ -156,23 +167,20 @@ where
     }
 }
 
-fn eval_view_program_value<'a, V>(item: &V, program: &RowProgram) -> Option<Val>
+fn eval_view_object_value_with_vm<'a, V>(
+    item: &V,
+    object: &ObjectKernel,
+    vm: &mut crate::vm::VM,
+) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    match program.eval_view(item)? {
+    match super::eval_view_kernel_with_vm(&BodyKernel::Object(object.clone()), item, vm)? {
         ViewKernelValue::View(view) => {
             scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
         }
         ViewKernelValue::Owned(value) => Some(value),
     }
-}
-
-fn eval_view_object_value<'a, V>(item: &V, object: &ObjectKernel) -> Option<Val>
-where
-    V: ValueView<'a>,
-{
-    eval_view_value(item, &BodyKernel::Object(object.clone()))
 }
 
 fn row_small_object(keys: &[Arc<str>], cells: &[Val]) -> Val {

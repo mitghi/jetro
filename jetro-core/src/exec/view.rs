@@ -385,8 +385,8 @@ where
         &body.stage_kernels,
         plan.source_demand,
         vm,
-        |item, _vm| {
-            collector.push_view_program(item, &plan.collect_program)?;
+        |item, vm| {
+            collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
             Some(ViewRowAction::Emit)
         },
     )?;
@@ -991,8 +991,8 @@ where
         stage_kernels,
         plan.source_demand,
         vm,
-        |item, _vm| {
-            collector.push_view_program(item, &plan.collect_program)?;
+        |item, vm| {
+            collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
             Some(ViewRowAction::Emit)
         },
     )?;

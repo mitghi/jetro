@@ -13,7 +13,7 @@ use crate::{
     vm::Program,
 };
 
-use super::{eval_view_kernel, eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
+use super::{eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
 #[cfg(test)]
 use super::eval_kernel;
 
@@ -57,14 +57,6 @@ impl RowProgram {
         })
     }
 
-    /// Evaluates this row program against a borrowed row view.
-    pub(crate) fn eval_view<'a, V>(&self, row: &V) -> Option<ViewKernelValue<V>>
-    where
-        V: ValueView<'a>,
-    {
-        eval_view_kernel(&self.kernel, row)
-    }
-
     /// Evaluates this row program against a borrowed row view using caller-owned
     /// VM state for nested fallback paths.
     pub(crate) fn eval_view_with_vm<'a, V>(
@@ -102,7 +94,11 @@ mod tests {
 
         let row: Val = (&json!({"id": 7, "price": 12, "qty": 3})).into();
         let val_out = row_program.eval_val(&row).unwrap();
-        let view_out = match row_program.eval_view(&ValView::new(&row)).unwrap() {
+        let mut vm = crate::vm::VM::new();
+        let view_out = match row_program
+            .eval_view_with_vm(&ValView::new(&row), &mut vm)
+            .unwrap()
+        {
             ViewKernelValue::View(view) => view.materialize(),
             ViewKernelValue::Owned(value) => value,
         };
