@@ -424,7 +424,7 @@ impl<'a> StageDescriptor<'a> {
         }
     }
 
-    // Used for stages with no builtin method (SortedDedup, CompiledMap synthetics).
+    // Used for synthetic stages with no builtin method (currently SortedDedup).
     #[inline]
     pub(crate) fn special() -> Self {
         Self {
@@ -671,7 +671,7 @@ impl Stage {
                 })
             }
             Stage::CompiledMap(_) => {
-                Some(StageDescriptor::special().receiver_unsafe_without_body())
+                Some(StageDescriptor::new(BuiltinMethod::Map).receiver_unsafe_without_body())
             }
             _ => None,
         }
@@ -778,7 +778,6 @@ impl Stage {
     /// or `None` for stages that do not participate in demand propagation.
     pub fn chain_op(&self) -> Option<ChainOp> {
         match self {
-            Stage::CompiledMap(_) => Some(ChainOp::builtin(BuiltinMethod::Map)),
             Stage::SortedDedup(_) => None,
             // Filter and Map whose body is a single `match` expression
             // are reported as `ChainOp::Match` so the demand model can
@@ -842,10 +841,9 @@ impl Stage {
         }
     }
 
-    // Hard-coded overrides for CompiledMap (Preserves) and SortedDedup (Blocks).
+    // Synthetic stages without builtin metadata conservatively block order propagation.
     fn pipeline_order_effect(&self) -> BuiltinPipelineOrderEffect {
         match self {
-            Stage::CompiledMap(_) => BuiltinPipelineOrderEffect::Preserves,
             Stage::SortedDedup(_) => BuiltinPipelineOrderEffect::Blocks,
             _ => self
                 .descriptor()
@@ -858,12 +856,6 @@ impl Stage {
     /// stage, used by the planner for strategy selection and filter reordering.
     pub fn shape(&self) -> StageShape {
         match self {
-            Stage::CompiledMap(_) => StageShape {
-                cardinality: BuiltinCardinality::OneToOne,
-                can_indexed: true,
-                cost: 10.0,
-                selectivity: 1.0,
-            },
             Stage::SortedDedup(_) => StageShape {
                 cardinality: BuiltinCardinality::OneToOne,
                 can_indexed: true,
