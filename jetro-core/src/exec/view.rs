@@ -1423,9 +1423,9 @@ mod tests {
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
-        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-        PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink, SourceCapabilities, Stage,
-        ViewSinkCapability, ViewStageCapability,
+        eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
+        MembershipSinkTarget, PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink,
+        SourceCapabilities, Stage, ViewKernelValue, ViewSinkCapability, ViewStageCapability,
     };
     use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
@@ -1571,6 +1571,22 @@ mod tests {
         assert_eq!(observed.get(), 0);
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn nested_plan_kernel_runs_on_view_without_materializing_row() {
+        let expr = crate::parse::parser::parse("items.map(@ * 2).sum()").expect("parse");
+        let kernel = BodyKernel::classify_expr(&expr);
+        let source = CountingView::root(&[1, 2, 3]);
+        let row = source.index(0);
+
+        let out = eval_view_kernel(&kernel, &row).and_then(|value| match value {
+            ViewKernelValue::Owned(value) => Some(value),
+            ViewKernelValue::View(view) => Some(view.materialize()),
+        });
+
+        assert_eq!(out, Some(Val::Int(12)));
         assert_eq!(source.materialize_reads(), 0);
     }
 
