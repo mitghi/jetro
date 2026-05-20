@@ -6,7 +6,8 @@ use super::ndjson_direct::{
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
-    view_object_projection, view_scalar_projection, BuiltinId, BuiltinViewObjectProjection,
+    raw_json_scalar, view_object_projection, view_scalar_projection, BuiltinId,
+    BuiltinRawJsonScalar, BuiltinViewObjectProjection,
 };
 use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
 use crate::data::value::Val;
@@ -870,7 +871,9 @@ fn write_raw_scalar_call<W: Write>(
             "unsupported raw scalar call".to_string(),
         )));
     };
-    if call.method == BuiltinMethod::Len && matches!(call.args, BuiltinArgs::None) {
+    if raw_json_scalar(BuiltinId::from_method(call.method), &call.args)
+        == Some(BuiltinRawJsonScalar::Len)
+    {
         let Some(len) = raw_json_view_len(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw len call".to_string(),
@@ -1020,12 +1023,9 @@ fn write_raw_string_case_call<W: Write>(
     call: &BuiltinCall,
 ) -> Result<bool, JetroEngineError> {
     let method = call.method;
-    if !matches!(call.args, BuiltinArgs::None) {
+    let Some(op) = raw_json_scalar(BuiltinId::from_method(method), &call.args) else {
         return Ok(false);
-    }
-    if !matches!(method, BuiltinMethod::Upper | BuiltinMethod::Lower) {
-        return Ok(false);
-    }
+    };
     let start = skip_json_ws(value, 0);
     let Some((s, next)) = parse_simple_json_string(value, start) else {
         return Ok(false);
@@ -1034,18 +1034,18 @@ fn write_raw_string_case_call<W: Write>(
         return Ok(false);
     }
     writer.write_all(b"\"")?;
-    match method {
-        BuiltinMethod::Upper => {
+    match op {
+        BuiltinRawJsonScalar::AsciiUpper => {
             for &byte in s {
                 writer.write_all(&[byte.to_ascii_uppercase()])?;
             }
         }
-        BuiltinMethod::Lower => {
+        BuiltinRawJsonScalar::AsciiLower => {
             for &byte in s {
                 writer.write_all(&[byte.to_ascii_lowercase()])?;
             }
         }
-        _ => unreachable!("case method checked"),
+        BuiltinRawJsonScalar::Len => return Ok(false),
     }
     writer.write_all(b"\"")?;
     Ok(true)

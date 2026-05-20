@@ -278,6 +278,18 @@ pub(crate) enum BuiltinArraySelector {
     Nth,
 }
 
+/// Raw-byte JSON scalar operation that can be executed before building a
+/// `JsonView` or materialising a `Val`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinRawJsonScalar {
+    /// Compute string/array/object length directly from raw JSON.
+    Len,
+    /// ASCII-only string uppercasing can be written without allocation.
+    AsciiUpper,
+    /// ASCII-only string lowercasing can be written without allocation.
+    AsciiLower,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -958,6 +970,24 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
 pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
     id.method()
         .is_some_and(BuiltinMethod::is_view_scalar_method)
+}
+
+/// Return raw-byte scalar execution support for builtin `id`, if the operation
+/// can be served directly from a JSON value slice with the given static args.
+#[inline]
+pub(crate) fn raw_json_scalar(
+    id: BuiltinId,
+    args: &crate::builtins::BuiltinArgs,
+) -> Option<BuiltinRawJsonScalar> {
+    if !matches!(args, crate::builtins::BuiltinArgs::None) {
+        return None;
+    }
+    match id.method()? {
+        BuiltinMethod::Len => Some(BuiltinRawJsonScalar::Len),
+        BuiltinMethod::Upper => Some(BuiltinRawJsonScalar::AsciiUpper),
+        BuiltinMethod::Lower => Some(BuiltinRawJsonScalar::AsciiLower),
+        _ => None,
+    }
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
@@ -2183,6 +2213,47 @@ mod tests {
         assert!(!view_scalar_projection(BuiltinId::from_method(
             BuiltinMethod::Sort
         )));
+    }
+
+    #[test]
+    fn registry_drives_raw_json_scalar_ops() {
+        use crate::builtins::BuiltinArgs;
+
+        assert_eq!(
+            raw_json_scalar(
+                BuiltinId::from_method(BuiltinMethod::Len),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinRawJsonScalar::Len)
+        );
+        assert_eq!(
+            raw_json_scalar(
+                BuiltinId::from_method(BuiltinMethod::Upper),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinRawJsonScalar::AsciiUpper)
+        );
+        assert_eq!(
+            raw_json_scalar(
+                BuiltinId::from_method(BuiltinMethod::Lower),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinRawJsonScalar::AsciiLower)
+        );
+        assert_eq!(
+            raw_json_scalar(
+                BuiltinId::from_method(BuiltinMethod::Upper),
+                &BuiltinArgs::Str(std::sync::Arc::from("x"))
+            ),
+            None
+        );
+        assert_eq!(
+            raw_json_scalar(
+                BuiltinId::from_method(BuiltinMethod::Sort),
+                &BuiltinArgs::None
+            ),
+            None
+        );
     }
 
     #[test]
