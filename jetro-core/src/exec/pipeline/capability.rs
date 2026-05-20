@@ -156,6 +156,23 @@ pub(crate) enum SourceAccessMode {
     MaterializedFallback,
 }
 
+impl SourceAccessMode {
+    /// Demand that should be handed to a row iterator after this access mode has been selected.
+    pub(crate) fn iterator_demand(self, requested: PullDemand) -> PullDemand {
+        match self {
+            Self::Reverse { outputs } => PullDemand::LastInput(outputs),
+            Self::ForwardBounded(inputs) => PullDemand::FirstInput(inputs),
+            Self::Indexed(_) | Self::IndexedFromEnd(_) => PullDemand::All,
+            Self::Forward | Self::MaterializedFallback
+                if matches!(requested, PullDemand::LastInput(_)) =>
+            {
+                PullDemand::All
+            }
+            Self::Forward | Self::MaterializedFallback => requested,
+        }
+    }
+}
+
 #[cfg(test)]
 mod source_capability_tests {
     use super::{SourceAccessMode, SourceCapabilities, ViewStageCapability};
@@ -340,6 +357,26 @@ mod source_capability_tests {
         assert_eq!(
             fallback_only.choose_access(PullDemand::All),
             SourceAccessMode::MaterializedFallback
+        );
+    }
+
+    #[test]
+    fn access_mode_rewrites_iterator_demand_after_fallback_choice() {
+        assert_eq!(
+            SourceAccessMode::Reverse { outputs: 2 }.iterator_demand(PullDemand::LastInput(10)),
+            PullDemand::LastInput(2)
+        );
+        assert_eq!(
+            SourceAccessMode::ForwardBounded(3).iterator_demand(PullDemand::All),
+            PullDemand::FirstInput(3)
+        );
+        assert_eq!(
+            SourceAccessMode::Indexed(4).iterator_demand(PullDemand::NthInput(4)),
+            PullDemand::All
+        );
+        assert_eq!(
+            SourceAccessMode::Forward.iterator_demand(PullDemand::LastInput(1)),
+            PullDemand::All
         );
     }
 

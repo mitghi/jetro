@@ -496,7 +496,7 @@ where
     }
     let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
-        pipeline::SourceAccessMode::Reverse { outputs } => {
+        pipeline::SourceAccessMode::Reverse { .. } => {
             let len = match source.scalar() {
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
@@ -506,7 +506,7 @@ where
                 items,
                 stages,
                 stage_kernels,
-                PullDemand::LastInput(outputs),
+                access.iterator_demand(source_demand),
                 vm,
                 observe,
             );
@@ -547,10 +547,7 @@ where
         pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
     }
     let items = source.array_iter()?;
-    let iter_demand = match source_demand {
-        PullDemand::LastInput(_) => PullDemand::All,
-        other => other,
-    };
+    let iter_demand = access.iterator_demand(source_demand);
     drive_view_iter(items, stages, stage_kernels, iter_demand, vm, observe)
 }
 
