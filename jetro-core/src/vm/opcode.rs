@@ -410,13 +410,6 @@ pub struct CompiledMatch {
     /// run before the first `ResetArm`) can write into projection slots
     /// without underflow.
     pub max_slots: u16,
-    /// `true` when at least one arm has an unconditional catch-all
-    /// pattern (`_` or a bare `Bind`) with no guard. Tooling and
-    /// future analysers consume this flag; the runtime always produces
-    /// the same non-exhaustive error if every arm misses, regardless of
-    /// the flag value.
-    #[allow(dead_code)]
-    pub is_exhaustive: bool,
     /// Shape summary describing what the structural backend can serve
     /// from a bitmap index without touching the document body. `None`
     /// means the match has no exploitable structure (mixed shapes,

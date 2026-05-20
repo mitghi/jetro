@@ -1410,9 +1410,6 @@ pub(crate) fn compile_match(
         bodies: Arc::from(b.bodies),
         subpats: Arc::from(b.subpats),
         max_slots,
-        is_exhaustive: arms
-            .iter()
-            .any(|a| a.guard.is_none() && matches!(a.pat, Pat::Wild | Pat::Bind(_))),
         shape_summary: derive_shape_summary(arms),
     }
 }
