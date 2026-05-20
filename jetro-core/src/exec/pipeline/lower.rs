@@ -10,14 +10,13 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_category, builtin_sink, by_name, cancellation as builtin_cancellation,
-    count_sink_accepts_predicate, expr_stage, nullary_stage, pipeline_accepts_arity,
-    pipeline_lowering, view_stage, BuiltinId,
+    builtin_sink, by_name, cancellation as builtin_cancellation, count_sink_accepts_predicate,
+    expr_stage, nullary_stage, pipeline_accepts_arity, pipeline_chain_operator,
+    pipeline_lowering, pipeline_stage_is_positional, view_stage, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCategory, BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage,
-    BuiltinPipelineLowering, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinViewStage,
+    BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
+    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -188,19 +187,7 @@ fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> boo
         let Step::Method(name, _) = step else {
             return false;
         };
-        matches!(
-            by_name(name.as_str()).and_then(builtin_category),
-            Some(
-                BuiltinCategory::StreamingOneToOne
-                    | BuiltinCategory::StreamingFilter
-                    | BuiltinCategory::StreamingExpand
-                    | BuiltinCategory::Reducer
-                    | BuiltinCategory::Positional
-                    | BuiltinCategory::Barrier
-                    | BuiltinCategory::Deep
-                    | BuiltinCategory::Relational,
-            )
-        )
+        by_name(name.as_str()).is_some_and(pipeline_chain_operator)
     })
 }
 
@@ -407,13 +394,13 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
 }
 
 fn is_take_stage(stage: &Stage) -> bool {
-    matches!(
-        stage,
-        Stage::UsizeBuiltin {
-            method: BuiltinMethod::Take,
-            ..
-        }
-    )
+    stage
+        .descriptor()
+        .and_then(|desc| desc.method)
+        .is_some_and(|method| {
+            method == BuiltinMethod::Take
+                && pipeline_stage_is_positional(BuiltinId::from_method(method))
+        })
 }
 
 // Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode; detects constant filter stages.

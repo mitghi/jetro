@@ -189,6 +189,25 @@ pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
     matches!(id.method(), Some(BuiltinMethod::Sort | BuiltinMethod::Reverse))
 }
 
+/// Return true when a builtin category is meaningful as a collection/pipeline
+/// operator in a trailing method chain.
+#[inline]
+pub(crate) fn pipeline_chain_operator(id: BuiltinId) -> bool {
+    matches!(
+        builtin_category(id),
+        Some(
+            BuiltinCategory::StreamingOneToOne
+                | BuiltinCategory::StreamingFilter
+                | BuiltinCategory::StreamingExpand
+                | BuiltinCategory::Reducer
+                | BuiltinCategory::Positional
+                | BuiltinCategory::Barrier
+                | BuiltinCategory::Deep
+                | BuiltinCategory::Relational
+        )
+    )
+}
+
 /// Return object-lambda behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {
@@ -1549,6 +1568,15 @@ mod tests {
         )));
         assert!(!pipeline_stage_is_order_only(BuiltinId::from_method(
             BuiltinMethod::Append
+        )));
+        assert!(pipeline_chain_operator(BuiltinId::from_method(
+            BuiltinMethod::Map
+        )));
+        assert!(pipeline_chain_operator(BuiltinId::from_method(
+            BuiltinMethod::DeepFind
+        )));
+        assert!(!pipeline_chain_operator(BuiltinId::from_method(
+            BuiltinMethod::Upper
         )));
     }
 
