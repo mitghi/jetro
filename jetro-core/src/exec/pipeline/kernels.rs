@@ -1931,7 +1931,12 @@ where
     let source = match eval_view_kernel_inner(source, item, vm.as_deref_mut())? {
         ViewKernelValue::View(view) => view,
         ViewKernelValue::Owned(value) => {
-            return eval_nested_array_reducer_native_owned(value, predicate, map, op)
+            return match vm {
+                Some(vm) => eval_nested_array_reducer_native_owned_with_vm(
+                    value, predicate, map, op, vm,
+                ),
+                None => eval_nested_array_reducer_native_owned(value, predicate, map, op),
+            }
         }
     };
     let mut iter = source.array_iter()?;
@@ -2022,7 +2027,10 @@ where
     let source = match eval_view_kernel_inner(source, item, vm.as_deref_mut())? {
         ViewKernelValue::View(view) => view,
         ViewKernelValue::Owned(value) => {
-            return eval_nested_array_count_native_owned(value, predicate)
+            return match vm {
+                Some(vm) => eval_nested_array_count_native_owned_with_vm(value, predicate, vm),
+                None => eval_nested_array_count_native_owned(value, predicate),
+            }
         }
     };
     let Some(predicate) = predicate else {
@@ -2213,6 +2221,17 @@ fn eval_nested_array_reducer_native_owned(
     map: Option<&BodyKernel>,
     op: super::NumOp,
 ) -> Option<Val> {
+    let mut vm = crate::vm::VM::new();
+    eval_nested_array_reducer_native_owned_with_vm(source, predicate, map, op, &mut vm)
+}
+
+fn eval_nested_array_reducer_native_owned_with_vm(
+    source: Val,
+    predicate: Option<&BodyKernel>,
+    map: Option<&BodyKernel>,
+    op: super::NumOp,
+    vm: &mut crate::vm::VM,
+) -> Option<Val> {
     let Some(items) = source.as_vals() else {
         return Some(op.empty());
     };
@@ -2223,13 +2242,13 @@ fn eval_nested_array_reducer_native_owned(
     let mut max_f = f64::NEG_INFINITY;
     let mut n_obs = 0usize;
     for child in items.iter() {
-        if !native_predicate_matches_opt(predicate, child)? {
+        if !native_predicate_matches_opt_with_vm(predicate, child, vm)? {
             continue;
         }
         let value;
         let observed = match map {
             Some(map) => {
-                value = eval_native_kernel(map, child).ok()?;
+                value = eval_native_kernel_with_vm(map, child, vm).ok()?;
                 &value
             }
             None => child,
@@ -2254,6 +2273,15 @@ fn eval_nested_array_count_native_owned(
     source: Val,
     predicate: Option<&BodyKernel>,
 ) -> Option<Val> {
+    let mut vm = crate::vm::VM::new();
+    eval_nested_array_count_native_owned_with_vm(source, predicate, &mut vm)
+}
+
+fn eval_nested_array_count_native_owned_with_vm(
+    source: Val,
+    predicate: Option<&BodyKernel>,
+    vm: &mut crate::vm::VM,
+) -> Option<Val> {
     let Some(items) = source.as_vals() else {
         return Some(Val::Int(0));
     };
@@ -2262,7 +2290,7 @@ fn eval_nested_array_count_native_owned(
     };
     let mut count = 0i64;
     for child in items.iter() {
-        if native_predicate_matches_opt(Some(predicate), child)? {
+        if native_predicate_matches_opt_with_vm(Some(predicate), child, vm)? {
             count += 1;
         }
     }
@@ -2270,9 +2298,13 @@ fn eval_nested_array_count_native_owned(
 }
 
 #[inline]
-fn native_predicate_matches_opt(predicate: Option<&BodyKernel>, item: &Val) -> Option<bool> {
+fn native_predicate_matches_opt_with_vm(
+    predicate: Option<&BodyKernel>,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+) -> Option<bool> {
     match predicate {
-        Some(predicate) => eval_native_kernel(predicate, item)
+        Some(predicate) => eval_native_kernel_with_vm(predicate, item, vm)
             .ok()
             .map(|value| crate::util::is_truthy(&value)),
         None => Some(true),
