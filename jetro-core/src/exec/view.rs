@@ -51,7 +51,7 @@ where
     if let Some(result) = run_terminal_collect(source.clone(), body) {
         return Some(result);
     }
-    if let Some(result) = run_terminal_select_projection(source.clone(), body) {
+    if let Some(result) = run_terminal_select_projection(source.clone(), body, vm) {
         return Some(result);
     }
     if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
@@ -395,6 +395,7 @@ where
 fn run_terminal_select_projection<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -445,7 +446,7 @@ where
                     return Some(ViewRowAction::Emit);
                 }
             }
-            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            selected = eval_owned_scalar_or_value_kernel_with_vm(item, &project_kernel, vm)?;
             seen = true;
             Some(match position {
                 TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
@@ -934,6 +935,7 @@ where
         body,
         plan.sort_stage + 1,
         false,
+        vm,
     ) {
         return Some(out);
     }
@@ -987,6 +989,7 @@ fn run_sorted_rows_terminal_select_projection_suffix<'a, V>(
     body: &pipeline::PipelineBody,
     suffix_start: usize,
     source_reversed: bool,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -1007,7 +1010,11 @@ where
             &body.stage_kernels,
             source_demand,
             |item| {
-                selected.push(eval_owned_scalar_or_value_kernel(item, &project_kernel)?);
+                selected.push(eval_owned_scalar_or_value_kernel_with_vm(
+                    item,
+                    &project_kernel,
+                    vm,
+                )?);
                 Some(ViewRowAction::Emit)
             },
         )?;
@@ -1051,7 +1058,7 @@ where
                     return Some(ViewRowAction::Skip);
                 }
             }
-            selected = eval_owned_scalar_or_value_kernel(item, &project_kernel)?;
+            selected = eval_owned_scalar_or_value_kernel_with_vm(item, &project_kernel, vm)?;
             seen = true;
             Some(match position {
                 TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
@@ -1148,6 +1155,7 @@ where
         body,
         plan.sort_stage + 1,
         source_reversed,
+        vm,
     ) {
         return Some(out);
     }
@@ -1380,21 +1388,6 @@ where
     }
 }
 
-/// Evaluates `kernel` against `item` and extracts a scalar `Val`. For view
-/// results, attempts a direct scalar conversion before falling back to full
-/// materialisation.
-fn eval_owned_scalar_or_value_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<Val>
-where
-    V: ValueView<'a>,
-{
-    match pipeline::eval_view_kernel(kernel, item)? {
-        pipeline::ViewKernelValue::View(view) => {
-            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
-        }
-        pipeline::ViewKernelValue::Owned(value) => Some(value),
-    }
-}
-
 fn eval_owned_scalar_or_value_kernel_with_vm<'a, V>(
     item: &V,
     kernel: &pipeline::BodyKernel,
@@ -1458,6 +1451,7 @@ mod tests {
     use crate::data::context::Env;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
+    use crate::vm::VM;
     use crate::exec::pipeline::{
         eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
         MembershipSinkTarget, PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink,
@@ -1895,7 +1889,8 @@ mod tests {
             stage_kernels: vec![BodyKernel::Current],
             sink_kernels: Vec::new(),
         };
-        let first = super::run_terminal_select_projection(first_source.clone(), &first_body)
+        let mut vm = VM::new();
+        let first = super::run_terminal_select_projection(first_source.clone(), &first_body, &mut vm)
             .unwrap()
             .unwrap();
         assert_eq!(first, Val::Int(1));
@@ -1907,7 +1902,7 @@ mod tests {
             sink: Sink::Terminal(crate::builtins::BuiltinMethod::Last),
             ..first_body
         };
-        let last = super::run_terminal_select_projection(last_source.clone(), &last_body)
+        let last = super::run_terminal_select_projection(last_source.clone(), &last_body, &mut vm)
             .unwrap()
             .unwrap();
         assert_eq!(last, Val::Int(4));
@@ -1946,7 +1941,7 @@ mod tests {
             stage_kernels: vec![BodyKernel::Current],
             sink_kernels: Vec::new(),
         };
-        let nth = super::run_terminal_select_projection(nth_source.clone(), &nth_body)
+        let nth = super::run_terminal_select_projection(nth_source.clone(), &nth_body, &mut vm)
             .unwrap()
             .unwrap();
         assert_eq!(nth, Val::Int(3));
