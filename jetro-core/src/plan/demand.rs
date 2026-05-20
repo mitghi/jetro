@@ -10,9 +10,6 @@ use std::sync::Arc;
 /// needs to read, used to skip deserialisation or evaluation work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
-    /// The stage only needs to know the element exists; payload can be skipped.
-    #[allow(dead_code)]
-    None,
     /// The stage only counts matching elements; payload can be skipped unless predicates need it.
     CountOnly,
     /// The stage only needs to know whether at least one element exists.
@@ -30,10 +27,7 @@ pub enum ValueNeed {
 impl ValueNeed {
     /// Returns `true` when satisfying this need requires reading row payload.
     pub(crate) fn requires_payload(self) -> bool {
-        !matches!(
-            self,
-            ValueNeed::None | ValueNeed::CountOnly | ValueNeed::ExistsOnly
-        )
+        !matches!(self, ValueNeed::CountOnly | ValueNeed::ExistsOnly)
     }
 
     /// Return the stricter of two `ValueNeed` values; `Whole` dominates all others.
@@ -45,8 +39,7 @@ impl ValueNeed {
             (Projection, _) | (_, Projection) => Projection,
             (Predicate, _) | (_, Predicate) => Predicate,
             (ExistsOnly, _) | (_, ExistsOnly) => ExistsOnly,
-            (CountOnly, _) | (_, CountOnly) => CountOnly,
-            (None, None) => None,
+            (CountOnly, CountOnly) => CountOnly,
         }
     }
 }
