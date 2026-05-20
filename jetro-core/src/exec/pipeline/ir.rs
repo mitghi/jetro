@@ -14,7 +14,8 @@ use crate::builtins::registry::{
     effective_pipeline_shape, expr_payload, expr_stage_elidable_when_value_unused,
     is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
     pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_stage_consumes_value,
-    pipeline_streams, sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
+    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
+    sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
@@ -733,19 +734,17 @@ impl Stage {
     /// Returns `true` when this stage uses a positional / bounded executor (e.g. `Take`, `Skip`),
     /// meaning order must be preserved upstream.
     pub(crate) fn is_positional_stage(&self) -> bool {
-        matches!(
-            self,
-            Stage::UsizeBuiltin {
-                method: BuiltinMethod::Take | BuiltinMethod::Skip,
-                ..
-            }
-        )
+        self.descriptor()
+            .and_then(|desc| desc.method)
+            .is_some_and(|method| pipeline_stage_is_positional(BuiltinId::from_method(method)))
     }
 
     /// Returns `true` when this stage only changes element order without affecting membership
     /// (e.g. `Sort`, `Reverse`), allowing the demand optimiser to drop it when order is unused.
     pub(crate) fn is_order_only_stage(&self) -> bool {
-        matches!(self, Stage::Sort(_) | Stage::Reverse(_))
+        self.descriptor()
+            .and_then(|desc| desc.method)
+            .is_some_and(|method| pipeline_stage_is_order_only(BuiltinId::from_method(method)))
     }
 
     /// Returns `true` when the stage reads the actual element value rather than just membership

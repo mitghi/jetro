@@ -176,6 +176,19 @@ pub(crate) fn pipeline_stage_consumes_value(id: BuiltinId, has_body: bool) -> bo
     )
 }
 
+/// Return true when the stage enforces an input-position window while preserving
+/// the relative order of retained rows.
+#[inline]
+pub(crate) fn pipeline_stage_is_positional(id: BuiltinId) -> bool {
+    matches!(demand_law(id), BuiltinDemandLaw::Take | BuiltinDemandLaw::Skip)
+}
+
+/// Return true when the stage only changes row order, not membership or row values.
+#[inline]
+pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
+    matches!(id.method(), Some(BuiltinMethod::Sort | BuiltinMethod::Reverse))
+}
+
 /// Return object-lambda behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {
@@ -1519,6 +1532,24 @@ mod tests {
             effective_pipeline_order_effect(BuiltinId::from_method(BuiltinMethod::Count), true),
             BuiltinPipelineOrderEffect::Blocks
         );
+        assert!(pipeline_stage_is_positional(BuiltinId::from_method(
+            BuiltinMethod::Take
+        )));
+        assert!(pipeline_stage_is_positional(BuiltinId::from_method(
+            BuiltinMethod::Skip
+        )));
+        assert!(!pipeline_stage_is_positional(BuiltinId::from_method(
+            BuiltinMethod::Filter
+        )));
+        assert!(pipeline_stage_is_order_only(BuiltinId::from_method(
+            BuiltinMethod::Sort
+        )));
+        assert!(pipeline_stage_is_order_only(BuiltinId::from_method(
+            BuiltinMethod::Reverse
+        )));
+        assert!(!pipeline_stage_is_order_only(BuiltinId::from_method(
+            BuiltinMethod::Append
+        )));
     }
 
     #[test]
