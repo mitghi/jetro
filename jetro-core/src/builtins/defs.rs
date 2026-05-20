@@ -8,8 +8,8 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinMembershipSink,
-    BuiltinMethod, BuiltinNullaryStage,
+    BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
+    BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
     BuiltinNumericReducer,
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
@@ -23,11 +23,18 @@ use super::{
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
 #[inline]
 fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
+    let logical = match reducer {
+        BuiltinNumericReducer::Sum => BuiltinLogicalShape::Sum,
+        BuiltinNumericReducer::Avg => BuiltinLogicalShape::Avg,
+        BuiltinNumericReducer::Min => BuiltinLogicalShape::Min,
+        BuiltinNumericReducer::Max => BuiltinLogicalShape::Max,
+    };
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
         .numeric_sink(reducer)
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::NumericReducer)
+        .logical_shape(logical)
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -67,6 +74,7 @@ fn filter_spec() -> BuiltinSpec {
         .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
         .expr_stage(BuiltinExprStage::Filter)
         .expr_payload(BuiltinExprPayload::PredicateScan)
+        .logical_shape(BuiltinLogicalShape::Filter)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -131,6 +139,7 @@ impl Builtin for Find {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
             .expr_stage(BuiltinExprStage::Filter)
+            .logical_shape(BuiltinLogicalShape::FilterThenFirst)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -207,6 +216,7 @@ impl Builtin for Map {
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .expr_stage(BuiltinExprStage::Map)
             .expr_payload(BuiltinExprPayload::Projection)
+            .logical_shape(BuiltinLogicalShape::Map)
             .lowering(BuiltinPipelineLowering::ExprArg)
             .element()
     }
@@ -269,6 +279,7 @@ impl Builtin for FlatMap {
             .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .expr_stage(BuiltinExprStage::FlatMap)
+            .logical_shape(BuiltinLogicalShape::FlatMap)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
@@ -313,6 +324,7 @@ impl Builtin for Take {
             .stage_merge(BuiltinStageMerge::UsizeMin)
             .demand_law(BuiltinDemandLaw::Take)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .logical_shape(BuiltinLogicalShape::Take)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
 
@@ -368,6 +380,7 @@ impl Builtin for Skip {
             .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
             .demand_law(BuiltinDemandLaw::Skip)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .logical_shape(BuiltinLogicalShape::Skip)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
 
@@ -425,6 +438,7 @@ impl Builtin for First {
             .array_selector(BuiltinArraySelector::First)
             .select_one_sink(BuiltinSelectionPosition::First)
             .demand_law(BuiltinDemandLaw::First)
+            .logical_shape(BuiltinLogicalShape::First)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -448,6 +462,7 @@ impl Builtin for Last {
             .array_selector(BuiltinArraySelector::Last)
             .select_one_sink(BuiltinSelectionPosition::Last)
             .demand_law(BuiltinDemandLaw::Last)
+            .logical_shape(BuiltinLogicalShape::Last)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -474,6 +489,7 @@ impl Builtin for TakeWhile {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::TakeWhile)
             .expr_payload(BuiltinExprPayload::PredicateScan)
+            .logical_shape(BuiltinLogicalShape::TakeWhile)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
                 true,
@@ -535,6 +551,7 @@ impl Builtin for DropWhile {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::DropWhile)
             .expr_payload(BuiltinExprPayload::PredicateScan)
+            .logical_shape(BuiltinLogicalShape::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -654,6 +671,7 @@ impl Builtin for Count {
             .count_sink()
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::Count)
+            .logical_shape(BuiltinLogicalShape::Count)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
@@ -678,6 +696,7 @@ impl Builtin for ApproxCountDistinct {
             .approx_distinct_sink()
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::RowKeyedReducer)
+            .logical_shape(BuiltinLogicalShape::ApproxCountDistinct)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -1051,6 +1070,7 @@ impl Builtin for FindFirst {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
             .expr_stage(BuiltinExprStage::Filter)
+            .logical_shape(BuiltinLogicalShape::FilterThenFirst)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1128,6 +1148,7 @@ impl Builtin for Sort {
         barrier_default_spec()
             .demand_law(BuiltinDemandLaw::OrderBarrier)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .logical_shape(BuiltinLogicalShape::Sort)
             .lowering(BuiltinPipelineLowering::Sort)
     }
     #[inline]
@@ -1344,6 +1365,7 @@ impl Builtin for GroupBy {
             .cost(20.0)
             .demand_law(BuiltinDemandLaw::RowKeyedReducer)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .logical_shape(BuiltinLogicalShape::GroupBy)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
     #[inline]
@@ -1391,6 +1413,7 @@ impl Builtin for CountBy {
                 1.0,
                 1.0,
             ))
+            .logical_shape(BuiltinLogicalShape::CountBy)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1436,6 +1459,7 @@ impl Builtin for IndexBy {
                 1.0,
                 1.0,
             ))
+            .logical_shape(BuiltinLogicalShape::IndexBy)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1524,6 +1548,7 @@ impl Builtin for Unique {
     fn spec() -> BuiltinSpec {
         unique_spec()
             .nullary_stage(BuiltinNullaryStage::Unique)
+            .logical_shape(BuiltinLogicalShape::Unique)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
@@ -1549,6 +1574,7 @@ impl Builtin for UniqueBy {
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
             .expr_stage(BuiltinExprStage::UniqueBy)
+            .logical_shape(BuiltinLogicalShape::UniqueBy)
     }
     #[inline]
     fn apply_barrier(
@@ -1574,6 +1600,7 @@ impl Builtin for Reverse {
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .nullary_stage(BuiltinNullaryStage::Reverse)
+            .logical_shape(BuiltinLogicalShape::Reverse)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]

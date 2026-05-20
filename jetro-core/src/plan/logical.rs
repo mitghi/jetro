@@ -7,9 +7,8 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{
-    by_name, logical_shape, pipeline_accepts_arity, BuiltinLogicalShape,
-};
+use crate::builtins::registry::{by_name, logical_shape, pipeline_accepts_arity};
+use crate::builtins::BuiltinLogicalShape;
 use crate::exec::pipeline::{SortSpec, Source};
 use crate::ir::logical::LogicalPlan;
 use crate::parse::ast::{Arg, Expr, Step};

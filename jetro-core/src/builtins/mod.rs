@@ -644,6 +644,8 @@ pub struct BuiltinSpec {
     pub expr_stage: Option<BuiltinExprStage>,
     /// Payload-demand behavior for expression-bearing stages, if any.
     pub expr_payload: Option<BuiltinExprPayload>,
+    /// Logical planner node shape, if this builtin participates in logical lowering.
+    pub logical_shape: Option<BuiltinLogicalShape>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -843,6 +845,60 @@ pub enum BuiltinExprPayload {
     KeyOnlyReducer,
     /// The expression computes a row-retaining aggregate key and therefore needs whole rows.
     RowKeyedReducer,
+}
+
+/// Logical planner shape for pipeline-position builtins.
+///
+/// This keeps builtin classification in the builtin definitions while allowing
+/// `plan::logical` to own construction of `LogicalPlan` nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinLogicalShape {
+    /// `filter(expr)`-style streaming predicate.
+    Filter,
+    /// `filter(expr)` followed by `first()` when terminal.
+    FilterThenFirst,
+    /// `map(expr)` one-to-one projection.
+    Map,
+    /// `flat_map(expr)` expansion.
+    FlatMap,
+    /// `take(n)` positional prefix.
+    Take,
+    /// `skip(n)` positional offset.
+    Skip,
+    /// Nullary terminal first.
+    First,
+    /// Nullary terminal last.
+    Last,
+    /// Nullary numeric reducer.
+    Sum,
+    /// Nullary numeric reducer.
+    Avg,
+    /// Nullary numeric reducer.
+    Min,
+    /// Nullary numeric reducer.
+    Max,
+    /// Nullary count reducer.
+    Count,
+    /// Nullary reverse barrier.
+    Reverse,
+    /// Prefix predicate barrier.
+    TakeWhile,
+    /// Prefix predicate barrier.
+    DropWhile,
+    /// Sort with optional key.
+    Sort,
+    /// Nullary unique.
+    Unique,
+    /// `unique_by(expr)`.
+    UniqueBy,
+    /// `group_by(expr)`.
+    GroupBy,
+    /// `count_by(expr)` followed by first when terminal.
+    CountBy,
+    /// `index_by(expr)` followed by first when terminal.
+    IndexBy,
+    /// Nullary approximate distinct reducer.
+    ApproxCountDistinct,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1370,6 +1426,7 @@ impl BuiltinSpec {
             nullary_stage: None,
             expr_stage: None,
             expr_payload: None,
+            logical_shape: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1475,6 +1532,12 @@ impl BuiltinSpec {
     /// Attaches expression payload-demand behavior.
     fn expr_payload(mut self, payload: BuiltinExprPayload) -> Self {
         self.expr_payload = Some(payload);
+        self
+    }
+
+    /// Attaches logical planner node shape.
+    fn logical_shape(mut self, shape: BuiltinLogicalShape) -> Self {
+        self.logical_shape = Some(shape);
         self
     }
 
