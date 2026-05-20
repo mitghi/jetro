@@ -244,9 +244,8 @@ impl Val {
 /// process-wide [`crate::data::intern::default_cache`] when possible.
 /// Used by `From<serde_json::Value> for Val` and the standalone
 /// `Jetro::from_bytes` path; engine-aware ingestion uses
-/// [`Val::from_value_with`] / [`Val::from_simd_borrowed_with`] /
-/// [`Val::from_tape_data_with`] instead, which thread an engine-owned
-/// [`crate::data::intern::KeyCache`].
+/// [`Val::from_value_with`] / [`Val::from_tape_data_with`] instead, which
+/// thread an engine-owned [`crate::data::intern::KeyCache`].
 #[inline]
 pub fn intern_key(k: &str) -> Arc<str> {
     crate::data::intern::default_cache().intern(k)
@@ -1192,68 +1191,6 @@ impl Val {
                     *idx += 1;
                     let v = Self::from_tape_walk(tape, idx);
                     out.insert(intern_key(key), v);
-                }
-                Val::Obj(Arc::new(out))
-            }
-        }
-    }
-
-    /// Convert a `simd_json::BorrowedValue` into `Val`, promoting homogeneous integer and string
-    /// arrays to columnar lanes. Kept as a fallback for borrowed-value API callers.
-    #[allow(dead_code)]
-    fn from_simd_borrowed(v: &simd_json::BorrowedValue<'_>) -> Val {
-        use simd_json::value::borrowed::Value as SV;
-        use simd_json::StaticNode as SN;
-        match v {
-            SV::Static(SN::Null) => Val::Null,
-            SV::Static(SN::Bool(b)) => Val::Bool(*b),
-            SV::Static(SN::I64(n)) => Val::Int(*n),
-            SV::Static(SN::U64(n)) => {
-                if *n <= i64::MAX as u64 {
-                    Val::Int(*n as i64)
-                } else {
-                    Val::Float(*n as f64)
-                }
-            }
-            SV::Static(SN::F64(f)) => Val::Float(*f),
-            SV::String(s) => Val::Str(Arc::<str>::from(s.as_ref())),
-            SV::Array(a) => {
-                let all_i64 = !a.is_empty()
-                    && a.iter()
-                        .all(|v| matches!(v, SV::Static(SN::I64(_)) | SV::Static(SN::U64(_))));
-                if all_i64 {
-                    let mut out: Vec<i64> = Vec::with_capacity(a.len());
-                    for v in a.iter() {
-                        if let SV::Static(SN::I64(n)) = v {
-                            out.push(*n);
-                        } else if let SV::Static(SN::U64(n)) = v {
-                            if *n <= i64::MAX as u64 {
-                                out.push(*n as i64);
-                            } else {
-                                return Val::Arr(Arc::new(
-                                    a.iter().map(Self::from_simd_borrowed).collect(),
-                                ));
-                            }
-                        }
-                    }
-                    return Val::IntVec(Arc::new(out));
-                }
-                let all_str = !a.is_empty() && a.iter().all(|v| matches!(v, SV::String(_)));
-                if all_str {
-                    let mut out: Vec<Arc<str>> = Vec::with_capacity(a.len());
-                    for v in a.iter() {
-                        if let SV::String(s) = v {
-                            out.push(Arc::<str>::from(s.as_ref()));
-                        }
-                    }
-                    return Val::StrVec(Arc::new(out));
-                }
-                Val::Arr(Arc::new(a.iter().map(Self::from_simd_borrowed).collect()))
-            }
-            SV::Object(m) => {
-                let mut out: IndexMap<Arc<str>, Val> = IndexMap::with_capacity(m.len());
-                for (k, v) in m.iter() {
-                    out.insert(intern_key(k.as_ref()), Self::from_simd_borrowed(v));
                 }
                 Val::Obj(Arc::new(out))
             }
