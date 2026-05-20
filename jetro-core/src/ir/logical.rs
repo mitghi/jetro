@@ -49,11 +49,8 @@ pub(crate) enum LogicalPlan {
     ApproxCountDistinct(Box<Self>),
 
     // ── VM fallback ───────────────────────────────────────────────────────
-    /// Any expression the logical planner could not classify; executed by VM.
-    /// The inner `Expr` is intentionally unused after lowering — `collect()` returns
-    /// `None` without reading it, making the variant a sentinel for the fallback path.
-    #[allow(dead_code)]
-    ScalarExpr(Expr),
+    /// Any expression the logical planner could not classify; sentinel for the fallback path.
+    ScalarExpr,
 }
 
 impl LogicalPlan {
@@ -61,51 +58,51 @@ impl LogicalPlan {
     /// Returns `Err(self)` for `Source` and `ScalarExpr`.
     pub(crate) fn take_input(self) -> Result<(Box<LogicalPlan>, LogicalPlan), LogicalPlan> {
         match self {
-            LogicalPlan::Source(_) | LogicalPlan::ScalarExpr(_) => Err(self),
+            LogicalPlan::Source(_) | LogicalPlan::ScalarExpr => Err(self),
 
             LogicalPlan::Filter { input, predicate } =>
-                Ok((input, LogicalPlan::Filter { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), predicate })),
+                Ok((input, LogicalPlan::Filter { input: Box::new(LogicalPlan::ScalarExpr), predicate })),
             LogicalPlan::Map { input, projection } =>
-                Ok((input, LogicalPlan::Map { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), projection })),
+                Ok((input, LogicalPlan::Map { input: Box::new(LogicalPlan::ScalarExpr), projection })),
             LogicalPlan::FlatMap { input, expansion } =>
-                Ok((input, LogicalPlan::FlatMap { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), expansion })),
+                Ok((input, LogicalPlan::FlatMap { input: Box::new(LogicalPlan::ScalarExpr), expansion })),
             LogicalPlan::TakeWhile { input, predicate } =>
-                Ok((input, LogicalPlan::TakeWhile { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), predicate })),
+                Ok((input, LogicalPlan::TakeWhile { input: Box::new(LogicalPlan::ScalarExpr), predicate })),
             LogicalPlan::DropWhile { input, predicate } =>
-                Ok((input, LogicalPlan::DropWhile { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), predicate })),
+                Ok((input, LogicalPlan::DropWhile { input: Box::new(LogicalPlan::ScalarExpr), predicate })),
             LogicalPlan::Take { input, n } =>
-                Ok((input, LogicalPlan::Take { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), n })),
+                Ok((input, LogicalPlan::Take { input: Box::new(LogicalPlan::ScalarExpr), n })),
             LogicalPlan::Skip { input, n } =>
-                Ok((input, LogicalPlan::Skip { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), n })),
+                Ok((input, LogicalPlan::Skip { input: Box::new(LogicalPlan::ScalarExpr), n })),
             LogicalPlan::Sort { input, spec } =>
-                Ok((input, LogicalPlan::Sort { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), spec })),
+                Ok((input, LogicalPlan::Sort { input: Box::new(LogicalPlan::ScalarExpr), spec })),
             LogicalPlan::Unique { input, key } =>
-                Ok((input, LogicalPlan::Unique { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), key })),
+                Ok((input, LogicalPlan::Unique { input: Box::new(LogicalPlan::ScalarExpr), key })),
             LogicalPlan::Reverse { input } =>
-                Ok((input, LogicalPlan::Reverse { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)) })),
+                Ok((input, LogicalPlan::Reverse { input: Box::new(LogicalPlan::ScalarExpr) })),
             LogicalPlan::GroupBy { input, key } =>
-                Ok((input, LogicalPlan::GroupBy { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), key })),
+                Ok((input, LogicalPlan::GroupBy { input: Box::new(LogicalPlan::ScalarExpr), key })),
             LogicalPlan::CountBy { input, key } =>
-                Ok((input, LogicalPlan::CountBy { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), key })),
+                Ok((input, LogicalPlan::CountBy { input: Box::new(LogicalPlan::ScalarExpr), key })),
             LogicalPlan::IndexBy { input, key } =>
-                Ok((input, LogicalPlan::IndexBy { input: Box::new(LogicalPlan::ScalarExpr(Expr::Null)), key })),
+                Ok((input, LogicalPlan::IndexBy { input: Box::new(LogicalPlan::ScalarExpr), key })),
 
             LogicalPlan::First(inner) =>
-                Ok((inner, LogicalPlan::First(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::First(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Last(inner) =>
-                Ok((inner, LogicalPlan::Last(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Last(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Sum(inner) =>
-                Ok((inner, LogicalPlan::Sum(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Sum(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Avg(inner) =>
-                Ok((inner, LogicalPlan::Avg(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Avg(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Min(inner) =>
-                Ok((inner, LogicalPlan::Min(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Min(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Max(inner) =>
-                Ok((inner, LogicalPlan::Max(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Max(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::Count(inner) =>
-                Ok((inner, LogicalPlan::Count(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::Count(Box::new(LogicalPlan::ScalarExpr)))),
             LogicalPlan::ApproxCountDistinct(inner) =>
-                Ok((inner, LogicalPlan::ApproxCountDistinct(Box::new(LogicalPlan::ScalarExpr(Expr::Null))))),
+                Ok((inner, LogicalPlan::ApproxCountDistinct(Box::new(LogicalPlan::ScalarExpr)))),
         }
     }
 
@@ -114,7 +111,7 @@ impl LogicalPlan {
     pub(crate) fn with_input(self, new_input: LogicalPlan) -> LogicalPlan {
         let new_box = Box::new(new_input);
         match self {
-            LogicalPlan::Source(_) | LogicalPlan::ScalarExpr(_) =>
+            LogicalPlan::Source(_) | LogicalPlan::ScalarExpr =>
                 panic!("with_input called on leaf node"),
 
             LogicalPlan::Filter { predicate, .. } =>

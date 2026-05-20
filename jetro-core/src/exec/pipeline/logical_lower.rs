@@ -162,7 +162,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         }
 
         // ── VM fallback — cannot lower to a Pipeline ───────────────────────
-        LogicalPlan::ScalarExpr(_) => None,
+        LogicalPlan::ScalarExpr => None,
     }
 }
 
