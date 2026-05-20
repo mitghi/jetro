@@ -9,6 +9,7 @@ use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
     BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNumericReducer,
+    BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
@@ -1963,7 +1964,9 @@ pub(crate) struct TransformKeys;
 impl Builtin for TransformKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformKeys;
     const NAME: &'static str = "transform_keys";
-    fn spec() -> BuiltinSpec { object_lambda_spec() }
+    fn spec() -> BuiltinSpec {
+        object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformKeys)
+    }
 
     #[inline]
     fn apply_stream(
@@ -2028,7 +2031,9 @@ pub(crate) struct TransformValues;
 impl Builtin for TransformValues {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformValues;
     const NAME: &'static str = "transform_values";
-    fn spec() -> BuiltinSpec { object_lambda_spec() }
+    fn spec() -> BuiltinSpec {
+        object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformValues)
+    }
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
@@ -2053,7 +2058,9 @@ pub(crate) struct FilterKeys;
 impl Builtin for FilterKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterKeys;
     const NAME: &'static str = "filter_keys";
-    fn spec() -> BuiltinSpec { object_lambda_spec() }
+    fn spec() -> BuiltinSpec {
+        object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterKeys)
+    }
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
@@ -2078,7 +2085,9 @@ pub(crate) struct FilterValues;
 impl Builtin for FilterValues {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterValues;
     const NAME: &'static str = "filter_values";
-    fn spec() -> BuiltinSpec { object_lambda_spec() }
+    fn spec() -> BuiltinSpec {
+        object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterValues)
+    }
     #[inline]
     fn apply_stream(
         ctx: &mut super::builtin::StreamCtx<'_, '_>,

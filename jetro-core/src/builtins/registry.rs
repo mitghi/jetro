@@ -9,7 +9,7 @@ use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
         BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
-        BuiltinMembershipSink, BuiltinPredicateSink,
+        BuiltinMembershipSink, BuiltinObjectLambda, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -192,19 +192,6 @@ pub(crate) enum BuiltinExprPayload {
     KeyOnlyReducer,
     /// The expression computes a row-retaining aggregate key and therefore needs whole rows.
     RowKeyedReducer,
-}
-
-/// Object-lambda operation behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinObjectLambda {
-    /// Map object keys through the lambda.
-    TransformKeys,
-    /// Map object values through the lambda.
-    TransformValues,
-    /// Keep entries whose key satisfies the predicate.
-    FilterKeys,
-    /// Keep entries whose value satisfies the predicate.
-    FilterValues,
 }
 
 /// Return the logical planner shape for builtin `id`, if it has one.
@@ -404,13 +391,7 @@ pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
 /// Return object-lambda behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {
-    match id.method()? {
-        BuiltinMethod::TransformKeys => Some(BuiltinObjectLambda::TransformKeys),
-        BuiltinMethod::TransformValues => Some(BuiltinObjectLambda::TransformValues),
-        BuiltinMethod::FilterKeys => Some(BuiltinObjectLambda::FilterKeys),
-        BuiltinMethod::FilterValues => Some(BuiltinObjectLambda::FilterValues),
-        _ => None,
-    }
+    id.method().and_then(|method| method.spec().object_lambda)
 }
 
 /// Return true when a count-like terminal sink accepts a predicate argument.

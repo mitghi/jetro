@@ -634,6 +634,8 @@ pub struct BuiltinSpec {
     pub view_object_projection: Option<BuiltinViewObjectProjection>,
     /// Raw-byte JSON scalar operation, if any.
     pub raw_json_scalar: Option<BuiltinRawJsonScalar>,
+    /// Object-lambda operation behavior, if any.
+    pub object_lambda: Option<BuiltinObjectLambda>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -771,6 +773,19 @@ pub enum BuiltinRawJsonScalar {
     AsciiUpper,
     /// ASCII-only string lowercasing can be written without allocation.
     AsciiLower,
+}
+
+/// Object-lambda operation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinObjectLambda {
+    /// Map object keys through the lambda.
+    TransformKeys,
+    /// Map object values through the lambda.
+    TransformValues,
+    /// Keep entries whose key satisfies the predicate.
+    FilterKeys,
+    /// Keep entries whose value satisfies the predicate.
+    FilterValues,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1293,6 +1308,7 @@ impl BuiltinSpec {
             view_scalar: false,
             view_object_projection: None,
             raw_json_scalar: None,
+            object_lambda: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1368,6 +1384,12 @@ impl BuiltinSpec {
     fn raw_json_scalar(mut self, scalar: BuiltinRawJsonScalar) -> Self {
         self.raw_json_scalar = Some(scalar);
         self.view_native = true;
+        self
+    }
+
+    /// Attaches object-lambda operation behavior.
+    fn object_lambda(mut self, lambda: BuiltinObjectLambda) -> Self {
+        self.object_lambda = Some(lambda);
         self
     }
 
