@@ -11,5 +11,4 @@ pub(crate) mod intern;
 pub(crate) mod runtime;
 pub(crate) mod tape;
 pub(crate) mod value;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod view;
