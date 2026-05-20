@@ -687,17 +687,6 @@ impl VM {
         }
     }
 
-    /// Execute `program` against the given `Val` root and convert the result to
-    /// `serde_json::Value`. Clears the `root_chain_cache` before each run.
-    #[allow(dead_code)]
-    pub fn execute_val(
-        &mut self,
-        program: &Program,
-        root: Val,
-    ) -> Result<serde_json::Value, EvalError> {
-        Ok(self.execute_val_raw(program, root)?.into())
-    }
-
     /// Execute `program` against the given `Val` root and return the raw `Val` result
     /// without converting to `serde_json::Value`.
     pub fn execute_val_raw(&mut self, program: &Program, root: Val) -> Result<Val, EvalError> {
