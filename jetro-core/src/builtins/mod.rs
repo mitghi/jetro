@@ -640,6 +640,8 @@ pub struct BuiltinSpec {
     pub string_pair_stage: Option<BuiltinStringPairStage>,
     /// Nullary pipeline stage behavior, if any.
     pub nullary_stage: Option<BuiltinNullaryStage>,
+    /// Expression-argument pipeline stage behavior, if any.
+    pub expr_stage: Option<BuiltinExprStage>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -811,6 +813,21 @@ pub enum BuiltinNullaryStage {
     Unique,
     /// Generic no-argument element builtin.
     Element,
+}
+
+/// Concrete pipeline stage shape for builtins with one expression argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinExprStage {
+    /// Predicate filter stage.
+    Filter,
+    /// One-to-one map stage.
+    Map,
+    /// Expanding flat-map stage.
+    FlatMap,
+    /// Deduplicate by key stage.
+    UniqueBy,
+    /// Generic expression-bearing builtin stage.
+    ExprBuiltin,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1336,6 +1353,7 @@ impl BuiltinSpec {
             object_lambda: None,
             string_pair_stage: None,
             nullary_stage: None,
+            expr_stage: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1429,6 +1447,12 @@ impl BuiltinSpec {
     /// Attaches nullary pipeline stage behavior.
     fn nullary_stage(mut self, stage: BuiltinNullaryStage) -> Self {
         self.nullary_stage = Some(stage);
+        self
+    }
+
+    /// Attaches expression-argument pipeline stage behavior.
+    fn expr_stage(mut self, stage: BuiltinExprStage) -> Self {
+        self.expr_stage = Some(stage);
         self
     }
 

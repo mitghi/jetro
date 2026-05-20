@@ -10,9 +10,11 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
     count_sink_accepts_predicate, expr_stage, numeric_reducer, view_object_projection,
-    view_projection, BuiltinExprStage, BuiltinId,
+    view_projection, BuiltinId,
 };
-use crate::builtins::{BuiltinArraySelector, BuiltinCall, BuiltinViewObjectProjection};
+use crate::builtins::{
+    BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinViewObjectProjection,
+};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};

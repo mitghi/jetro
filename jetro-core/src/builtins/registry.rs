@@ -8,8 +8,8 @@
 use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
-        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod,
-        BuiltinMembershipSink, BuiltinNullaryStage, BuiltinNumericReducer,
+        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprStage, BuiltinKeyedReducer,
+        BuiltinMethod, BuiltinMembershipSink, BuiltinNullaryStage, BuiltinNumericReducer,
         BuiltinObjectLambda, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
@@ -146,21 +146,6 @@ pub(crate) enum BuiltinRowStreamOp {
     Map,
 }
 
-/// Concrete pipeline stage shape for builtins with one expression argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinExprStage {
-    /// Predicate filter stage.
-    Filter,
-    /// One-to-one map stage.
-    Map,
-    /// Expanding flat-map stage.
-    FlatMap,
-    /// Deduplicate by key stage.
-    UniqueBy,
-    /// Generic expression-bearing builtin stage.
-    ExprBuiltin,
-}
-
 /// Payload-demand behavior for expression-bearing pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinExprPayload {
@@ -271,24 +256,17 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
 /// Return the concrete pipeline stage shape for an expression-argument builtin.
 #[inline]
 pub(crate) fn expr_stage(id: BuiltinId) -> Option<BuiltinExprStage> {
-    match id.method()? {
-        BuiltinMethod::Filter
-        | BuiltinMethod::Find
-        | BuiltinMethod::FindAll
-        | BuiltinMethod::FindFirst => Some(BuiltinExprStage::Filter),
-        BuiltinMethod::Map => Some(BuiltinExprStage::Map),
-        BuiltinMethod::FlatMap => Some(BuiltinExprStage::FlatMap),
-        BuiltinMethod::UniqueBy => Some(BuiltinExprStage::UniqueBy),
-        method if matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
-            Some(BuiltinPipelineLowering::ExprArg)
-                | Some(BuiltinPipelineLowering::TerminalExprArg { .. })
-        ) =>
-        {
-            Some(BuiltinExprStage::ExprBuiltin)
-        }
-        _ => None,
+    let method = id.method()?;
+    let spec = method.spec();
+    if let Some(stage) = spec.expr_stage {
+        return Some(stage);
     }
+    matches!(
+        spec.lowering,
+        Some(BuiltinPipelineLowering::ExprArg)
+            | Some(BuiltinPipelineLowering::TerminalExprArg { .. })
+    )
+    .then_some(BuiltinExprStage::ExprBuiltin)
 }
 
 /// Return the concrete pipeline stage shape for a nullary pipeline builtin.

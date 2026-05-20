@@ -8,7 +8,8 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
+    BuiltinExprStage, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod,
+    BuiltinNullaryStage,
     BuiltinNumericReducer,
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
@@ -64,6 +65,7 @@ fn filter_spec() -> BuiltinSpec {
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::FilterLike)
         .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+        .expr_stage(BuiltinExprStage::Filter)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -127,6 +129,7 @@ impl Builtin for Find {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
+            .expr_stage(BuiltinExprStage::Filter)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -201,6 +204,7 @@ impl Builtin for Map {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .expr_stage(BuiltinExprStage::Map)
             .lowering(BuiltinPipelineLowering::ExprArg)
             .element()
     }
@@ -262,6 +266,7 @@ impl Builtin for FlatMap {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .expr_stage(BuiltinExprStage::FlatMap)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
@@ -1041,6 +1046,7 @@ impl Builtin for FindFirst {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
+            .expr_stage(BuiltinExprStage::Filter)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1538,6 +1544,7 @@ impl Builtin for UniqueBy {
     const ALIASES: &'static [&'static str] = &["distinct_by"];
     fn spec() -> BuiltinSpec {
         unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
+            .expr_stage(BuiltinExprStage::UniqueBy)
     }
     #[inline]
     fn apply_barrier(
