@@ -18,7 +18,6 @@ use super::stream_plan::{
     RowStreamSourceKind, RowStreamStage,
 };
 use super::stream_types::RowStreamStats;
-use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
@@ -717,13 +716,7 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
     let [prefix @ .., RowStreamStage::Map(map), terminal] = plan.stages.as_slice() else {
         return None;
     };
-    let method = match terminal {
-        RowStreamStage::Sum => BuiltinMethod::Sum,
-        RowStreamStage::Avg => BuiltinMethod::Avg,
-        RowStreamStage::Min => BuiltinMethod::Min,
-        RowStreamStage::Max => BuiltinMethod::Max,
-        _ => return None,
-    };
+    let reducer = terminal.numeric_reducer()?;
     let value_path = match direct_tape_plan_for_expr(map)? {
         NdjsonDirectTapePlan::RootPath(steps) => steps,
         _ => return None,
@@ -732,7 +725,7 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
     Some(DirectSum {
         predicates,
         value_path,
-        acc: NumericAccumulator::new(method),
+        acc: NumericAccumulator::from_reducer(reducer),
     })
 }
 fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicateSink> {

@@ -1,5 +1,4 @@
-use crate::builtins::registry::{numeric_reducer, BuiltinId};
-use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
+use crate::builtins::BuiltinNumericReducer;
 use crate::data::value::Val;
 use crate::util::JsonView;
 
@@ -15,9 +14,7 @@ pub(super) struct NumericAccumulator {
 }
 
 impl NumericAccumulator {
-    pub(super) fn new(method: BuiltinMethod) -> Self {
-        let reducer = numeric_reducer(BuiltinId::from_method(method))
-            .expect("numeric accumulator requires numeric reducer metadata");
+    pub(super) fn from_reducer(reducer: BuiltinNumericReducer) -> Self {
         Self {
             reducer,
             int_acc: 0,

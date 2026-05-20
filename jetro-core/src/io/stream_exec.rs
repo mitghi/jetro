@@ -9,7 +9,6 @@ use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, wri
 use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
-use crate::builtins::BuiltinMethod;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
@@ -444,18 +443,13 @@ impl CompiledRowStreamStage {
             },
             RowStreamStage::Last => Self::Last { value: None },
             RowStreamStage::Count => Self::Count { count: 0 },
-            RowStreamStage::Sum => Self::Numeric {
-                acc: NumericAccumulator::new(BuiltinMethod::Sum),
-            },
-            RowStreamStage::Avg => Self::Numeric {
-                acc: NumericAccumulator::new(BuiltinMethod::Avg),
-            },
-            RowStreamStage::Min => Self::Numeric {
-                acc: NumericAccumulator::new(BuiltinMethod::Min),
-            },
-            RowStreamStage::Max => Self::Numeric {
-                acc: NumericAccumulator::new(BuiltinMethod::Max),
-            },
+            RowStreamStage::Sum | RowStreamStage::Avg | RowStreamStage::Min | RowStreamStage::Max => {
+                Self::Numeric {
+                    acc: NumericAccumulator::from_reducer(
+                        stage.numeric_reducer().expect("numeric reducer"),
+                    ),
+                }
+            }
             RowStreamStage::Any(expr) => Self::Any {
                 program: Compiler::compile(expr, "<ndjson-rows-any>"),
                 matched: false,

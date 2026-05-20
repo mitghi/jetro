@@ -8,7 +8,7 @@
 use crate::builtins::registry::{
     by_name as builtin_by_name, row_stream_op, BuiltinId, BuiltinRowStreamOp,
 };
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{BuiltinMethod, BuiltinNumericReducer};
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
 
@@ -100,6 +100,16 @@ impl RowStreamStage {
         match self {
             RowStreamStage::Take(n) => Some(*n),
             RowStreamStage::Last => Some(1),
+            _ => None,
+        }
+    }
+
+    pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
+        match self {
+            RowStreamStage::Sum => Some(BuiltinNumericReducer::Sum),
+            RowStreamStage::Avg => Some(BuiltinNumericReducer::Avg),
+            RowStreamStage::Min => Some(BuiltinNumericReducer::Min),
+            RowStreamStage::Max => Some(BuiltinNumericReducer::Max),
             _ => None,
         }
     }
