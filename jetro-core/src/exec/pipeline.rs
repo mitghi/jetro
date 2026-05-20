@@ -430,29 +430,24 @@ pub struct Pipeline {
     pub source_demand: SinkDemand,
 
     /// Precise source payload demand split into scan-time and result-row lanes.
-    #[allow(dead_code)]
     pub payload_demand: PayloadDemand,
 
     /// Tail projection that can be delayed until rows have been selected.
     pub late_projection: Option<LateProjection>,
 
     /// Static source traversal capabilities used to choose the access mode.
-    #[allow(dead_code)]
     pub(crate) source_capabilities: SourceCapabilities,
 
     /// Whether the source can satisfy split scan/result payload lanes without full row materialization.
-    #[allow(dead_code)]
     pub(crate) source_payload_lanes_supported: bool,
 
     /// Whether bounded demand can materialize only selected source rows.
-    #[allow(dead_code)]
     pub(crate) source_selected_materialization_supported: bool,
 
     /// Access mode selected from source capabilities plus propagated pull demand.
     pub(crate) source_access: SourceAccessMode,
 
     /// Boundary where execution must materialize or fall back.
-    #[allow(dead_code)]
     pub fallback_boundary: FallbackBoundary,
 
     /// Physical execution path selected at lower time; tells `exec.rs` which specialised
