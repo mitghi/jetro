@@ -642,6 +642,8 @@ pub struct BuiltinSpec {
     pub arg_extreme_sink: Option<BuiltinArgExtremeSink>,
     /// Predicate terminal sink kind, used by predicate reducers.
     pub predicate_sink: Option<BuiltinPredicateSink>,
+    /// Membership terminal sink kind, used by target-value reducers.
+    pub membership_sink: Option<BuiltinMembershipSink>,
     /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
@@ -843,6 +845,17 @@ pub enum BuiltinPredicateSink {
     IndicesWhere,
     /// Returns exactly one matching row, erroring on zero or multiple matches.
     FindOne,
+}
+
+/// Membership terminal sink behavior for builtins with a target value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinMembershipSink {
+    /// Returns true when any row equals the target.
+    Includes,
+    /// Returns the zero-based index of the first matching row, or null.
+    Index,
+    /// Returns all zero-based indices matching the target.
+    IndicesOf,
 }
 
 /// Which end of the stream the `SelectOne` sink picks.
@@ -1228,6 +1241,7 @@ impl BuiltinSpec {
             numeric_reducer: None,
             arg_extreme_sink: None,
             predicate_sink: None,
+            membership_sink: None,
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
@@ -1358,6 +1372,12 @@ impl BuiltinSpec {
     /// Attaches a predicate terminal sink kind.
     fn predicate_sink(mut self, sink: BuiltinPredicateSink) -> Self {
         self.predicate_sink = Some(sink);
+        self
+    }
+
+    /// Attaches a membership terminal sink kind.
+    fn membership_sink(mut self, sink: BuiltinMembershipSink) -> Self {
+        self.membership_sink = Some(sink);
         self
     }
 

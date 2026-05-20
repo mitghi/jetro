@@ -9,7 +9,7 @@ use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
         BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
-        BuiltinPredicateSink,
+        BuiltinMembershipSink, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
@@ -142,17 +142,6 @@ pub(crate) enum BuiltinRowStreamOp {
     All,
     /// Project each retained row.
     Map,
-}
-
-/// Membership terminal sink behavior for builtins with a target value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinMembershipSink {
-    /// Returns true when any row equals the target.
-    Includes,
-    /// Returns the zero-based index of the first matching row, or null.
-    Index,
-    /// Returns all zero-based indices matching the target.
-    IndicesOf,
 }
 
 /// Concrete pipeline stage shape for builtins with one expression argument.
@@ -352,12 +341,7 @@ pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
 /// Return membership terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
-    match id.method()? {
-        BuiltinMethod::Includes => Some(BuiltinMembershipSink::Includes),
-        BuiltinMethod::Index => Some(BuiltinMembershipSink::Index),
-        BuiltinMethod::IndicesOf => Some(BuiltinMembershipSink::IndicesOf),
-        _ => None,
-    }
+    Some(id.method()?.spec().membership_sink?)
 }
 
 /// Return arg-extreme terminal-sink behavior for builtin `id`, if it has one.

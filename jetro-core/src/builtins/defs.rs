@@ -8,7 +8,8 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPredicateSink,
+    BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNumericReducer,
+    BuiltinPipelineLowering, BuiltinPredicateSink,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
 };
@@ -2831,6 +2832,7 @@ impl Builtin for Includes {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Includes)
             .view_scalar()
+            .membership_sink(BuiltinMembershipSink::Includes)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -2848,7 +2850,9 @@ impl Builtin for Index {
     const METHOD: BuiltinMethod = BuiltinMethod::Index;
     const NAME: &'static str = "index";
     fn spec() -> BuiltinSpec {
-        default_scalar_spec(BuiltinMethod::Index).lowering(BuiltinPipelineLowering::TerminalSink)
+        default_scalar_spec(BuiltinMethod::Index)
+            .membership_sink(BuiltinMembershipSink::Index)
+            .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -2866,6 +2870,7 @@ impl Builtin for IndicesOf {
     const NAME: &'static str = "indices_of";
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::IndicesOf)
+            .membership_sink(BuiltinMembershipSink::IndicesOf)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
