@@ -8,11 +8,12 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, expr_stage, numeric_reducer,
-    view_object_projection, view_projection, BuiltinArraySelector, BuiltinExprStage, BuiltinId,
+    array_selector as builtin_array_selector, by_name as builtin_by_name,
+    count_sink_accepts_predicate, expr_stage, numeric_reducer, view_object_projection,
+    view_projection, BuiltinArraySelector, BuiltinExprStage, BuiltinId,
     BuiltinViewObjectProjection,
 };
-use crate::builtins::{BuiltinCall, BuiltinMethod};
+use crate::builtins::BuiltinCall;
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
@@ -407,13 +408,12 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
     if !args.is_empty() {
         return None;
     }
-    let method = BuiltinMethod::from_name(name.as_str());
-    let op =
-        numeric_reducer(BuiltinId::from_method(method)).map(super::NumOp::from_builtin_reducer);
+    let id = builtin_by_name(name.as_str())?;
+    let op = numeric_reducer(id).map(super::NumOp::from_builtin_reducer);
 
     let (source_steps, map) = match prefix.split_last() {
         Some((Step::Method(map_name, map_args), source_steps))
-            if expr_stage(BuiltinId::from_method(BuiltinMethod::from_name(map_name.as_str())))
+            if builtin_by_name(map_name.as_str()).and_then(expr_stage)
                 == Some(BuiltinExprStage::Map) =>
         {
             let [crate::parse::ast::Arg::Pos(map_expr)] = map_args.as_slice() else {
@@ -429,7 +429,7 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
     };
     let (source_steps, predicate) = match source_steps.split_last() {
         Some((Step::Method(filter_name, filter_args), source_steps))
-            if expr_stage(BuiltinId::from_method(BuiltinMethod::from_name(filter_name.as_str())))
+            if builtin_by_name(filter_name.as_str()).and_then(expr_stage)
                 == Some(BuiltinExprStage::Filter) =>
         {
             let [crate::parse::ast::Arg::Pos(filter_expr)] = filter_args.as_slice() else {
@@ -452,14 +452,14 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
     if matches!(source, BodyKernel::Generic) {
         return None;
     }
-    match (method, op, map) {
+    match (id, op, map) {
         (_, Some(op), map) => Some(BodyKernel::NestedArrayReducer {
             source: Box::new(source),
             predicate,
             map,
             op,
         }),
-        (BuiltinMethod::Count, None, None) => Some(BodyKernel::NestedArrayCount {
+        (id, None, None) if count_sink_accepts_predicate(id) => Some(BodyKernel::NestedArrayCount {
             source: Box::new(source),
             predicate,
         }),
