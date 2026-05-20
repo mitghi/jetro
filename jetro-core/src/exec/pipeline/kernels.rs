@@ -2399,7 +2399,8 @@ where
             eval_nested_array_count_view(source, predicate.as_deref(), item)
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::NestedPlan(plan) => plan.run(item.materialize())
+        BodyKernel::NestedPlan(plan) => super::nested::run_plan_view(&plan.plan, item)
+            .unwrap_or_else(|| plan.run(item.materialize()))
             .ok()
             .map(ViewKernelValue::Owned),
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm.as_deref_mut())? {
