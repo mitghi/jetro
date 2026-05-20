@@ -94,20 +94,7 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
-    let sink = match (source_demand, capabilities.sink) {
-        (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
-            pipeline::ViewSinkCapability::Nth { index: 0 }
-        }
-        (
-            PullDemand::LastInput(_),
-            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
-        ) => pipeline::ViewSinkCapability::SelectMany {
-            n,
-            from_end,
-            source_reversed: true,
-        },
-        (_, sink) => sink,
-    };
+    let sink = view_suffix_sink_for_demand(capabilities.sink, source_demand);
     let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -1203,6 +1190,9 @@ fn view_suffix_sink_for_demand(
     source_demand: PullDemand,
 ) -> pipeline::ViewSinkCapability {
     match (source_demand, sink) {
+        (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
+            pipeline::ViewSinkCapability::Nth { index: 0 }
+        }
         (
             PullDemand::LastInput(_),
             pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
