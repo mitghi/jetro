@@ -630,6 +630,10 @@ pub struct BuiltinSpec {
     pub view_native: bool,
     /// Whether the builtin can execute directly on a `JsonView` without materialising.
     pub view_scalar: bool,
+    /// View-native object/path projection operation, if any.
+    pub view_object_projection: Option<BuiltinViewObjectProjection>,
+    /// Raw-byte JSON scalar operation, if any.
+    pub raw_json_scalar: Option<BuiltinRawJsonScalar>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -728,6 +732,45 @@ pub enum BuiltinDemandLaw {
     OrderBarrier,
     /// Reverses one-to-one output order, swapping first/last positional demand.
     Reverse,
+}
+
+/// View-native object/path projection operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewObjectProjection {
+    /// Broad membership check (`has`).
+    Has,
+    /// All listed keys/items must be present.
+    HasAll,
+    /// Object-key-only existence check.
+    HasKey,
+    /// Object key/path is missing or null.
+    Missing,
+    /// Return a nested path view.
+    GetPath,
+    /// Test whether a nested path exists.
+    HasPath,
+    /// Return object keys.
+    Keys,
+    /// Return object values.
+    Values,
+    /// Return object entries.
+    Entries,
+    /// Keep selected keys.
+    Pick,
+    /// Drop selected keys.
+    Omit,
+}
+
+/// Raw-byte JSON scalar operation that can be executed before building a
+/// `JsonView` or materialising a `Val`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinRawJsonScalar {
+    /// Compute string/array/object length directly from raw JSON.
+    Len,
+    /// ASCII-only string uppercasing can be written without allocation.
+    AsciiUpper,
+    /// ASCII-only string lowercasing can be written without allocation.
+    AsciiLower,
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1248,6 +1291,8 @@ impl BuiltinSpec {
             can_indexed: false,
             view_native: false,
             view_scalar: false,
+            view_object_projection: None,
+            raw_json_scalar: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1308,6 +1353,20 @@ impl BuiltinSpec {
     /// Marks this builtin as a view-scalar method (implies `view_native`).
     fn view_scalar(mut self) -> Self {
         self.view_scalar = true;
+        self.view_native = true;
+        self
+    }
+
+    /// Attaches a view-native object/path projection operation.
+    fn view_object_projection(mut self, projection: BuiltinViewObjectProjection) -> Self {
+        self.view_object_projection = Some(projection);
+        self.view_native = true;
+        self
+    }
+
+    /// Attaches a raw-byte JSON scalar operation.
+    fn raw_json_scalar(mut self, scalar: BuiltinRawJsonScalar) -> Self {
+        self.raw_json_scalar = Some(scalar);
         self.view_native = true;
         self
     }

@@ -7,9 +7,11 @@ use super::ndjson_direct::{
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
     raw_json_scalar, view_object_projection, view_scalar_projection, BuiltinId,
-    BuiltinRawJsonScalar, BuiltinViewObjectProjection,
 };
-use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
+use crate::builtins::{
+    BuiltinArgs, BuiltinCall, BuiltinMethod, BuiltinRawJsonScalar,
+    BuiltinViewObjectProjection,
+};
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;

@@ -12,8 +12,9 @@ use crate::{
         BuiltinMembershipSink, BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
+        BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+        BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStageMerge,
+        BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewStage,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
@@ -204,45 +205,6 @@ pub(crate) enum BuiltinObjectLambda {
     FilterKeys,
     /// Keep entries whose value satisfies the predicate.
     FilterValues,
-}
-
-/// View-native object/path projection operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinViewObjectProjection {
-    /// Broad membership check (`has`).
-    Has,
-    /// All listed keys/items must be present.
-    HasAll,
-    /// Object-key-only existence check.
-    HasKey,
-    /// Object key/path is missing or null.
-    Missing,
-    /// Return a nested path view.
-    GetPath,
-    /// Test whether a nested path exists.
-    HasPath,
-    /// Return object keys.
-    Keys,
-    /// Return object values.
-    Values,
-    /// Return object entries.
-    Entries,
-    /// Keep selected keys.
-    Pick,
-    /// Drop selected keys.
-    Omit,
-}
-
-/// Raw-byte JSON scalar operation that can be executed before building a
-/// `JsonView` or materialising a `Val`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinRawJsonScalar {
-    /// Compute string/array/object length directly from raw JSON.
-    Len,
-    /// ASCII-only string uppercasing can be written without allocation.
-    AsciiUpper,
-    /// ASCII-only string lowercasing can be written without allocation.
-    AsciiLower,
 }
 
 /// Return the logical planner shape for builtin `id`, if it has one.
@@ -846,20 +808,8 @@ pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
 /// Return the view-native object/path operation for builtin `id`, if any.
 #[inline]
 pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectProjection> {
-    match id.method()? {
-        BuiltinMethod::Has => Some(BuiltinViewObjectProjection::Has),
-        BuiltinMethod::HasAll => Some(BuiltinViewObjectProjection::HasAll),
-        BuiltinMethod::HasKey => Some(BuiltinViewObjectProjection::HasKey),
-        BuiltinMethod::Missing => Some(BuiltinViewObjectProjection::Missing),
-        BuiltinMethod::GetPath => Some(BuiltinViewObjectProjection::GetPath),
-        BuiltinMethod::HasPath => Some(BuiltinViewObjectProjection::HasPath),
-        BuiltinMethod::Keys => Some(BuiltinViewObjectProjection::Keys),
-        BuiltinMethod::Values => Some(BuiltinViewObjectProjection::Values),
-        BuiltinMethod::Entries => Some(BuiltinViewObjectProjection::Entries),
-        BuiltinMethod::Pick => Some(BuiltinViewObjectProjection::Pick),
-        BuiltinMethod::Omit => Some(BuiltinViewObjectProjection::Omit),
-        _ => None,
-    }
+    id.method()
+        .and_then(|method| method.spec().view_object_projection)
 }
 
 /// Return true when builtin `id` enumerates object keys, values, or entries in
@@ -915,12 +865,7 @@ pub(crate) fn raw_json_scalar(
     if !matches!(args, crate::builtins::BuiltinArgs::None) {
         return None;
     }
-    match id.method()? {
-        BuiltinMethod::Len => Some(BuiltinRawJsonScalar::Len),
-        BuiltinMethod::Upper => Some(BuiltinRawJsonScalar::AsciiUpper),
-        BuiltinMethod::Lower => Some(BuiltinRawJsonScalar::AsciiLower),
-        _ => None,
-    }
+    id.method().and_then(|method| method.spec().raw_json_scalar)
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit

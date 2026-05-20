@@ -39,9 +39,8 @@ use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
 pub use super::ndjson_driver::NdjsonPerRowDriver;
 use crate::compile::compiler::Compiler;
-use crate::builtins::registry::{
-    view_object_projection, BuiltinId, BuiltinViewObjectProjection,
-};
+use crate::builtins::registry::{view_object_projection, BuiltinId};
+use crate::builtins::BuiltinViewObjectProjection;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;

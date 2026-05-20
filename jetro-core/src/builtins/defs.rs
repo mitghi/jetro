@@ -9,9 +9,10 @@ use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
     BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinMethod, BuiltinNumericReducer,
-    BuiltinPipelineLowering, BuiltinPredicateSink,
+    BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
+    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
+    BuiltinViewObjectProjection, BuiltinViewStage,
 };
 
 // ── Helpers shared across reducer family ─────────────────────────────────────
@@ -577,6 +578,7 @@ impl Builtin for Len {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .indexed()
             .view_scalar()
+            .raw_json_scalar(BuiltinRawJsonScalar::Len)
             .count_sink()
     }
     #[inline]
@@ -1737,7 +1739,9 @@ pub(crate) struct Keys;
 impl Builtin for Keys {
     const METHOD: BuiltinMethod = BuiltinMethod::Keys;
     const NAME: &'static str = "keys";
-    fn spec() -> BuiltinSpec { object_element_spec() }
+    fn spec() -> BuiltinSpec {
+        object_element_spec().view_object_projection(BuiltinViewObjectProjection::Keys)
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::keys_apply(recv))
@@ -1749,7 +1753,9 @@ pub(crate) struct Values;
 impl Builtin for Values {
     const METHOD: BuiltinMethod = BuiltinMethod::Values;
     const NAME: &'static str = "values";
-    fn spec() -> BuiltinSpec { object_element_spec() }
+    fn spec() -> BuiltinSpec {
+        object_element_spec().view_object_projection(BuiltinViewObjectProjection::Values)
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::values_apply(recv))
@@ -1761,7 +1767,9 @@ pub(crate) struct Entries;
 impl Builtin for Entries {
     const METHOD: BuiltinMethod = BuiltinMethod::Entries;
     const NAME: &'static str = "entries";
-    fn spec() -> BuiltinSpec { object_element_spec() }
+    fn spec() -> BuiltinSpec {
+        object_element_spec().view_object_projection(BuiltinViewObjectProjection::Entries)
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::entries_apply(recv))
@@ -1817,6 +1825,7 @@ impl Builtin for Pick {
     fn spec() -> BuiltinSpec {
         object_simple_spec()
             .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::Pick)
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
@@ -1838,6 +1847,7 @@ impl Builtin for Omit {
     fn spec() -> BuiltinSpec {
         object_simple_spec()
             .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::Omit)
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
@@ -2104,7 +2114,9 @@ pub(crate) struct GetPath;
 impl Builtin for GetPath {
     const METHOD: BuiltinMethod = BuiltinMethod::GetPath;
     const NAME: &'static str = "get_path";
-    fn spec() -> BuiltinSpec { path_element_spec() }
+    fn spec() -> BuiltinSpec {
+        path_element_spec().view_object_projection(BuiltinViewObjectProjection::GetPath)
+    }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
         match args {
@@ -2136,7 +2148,9 @@ impl Builtin for HasPath {
     const METHOD: BuiltinMethod = BuiltinMethod::HasPath;
     const NAME: &'static str = "has_path";
     fn spec() -> BuiltinSpec {
-        path_element_spec().demand_law(BuiltinDemandLaw::PredicateMapLike)
+        path_element_spec()
+            .view_object_projection(BuiltinViewObjectProjection::HasPath)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -2673,8 +2687,6 @@ scalar_view_scalar_element! {
     Floor => Floor, "floor";
     Round => Round, "round";
     Abs => Abs, "abs";
-    Upper => Upper, "upper", apply: upper_apply;
-    Lower => Lower, "lower", apply: lower_apply;
     Trim => Trim, "trim", apply: trim_apply;
     TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], apply: trim_left_apply;
     TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], apply: trim_right_apply;
@@ -2683,6 +2695,34 @@ scalar_view_scalar_element! {
     IndexOf => IndexOf, "index_of";
     LastIndexOf => LastIndexOf, "last_index_of";
     ByteLen => ByteLen, "byte_len";
+}
+
+/// `upper` — ASCII raw-json scalar capable uppercase transform.
+pub(crate) struct Upper;
+impl Builtin for Upper {
+    const METHOD: BuiltinMethod = BuiltinMethod::Upper;
+    const NAME: &'static str = "upper";
+    fn spec() -> BuiltinSpec {
+        scalar_view_scalar_element_spec().raw_json_scalar(BuiltinRawJsonScalar::AsciiUpper)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        Some(super::upper_apply(recv).unwrap_or_else(|| recv.clone()))
+    }
+}
+
+/// `lower` — ASCII raw-json scalar capable lowercase transform.
+pub(crate) struct Lower;
+impl Builtin for Lower {
+    const METHOD: BuiltinMethod = BuiltinMethod::Lower;
+    const NAME: &'static str = "lower";
+    fn spec() -> BuiltinSpec {
+        scalar_view_scalar_element_spec().raw_json_scalar(BuiltinRawJsonScalar::AsciiLower)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        Some(super::lower_apply(recv).unwrap_or_else(|| recv.clone()))
+    }
 }
 
 scalar_view_predicate_element! {
@@ -2896,6 +2936,7 @@ impl Builtin for Missing {
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Missing)
+            .view_object_projection(BuiltinViewObjectProjection::Missing)
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
@@ -3125,6 +3166,7 @@ impl Builtin for Has {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::Has)
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
@@ -3153,6 +3195,7 @@ impl Builtin for HasAll {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::HasAll)
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
@@ -3179,6 +3222,7 @@ impl Builtin for HasKey {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::HasKey)
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
