@@ -7,17 +7,21 @@
 
 use crate::{
     builtins::{
-        BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
-        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprPayload, BuiltinExprStage,
-        BuiltinKeyedReducer, BuiltinLogicalShape, BuiltinMethod, BuiltinMembershipSink,
-        BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda, BuiltinPredicateSink,
-        BuiltinPipelineLowering,
-        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-        BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStageMerge,
-        BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewStage,
+        builtin::{BarrierCtx, Builtin, StreamCtx},
+        defs, BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality,
+        BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprPayload,
+        BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape, BuiltinMembershipSink,
+        BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda,
+        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
+        BuiltinPipelineShape, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
+        BuiltinViewObjectProjection, BuiltinViewStage,
     },
+    data::{context::EvalError, value::Val},
+    exec::pipeline::StageFlow,
     plan::demand::{Demand, PullDemand, ValueNeed},
+    vm::Program,
 };
 
 /// Compact, stable numeric identity for a builtin. One-to-one with
@@ -119,7 +123,8 @@ pub(crate) fn nullary_stage(id: BuiltinId) -> Option<BuiltinNullaryStage> {
 /// Return concrete behavior for a two-string-argument pipeline builtin.
 #[inline]
 pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage> {
-    id.method().and_then(|method| method.spec().string_pair_stage)
+    id.method()
+        .and_then(|method| method.spec().string_pair_stage)
 }
 
 /// Return payload-demand behavior for expression-bearing builtin stages.
@@ -693,9 +698,7 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
             }
         }
         BuiltinSinkAccumulator::Numeric => BuiltinPipelineArity::Range { min: 0, max: 1 },
-        BuiltinSinkAccumulator::SelectOne(_) => {
-            BuiltinPipelineArity::Range { min: 0, max: 1 }
-        }
+        BuiltinSinkAccumulator::SelectOne(_) => BuiltinPipelineArity::Range { min: 0, max: 1 },
         BuiltinSinkAccumulator::ApproxDistinct => BuiltinPipelineArity::Exact(0),
     })
 }
@@ -720,6 +723,100 @@ fn demand_law(id: BuiltinId) -> BuiltinDemandLaw {
     id.method()
         .map(|m| m.spec().demand_law)
         .unwrap_or(BuiltinDemandLaw::Identity)
+}
+
+/// Dispatch the migrated per-row streaming hook for `method`.
+///
+/// This is intentionally a static match over concrete builtin definition
+/// types: hot executors avoid vtables, while the method-to-hook authority
+/// remains in the builtin registry instead of being duplicated by backends.
+#[inline]
+pub(crate) fn apply_stream_hook_or_else<F>(
+    method: BuiltinMethod,
+    ctx: &mut StreamCtx<'_, '_>,
+    item: Val,
+    body: Option<&Program>,
+    fallback: F,
+) -> Result<StageFlow<Val>, EvalError>
+where
+    F: FnOnce(Val) -> Result<StageFlow<Val>, EvalError>,
+{
+    match method {
+        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+            <defs::Filter as Builtin>::apply_stream(ctx, item, body)
+        }
+        BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::Map => <defs::Map as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::Take => <defs::Take as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::TransformKeys => {
+            <defs::TransformKeys as Builtin>::apply_stream(ctx, item, body)
+        }
+        BuiltinMethod::TransformValues => {
+            <defs::TransformValues as Builtin>::apply_stream(ctx, item, body)
+        }
+        BuiltinMethod::FilterKeys => <defs::FilterKeys as Builtin>::apply_stream(ctx, item, body),
+        BuiltinMethod::FilterValues => {
+            <defs::FilterValues as Builtin>::apply_stream(ctx, item, body)
+        }
+        _ => fallback(item),
+    }
+}
+
+/// Dispatch the migrated materialized-buffer hook for `method`.
+///
+/// Keep this in lockstep with builtin definitions as methods migrate; executor
+/// modules should call this helper instead of carrying local builtin hook
+/// tables.
+#[inline]
+pub(crate) fn apply_barrier_hook(
+    method: BuiltinMethod,
+    ctx: &mut BarrierCtx<'_>,
+    buf: &mut Vec<Val>,
+    body: Option<&Program>,
+) -> Option<Result<(), EvalError>> {
+    match method {
+        BuiltinMethod::Reverse => <defs::Reverse as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Sort => <defs::Sort as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Window => <defs::Window as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Chunk => <defs::Chunk as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::CountBy => <defs::CountBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+            <defs::Filter as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Map => <defs::Map as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Unique => <defs::Unique as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Take => <defs::Take as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::IndicesWhere => {
+            <defs::IndicesWhere as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        BuiltinMethod::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::MinBy => <defs::MinBy as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::TransformKeys => {
+            <defs::TransformKeys as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        BuiltinMethod::TransformValues => {
+            <defs::TransformValues as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        BuiltinMethod::FilterKeys => <defs::FilterKeys as Builtin>::apply_barrier(ctx, buf, body),
+        BuiltinMethod::FilterValues => {
+            <defs::FilterValues as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        _ => None,
+    }
 }
 
 impl BuiltinId {
@@ -821,7 +918,10 @@ mod tests {
     fn registry_name_lookup_matches_legacy_lookup() {
         for (method, canonical, aliases) in all_method_entries() {
             assert_eq!(by_name(canonical).and_then(BuiltinId::method), Some(method));
-            assert_eq!(canonical_name(BuiltinId::from_method(method)), Some(canonical));
+            assert_eq!(
+                canonical_name(BuiltinId::from_method(method)),
+                Some(canonical)
+            );
             for alias in aliases {
                 assert_eq!(by_name(alias).and_then(BuiltinId::method), Some(method));
             }
@@ -905,7 +1005,11 @@ mod tests {
             let id = BuiltinId::from_method(method);
             let spec = method.spec();
             assert_eq!(builtin_category(id), Some(spec.category), "{method:?}");
-            assert_eq!(builtin_cardinality(id), Some(spec.cardinality), "{method:?}");
+            assert_eq!(
+                builtin_cardinality(id),
+                Some(spec.cardinality),
+                "{method:?}"
+            );
             assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
             assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
             assert_eq!(builtin_sink(id), spec.sink, "{method:?}");
@@ -1463,7 +1567,10 @@ mod tests {
             expr_stage(BuiltinId::from_method(BuiltinMethod::TransformKeys)),
             Some(BuiltinExprStage::ExprBuiltin)
         );
-        assert_eq!(expr_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
+        assert_eq!(
+            expr_stage(BuiltinId::from_method(BuiltinMethod::Take)),
+            None
+        );
     }
 
     #[test]
@@ -1476,8 +1583,14 @@ mod tests {
             nullary_stage(BuiltinId::from_method(BuiltinMethod::Unique)),
             Some(BuiltinNullaryStage::Unique)
         );
-        assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Keys)), None);
-        assert_eq!(nullary_stage(BuiltinId::from_method(BuiltinMethod::Take)), None);
+        assert_eq!(
+            nullary_stage(BuiltinId::from_method(BuiltinMethod::Keys)),
+            None
+        );
+        assert_eq!(
+            nullary_stage(BuiltinId::from_method(BuiltinMethod::Take)),
+            None
+        );
     }
 
     #[test]
@@ -1518,7 +1631,10 @@ mod tests {
             expr_payload(BuiltinId::from_method(BuiltinMethod::GroupBy)),
             Some(BuiltinExprPayload::RowKeyedReducer)
         );
-        assert_eq!(expr_payload(BuiltinId::from_method(BuiltinMethod::Take)), None);
+        assert_eq!(
+            expr_payload(BuiltinId::from_method(BuiltinMethod::Take)),
+            None
+        );
     }
 
     #[test]
@@ -1534,12 +1650,12 @@ mod tests {
                 "{method:?}"
             );
         }
-        assert!(!expr_stage_elidable_when_value_unused(BuiltinId::from_method(
-            BuiltinMethod::TakeWhile
-        )));
-        assert!(!expr_stage_elidable_when_value_unused(BuiltinId::from_method(
-            BuiltinMethod::GroupBy
-        )));
+        assert!(!expr_stage_elidable_when_value_unused(
+            BuiltinId::from_method(BuiltinMethod::TakeWhile)
+        ));
+        assert!(!expr_stage_elidable_when_value_unused(
+            BuiltinId::from_method(BuiltinMethod::GroupBy)
+        ));
     }
 
     #[test]
@@ -1560,7 +1676,10 @@ mod tests {
             object_lambda(BuiltinId::from_method(BuiltinMethod::FilterValues)),
             Some(BuiltinObjectLambda::FilterValues)
         );
-        assert_eq!(object_lambda(BuiltinId::from_method(BuiltinMethod::Map)), None);
+        assert_eq!(
+            object_lambda(BuiltinId::from_method(BuiltinMethod::Map)),
+            None
+        );
     }
 
     #[test]
@@ -1590,7 +1709,10 @@ mod tests {
             predicate_sink(BuiltinId::from_method(BuiltinMethod::FindOne)),
             Some(BuiltinPredicateSink::FindOne)
         );
-        assert_eq!(predicate_sink(BuiltinId::from_method(BuiltinMethod::Count)), None);
+        assert_eq!(
+            predicate_sink(BuiltinId::from_method(BuiltinMethod::Count)),
+            None
+        );
 
         assert_eq!(
             membership_sink(BuiltinId::from_method(BuiltinMethod::Includes)),
@@ -1836,14 +1958,16 @@ mod tests {
             assert!(view_projection(id), "{method:?}");
         }
 
-        assert!(view_projection(BuiltinId::from_method(BuiltinMethod::Upper)));
+        assert!(view_projection(BuiltinId::from_method(
+            BuiltinMethod::Upper
+        )));
         assert!(view_scalar_projection(BuiltinId::from_method(
             BuiltinMethod::Upper
         )));
-        assert!(
-            view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)).is_none()
-        );
-        assert!(!view_projection(BuiltinId::from_method(BuiltinMethod::Sort)));
+        assert!(view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)).is_none());
+        assert!(!view_projection(BuiltinId::from_method(
+            BuiltinMethod::Sort
+        )));
         assert!(!view_scalar_projection(BuiltinId::from_method(
             BuiltinMethod::Sort
         )));
@@ -1940,7 +2064,10 @@ mod tests {
             array_selector(BuiltinId::from_method(BuiltinMethod::Nth)),
             Some(BuiltinArraySelector::Nth)
         );
-        assert_eq!(array_selector(BuiltinId::from_method(BuiltinMethod::Take)), None);
+        assert_eq!(
+            array_selector(BuiltinId::from_method(BuiltinMethod::Take)),
+            None
+        );
     }
 
     #[test]

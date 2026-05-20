@@ -23,8 +23,8 @@ use super::{
 };
 
 use crate::builtins::registry::{
-    keyed_reducer, string_pair_stage as builtin_string_pair_stage,
-    object_lambda as builtin_object_lambda, BuiltinId,
+    keyed_reducer, object_lambda as builtin_object_lambda,
+    string_pair_stage as builtin_string_pair_stage, BuiltinId,
 };
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinObjectLambda,
@@ -394,43 +394,8 @@ fn apply_adapter_materialized(
             stage,
             strategy,
         };
-        use crate::builtins::{builtin::Builtin, defs, BuiltinMethod as M};
-        let trait_result = match method {
-            M::Reverse => <defs::Reverse as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Sort => <defs::Sort as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Window => <defs::Window as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Chunk => <defs::Chunk as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::CountBy => <defs::CountBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Filter | M::Find | M::FindAll => {
-                <defs::Filter as Builtin>::apply_barrier(&mut ctx, buf, body)
-            }
-            M::Compact => <defs::Compact as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Remove => <defs::Remove as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Map => <defs::Map as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Unique => <defs::Unique as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Take => <defs::Take as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::Skip => <defs::Skip as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::IndicesWhere => <defs::IndicesWhere as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::MinBy => <defs::MinBy as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::TransformKeys => {
-                <defs::TransformKeys as Builtin>::apply_barrier(&mut ctx, buf, body)
-            }
-            M::TransformValues => {
-                <defs::TransformValues as Builtin>::apply_barrier(&mut ctx, buf, body)
-            }
-            M::FilterKeys => <defs::FilterKeys as Builtin>::apply_barrier(&mut ctx, buf, body),
-            M::FilterValues => <defs::FilterValues as Builtin>::apply_barrier(&mut ctx, buf, body),
-            _ => None,
-        };
-        if let Some(r) = trait_result {
+        if let Some(r) = crate::builtins::registry::apply_barrier_hook(method, &mut ctx, buf, body)
+        {
             return Some(r);
         }
     }
@@ -662,9 +627,7 @@ pub(crate) fn apply_lambda_obj(
     let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
         indexmap::IndexMap::with_capacity(m.len());
     let operation = match stage {
-        Stage::ExprBuiltin { method, .. } => {
-            builtin_object_lambda(BuiltinId::from_method(*method))
-        }
+        Stage::ExprBuiltin { method, .. } => builtin_object_lambda(BuiltinId::from_method(*method)),
         _ => None,
     }
     .expect("apply_lambda_obj called with non-Obj-lambda Stage");
