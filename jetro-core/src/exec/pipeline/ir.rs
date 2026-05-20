@@ -11,12 +11,11 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
     columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    expr_payload, expr_stage_elidable_when_value_unused, effective_pipeline_shape,
+    effective_pipeline_shape, expr_payload, expr_stage_elidable_when_value_unused,
     is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
-    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_streams,
-    sink_demand as builtin_sink_demand,
-    stage_merge as builtin_stage_merge, terminal_selection_position,
-    view_stage as builtin_view_stage, BuiltinId,
+    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_stage_consumes_value,
+    pipeline_streams, sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
+    terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinExprPayload, BuiltinMethod, BuiltinPipelineOrderEffect,
@@ -687,13 +686,11 @@ impl Stage {
                     desc
                 })
             }
-            Stage::CompiledMap(_) => {
-                Some(
-                    StageDescriptor::new(BuiltinMethod::Map)
-                        .receiver_unsafe_without_body()
-                        .disable_columnar(),
-                )
-            }
+            Stage::CompiledMap(_) => Some(
+                StageDescriptor::new(BuiltinMethod::Map)
+                    .receiver_unsafe_without_body()
+                    .disable_columnar(),
+            ),
             _ => None,
         }
     }
@@ -752,20 +749,21 @@ impl Stage {
     }
 
     /// Returns `true` when the stage reads the actual element value rather than just membership
-    /// metadata, meaning downstream value-demand cannot be eliminated.
-    /// Direct Stage-variant match — Sort with key, lambdas (Filter/Map/FlatMap),
-    /// keyed reducers, prefix predicates, and ExprBuiltin all read element value.
+    /// metadata, meaning upstream value-demand cannot be eliminated before this stage.
     pub(crate) fn consumes_input_value(&self) -> bool {
         match self {
-            Stage::Filter(_, _)
-            | Stage::Map(_, _)
-            | Stage::FlatMap(_, _)
-            | Stage::CompiledMap(_)
-            | Stage::ExprBuiltin { .. }
-            | Stage::UniqueBy(Some(_))
-            | Stage::SortedDedup(Some(_)) => true,
-            Stage::Sort(spec) => spec.key.is_some(),
-            _ => false,
+            Stage::CompiledMap(_) | Stage::SortedDedup(_) => true,
+            _ => self
+                .descriptor()
+                .and_then(|desc| {
+                    desc.method.map(|method| {
+                        pipeline_stage_consumes_value(
+                            BuiltinId::from_method(method),
+                            desc.body.is_some(),
+                        )
+                    })
+                })
+                .unwrap_or(false),
         }
     }
 
@@ -1374,7 +1372,9 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
         ))),
         Stage::Builtin(call)
             if builtin_is_pure(BuiltinId::from_method(call.method))
-                && crate::builtins::registry::view_projection(BuiltinId::from_method(call.method))
+                && crate::builtins::registry::view_projection(BuiltinId::from_method(
+                    call.method,
+                ))
                 && builtin_cardinality(BuiltinId::from_method(call.method))
                     == Some(BuiltinCardinality::OneToOne) =>
         {

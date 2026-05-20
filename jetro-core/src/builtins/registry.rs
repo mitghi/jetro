@@ -152,6 +152,30 @@ pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
         && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
 }
 
+/// Return true when a pipeline stage for `id` must inspect row values to
+/// decide its output membership, ordering, key, or projected value.
+#[inline]
+pub(crate) fn pipeline_stage_consumes_value(id: BuiltinId, has_body: bool) -> bool {
+    if has_body {
+        return true;
+    }
+    matches!(
+        demand_law(id),
+        BuiltinDemandLaw::FilterLike
+            | BuiltinDemandLaw::TakeWhile
+            | BuiltinDemandLaw::DropWhile
+            | BuiltinDemandLaw::UniqueLike
+            | BuiltinDemandLaw::MapLike
+            | BuiltinDemandLaw::PredicateMapLike
+            | BuiltinDemandLaw::Slice
+            | BuiltinDemandLaw::FlatMapLike
+            | BuiltinDemandLaw::NumericReducer
+            | BuiltinDemandLaw::KeyOnlyReducer
+            | BuiltinDemandLaw::RowKeyedReducer
+            | BuiltinDemandLaw::OrderBarrier
+    )
+}
+
 /// Return object-lambda behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {

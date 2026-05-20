@@ -316,6 +316,13 @@ fn unique_last_uses_distinct_output_order() {
 }
 
 #[test]
+fn value_dependent_stages_keep_upstream_projection_for_count() {
+    let d = json!({"xs": [1, 2, 3, 4]});
+    assert_eq!(run("$.xs.map(0).unique().count()", &d), "1");
+    assert_eq!(run("$.xs.map(null).compact().count()", &d), "0");
+}
+
+#[test]
 fn sort_lambda_forms() {
     let d = users();
     let asc = r#"[{"active":false,"age":24,"id":2,"name":"Bob","score":40},{"active":true,"age":30,"id":1,"name":"Ada","score":80},{"active":true,"age":42,"id":3,"name":"Carol","score":95}]"#;
