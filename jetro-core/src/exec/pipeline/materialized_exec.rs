@@ -24,7 +24,8 @@ use super::{
 
 use crate::builtins::registry::{
     keyed_reducer, string_pair_stage as builtin_string_pair_stage,
-    view_stage as builtin_view_stage, BuiltinId, BuiltinStringPairStage,
+    object_lambda as builtin_object_lambda, view_stage as builtin_view_stage, BuiltinId,
+    BuiltinObjectLambda, BuiltinStringPairStage,
 };
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinViewStage,
@@ -686,12 +687,17 @@ pub(crate) fn apply_lambda_obj(
     };
     let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
         indexmap::IndexMap::with_capacity(m.len());
+    let operation = match stage {
+        Stage::ExprBuiltin { method, .. } => {
+            builtin_object_lambda(BuiltinId::from_method(*method))
+        }
+        _ => None,
+    }
+    .expect("apply_lambda_obj called with non-Obj-lambda Stage");
+
     for (k, v) in m.iter() {
-        match stage {
-            Stage::ExprBuiltin {
-                method: BuiltinMethod::TransformKeys,
-                ..
-            } => {
+        match operation {
+            BuiltinObjectLambda::TransformKeys => {
                 let k_val = Val::Str(k.clone());
                 let new_k = eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
@@ -702,19 +708,13 @@ pub(crate) fn apply_lambda_obj(
                 };
                 out.insert(new_k_arc, v.clone());
             }
-            Stage::ExprBuiltin {
-                method: BuiltinMethod::TransformValues,
-                ..
-            } => {
+            BuiltinObjectLambda::TransformValues => {
                 let new_v = eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?;
                 out.insert(k.clone(), new_v);
             }
-            Stage::ExprBuiltin {
-                method: BuiltinMethod::FilterKeys,
-                ..
-            } => {
+            BuiltinObjectLambda::FilterKeys => {
                 let k_val = Val::Str(k.clone());
                 if is_truthy(&eval_kernel_with_vm(kernel, &k_val, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
@@ -722,17 +722,13 @@ pub(crate) fn apply_lambda_obj(
                     out.insert(k.clone(), v.clone());
                 }
             }
-            Stage::ExprBuiltin {
-                method: BuiltinMethod::FilterValues,
-                ..
-            } => {
+            BuiltinObjectLambda::FilterValues => {
                 if is_truthy(&eval_kernel_with_vm(kernel, v, vm, |item, vm| {
                     apply_item_in_env(vm, loop_env, item, prog)
                 })?) {
                     out.insert(k.clone(), v.clone());
                 }
             }
-            _ => unreachable!("apply_lambda_obj called with non-Obj-lambda Stage"),
         }
     }
     Ok(Val::obj(out))

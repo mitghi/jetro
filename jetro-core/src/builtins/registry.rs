@@ -192,6 +192,19 @@ pub(crate) enum BuiltinExprPayload {
     RowKeyedReducer,
 }
 
+/// Object-lambda operation behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinObjectLambda {
+    /// Map object keys through the lambda.
+    TransformKeys,
+    /// Map object values through the lambda.
+    TransformValues,
+    /// Keep entries whose key satisfies the predicate.
+    FilterKeys,
+    /// Keep entries whose value satisfies the predicate.
+    FilterValues,
+}
+
 /// View-native object/path projection operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinViewObjectProjection {
@@ -412,6 +425,18 @@ pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
     ) && is_pure(id)
         && builtin_cardinality(id) == Some(BuiltinCardinality::OneToOne)
         && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
+}
+
+/// Return object-lambda behavior for builtin `id`, if any.
+#[inline]
+pub(crate) fn object_lambda(id: BuiltinId) -> Option<BuiltinObjectLambda> {
+    match id.method()? {
+        BuiltinMethod::TransformKeys => Some(BuiltinObjectLambda::TransformKeys),
+        BuiltinMethod::TransformValues => Some(BuiltinObjectLambda::TransformValues),
+        BuiltinMethod::FilterKeys => Some(BuiltinObjectLambda::FilterKeys),
+        BuiltinMethod::FilterValues => Some(BuiltinObjectLambda::FilterValues),
+        _ => None,
+    }
 }
 
 /// Return true when a count-like terminal sink accepts a predicate argument.
@@ -1784,6 +1809,27 @@ mod tests {
         assert!(!expr_stage_elidable_when_value_unused(BuiltinId::from_method(
             BuiltinMethod::GroupBy
         )));
+    }
+
+    #[test]
+    fn registry_drives_object_lambda_classification() {
+        assert_eq!(
+            object_lambda(BuiltinId::from_method(BuiltinMethod::TransformKeys)),
+            Some(BuiltinObjectLambda::TransformKeys)
+        );
+        assert_eq!(
+            object_lambda(BuiltinId::from_method(BuiltinMethod::TransformValues)),
+            Some(BuiltinObjectLambda::TransformValues)
+        );
+        assert_eq!(
+            object_lambda(BuiltinId::from_method(BuiltinMethod::FilterKeys)),
+            Some(BuiltinObjectLambda::FilterKeys)
+        );
+        assert_eq!(
+            object_lambda(BuiltinId::from_method(BuiltinMethod::FilterValues)),
+            Some(BuiltinObjectLambda::FilterValues)
+        );
+        assert_eq!(object_lambda(BuiltinId::from_method(BuiltinMethod::Map)), None);
     }
 
     #[test]
