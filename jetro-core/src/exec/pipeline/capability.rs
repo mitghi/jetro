@@ -124,14 +124,7 @@ impl SourceCapabilities {
     /// Returns true when this source can defer owned materialization to only
     /// rows selected by bounded or positional demand.
     pub(crate) fn supports_selected_materialization(self, demand: PullDemand) -> bool {
-        self.selected_row_materialization
-            && matches!(
-                demand,
-                PullDemand::FirstInput(_)
-                    | PullDemand::LastInput(_)
-                    | PullDemand::NthInput(_)
-                    | PullDemand::UntilOutput(_)
-            )
+        self.selected_row_materialization && demand.permits_selected_materialization()
     }
 }
 

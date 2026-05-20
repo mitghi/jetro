@@ -246,6 +246,18 @@ impl PullDemand {
         )
     }
 
+    /// Returns true when this demand selects a bounded subset of rows, allowing
+    /// capable sources to defer owned materialization to selected rows.
+    pub(crate) fn permits_selected_materialization(self) -> bool {
+        matches!(
+            self,
+            PullDemand::FirstInput(_)
+                | PullDemand::LastInput(_)
+                | PullDemand::NthInput(_)
+                | PullDemand::UntilOutput(_)
+        )
+    }
+
     /// Return a `PullDemand` capped to at most `n` input elements,
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {
@@ -374,6 +386,15 @@ mod tests {
         assert!(PullDemand::UntilOutput(0).is_zero());
         assert!(!PullDemand::NthInput(0).is_zero());
         assert!(!PullDemand::All.is_zero());
+    }
+
+    #[test]
+    fn pull_demand_marks_selected_materialization_shapes() {
+        assert!(PullDemand::FirstInput(1).permits_selected_materialization());
+        assert!(PullDemand::LastInput(1).permits_selected_materialization());
+        assert!(PullDemand::NthInput(0).permits_selected_materialization());
+        assert!(PullDemand::UntilOutput(1).permits_selected_materialization());
+        assert!(!PullDemand::All.permits_selected_materialization());
     }
 
     #[test]
