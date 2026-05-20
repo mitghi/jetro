@@ -297,7 +297,6 @@ impl ObjectKernel {
     }
 
     /// Returns the source-row field payload needed to evaluate every value entry.
-    #[allow(dead_code)]
     pub(crate) fn field_demand(&self) -> FieldDemand {
         self.entries.iter().fold(FieldDemand::None, |need, entry| {
             need.merge(entry.value.field_demand())
@@ -578,7 +577,6 @@ impl BodyKernel {
     }
 
     /// Returns the field payload needed from the current row to evaluate this kernel.
-    #[allow(dead_code)]
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
             Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) | Self::NestedPlan(_) => {
