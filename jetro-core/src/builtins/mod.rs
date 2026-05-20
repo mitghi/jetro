@@ -1436,6 +1436,7 @@ impl BuiltinMethod {
     #[inline]
     pub(crate) fn is_view_scalar_method(self) -> bool {
         self == Self::Len
+            || self == Self::Includes
             || self.is_string_arg_view_scalar()
             || self.is_string_no_arg_view_scalar()
             || self.is_numeric_no_arg_view_scalar()
