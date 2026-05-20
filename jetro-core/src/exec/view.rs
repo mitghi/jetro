@@ -36,24 +36,6 @@ where
     cur
 }
 
-/// Top-level view-pipeline runner. Tries fast-path sub-runners in priority order:
-/// `terminal_collect`, `full`, `reducing_stage_prefix`, `sort_prefix`, then a
-/// generic `prefix_then_materialized_suffix` fallback. Returns `None` when no
-/// path can handle the pipeline shape, allowing the caller to fall back to `Val`-based execution.
-#[allow(dead_code)]
-pub(crate) fn run_with_env<'a, V>(
-    source: V,
-    body: &pipeline::PipelineBody,
-    cache: Option<&dyn pipeline::PipelineData>,
-    base_env: &Env,
-) -> Option<Result<Val, EvalError>>
-where
-    V: ValueView<'a>,
-{
-    let mut vm = VM::new();
-    run_with_env_and_vm(source, body, cache, base_env, &mut vm)
-}
-
 /// Top-level view-pipeline runner using caller-owned VM state for fallback suffixes
 /// and VM-backed sink targets.
 pub(crate) fn run_with_env_and_vm<'a, V>(
