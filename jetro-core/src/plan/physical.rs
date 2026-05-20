@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{dispatches_scalar_direct, BuiltinId};
-use crate::builtins::{BuiltinCall, BuiltinMethod};
+use crate::builtins::registry::{by_name as builtin_by_name, dispatches_scalar_direct, BuiltinId};
+use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::exec::pipeline::{Pipeline, Source};
@@ -634,7 +634,7 @@ fn lower_structural_prefix(
             Step::Index(index) => anchor.push(StructuralPathStep::Index(*index)),
             Step::Method(name, args) | Step::OptMethod(name, args) => {
                 let anchor = Arc::from(anchor);
-                let method = BuiltinMethod::from_name(name);
+                let method = builtin_by_name(name.as_str())?.method()?;
                 let plan = StructuralPlan::lower_builtin(anchor, method, args)?;
                 let fallback_expr = base.clone().maybe_chain(steps[..=idx].to_vec());
                 let fallback = Arc::new(Compiler::compile(&fallback_expr, "<structural-fallback>"));
