@@ -188,7 +188,7 @@ where
                     let kernel = sink_kernels.get(kernel)?;
                     eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm)
                 },
-                || Some(eval_view_key(item, None)?.object_key().to_string()),
+                || Some(eval_view_key_scalar(item)?.object_key().to_string()),
             )?;
             Some(if sink_done {
                 ViewRowAction::Stop
@@ -874,8 +874,8 @@ where
         &body.stage_kernels,
         source_demand,
         vm,
-        |item, _vm| {
-            plan.reducer.observe(item, &body.stage_kernels)?;
+        |item, vm| {
+            plan.reducer.observe(item, &body.stage_kernels, vm)?;
             Some(ViewRowAction::Emit)
         },
     )?;
@@ -1418,24 +1418,6 @@ where
     }
 }
 
-/// Extracts a `ViewKey` from `item` using `kernel` when provided, or from the
-/// item's own scalar directly. Used for dedup (`distinct`) and group-by keying
-/// without materialising the full value.
-fn eval_view_key<'a, V>(item: &V, kernel: Option<&pipeline::BodyKernel>) -> Option<ViewKey>
-where
-    V: ValueView<'a>,
-{
-    match kernel {
-        Some(kernel) => match pipeline::eval_view_kernel(kernel, item)? {
-            pipeline::ViewKernelValue::View(view) => ViewKey::from_view(view.scalar())
-                .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
-            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
-        },
-        None => ViewKey::from_view(item.scalar())
-            .or_else(|| Some(ViewKey::from_owned(item.materialize()))),
-    }
-}
-
 fn eval_view_key_with_vm<'a, V>(
     item: &V,
     kernel: Option<&pipeline::BodyKernel>,
@@ -1450,9 +1432,15 @@ where
                 .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
             pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
         },
-        None => ViewKey::from_view(item.scalar())
-            .or_else(|| Some(ViewKey::from_owned(item.materialize()))),
+        None => eval_view_key_scalar(item),
     }
+}
+
+fn eval_view_key_scalar<'a, V>(item: &V) -> Option<ViewKey>
+where
+    V: ValueView<'a>,
+{
+    ViewKey::from_view(item.scalar()).or_else(|| Some(ViewKey::from_owned(item.materialize())))
 }
 
 /// Extracts a sort key `Val` from `item`, optionally applying a row program.

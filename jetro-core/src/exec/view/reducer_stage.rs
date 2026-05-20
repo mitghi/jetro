@@ -64,6 +64,7 @@ impl ViewStageReducer {
         &mut self,
         item: &V,
         stage_kernels: &[pipeline::BodyKernel],
+        vm: &mut crate::vm::VM,
     ) -> Option<()>
     where
         V: ValueView<'a>,
@@ -74,7 +75,7 @@ impl ViewStageReducer {
                 kernel,
                 entries,
             } => {
-                let key = super::eval_view_key(item, Some(stage_kernels.get(*kernel)?))?;
+                let key = super::eval_view_key_with_vm(item, Some(stage_kernels.get(*kernel)?), vm)?;
                 match kind {
                     BuiltinKeyedReducer::Count => match entries.entry(key) {
                         indexmap::map::Entry::Occupied(mut entry) => {

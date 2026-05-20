@@ -58,9 +58,11 @@ pub use kernels::{eval_cmp_op, BodyKernel};
 #[cfg(test)]
 pub(crate) use kernels::eval_kernel;
 pub(crate) use kernels::{
-    eval_kernel_with_vm, eval_view_kernel, eval_view_kernel_with_vm, CollectLayout,
-    NestedPlanKernel, ObjectKernel, ViewKernelValue,
+    eval_kernel_with_vm, eval_view_kernel_with_vm, CollectLayout, NestedPlanKernel, ObjectKernel,
+    ViewKernelValue,
 };
+#[cfg(test)]
+pub(crate) use kernels::eval_view_kernel;
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,

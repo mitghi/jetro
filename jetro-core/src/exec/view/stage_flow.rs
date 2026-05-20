@@ -199,7 +199,7 @@ where
                 Some(kernel) => {
                     super::eval_view_key_with_vm(&item, Some(stage_kernels.get(kernel)?), vm)?
                 }
-                None => super::eval_view_key(&item, None)?,
+                None => super::eval_view_key_scalar(&item)?,
             };
             if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))
