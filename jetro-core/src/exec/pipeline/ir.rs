@@ -407,6 +407,8 @@ pub(crate) struct StageDescriptor<'a> {
     view_stage_override: Option<BuiltinViewStage>,
     // when true, a one-to-one stage may fall back to Preserves order effect
     allow_one_to_one_order_fallback: bool,
+    // when false, the stage uses builtin planning facts but cannot run on the columnar executor
+    columnar_enabled: bool,
     // when true, the stage is safe to run against a materialised receiver with no body program
     receiver_safe_without_body: bool,
 }
@@ -420,6 +422,7 @@ impl<'a> StageDescriptor<'a> {
             usize_arg: None,
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
+            columnar_enabled: true,
             receiver_safe_without_body: true,
         }
     }
@@ -433,6 +436,7 @@ impl<'a> StageDescriptor<'a> {
             usize_arg: None,
             view_stage_override: None,
             allow_one_to_one_order_fallback: false,
+            columnar_enabled: false,
             receiver_safe_without_body: true,
         }
     }
@@ -468,6 +472,12 @@ impl<'a> StageDescriptor<'a> {
         self
     }
 
+    #[inline]
+    pub(crate) fn disable_columnar(mut self) -> Self {
+        self.columnar_enabled = false;
+        self
+    }
+
     /// Returns the effective `BuiltinViewStage` for this descriptor, using the override if set
     /// or falling back to the method's registered view stage.
     #[inline]
@@ -481,7 +491,9 @@ impl<'a> StageDescriptor<'a> {
     /// Returns the columnar-stage metadata for the method, if it supports columnar execution.
     #[inline]
     pub(crate) fn columnar_stage(self) -> Option<crate::builtins::BuiltinColumnarStage> {
-        self.method
+        self.columnar_enabled
+            .then_some(())
+            .and_then(|_| self.method)
             .and_then(|method| builtin_columnar_stage(BuiltinId::from_method(method)))
     }
 
@@ -674,7 +686,11 @@ impl Stage {
                 })
             }
             Stage::CompiledMap(_) => {
-                Some(StageDescriptor::new(BuiltinMethod::Map).receiver_unsafe_without_body())
+                Some(
+                    StageDescriptor::new(BuiltinMethod::Map)
+                        .receiver_unsafe_without_body()
+                        .disable_columnar(),
+                )
             }
             _ => None,
         }
