@@ -156,14 +156,15 @@ fn sink_name(s: &Sink) -> &'static str {
         },
         Sink::ArgExtreme(spec) if spec.want_max => "max_by",
         Sink::ArgExtreme(_) => "min_by",
-        Sink::Terminal(BuiltinMethod::First) => "first",
-        Sink::Terminal(BuiltinMethod::Last) => "last",
+        Sink::Terminal(method) => crate::builtins::registry::canonical_name(
+            crate::builtins::registry::BuiltinId::from_method(*method),
+        )
+        .unwrap_or("terminal"),
         Sink::SelectMany {
             from_end: false, ..
         } => "first_n",
         Sink::SelectMany { from_end: true, .. } => "last_n",
         Sink::Nth(_) => "nth",
-        Sink::Terminal(_) => "terminal",
         Sink::ApproxCountDistinct => "approx_count_distinct",
     }
 }

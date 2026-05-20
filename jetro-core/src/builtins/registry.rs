@@ -776,6 +776,22 @@ pub(crate) fn by_name(name: &str) -> Option<BuiltinId> {
     None
 }
 
+/// Return the canonical source-level name for builtin `id`.
+#[inline]
+pub(crate) fn canonical_name(id: BuiltinId) -> Option<&'static str> {
+    macro_rules! check {
+        ( $( $variant:ident ),* $(,)? ) => {
+            $(
+                if id.0 == BuiltinMethod::$variant as u16 {
+                    return Some(<crate::builtins::defs::$variant as crate::builtins::builtin::Builtin>::NAME);
+                }
+            )*
+        };
+    }
+    crate::for_each_builtin!(check);
+    None
+}
+
 /// Return identity entries for all registered builtins: (method, canonical, aliases).
 #[cfg(test)]
 pub(crate) fn all_method_entries() -> Vec<(BuiltinMethod, &'static str, &'static [&'static str])> {
