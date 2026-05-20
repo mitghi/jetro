@@ -1,6 +1,7 @@
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, terminal_selection_position,
-    view_object_items_projection, BuiltinArraySelector, BuiltinId,
+    array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
+    terminal_selection_position, view_object_items_projection, BuiltinArraySelector, BuiltinId,
+    BuiltinLogicalShape,
 };
 use crate::builtins::BuiltinSelectionPosition;
 use crate::data::value::Val;
@@ -779,8 +780,6 @@ pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirect
 }
 
 fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
-    use crate::builtins::BuiltinMethod;
-
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
@@ -788,10 +787,8 @@ fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate>
     let Step::Method(name, args) = last else {
         return None;
     };
-    if !matches!(
-        BuiltinMethod::from_name(name),
-        BuiltinMethod::Find | BuiltinMethod::FindFirst
-    ) {
+    if logical_shape(builtin_by_name(name.as_str())?) != Some(BuiltinLogicalShape::FilterThenFirst)
+    {
         return None;
     }
     let [Arg::Pos(predicate_expr)] = args.as_slice() else {
