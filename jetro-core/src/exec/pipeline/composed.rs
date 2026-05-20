@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::builtins::{
     registry::{
         keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
-        view_stage, BuiltinId,
+        terminal_selection_position, view_stage, BuiltinId,
     },
     BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     BuiltinViewStage,
@@ -638,8 +638,11 @@ fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink
     }
     match sink {
         Sink::Collect => Some(ProjectingSink::Collect(Vec::new())),
-        Sink::Terminal(crate::builtins::BuiltinMethod::First) => Some(ProjectingSink::First(None)),
-        Sink::Terminal(crate::builtins::BuiltinMethod::Last) => Some(ProjectingSink::Last(None)),
+        Sink::Terminal(method) => match terminal_selection_position(BuiltinId::from_method(*method))?
+        {
+            BuiltinSelectionPosition::First => Some(ProjectingSink::First(None)),
+            BuiltinSelectionPosition::Last => Some(ProjectingSink::Last(None)),
+        },
         Sink::Nth(idx) => {
             let target = if matches!(demand, PullDemand::NthInput(_)) {
                 0
