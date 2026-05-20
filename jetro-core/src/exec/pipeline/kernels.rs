@@ -1914,11 +1914,12 @@ fn eval_nested_array_reducer_view<'a, V>(
     map: Option<&BodyKernel>,
     op: super::NumOp,
     item: &V,
+    mut vm: Option<&mut crate::vm::VM>,
 ) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    let source = match eval_view_kernel(source, item)? {
+    let source = match eval_view_kernel_inner(source, item, vm.as_deref_mut())? {
         ViewKernelValue::View(view) => view,
         ViewKernelValue::Owned(value) => {
             return eval_nested_array_reducer_native_owned(value, predicate, map, op)
@@ -1933,7 +1934,7 @@ where
     let mut n_obs = 0usize;
 
     iter.try_for_each(|child| {
-        if !view_predicate_matches(predicate, &child)? {
+        if !view_predicate_matches(predicate, &child, vm.as_deref_mut())? {
             return Some(());
         }
         match map {
@@ -1952,7 +1953,7 @@ where
                     return Some(());
                 }
 
-                match eval_view_kernel(map, &child)? {
+                match eval_view_kernel_inner(map, &child, vm.as_deref_mut())? {
                     ViewKernelValue::View(view) => {
                         fold_json_view_scalar(
                             view.scalar(),
@@ -2004,11 +2005,12 @@ fn eval_nested_array_count_view<'a, V>(
     source: &BodyKernel,
     predicate: Option<&BodyKernel>,
     item: &V,
+    mut vm: Option<&mut crate::vm::VM>,
 ) -> Option<Val>
 where
     V: ValueView<'a>,
 {
-    let source = match eval_view_kernel(source, item)? {
+    let source = match eval_view_kernel_inner(source, item, vm.as_deref_mut())? {
         ViewKernelValue::View(view) => view,
         ViewKernelValue::Owned(value) => {
             return eval_nested_array_count_native_owned(value, predicate)
@@ -2023,7 +2025,7 @@ where
     let mut count = 0i64;
     let mut iter = source.array_iter()?;
     iter.try_for_each(|child| {
-        if view_predicate_matches(Some(predicate), &child)? {
+        if view_predicate_matches(Some(predicate), &child, vm.as_deref_mut())? {
             count += 1;
         }
         Some(())
@@ -2032,12 +2034,16 @@ where
 }
 
 #[inline]
-fn view_predicate_matches<'a, V>(predicate: Option<&BodyKernel>, item: &V) -> Option<bool>
+fn view_predicate_matches<'a, V>(
+    predicate: Option<&BodyKernel>,
+    item: &V,
+    vm: Option<&mut crate::vm::VM>,
+) -> Option<bool>
 where
     V: ValueView<'a>,
 {
     match predicate {
-        Some(predicate) => match eval_view_kernel(predicate, item)? {
+        Some(predicate) => match eval_view_kernel_inner(predicate, item, vm)? {
             ViewKernelValue::View(view) => Some(view.scalar().truthy()),
             ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
         },
@@ -2417,11 +2423,18 @@ where
             map,
             op,
         } => {
-            eval_nested_array_reducer_view(source, predicate.as_deref(), map.as_deref(), *op, item)
-                .map(ViewKernelValue::Owned)
+            eval_nested_array_reducer_view(
+                source,
+                predicate.as_deref(),
+                map.as_deref(),
+                *op,
+                item,
+                vm.as_deref_mut(),
+            )
+            .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedArrayCount { source, predicate } => {
-            eval_nested_array_count_view(source, predicate.as_deref(), item)
+            eval_nested_array_count_view(source, predicate.as_deref(), item, vm.as_deref_mut())
                 .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedPlan(plan) => {
