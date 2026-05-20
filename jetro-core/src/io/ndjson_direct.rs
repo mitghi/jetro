@@ -1136,12 +1136,10 @@ fn direct_tape_filter_map_positional_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::builtins::BuiltinMethod;
     use crate::exec::pipeline::{Sink, Stage};
 
     let want_last = match body.sink {
-        Sink::Terminal(BuiltinMethod::First) => false,
-        Sink::Terminal(BuiltinMethod::Last) => true,
+        Sink::Terminal(method) => selection_position_wants_last(method)?,
         _ => return None,
     };
     let (predicate, map) = match body.stages.as_slice() {
