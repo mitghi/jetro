@@ -13,7 +13,7 @@ use crate::{
     vm::Program,
 };
 
-use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
+use super::{eval_view_kernel, eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
 #[cfg(test)]
 use super::eval_kernel;
 
@@ -63,6 +63,19 @@ impl RowProgram {
         V: ValueView<'a>,
     {
         eval_view_kernel(&self.kernel, row)
+    }
+
+    /// Evaluates this row program against a borrowed row view using caller-owned
+    /// VM state for nested fallback paths.
+    pub(crate) fn eval_view_with_vm<'a, V>(
+        &self,
+        row: &V,
+        vm: &mut crate::vm::VM,
+    ) -> Option<ViewKernelValue<V>>
+    where
+        V: ValueView<'a>,
+    {
+        eval_view_kernel_with_vm(&self.kernel, row, vm)
     }
 }
 

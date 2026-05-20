@@ -916,7 +916,7 @@ where
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_program.as_ref())?;
+            let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -1141,7 +1141,7 @@ where
         &body.stage_kernels,
         PullDemand::All,
         |item| {
-            let key = view_sort_key(item, plan.key_program.as_ref())?;
+            let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
         },
@@ -1424,12 +1424,16 @@ where
 
 /// Extracts a sort key `Val` from `item`, optionally applying a row program.
 /// Falls back to `item.materialize()` when no key program is specified.
-fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>) -> Option<Val>
+fn view_sort_key<'a, V>(
+    item: &V,
+    key: Option<&pipeline::RowProgram>,
+    vm: &mut VM,
+) -> Option<Val>
 where
     V: ValueView<'a>,
 {
     match key {
-        Some(program) => match program.eval_view(item)? {
+        Some(program) => match program.eval_view_with_vm(item, vm)? {
             pipeline::ViewKernelValue::View(view) => {
                 scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
             }
