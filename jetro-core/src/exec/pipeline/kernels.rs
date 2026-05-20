@@ -1356,7 +1356,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             } else {
                 classify_structural_view_kernel(receiver)?
             };
-            let builtin_call = if call.method == crate::builtins::BuiltinMethod::Pick {
+            let builtin_call = if view_object_projection(BuiltinId::from_method(call.method))
+                == Some(BuiltinViewObjectProjection::Pick)
+            {
                 static_positional_pick_call(call)?
             } else {
                 BuiltinCall::from_static_args(
