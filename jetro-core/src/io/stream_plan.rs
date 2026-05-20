@@ -5,7 +5,9 @@
 //! It deliberately contains stream semantics only; byte/tape and materialized
 //! execution details live behind source/projector implementations.
 
-use crate::builtins::registry::{by_name as builtin_by_name, row_stream_op, BuiltinRowStreamOp};
+use crate::builtins::registry::{
+    by_name as builtin_by_name, row_stream_op, BuiltinId, BuiltinRowStreamOp,
+};
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
@@ -411,7 +413,9 @@ fn root_rows_steps(expr: &Expr) -> Option<&[Step]> {
     let Some((Step::Method(name, args), rest)) = steps.split_first() else {
         return None;
     };
-    if BuiltinMethod::from_name(name) != BuiltinMethod::Rows || !args.is_empty() {
+    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
+        || !args.is_empty()
+    {
         return None;
     }
     Some(rest)
