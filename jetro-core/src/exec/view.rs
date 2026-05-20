@@ -663,7 +663,7 @@ where
             pipeline::ViewOutputMode::BorrowedSubviews
         );
         let kernel = stage_kernels.get(kernel)?;
-        for child in eval_flat_map_kernel(&item, kernel)? {
+        for child in eval_flat_map_kernel(&item, kernel, vm)? {
             if matches!(
                 drive_view_item(
                     child,
@@ -1391,11 +1391,12 @@ where
 fn eval_flat_map_kernel<'a, V>(
     item: &V,
     kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
 ) -> Option<Box<dyn Iterator<Item = V> + 'a>>
 where
     V: ValueView<'a>,
 {
-    match pipeline::eval_view_kernel(kernel, item)? {
+    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => view.array_iter(),
         pipeline::ViewKernelValue::Owned(_) => None,
     }
