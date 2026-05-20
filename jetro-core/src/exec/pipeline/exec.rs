@@ -28,19 +28,6 @@ impl Pipeline {
         self.run_with_env_and_vm(root, &env, cache, &mut vm)
     }
 
-    /// Dispatches to the first applicable backend for this pipeline shape.
-    /// The path was classified at lower time; no stage-list re-inspection occurs here.
-    #[allow(dead_code)]
-    pub fn run_with_env(
-        &self,
-        root: &Val,
-        base_env: &Env,
-        cache: Option<&dyn PipelineData>,
-    ) -> Result<Val, EvalError> {
-        let mut vm = VM::new();
-        self.run_with_env_and_vm(root, base_env, cache, &mut vm)
-    }
-
     /// Dispatches with caller-owned VM state for compiled fallback programs.
     pub(crate) fn run_with_env_and_vm(
         &self,
