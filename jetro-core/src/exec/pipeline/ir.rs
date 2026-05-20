@@ -15,8 +15,8 @@ use crate::builtins::registry::{
     is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
     pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_streams,
     sink_demand as builtin_sink_demand,
-    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinExprPayload,
-    BuiltinId,
+    stage_merge as builtin_stage_merge, terminal_selection_position,
+    view_stage as builtin_view_stage, BuiltinExprPayload, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect, BuiltinSelectionPosition,
@@ -167,9 +167,10 @@ impl Sink {
     pub(crate) fn supports_late_projection(&self, demand: PullDemand) -> bool {
         match self {
             Sink::Collect => !matches!(demand, PullDemand::LastInput(_)),
-            Sink::Terminal(BuiltinMethod::First | BuiltinMethod::Last)
-            | Sink::Nth(_)
-            | Sink::SelectMany { .. } => true,
+            Sink::Terminal(method) => {
+                terminal_selection_position(BuiltinId::from_method(*method)).is_some()
+            }
+            Sink::Nth(_) | Sink::SelectMany { .. } => true,
             _ => false,
         }
     }
