@@ -3109,7 +3109,6 @@ pub mod ops;
 
 pub(crate) mod builtin;
 pub(crate) mod defs;
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod helpers;
 pub(crate) mod registry;
 
