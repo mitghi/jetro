@@ -1,10 +1,13 @@
+use crate::builtins::registry::{
+    array_selector as builtin_array_selector, view_object_items_projection, BuiltinArraySelector,
+    BuiltinId,
+};
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
 use crate::plan::physical::{plan_ast_with_context, PlanningContext};
 use crate::JetroEngine;
 use std::sync::Arc;
-use crate::builtins::registry::{view_object_items_projection, BuiltinId};
 
 /// Planner-side description of NDJSON row work that can run directly on
 /// simd-json tape scratch. Execution stays in `ndjson.rs`; this module owns
@@ -1407,16 +1410,15 @@ fn direct_array_element_source(
         if *optional {
             return None;
         }
-        let element = match call.method {
-            BuiltinMethod::First => NdjsonDirectElement::First,
-            BuiltinMethod::Last => NdjsonDirectElement::Last,
-            BuiltinMethod::Nth => {
+        let element = match builtin_array_selector(BuiltinId::from_method(call.method))? {
+            BuiltinArraySelector::First => NdjsonDirectElement::First,
+            BuiltinArraySelector::Last => NdjsonDirectElement::Last,
+            BuiltinArraySelector::Nth => {
                 let crate::builtins::BuiltinArgs::I64(n) = &call.args else {
                     return None;
                 };
                 NdjsonDirectElement::Nth(usize::try_from(*n).ok()?)
             }
-            _ => return None,
         };
         return Some((node_path_steps(plan, *receiver)?, element));
     }
