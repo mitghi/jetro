@@ -14,7 +14,7 @@ use crate::{
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinRawJsonScalar, BuiltinSelectionPosition, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed, BuiltinStageMerge,
-        BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewStage,
+        BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewStage,
     },
     plan::demand::{Demand, PullDemand, ValueNeed},
 };
@@ -171,16 +171,6 @@ pub(crate) enum BuiltinNullaryStage {
     Element,
 }
 
-/// Concrete pipeline stage behavior for builtins with two string arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinStringPairStage {
-    /// String replacement; `all` selects first-hit vs all-hit replacement.
-    Replace {
-        /// Replace every occurrence when true, otherwise only the first.
-        all: bool,
-    },
-}
-
 /// Payload-demand behavior for expression-bearing pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinExprPayload {
@@ -332,11 +322,7 @@ pub(crate) fn nullary_stage(id: BuiltinId) -> Option<BuiltinNullaryStage> {
 /// Return concrete behavior for a two-string-argument pipeline builtin.
 #[inline]
 pub(crate) fn string_pair_stage(id: BuiltinId) -> Option<BuiltinStringPairStage> {
-    match id.method()? {
-        BuiltinMethod::Replace => Some(BuiltinStringPairStage::Replace { all: false }),
-        BuiltinMethod::ReplaceAll => Some(BuiltinStringPairStage::Replace { all: true }),
-        _ => None,
-    }
+    id.method().and_then(|method| method.spec().string_pair_stage)
 }
 
 /// Return payload-demand behavior for expression-bearing builtin stages.

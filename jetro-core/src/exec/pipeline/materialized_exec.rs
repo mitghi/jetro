@@ -25,11 +25,10 @@ use super::{
 use crate::builtins::registry::{
     keyed_reducer, string_pair_stage as builtin_string_pair_stage,
     object_lambda as builtin_object_lambda, view_stage as builtin_view_stage, BuiltinId,
-    BuiltinStringPairStage,
 };
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinObjectLambda,
-    BuiltinViewStage,
+    BuiltinStringPairStage, BuiltinViewStage,
 };
 use crate::plan::demand::PullDemand;
 

@@ -636,6 +636,8 @@ pub struct BuiltinSpec {
     pub raw_json_scalar: Option<BuiltinRawJsonScalar>,
     /// Object-lambda operation behavior, if any.
     pub object_lambda: Option<BuiltinObjectLambda>,
+    /// Two-string-argument pipeline stage behavior, if any.
+    pub string_pair_stage: Option<BuiltinStringPairStage>,
     /// View-stage lowering target, if the builtin maps to one of the view stages.
     pub view_stage: Option<BuiltinViewStage>,
     /// Sink (terminal aggregation) descriptor, present for reducing builtins.
@@ -786,6 +788,16 @@ pub enum BuiltinObjectLambda {
     FilterKeys,
     /// Keep entries whose value satisfies the predicate.
     FilterValues,
+}
+
+/// Concrete pipeline stage behavior for builtins with two string arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStringPairStage {
+    /// String replacement; `all` selects first-hit vs all-hit replacement.
+    Replace {
+        /// Replace every occurrence when true, otherwise only the first.
+        all: bool,
+    },
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.
@@ -1309,6 +1321,7 @@ impl BuiltinSpec {
             view_object_projection: None,
             raw_json_scalar: None,
             object_lambda: None,
+            string_pair_stage: None,
             view_stage: None,
             sink: None,
             keyed_reducer: None,
@@ -1390,6 +1403,12 @@ impl BuiltinSpec {
     /// Attaches object-lambda operation behavior.
     fn object_lambda(mut self, lambda: BuiltinObjectLambda) -> Self {
         self.object_lambda = Some(lambda);
+        self
+    }
+
+    /// Attaches two-string-argument pipeline stage behavior.
+    fn string_pair_stage(mut self, stage: BuiltinStringPairStage) -> Self {
+        self.string_pair_stage = Some(stage);
         self
     }
 

@@ -13,7 +13,7 @@ use super::{
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
-    BuiltinViewObjectProjection, BuiltinViewStage,
+    BuiltinStringPairStage, BuiltinViewObjectProjection, BuiltinViewStage,
 };
 
 // ── Helpers shared across reducer family ─────────────────────────────────────
@@ -2790,6 +2790,7 @@ impl Builtin for Replace {
                 1.0,
             ))
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .string_pair_stage(BuiltinStringPairStage::Replace { all: false })
             .lowering(BuiltinPipelineLowering::StringPairArg)
     }
     #[inline]
@@ -2817,6 +2818,7 @@ impl Builtin for ReplaceAll {
                 1.0,
             ))
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
+            .string_pair_stage(BuiltinStringPairStage::Replace { all: true })
             .lowering(BuiltinPipelineLowering::StringPairArg)
     }
     #[inline]
