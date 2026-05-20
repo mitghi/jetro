@@ -7,7 +7,7 @@
 
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
-    BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
+    BuiltinArgExtremeSink, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
     BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
@@ -28,10 +28,12 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
 
 /// Arg-extreme reducer (`max_by` / `min_by`) skeleton.
 #[inline]
-fn arg_extreme_reducer_spec() -> BuiltinSpec {
+fn arg_extreme_reducer_spec(sink: BuiltinArgExtremeSink) -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
+        .arg_extreme_sink(sink)
         .cost(10.0)
+        .demand_law(BuiltinDemandLaw::RowKeyedReducer)
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -812,7 +814,7 @@ impl Builtin for MaxBy {
     const NAME: &'static str = "max_by";
 
     fn spec() -> BuiltinSpec {
-        arg_extreme_reducer_spec()
+        arg_extreme_reducer_spec(BuiltinArgExtremeSink::MaxBy)
     }
 
     #[inline]
@@ -832,7 +834,7 @@ impl Builtin for MinBy {
     const NAME: &'static str = "min_by";
 
     fn spec() -> BuiltinSpec {
-        arg_extreme_reducer_spec()
+        arg_extreme_reducer_spec(BuiltinArgExtremeSink::MinBy)
     }
 
     #[inline]

@@ -638,6 +638,8 @@ pub struct BuiltinSpec {
     pub keyed_reducer: Option<BuiltinKeyedReducer>,
     /// Numeric reducer kind, used by the numeric sink path.
     pub numeric_reducer: Option<BuiltinNumericReducer>,
+    /// Arg-extreme sink kind, used by `max_by` / `min_by` planning.
+    pub arg_extreme_sink: Option<BuiltinArgExtremeSink>,
     /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
@@ -815,6 +817,15 @@ pub enum BuiltinKeyedReducer {
     Index,
     /// Maps each key to a list of its values (`group_by`).
     Group,
+}
+
+/// Arg-extreme terminal sink behavior for key-based row selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinArgExtremeSink {
+    /// Keep the row with the largest key.
+    MaxBy,
+    /// Keep the row with the smallest key.
+    MinBy,
 }
 
 /// Which end of the stream the `SelectOne` sink picks.
@@ -1198,6 +1209,7 @@ impl BuiltinSpec {
             sink: None,
             keyed_reducer: None,
             numeric_reducer: None,
+            arg_extreme_sink: None,
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
@@ -1316,6 +1328,12 @@ impl BuiltinSpec {
     /// Attaches a keyed reducer kind (group, count, or index).
     fn keyed_reducer(mut self, reducer: BuiltinKeyedReducer) -> Self {
         self.keyed_reducer = Some(reducer);
+        self
+    }
+
+    /// Attaches an arg-extreme sink kind (`max_by` / `min_by`).
+    fn arg_extreme_sink(mut self, sink: BuiltinArgExtremeSink) -> Self {
+        self.arg_extreme_sink = Some(sink);
         self
     }
 

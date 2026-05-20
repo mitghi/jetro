@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     arg_extreme_sink as builtin_arg_extreme_sink, membership_sink as builtin_membership_sink,
-    numeric_reducer, predicate_sink as builtin_predicate_sink, BuiltinArgExtremeSink, BuiltinId,
-    BuiltinMembershipSink, BuiltinPredicateSink,
+    numeric_reducer, predicate_sink as builtin_predicate_sink, BuiltinId, BuiltinMembershipSink,
+    BuiltinPredicateSink,
 };
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{BuiltinArgExtremeSink, BuiltinMethod};
 use crate::parse::ast::Expr;
 use crate::plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed};
 use crate::vm::Program;

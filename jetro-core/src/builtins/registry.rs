@@ -7,8 +7,8 @@
 
 use crate::{
     builtins::{
-        BuiltinCancellation, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
-        BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
+        BuiltinArgExtremeSink, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
+        BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
@@ -167,15 +167,6 @@ pub(crate) enum BuiltinMembershipSink {
     Index,
     /// Returns all zero-based indices matching the target.
     IndicesOf,
-}
-
-/// Arg-extreme terminal sink behavior for builtins with a key expression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinArgExtremeSink {
-    /// Keep the row with the largest key.
-    MaxBy,
-    /// Keep the row with the smallest key.
-    MinBy,
 }
 
 /// Concrete pipeline stage shape for builtins with one expression argument.
@@ -393,11 +384,7 @@ pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
 /// Return arg-extreme terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
-    match id.method()? {
-        BuiltinMethod::MaxBy => Some(BuiltinArgExtremeSink::MaxBy),
-        BuiltinMethod::MinBy => Some(BuiltinArgExtremeSink::MinBy),
-        _ => None,
-    }
+    Some(id.method()?.spec().arg_extreme_sink?)
 }
 
 /// Return the concrete pipeline stage shape for an expression-argument builtin.
