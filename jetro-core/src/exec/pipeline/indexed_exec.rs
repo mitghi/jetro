@@ -26,7 +26,7 @@ pub(super) fn run(
         return run_select_many(pipeline, base_env, vm, &recv, len, n, from_end);
     }
 
-    let idx = match pipeline.source_access {
+    let idx = match pipeline.source_access() {
         SourceAccessMode::Indexed(idx) => idx,
         SourceAccessMode::IndexedFromEnd(offset) => {
             len.checked_sub(offset.checked_add(1)?)?

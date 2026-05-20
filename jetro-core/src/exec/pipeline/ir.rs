@@ -1228,6 +1228,30 @@ impl Pipeline {
         self.payload_demand.clone()
     }
 
+    /// Returns the source traversal selected from propagated demand and source capabilities.
+    #[inline]
+    pub(crate) fn source_access(&self) -> super::SourceAccessMode {
+        self.source_access
+    }
+
+    /// Returns true when the source can satisfy scan/result payload lanes without full-row materialisation.
+    #[inline]
+    pub(crate) fn source_payload_lanes_supported(&self) -> bool {
+        self.source_payload_lanes_supported
+    }
+
+    /// Returns true when bounded/positional demand can materialise only selected source rows.
+    #[inline]
+    pub(crate) fn source_selected_materialization_supported(&self) -> bool {
+        self.source_selected_materialization_supported
+    }
+
+    /// Returns the static source capabilities used for demand-driven access selection.
+    #[inline]
+    pub(crate) fn source_capabilities(&self) -> super::SourceCapabilities {
+        self.source_capabilities
+    }
+
     /// Finds a trailing run of pure one-to-one projection stages and composes it into a
     /// single late-projection annotation.
     pub fn late_projection_for(
