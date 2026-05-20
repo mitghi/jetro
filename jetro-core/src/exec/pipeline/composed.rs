@@ -470,17 +470,6 @@ fn source_rows(source: &Source, root: &Val) -> Option<row_source::Rows<'static>>
 // Top-level driver
 // ---------------------------------------------------------------------------
 
-/// Entry point for composed execution; returns `None` when any stage or sink cannot be lowered.
-#[allow(dead_code)]
-pub(super) fn run(
-    pipeline: &Pipeline,
-    root: &Val,
-    base_env: &Env,
-) -> Option<Result<Val, EvalError>> {
-    let mut vm = VM::new();
-    run_with_vm(pipeline, root, base_env, &mut vm)
-}
-
 /// Entry point for composed execution using caller-owned VM cache/state.
 pub(super) fn run_with_vm(
     pipeline: &Pipeline,

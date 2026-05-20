@@ -162,18 +162,6 @@ pub(super) fn run(
     sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
-/// Streams a pipeline directly from a `simd-json` tape; returns `None` when any stage requires materialisation.
-#[allow(dead_code)]
-pub(super) fn run_tape_field_chain(
-    body: &PipelineBody,
-    tape: &crate::data::tape::TapeData,
-    keys: &[Arc<str>],
-    base_env: &Env,
-) -> Option<Result<Val, EvalError>> {
-    let mut vm = VM::new();
-    run_tape_field_chain_with_vm(body, tape, keys, base_env, &mut vm)
-}
-
 /// Streams a pipeline directly from a `simd-json` tape using caller-owned VM state.
 pub(super) fn run_tape_field_chain_with_vm(
     body: &PipelineBody,
