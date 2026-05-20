@@ -1724,7 +1724,7 @@ fn object_element_spec() -> BuiltinSpec {
     // caused the streaming pipeline to wrap their already-array result in
     // an outer `Val::Arr`, producing the `[[pairs]]` triple-wrap bug.
     BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
-        .view_scalar()
+        .view_native()
         .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .lowering(BuiltinPipelineLowering::Nullary)
@@ -1814,7 +1814,7 @@ impl Builtin for Pick {
     const NAME: &'static str = "pick";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
-            .view_scalar()
+            .view_native()
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
@@ -1835,7 +1835,7 @@ impl Builtin for Omit {
     const NAME: &'static str = "omit";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
-            .view_scalar()
+            .view_native()
             .demand_law(BuiltinDemandLaw::MapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
@@ -3173,7 +3173,6 @@ impl Builtin for HasKey {
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .view_scalar()
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()

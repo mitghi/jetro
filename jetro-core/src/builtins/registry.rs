@@ -892,22 +892,6 @@ pub(crate) fn view_stage(id: BuiltinId) -> Option<BuiltinViewStage> {
     id.method().and_then(|method| method.spec().view_stage)
 }
 
-/// Return true for object/path membership helpers that can execute on a
-/// borrowed `JsonView` without materialising the receiver object.
-#[inline]
-pub(crate) fn view_object_key_projection(id: BuiltinId) -> bool {
-    matches!(
-        view_object_projection(id),
-        Some(
-            BuiltinViewObjectProjection::Has
-                | BuiltinViewObjectProjection::HasKey
-                | BuiltinViewObjectProjection::Missing
-                | BuiltinViewObjectProjection::GetPath
-                | BuiltinViewObjectProjection::HasPath
-        )
-    )
-}
-
 /// Return the view-native object/path operation for builtin `id`, if any.
 #[inline]
 pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectProjection> {
@@ -965,9 +949,7 @@ pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelect
 /// kernel without materialising the receiver row.
 #[inline]
 pub(crate) fn view_projection(id: BuiltinId) -> bool {
-    id.method()
-        .is_some_and(|method| method.spec().view_scalar)
-        || view_object_key_projection(id)
+    view_scalar_projection(id) || view_object_projection(id).is_some()
 }
 
 /// Return true when builtin `id` can evaluate directly against a scalar
@@ -1551,6 +1533,11 @@ mod tests {
     #[test]
     fn registry_view_scalar_projection_matches_json_view_dispatch() {
         for (method, _, _) in all_method_entries() {
+            assert_eq!(
+                method.spec().view_scalar,
+                view_scalar_projection(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
             assert_eq!(
                 view_scalar_projection(BuiltinId::from_method(method)),
                 method.is_view_scalar_method(),
@@ -2181,7 +2168,7 @@ mod tests {
             BuiltinMethod::HasPath,
         ] {
             let id = BuiltinId::from_method(method);
-            assert!(view_object_key_projection(id), "{method:?}");
+            assert!(view_object_projection(id).is_some(), "{method:?}");
             assert!(view_projection(id), "{method:?}");
         }
 
@@ -2189,9 +2176,9 @@ mod tests {
         assert!(view_scalar_projection(BuiltinId::from_method(
             BuiltinMethod::Upper
         )));
-        assert!(!view_object_key_projection(BuiltinId::from_method(
-            BuiltinMethod::Upper
-        )));
+        assert!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)).is_none()
+        );
         assert!(!view_projection(BuiltinId::from_method(BuiltinMethod::Sort)));
         assert!(!view_scalar_projection(BuiltinId::from_method(
             BuiltinMethod::Sort

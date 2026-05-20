@@ -2161,9 +2161,10 @@ mod tests {
             method: crate::builtins::BuiltinMethod::HasKey,
             args: crate::builtins::BuiltinArgs::Str(Arc::from("isbn")),
         };
-        assert!(crate::builtins::registry::view_object_key_projection(
+        assert!(crate::builtins::registry::view_object_projection(
             crate::builtins::registry::BuiltinId::from_method(call.method)
-        ));
+        )
+        .is_some());
         let body = PipelineBody {
             stages: vec![Stage::Builtin(call)],
             stage_exprs: Vec::new(),
