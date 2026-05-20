@@ -60,7 +60,6 @@ impl ChainOp {
                 let cardinality = match role {
                     MatchRole::Predicate => BuiltinCardinality::Filtering,
                     MatchRole::Transform => BuiltinCardinality::OneToOne,
-                    MatchRole::Multi => BuiltinCardinality::Expanding,
                 };
                 OpSpec {
                     input: ValueKind::Stream,
@@ -131,15 +130,6 @@ impl DemandOperator for ChainOp {
                 },
                 // Transform match is 1:1, so demand passes through.
                 MatchRole::Transform => downstream,
-                // Multi match expands rows; bounded output cannot bound input.
-                MatchRole::Multi => Demand {
-                    pull: match downstream.pull {
-                        PullDemand::FirstInput(_) | PullDemand::UntilOutput(_) => PullDemand::All,
-                        other => other,
-                    },
-                    value: downstream.value,
-                    order: downstream.order || !matches!(downstream.pull, PullDemand::All),
-                },
             },
             ChainOp::Builtin { id, demand_arg } => {
                 propagate_builtin_demand(*id, *demand_arg, downstream)
@@ -181,12 +171,6 @@ mod tests {
     fn match_transform_classifies_as_map() {
         let spec = ChainOp::match_role(MatchRole::Transform).spec();
         assert_eq!(spec.cardinality, BuiltinCardinality::OneToOne);
-    }
-
-    #[test]
-    fn match_multi_classifies_as_flat_map() {
-        let spec = ChainOp::match_role(MatchRole::Multi).spec();
-        assert_eq!(spec.cardinality, BuiltinCardinality::Expanding);
     }
 
     #[test]

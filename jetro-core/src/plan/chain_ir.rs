@@ -21,7 +21,7 @@ pub enum ChainOp {
         demand_arg: BuiltinDemandArg,
     },
     /// A `match` expression participating in a streaming chain. Match
-    /// behaves as one of three shapes depending on how the surrounding
+    /// behaves as one of two shapes depending on how the surrounding
     /// pipeline uses its result, captured here as `MatchRole`.
     Match {
         /// How the surrounding chain consumes match output.
@@ -36,9 +36,6 @@ pub enum MatchRole {
     Predicate,
     /// Single-value transform: every input row yields exactly one output.
     Transform,
-    /// Each input row produces zero or more output rows.
-    #[allow(dead_code)]
-    Multi,
 }
 
 impl ChainOp {
