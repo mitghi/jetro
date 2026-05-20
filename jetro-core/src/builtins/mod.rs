@@ -1449,7 +1449,13 @@ impl BuiltinMethod {
         macro_rules! spec_arm {
             ( $( $variant:ident ),* $(,)? ) => {
                 match self {
-                    $( Self::$variant => <defs::$variant as builtin::Builtin>::spec(), )*
+                    $( Self::$variant => {
+                        debug_assert_eq!(
+                            <defs::$variant as builtin::Builtin>::METHOD,
+                            Self::$variant
+                        );
+                        <defs::$variant as builtin::Builtin>::spec()
+                    }, )*
                 }
             };
         }
