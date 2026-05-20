@@ -1,5 +1,7 @@
 use super::report::{PipelineInspection, PipelineStageInspection};
-use crate::exec::pipeline::{FallbackBoundary, PhysicalExecPath, PipelineBody, Sink, Stage};
+use crate::exec::pipeline::{
+    FallbackBoundary, PhysicalExecPath, Pipeline, PipelineBody, Sink, SourceCapabilities, Stage,
+};
 use crate::ir::physical::{PipelinePlanSource, PlanNode, QueryPlan};
 
 pub(crate) fn inspect_first_pipeline(plan: &QueryPlan) -> Option<PipelineInspection> {
@@ -18,6 +20,19 @@ pub(crate) fn inspect_pipeline(
     let exec_path = crate::exec::pipeline::select_exec_path(&body.stages, &body.sink);
     let fallback_boundary =
         crate::exec::pipeline::Pipeline::fallback_boundary_for(&body.stages, exec_path);
+    let source_demand = body.source_demand();
+    let payload_demand = Pipeline::segment_payload_demand(
+        &body.stages,
+        &body.stage_kernels,
+        &body.sink,
+        &body.sink_kernels,
+    );
+    let source_capabilities = source_capabilities_for(source);
+    let source_access = source_capabilities.choose_access(source_demand.chain.pull);
+    let payload_lanes_supported = source_capabilities
+        .supports_payload_lanes(&payload_demand.scan_need, &payload_demand.result_need);
+    let selected_materialization_supported =
+        source_capabilities.supports_selected_materialization(source_demand.chain.pull);
     PipelineInspection {
         source: source_label(source),
         stages: body
@@ -27,9 +42,22 @@ pub(crate) fn inspect_pipeline(
             .map(|(index, stage)| inspect_stage(index, stage))
             .collect(),
         sink: sink_label(&body.sink).to_string(),
-        source_demand: format!("{:?}", body.source_demand().chain.pull),
+        source_demand: format!("{:?}", source_demand.chain.pull),
+        payload_demand: format!("{payload_demand:?}"),
+        source_access: format!("{source_access:?}"),
+        source_capabilities: format!("{source_capabilities:?}"),
+        payload_lanes_supported,
+        selected_materialization_supported,
         fallback_boundary: fallback_boundary_label(fallback_boundary),
         execution_path: Some(exec_path_label(exec_path).to_string()),
+    }
+}
+
+fn source_capabilities_for(source: &PipelinePlanSource) -> SourceCapabilities {
+    match source {
+        PipelinePlanSource::FieldChain { .. } | PipelinePlanSource::Expr(_) => {
+            SourceCapabilities::MATERIALIZED_ARRAY
+        }
     }
 }
 
@@ -169,5 +197,8 @@ mod tests {
         assert!(!pipeline.stages.is_empty());
         assert!(!pipeline.sink.is_empty());
         assert!(!pipeline.source_demand.is_empty());
+        assert!(!pipeline.payload_demand.is_empty());
+        assert!(!pipeline.source_access.is_empty());
+        assert!(!pipeline.source_capabilities.is_empty());
     }
 }

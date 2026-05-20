@@ -155,6 +155,11 @@ pub struct PipelineInspection {
     pub stages: Vec<PipelineStageInspection>,
     pub sink: String,
     pub source_demand: String,
+    pub payload_demand: String,
+    pub source_access: String,
+    pub source_capabilities: String,
+    pub payload_lanes_supported: bool,
+    pub selected_materialization_supported: bool,
     pub fallback_boundary: Option<String>,
     pub execution_path: Option<String>,
 }
