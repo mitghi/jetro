@@ -80,6 +80,7 @@ pub(super) fn apply_stage<'a, V>(
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
+    vm: &mut crate::vm::VM,
 ) -> Option<ViewStageFlow<V>>
 where
     V: ValueView<'a>,
@@ -127,7 +128,7 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel(&item, kernel)? {
+            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Drop)
@@ -164,7 +165,7 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel(&item, kernel)? {
+            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Stop)
@@ -181,7 +182,7 @@ where
                 return Some(ViewStageFlow::Keep(item));
             }
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel(&item, kernel)? {
+            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
                 Some(ViewStageFlow::Drop)
             } else {
                 *done = true;
@@ -195,7 +196,9 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let key = match kernel {
-                Some(kernel) => super::eval_view_key(&item, Some(stage_kernels.get(kernel)?))?,
+                Some(kernel) => {
+                    super::eval_view_key_with_vm(&item, Some(stage_kernels.get(kernel)?), vm)?
+                }
                 None => super::eval_view_key(&item, None)?,
             };
             if op_state.get_mut(op_idx)?.keys().insert(key) {
@@ -211,7 +214,9 @@ where
                 pipeline::ViewOutputMode::BorrowedSubview
             );
             let kernel = stage_kernels.get(kernel)?;
-            Some(ViewStageFlow::Keep(super::eval_map_kernel(&item, kernel)?))
+            Some(ViewStageFlow::Keep(super::eval_map_kernel_with_vm(
+                &item, kernel, vm,
+            )?))
         }
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::FlatMap { .. } => None,

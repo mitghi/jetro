@@ -48,7 +48,7 @@ pub(crate) fn run_with_env_and_vm<'a, V>(
 where
     V: ValueView<'a>,
 {
-    if let Some(result) = run_terminal_collect(source.clone(), body) {
+    if let Some(result) = run_terminal_collect(source.clone(), body, vm) {
         return Some(result);
     }
     if let Some(result) = run_terminal_select_projection(source.clone(), body, vm) {
@@ -120,7 +120,8 @@ where
         &capabilities.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+        vm,
+        |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -346,7 +347,8 @@ where
         &prefix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| {
+        vm,
+        |item, _vm| {
             boundary_rows.push(item.materialize());
             Some(ViewRowAction::Emit)
         },
@@ -368,6 +370,7 @@ where
 fn run_terminal_collect<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -381,7 +384,8 @@ where
         &plan.prefix,
         &body.stage_kernels,
         plan.source_demand,
-        |item| {
+        vm,
+        |item, _vm| {
             collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
@@ -439,7 +443,8 @@ where
         &prefix,
         &body.stage_kernels,
         source_demand,
-        |item| {
+        vm,
+        |item, vm| {
             if let Some(target) = nth_target {
                 if nth_seen < target {
                     nth_seen += 1;
@@ -492,11 +497,12 @@ fn drive_view_frontier<'a, V, F>(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
+    vm: &mut VM,
     observe: F,
 ) -> Option<()>
 where
     V: ValueView<'a>,
-    F: FnMut(&V) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
 {
     if source_demand.is_zero() {
         return Some(());
@@ -514,6 +520,7 @@ where
                 stages,
                 stage_kernels,
                 PullDemand::LastInput(outputs),
+                vm,
                 observe,
             );
         }
@@ -526,7 +533,7 @@ where
                 return Some(());
             }
             let items = std::iter::once(source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
         pipeline::SourceAccessMode::IndexedFromEnd(offset) => {
             let len = match source.scalar() {
@@ -537,7 +544,7 @@ where
                 return Some(());
             };
             let items = std::iter::once(source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, observe);
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
         pipeline::SourceAccessMode::ForwardBounded(inputs) => {
             let items = source.array_iter()?;
@@ -546,13 +553,14 @@ where
                 stages,
                 stage_kernels,
                 PullDemand::FirstInput(inputs),
+                vm,
                 observe,
             );
         }
         pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
     }
     let items = source.array_iter()?;
-    drive_view_iter(items, stages, stage_kernels, source_demand, observe)
+    drive_view_iter(items, stages, stage_kernels, source_demand, vm, observe)
 }
 
 fn index_from_end(len: usize, offset: usize) -> Option<usize> {
@@ -567,12 +575,13 @@ fn drive_view_iter<'a, V, I, F>(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
+    vm: &mut VM,
     mut observe: F,
 ) -> Option<()>
 where
     V: ValueView<'a>,
     I: IntoIterator<Item = V>,
-    F: FnMut(&V) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
 {
     let mut op_state: Vec<ViewStageState> = (0..stages.len())
         .map(|_| ViewStageState::default())
@@ -595,6 +604,7 @@ where
                 stage_kernels,
                 source_demand,
                 &mut emitted_outputs,
+                vm,
                 &mut observe,
             )?,
             ViewDriveFlow::Stop
@@ -620,14 +630,15 @@ fn drive_view_item<'a, V, F>(
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
     emitted_outputs: &mut usize,
+    vm: &mut VM,
     observe: &mut F,
 ) -> Option<ViewDriveFlow>
 where
     V: ValueView<'a>,
-    F: FnMut(&V) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
 {
     let Some(stage) = stages.get(stage_idx).cloned() else {
-        return match observe(&item)? {
+        return match observe(&item, vm)? {
             ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
             ViewRowAction::Emit => {
                 *emitted_outputs += 1;
@@ -662,6 +673,7 @@ where
                     stage_kernels,
                     source_demand,
                     emitted_outputs,
+                    vm,
                     observe,
                 )?,
                 ViewDriveFlow::Stop
@@ -672,7 +684,7 @@ where
         return Some(ViewDriveFlow::Continue);
     }
 
-    match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels)? {
+    match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels, vm)? {
         ViewStageFlow::Keep(next) => drive_view_item(
             next,
             stage_idx + 1,
@@ -681,6 +693,7 @@ where
             stage_kernels,
             source_demand,
             emitted_outputs,
+            vm,
             observe,
         ),
         ViewStageFlow::Drop => Some(ViewDriveFlow::Continue),
@@ -860,7 +873,8 @@ where
         &plan.prefix,
         &body.stage_kernels,
         source_demand,
-        |item| {
+        vm,
+        |item, _vm| {
             plan.reducer.observe(item, &body.stage_kernels)?;
             Some(ViewRowAction::Emit)
         },
@@ -915,7 +929,8 @@ where
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
-        |item| {
+        vm,
+        |item, vm| {
             let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
@@ -928,6 +943,7 @@ where
             winners,
             &collect_plan,
             &body.stage_kernels,
+            vm,
         );
     }
     if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
@@ -963,6 +979,7 @@ fn run_sorted_rows_terminal_collect_suffix<'a, V>(
     rows: Vec<V>,
     plan: &TerminalCollectPlan,
     stage_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
     V: ValueView<'a>,
@@ -973,7 +990,8 @@ where
         &plan.prefix,
         stage_kernels,
         plan.source_demand,
-        |item| {
+        vm,
+        |item, _vm| {
             collector.push_view_program(item, &plan.collect_program)?;
             Some(ViewRowAction::Emit)
         },
@@ -1009,7 +1027,8 @@ where
             &prefix,
             &body.stage_kernels,
             source_demand,
-            |item| {
+            vm,
+            |item, vm| {
                 selected.push(eval_owned_scalar_or_value_kernel_with_vm(
                     item,
                     &project_kernel,
@@ -1051,7 +1070,8 @@ where
         &prefix,
         &body.stage_kernels,
         source_demand,
-        |item| {
+        vm,
+        |item, vm| {
             if let Some(target) = nth_target {
                 if selected_index < target {
                     selected_index += 1;
@@ -1098,7 +1118,8 @@ where
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+        vm,
+        |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -1140,7 +1161,8 @@ where
         &plan.prefix,
         &body.stage_kernels,
         PullDemand::All,
-        |item| {
+        vm,
+        |item, vm| {
             let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
             Some(ViewRowAction::Emit)
@@ -1165,7 +1187,8 @@ where
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
-        |item| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+        vm,
+        |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
     )?;
 
     Some(sink_acc.finish_result(false))
@@ -1309,11 +1332,12 @@ fn apply_view_stage<'a, V>(
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
 ) -> Option<ViewStageFlow<V>>
 where
     V: ValueView<'a>,
 {
-    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels)
+    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels, vm)
 }
 
 /// Slices `body` to produce a new `PipelineBody` starting at `consumed_stages`,
@@ -1333,18 +1357,6 @@ fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipelin
     }
 }
 
-/// Evaluates `kernel` against `item` as a boolean predicate.
-/// Returns `None` when kernel evaluation is not supported in the view domain.
-fn eval_filter_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<bool>
-where
-    V: ValueView<'a>,
-{
-    match pipeline::eval_view_kernel(kernel, item)? {
-        pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
-        pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
-    }
-}
-
 fn eval_filter_kernel_with_vm<'a, V>(
     item: &V,
     kernel: &pipeline::BodyKernel,
@@ -1359,14 +1371,15 @@ where
     }
 }
 
-/// Evaluates `kernel` against `item` as a view-domain projection, returning the
-/// result as a `V` subview. Returns `None` when the kernel produces an owned
-/// value (requiring materialisation) rather than a borrowed view.
-fn eval_map_kernel<'a, V>(item: &V, kernel: &pipeline::BodyKernel) -> Option<V>
+fn eval_map_kernel_with_vm<'a, V>(
+    item: &V,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<V>
 where
     V: ValueView<'a>,
 {
-    match pipeline::eval_view_kernel(kernel, item)? {
+    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
         pipeline::ViewKernelValue::Owned(_) => None,
     }
@@ -1413,6 +1426,25 @@ where
 {
     match kernel {
         Some(kernel) => match pipeline::eval_view_kernel(kernel, item)? {
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_view(view.scalar())
+                .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
+        },
+        None => ViewKey::from_view(item.scalar())
+            .or_else(|| Some(ViewKey::from_owned(item.materialize()))),
+    }
+}
+
+fn eval_view_key_with_vm<'a, V>(
+    item: &V,
+    kernel: Option<&pipeline::BodyKernel>,
+    vm: &mut VM,
+) -> Option<ViewKey>
+where
+    V: ValueView<'a>,
+{
+    match kernel {
+        Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
             pipeline::ViewKernelValue::View(view) => ViewKey::from_view(view.scalar())
                 .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
             pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
@@ -1588,6 +1620,7 @@ mod tests {
         let source = CountingView::root(&[1, 2, 3]);
         let observed = Rc::new(Cell::new(0usize));
         let observed_in_closure = Rc::clone(&observed);
+        let mut vm = VM::new();
 
         let result = super::drive_view_frontier(
             source.clone(),
@@ -1595,7 +1628,8 @@ mod tests {
             &[],
             &[],
             PullDemand::FirstInput(0),
-            move |_| {
+            &mut vm,
+            move |_, _| {
                 observed_in_closure.set(observed_in_closure.get() + 1);
                 Some(super::ViewRowAction::Emit)
             },
@@ -1830,6 +1864,7 @@ mod tests {
     fn view_frontier_zero_demand_does_not_touch_source() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let mut observed = 0usize;
+        let mut vm = VM::new();
 
         super::drive_view_frontier(
             source.clone(),
@@ -1837,7 +1872,8 @@ mod tests {
             &[],
             &[],
             crate::plan::demand::PullDemand::LastInput(0),
-            |_| {
+            &mut vm,
+            |_, _| {
                 observed += 1;
                 Some(super::ViewRowAction::Emit)
             },
@@ -1927,7 +1963,8 @@ mod tests {
             stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
             sink_kernels: Vec::new(),
         };
-        let take = super::run_terminal_collect(take_source.clone(), &take_body)
+        let mut vm = VM::new();
+        let take = super::run_terminal_collect(take_source.clone(), &take_body, &mut vm)
             .unwrap()
             .unwrap();
         let take_json: serde_json::Value = take.into();
@@ -2256,7 +2293,8 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let out = super::run_terminal_collect(source.clone(), &body)
+        let mut vm = VM::new();
+        let out = super::run_terminal_collect(source.clone(), &body, &mut vm)
             .unwrap()
             .unwrap();
 
@@ -2298,7 +2336,8 @@ mod tests {
             ViewStageCapability::FlatMap { .. }
         ));
 
-        let out = super::run_terminal_collect(ValView::new(&source), &body)
+        let mut vm = VM::new();
+        let out = super::run_terminal_collect(ValView::new(&source), &body, &mut vm)
             .unwrap()
             .unwrap();
 
