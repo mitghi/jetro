@@ -427,10 +427,10 @@ pub struct Pipeline {
     pub sink_kernels: Vec<BodyKernel>,
 
     /// Source pull/value/order demand computed once during lowering.
-    pub source_demand: SinkDemand,
+    source_demand: SinkDemand,
 
     /// Precise source payload demand split into scan-time and result-row lanes.
-    pub payload_demand: PayloadDemand,
+    payload_demand: PayloadDemand,
 
     /// Tail projection that can be delayed until rows have been selected.
     pub late_projection: Option<LateProjection>,
@@ -448,7 +448,7 @@ pub struct Pipeline {
     pub(crate) source_access: SourceAccessMode,
 
     /// Boundary where execution must materialize or fall back.
-    pub fallback_boundary: FallbackBoundary,
+    fallback_boundary: FallbackBoundary,
 
     /// Physical execution path selected at lower time; tells `exec.rs` which specialised
     /// backends to attempt before falling back to legacy, eliminating runtime fallthrough

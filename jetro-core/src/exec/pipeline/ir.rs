@@ -1252,6 +1252,12 @@ impl Pipeline {
         self.source_capabilities
     }
 
+    /// Returns the materialization/fallback boundary selected for this pipeline.
+    #[inline]
+    pub(crate) fn fallback_boundary(&self) -> super::FallbackBoundary {
+        self.fallback_boundary
+    }
+
     /// Finds a trailing run of pure one-to-one projection stages and composes it into a
     /// single late-projection annotation.
     pub fn late_projection_for(

@@ -28,13 +28,13 @@ pub(crate) fn inspect_pipeline(
             .map(|(index, stage)| inspect_stage(index, stage))
             .collect(),
         sink: sink_label(&pipeline.sink).to_string(),
-        source_demand: format!("{:?}", pipeline.source_demand.chain.pull),
+        source_demand: format!("{:?}", pipeline.source_demand().chain.pull),
         payload_demand: format!("{:?}", pipeline.payload_demand()),
         source_access: format!("{:?}", pipeline.source_access()),
         source_capabilities: format!("{:?}", pipeline.source_capabilities()),
         payload_lanes_supported: pipeline.source_payload_lanes_supported(),
         selected_materialization_supported: pipeline.source_selected_materialization_supported(),
-        fallback_boundary: fallback_boundary_label(pipeline.fallback_boundary),
+        fallback_boundary: fallback_boundary_label(pipeline.fallback_boundary()),
         execution_path: Some(exec_path_label(pipeline.exec_path).to_string()),
     }
 }
