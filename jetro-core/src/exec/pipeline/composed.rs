@@ -29,8 +29,8 @@ use crate::vm::{Program, VM};
 
 use super::ir::program_match_only;
 use super::{
-    compute_strategies_with_kernels, eval_kernel, ordered_by_key_cmp, row_source, BodyKernel,
-    Pipeline, Sink, Source, Stage, StageStrategy,
+    compute_strategies_with_kernels, eval_kernel_with_vm, ordered_by_key_cmp, row_source,
+    BodyKernel, Pipeline, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -217,6 +217,17 @@ impl<'a> ComposedStageBuilder<'a> {
         } else if let Some(seed) = self.vm_seed.borrow_mut().take() {
             *vm = seed;
         }
+    }
+
+    fn with_vm<T>(&self, f: impl FnOnce(&mut VM) -> T) -> T {
+        if let Some(ctx) = self.vm_ctx.get() {
+            return f(&mut ctx.borrow_mut().vm);
+        }
+        f(self
+            .vm_seed
+            .borrow_mut()
+            .as_mut()
+            .expect("composed VM seed must be present before restore"))
     }
 }
 
@@ -618,6 +629,7 @@ fn run_late_projection_sink(
         demand,
         &projection.kernel,
         projecting_sink,
+        stage_builder,
     )
 }
 
@@ -698,20 +710,34 @@ enum ProjectingSink {
 }
 
 impl ProjectingSink {
-    fn observe(&mut self, item: &Val, projection: &BodyKernel) -> Result<bool, EvalError> {
+    fn observe_with_vm(
+        &mut self,
+        item: &Val,
+        projection: &BodyKernel,
+        stage_builder: &ComposedStageBuilder<'_>,
+    ) -> Result<bool, EvalError> {
+        stage_builder.with_vm(|vm| self.observe(item, projection, vm))
+    }
+
+    fn observe(
+        &mut self,
+        item: &Val,
+        projection: &BodyKernel,
+        vm: &mut VM,
+    ) -> Result<bool, EvalError> {
         match self {
             ProjectingSink::Collect(items) => {
-                items.push(eval_late_projection(projection, item)?);
+                items.push(eval_late_projection(projection, item, vm)?);
                 Ok(false)
             }
             ProjectingSink::First(slot) => {
                 if slot.is_none() {
-                    *slot = Some(eval_late_projection(projection, item)?);
+                    *slot = Some(eval_late_projection(projection, item, vm)?);
                 }
                 Ok(true)
             }
             ProjectingSink::Last(slot) => {
-                *slot = Some(eval_late_projection(projection, item)?);
+                *slot = Some(eval_late_projection(projection, item, vm)?);
                 Ok(false)
             }
             ProjectingSink::Nth {
@@ -720,7 +746,7 @@ impl ProjectingSink {
                 value,
             } => {
                 if *seen == *target {
-                    *value = Some(eval_late_projection(projection, item)?);
+                    *value = Some(eval_late_projection(projection, item, vm)?);
                     return Ok(true);
                 }
                 *seen += 1;
@@ -735,7 +761,7 @@ impl ProjectingSink {
                 if *n == 0 {
                     return Ok(true);
                 }
-                let item = eval_late_projection(projection, item)?;
+                let item = eval_late_projection(projection, item, vm)?;
                 if *prepend {
                     if items.len() == *n {
                         items.pop_back();
@@ -780,8 +806,12 @@ impl ProjectingSink {
     }
 }
 
-fn eval_late_projection(projection: &BodyKernel, item: &Val) -> Result<Val, EvalError> {
-    eval_kernel(projection, item, |_| {
+fn eval_late_projection(
+    projection: &BodyKernel,
+    item: &Val,
+    vm: &mut VM,
+) -> Result<Val, EvalError> {
+    eval_kernel_with_vm(projection, item, vm, |_, _| {
         Err(EvalError(
             "late projection requires a native body kernel".to_string(),
         ))
@@ -794,6 +824,7 @@ fn run_projecting_iter<I>(
     demand: PullDemand,
     projection: &BodyKernel,
     mut sink: ProjectingSink,
+    stage_builder: &ComposedStageBuilder<'_>,
 ) -> Option<Result<Val, EvalError>>
 where
     I: IntoIterator,
@@ -809,7 +840,7 @@ where
 
         match stages.apply(row.borrow()) {
             cmp::StageOutput::Pass(cow) => {
-                let done = match sink.observe(cow.as_ref(), projection) {
+                let done = match sink.observe_with_vm(cow.as_ref(), projection, stage_builder) {
                     Ok(done) => done,
                     Err(err) => return Some(Err(err)),
                 };
@@ -827,7 +858,7 @@ where
             cmp::StageOutput::Filtered => continue,
             cmp::StageOutput::Many(items) => {
                 for item in items {
-                    let done = match sink.observe(item.as_ref(), projection) {
+                    let done = match sink.observe_with_vm(item.as_ref(), projection, stage_builder) {
                         Ok(done) => done,
                         Err(err) => return Some(Err(err)),
                     };
@@ -916,6 +947,7 @@ fn run_lazy_ordered_suffix(
                         final_demand,
                         &projection.kernel,
                         projecting_sink,
+                        stage_builder,
                     );
                 }
             }
