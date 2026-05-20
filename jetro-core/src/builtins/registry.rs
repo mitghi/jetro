@@ -693,14 +693,10 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
             }
         }
         BuiltinSinkAccumulator::Numeric => BuiltinPipelineArity::Range { min: 0, max: 1 },
-        BuiltinSinkAccumulator::SelectOne(_)
-            if matches!(method, BuiltinMethod::First | BuiltinMethod::Last) =>
-        {
+        BuiltinSinkAccumulator::SelectOne(_) => {
             BuiltinPipelineArity::Range { min: 0, max: 1 }
         }
-        BuiltinSinkAccumulator::SelectOne(_) | BuiltinSinkAccumulator::ApproxDistinct => {
-            BuiltinPipelineArity::Exact(0)
-        }
+        BuiltinSinkAccumulator::ApproxDistinct => BuiltinPipelineArity::Exact(0),
     })
 }
 
