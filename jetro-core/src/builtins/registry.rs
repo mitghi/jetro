@@ -9,6 +9,7 @@ use crate::{
     builtins::{
         BuiltinArgExtremeSink, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
         BuiltinColumnarStage, BuiltinDemandLaw, BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer,
+        BuiltinPredicateSink,
         BuiltinPipelineLowering,
         BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
@@ -141,21 +142,6 @@ pub(crate) enum BuiltinRowStreamOp {
     All,
     /// Project each retained row.
     Map,
-}
-
-/// Predicate terminal sink behavior for builtins with a predicate argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinPredicateSink {
-    /// Returns true when any row matches the predicate.
-    Any,
-    /// Returns true when every row matches the predicate.
-    All,
-    /// Returns the zero-based index of the first matching row, or null.
-    FindIndex,
-    /// Returns all zero-based indices whose rows match.
-    IndicesWhere,
-    /// Returns exactly one matching row, erroring on zero or multiple matches.
-    FindOne,
 }
 
 /// Membership terminal sink behavior for builtins with a target value.
@@ -360,14 +346,7 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
-    match id.method()? {
-        BuiltinMethod::Any => Some(BuiltinPredicateSink::Any),
-        BuiltinMethod::All => Some(BuiltinPredicateSink::All),
-        BuiltinMethod::FindIndex => Some(BuiltinPredicateSink::FindIndex),
-        BuiltinMethod::IndicesWhere => Some(BuiltinPredicateSink::IndicesWhere),
-        BuiltinMethod::FindOne => Some(BuiltinPredicateSink::FindOne),
-        _ => None,
-    }
+    Some(id.method()?.spec().predicate_sink?)
 }
 
 /// Return membership terminal-sink behavior for builtin `id`, if it has one.

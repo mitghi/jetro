@@ -640,6 +640,8 @@ pub struct BuiltinSpec {
     pub numeric_reducer: Option<BuiltinNumericReducer>,
     /// Arg-extreme sink kind, used by `max_by` / `min_by` planning.
     pub arg_extreme_sink: Option<BuiltinArgExtremeSink>,
+    /// Predicate terminal sink kind, used by predicate reducers.
+    pub predicate_sink: Option<BuiltinPredicateSink>,
     /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
@@ -826,6 +828,21 @@ pub enum BuiltinArgExtremeSink {
     MaxBy,
     /// Keep the row with the smallest key.
     MinBy,
+}
+
+/// Predicate terminal sink behavior for builtins with a predicate argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPredicateSink {
+    /// Returns true when any row matches the predicate.
+    Any,
+    /// Returns true when every row matches the predicate.
+    All,
+    /// Returns the zero-based index of the first matching row, or null.
+    FindIndex,
+    /// Returns all zero-based indices whose rows match.
+    IndicesWhere,
+    /// Returns exactly one matching row, erroring on zero or multiple matches.
+    FindOne,
 }
 
 /// Which end of the stream the `SelectOne` sink picks.
@@ -1210,6 +1227,7 @@ impl BuiltinSpec {
             keyed_reducer: None,
             numeric_reducer: None,
             arg_extreme_sink: None,
+            predicate_sink: None,
             stage_merge: None,
             cancellation: None,
             columnar_stage: None,
@@ -1334,6 +1352,12 @@ impl BuiltinSpec {
     /// Attaches an arg-extreme sink kind (`max_by` / `min_by`).
     fn arg_extreme_sink(mut self, sink: BuiltinArgExtremeSink) -> Self {
         self.arg_extreme_sink = Some(sink);
+        self
+    }
+
+    /// Attaches a predicate terminal sink kind.
+    fn predicate_sink(mut self, sink: BuiltinPredicateSink) -> Self {
+        self.predicate_sink = Some(sink);
         self
     }
 

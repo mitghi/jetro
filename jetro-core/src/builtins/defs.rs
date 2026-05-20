@@ -8,7 +8,7 @@
 use super::{
     builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
     BuiltinArgExtremeSink, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering,
+    BuiltinKeyedReducer, BuiltinMethod, BuiltinNumericReducer, BuiltinPipelineLowering, BuiltinPredicateSink,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural, BuiltinViewStage,
 };
@@ -39,9 +39,10 @@ fn arg_extreme_reducer_spec(sink: BuiltinArgExtremeSink) -> BuiltinSpec {
 
 /// Predicate terminal sink skeleton for short-circuiting reducers.
 #[inline]
-fn predicate_terminal_sink_spec() -> BuiltinSpec {
+fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
+        .predicate_sink(sink)
         .cost(10.0)
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
@@ -678,7 +679,7 @@ impl Builtin for Any {
     const ALIASES: &'static [&'static str] = &["exists"];
 
     fn spec() -> BuiltinSpec {
-        predicate_terminal_sink_spec()
+        predicate_terminal_sink_spec(BuiltinPredicateSink::Any)
     }
 }
 
@@ -689,7 +690,7 @@ impl Builtin for All {
     const NAME: &'static str = "all";
 
     fn spec() -> BuiltinSpec {
-        predicate_terminal_sink_spec()
+        predicate_terminal_sink_spec(BuiltinPredicateSink::All)
     }
 }
 
@@ -700,7 +701,7 @@ impl Builtin for FindIndex {
     const NAME: &'static str = "find_index";
 
     fn spec() -> BuiltinSpec {
-        predicate_terminal_sink_spec()
+        predicate_terminal_sink_spec(BuiltinPredicateSink::FindIndex)
     }
 
     #[inline]
@@ -737,7 +738,7 @@ impl Builtin for IndicesWhere {
     const NAME: &'static str = "indices_where";
 
     fn spec() -> BuiltinSpec {
-        predicate_terminal_sink_spec()
+        predicate_terminal_sink_spec(BuiltinPredicateSink::IndicesWhere)
     }
 
     #[inline]
@@ -1046,6 +1047,7 @@ impl Builtin for FindOne {
     const NAME: &'static str = "find_one";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .predicate_sink(BuiltinPredicateSink::FindOne)
             .cost(10.0)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
