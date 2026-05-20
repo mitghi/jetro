@@ -1351,6 +1351,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
             let kernel = kernel?;
             kernel.is_view_native().then(|| kernel.clone())
         }
+        Stage::CompiledMap(plan) => Some(BodyKernel::NestedPlan(Arc::clone(plan))),
         Stage::Builtin(call)
             if builtin_is_pure(BuiltinId::from_method(call.method))
                 && crate::builtins::registry::view_projection(BuiltinId::from_method(call.method))

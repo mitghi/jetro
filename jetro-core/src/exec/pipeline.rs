@@ -1534,6 +1534,27 @@ mod tests {
     }
 
     #[test]
+    fn late_projection_accepts_nested_compiled_map() {
+        let p = lower_query("$.books.map(items.filter(price > 20).map(isbn).last()).last()")
+            .unwrap();
+        let demand = p.payload_demand();
+
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(
+            demand_paths(&demand.result_need),
+            vec!["items.price", "items.isbn"]
+        );
+        assert!(matches!(
+            p.late_projection,
+            Some(LateProjection { prefix_len: 0, .. })
+        ));
+        assert!(matches!(
+            p.late_projection.as_ref().map(|projection| &projection.kernel),
+            Some(BodyKernel::NestedPlan(_))
+        ));
+    }
+
+    #[test]
     fn payload_demand_prefixes_scan_and_result_lanes_through_map() {
         let p = lower_query("$.books.map(user).filter(@.active).map(name).last()").unwrap();
         let demand = p.payload_demand();
