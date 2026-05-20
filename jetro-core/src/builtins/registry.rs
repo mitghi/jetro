@@ -975,7 +975,7 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
     id.method()
-        .is_some_and(|method| method.spec().view_scalar)
+        .is_some_and(BuiltinMethod::is_view_scalar_method)
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
@@ -1545,6 +1545,17 @@ mod tests {
                     "{method:?} has logical pipeline shape but no demand metadata"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn registry_view_scalar_projection_matches_json_view_dispatch() {
+        for (method, _, _) in all_method_entries() {
+            assert_eq!(
+                view_scalar_projection(BuiltinId::from_method(method)),
+                method.is_view_scalar_method(),
+                "{method:?}"
+            );
         }
     }
 
