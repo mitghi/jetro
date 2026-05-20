@@ -53,15 +53,6 @@ fn body_from_plan(plan: &Plan) -> PipelineBody {
     }
 }
 
-/// Runs a nested plan with `seed` as the current row/root.
-pub(super) fn run_plan(plan: &Plan, seed: Val) -> Result<Val, EvalError> {
-    let source = match &plan.source {
-        Source::Receiver(_) => Source::Receiver(seed.clone()),
-        source => source.clone(),
-    };
-    body_from_plan(plan).with_source(source).run(&seed)
-}
-
 /// Runs a nested plan against a borrowed row view when the plan can be evaluated
 /// without reading the materialised outer root. Returns `None` when a fallback
 /// path would need root/current VM semantics that require ownership.

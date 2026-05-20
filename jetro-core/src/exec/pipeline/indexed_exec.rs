@@ -9,7 +9,7 @@ use crate::{
     vm::VM,
 };
 
-use super::{row_source, Pipeline, Position, SourceAccessMode, Stage};
+use super::{nested::PreparedPlan, row_source, Pipeline, Position, SourceAccessMode, Stage};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
@@ -50,7 +50,8 @@ pub(super) fn run(
     }
 
     let elem = row_source::row_at(&recv, idx)?;
-    apply_indexed_stages(pipeline, base_env, vm, elem)
+    let prepared = prepare_nested_stages(pipeline);
+    apply_indexed_stages(pipeline, &prepared, base_env, vm, elem)
 }
 
 fn run_select_many(
@@ -69,9 +70,10 @@ fn run_select_many(
     let start = if from_end { len.saturating_sub(n) } else { 0 };
     let end = if from_end { len } else { n.min(len) };
     let mut out = Vec::with_capacity(end.saturating_sub(start));
+    let prepared = prepare_nested_stages(pipeline);
     for idx in start..end {
         if let Some(elem) = row_source::row_at(recv, idx) {
-            match apply_indexed_stages(pipeline, base_env, vm, elem)? {
+            match apply_indexed_stages(pipeline, &prepared, base_env, vm, elem)? {
                 Ok(value) => out.push(value),
                 Err(err) => return Some(Err(err)),
             }
@@ -85,15 +87,27 @@ fn run_select_many(
     }
 }
 
+fn prepare_nested_stages(pipeline: &Pipeline) -> Vec<Option<PreparedPlan>> {
+    pipeline
+        .stages
+        .iter()
+        .map(|stage| match stage {
+            Stage::CompiledMap(plan) => Some(PreparedPlan::new(plan)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn apply_indexed_stages(
     pipeline: &Pipeline,
+    prepared: &[Option<PreparedPlan>],
     base_env: &Env,
     vm: &mut VM,
     elem: Val,
 ) -> Option<Result<Val, EvalError>> {
     let mut env = base_env.clone();
     let mut cur = elem;
-    for stage in &pipeline.stages {
+    for (idx, stage) in pipeline.stages.iter().enumerate() {
         match stage {
             Stage::Map(prog, _) => {
                 let prev = env.swap_current(cur);
@@ -107,7 +121,11 @@ fn apply_indexed_stages(
                 env.restore_current(prev);
             }
             Stage::CompiledMap(plan) => {
-                cur = match super::nested::run_plan(plan, cur) {
+                let result = match prepared.get(idx).and_then(Option::as_ref) {
+                    Some(prepared) => prepared.run(cur),
+                    None => PreparedPlan::new(plan).run(cur),
+                };
+                cur = match result {
                     Ok(value) => value,
                     Err(err) => return Some(Err(err)),
                 };
