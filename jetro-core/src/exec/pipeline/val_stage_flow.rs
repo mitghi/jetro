@@ -3,10 +3,6 @@
 //! items using the builtins-layer primitives.
 
 use crate::{
-    builtins::{
-        registry::{view_stage, BuiltinId},
-        BuiltinViewStage,
-    },
     data::context::{Env, EvalError},
     data::value::Val,
 };
@@ -45,6 +41,8 @@ pub(super) fn apply_adapter_streaming<'a>(
             M::Filter | M::Find | M::FindAll => {
                 return <defs::Filter as Builtin>::apply_stream(&mut ctx, item, body);
             }
+            M::Compact => return <defs::Compact as Builtin>::apply_stream(&mut ctx, item, body),
+            M::Remove => return <defs::Remove as Builtin>::apply_stream(&mut ctx, item, body),
             M::Map => return <defs::Map as Builtin>::apply_stream(&mut ctx, item, body),
             M::TakeWhile => {
                 return <defs::TakeWhile as Builtin>::apply_stream(&mut ctx, item, body)
@@ -72,28 +70,6 @@ pub(super) fn apply_adapter_streaming<'a>(
     // ElementBuiltin: element-wise scalar apply via Stage variant match.
     // All other variants pass through (barriers handled by materialised path).
     match stage {
-        Stage::Builtin(call)
-            if view_stage(BuiltinId::from_method(call.method)) == Some(BuiltinViewStage::Compact) =>
-        {
-            if matches!(item, Val::Null) {
-                Ok(StageFlow::SkipRow)
-            } else {
-                Ok(StageFlow::Continue(item))
-            }
-        }
-        Stage::Builtin(call)
-            if view_stage(BuiltinId::from_method(call.method))
-                == Some(BuiltinViewStage::RemoveValue) =>
-        {
-            match &call.args {
-                crate::builtins::BuiltinArgs::Val(target)
-                    if crate::util::vals_eq(&item, target) =>
-                {
-                    Ok(StageFlow::SkipRow)
-                }
-                _ => Ok(StageFlow::Continue(item)),
-            }
-        }
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => Ok(
             StageFlow::Continue(materialized_exec::apply_element_adapter(stage, item)),
         ),

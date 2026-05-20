@@ -24,11 +24,11 @@ use super::{
 
 use crate::builtins::registry::{
     keyed_reducer, string_pair_stage as builtin_string_pair_stage,
-    object_lambda as builtin_object_lambda, view_stage as builtin_view_stage, BuiltinId,
+    object_lambda as builtin_object_lambda, BuiltinId,
 };
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinObjectLambda,
-    BuiltinStringPairStage, BuiltinViewStage,
+    BuiltinStringPairStage,
 };
 use crate::plan::demand::PullDemand;
 
@@ -406,6 +406,8 @@ fn apply_adapter_materialized(
             M::Filter | M::Find | M::FindAll => {
                 <defs::Filter as Builtin>::apply_barrier(&mut ctx, buf, body)
             }
+            M::Compact => <defs::Compact as Builtin>::apply_barrier(&mut ctx, buf, body),
+            M::Remove => <defs::Remove as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::Map => <defs::Map as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(&mut ctx, buf, body),
             M::Unique => <defs::Unique as Builtin>::apply_barrier(&mut ctx, buf, body),
@@ -435,22 +437,6 @@ fn apply_adapter_materialized(
     // Remaining barrier dispatch by Stage variant — all other variants are handled
     // above by Builtin::apply_barrier trait dispatch and never reach this point.
     match stage {
-        Stage::Builtin(call)
-            if builtin_view_stage(BuiltinId::from_method(call.method))
-                == Some(BuiltinViewStage::Compact) =>
-        {
-            buf.retain(|v| !matches!(v, Val::Null));
-            Some(Ok(()))
-        }
-        Stage::Builtin(call)
-            if builtin_view_stage(BuiltinId::from_method(call.method))
-                == Some(BuiltinViewStage::RemoveValue) =>
-        {
-            if let crate::builtins::BuiltinArgs::Val(target) = &call.args {
-                buf.retain(|v| !crate::util::vals_eq(v, target));
-            }
-            Some(Ok(()))
-        }
         // Element-wise scalar (Slice, Replace, ReplaceAll, BuiltinCall::apply).
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
             let mut out: Vec<Val> = Vec::with_capacity(buf.len());

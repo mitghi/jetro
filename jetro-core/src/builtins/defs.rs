@@ -177,6 +177,29 @@ impl Builtin for Compact {
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::compact_apply(recv).unwrap_or_else(|| recv.clone()))
     }
+
+    #[inline]
+    fn apply_stream(
+        _ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+        Ok(if matches!(item, crate::data::value::Val::Null) {
+            crate::exec::pipeline::StageFlow::SkipRow
+        } else {
+            crate::exec::pipeline::StageFlow::Continue(item)
+        })
+    }
+
+    #[inline]
+    fn apply_barrier(
+        _ctx: &mut super::builtin::BarrierCtx<'_>,
+        buf: &mut Vec<crate::data::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
+        buf.retain(|v| !matches!(v, crate::data::value::Val::Null));
+        Some(Ok(()))
+    }
 }
 
 /// Removes elements equal to the literal argument; degenerate equality filter.
@@ -198,6 +221,38 @@ impl Builtin for Remove {
             super::BuiltinArgs::Val(item) => Some(super::remove_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
             _ => None,
         }
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+        let crate::exec::pipeline::Stage::Builtin(call) = ctx.stage else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        match &call.args {
+            super::BuiltinArgs::Val(target) if crate::util::vals_eq(&item, target) => {
+                Ok(crate::exec::pipeline::StageFlow::SkipRow)
+            }
+            _ => Ok(crate::exec::pipeline::StageFlow::Continue(item)),
+        }
+    }
+
+    #[inline]
+    fn apply_barrier(
+        ctx: &mut super::builtin::BarrierCtx<'_>,
+        buf: &mut Vec<crate::data::value::Val>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Option<Result<(), crate::data::context::EvalError>> {
+        let crate::exec::pipeline::Stage::Builtin(call) = ctx.stage else {
+            return Some(Ok(()));
+        };
+        if let super::BuiltinArgs::Val(target) = &call.args {
+            buf.retain(|v| !crate::util::vals_eq(v, target));
+        }
+        Some(Ok(()))
     }
 }
 
