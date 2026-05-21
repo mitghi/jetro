@@ -594,6 +594,7 @@ pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
         || spec.object_lambda.is_some()
         || spec.keyed_reducer.is_some()
         || spec.arg_extreme_sink.is_some()
+        || spec.predicate_sink.is_some()
         || matches!(
             spec.lowering,
             Some(
@@ -607,12 +608,7 @@ pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
             .is_some_and(|sink| sink.accepts_predicate)
         || matches!(
             method,
-            BuiltinMethod::Any
-                | BuiltinMethod::All
-                | BuiltinMethod::FindIndex
-                | BuiltinMethod::IndicesWhere
-                | BuiltinMethod::FindOne
-                | BuiltinMethod::Accumulate
+            BuiltinMethod::Accumulate
                 | BuiltinMethod::Fold
                 | BuiltinMethod::Partition
                 | BuiltinMethod::Pivot
