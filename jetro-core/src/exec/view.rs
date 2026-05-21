@@ -493,11 +493,7 @@ where
     let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
-            let len = match source.scalar() {
-                JsonView::ArrayLen(len) => len,
-                _ => return None,
-            };
-            let items = (0..len).rev().map(|idx| source.index(idx as i64));
+            let items = source.array_iter_rev()?;
             return drive_view_iter(
                 items,
                 stages,
@@ -1571,6 +1567,25 @@ mod tests {
             })))
         }
 
+        fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads
+                .set(self.array_iter_reads.get() + 1);
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let scalar_reads = Rc::clone(&self.scalar_reads);
+            let array_iter_reads = Rc::clone(&self.array_iter_reads);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            Some(Box::new((0..rows.len()).rev().map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                scalar_reads: Rc::clone(&scalar_reads),
+                array_iter_reads: Rc::clone(&array_iter_reads),
+                materialize_reads: Rc::clone(&materialize_reads),
+            })))
+        }
+
         fn materialize(&self) -> Val {
             self.materialize_reads.set(self.materialize_reads.get() + 1);
             self.idx
@@ -1605,6 +1620,32 @@ mod tests {
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_frontier_reverse_demand_uses_reverse_iterator() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let observed = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let observed_in_closure = Rc::clone(&observed);
+        let mut vm = VM::new();
+
+        let result = super::drive_view_frontier(
+            source.clone(),
+            SourceCapabilities::VIEW_ARRAY,
+            &[],
+            &[],
+            PullDemand::LastInput(2),
+            &mut vm,
+            move |item, _| {
+                observed_in_closure.borrow_mut().push(item.materialize());
+                Some(super::ViewRowAction::Emit)
+            },
+        );
+
+        assert!(result.is_some());
+        assert_eq!(*observed.borrow(), vec![Val::Int(4), Val::Int(3)]);
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 1);
     }
 
     #[test]

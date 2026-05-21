@@ -241,6 +241,21 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
     Some(Val::obj(out))
 }
 
+fn tape_array_child_indices<T: TapeLike>(tape: &T, idx: usize) -> Option<Vec<usize>> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Array { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+    let mut indices = Vec::with_capacity(len);
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        indices.push(cur);
+        cur += tape.span(cur);
+    }
+    Some(indices)
+}
+
 /// Navigation interface shared by all document representations.
 /// Implementations exist for `ValView` (in-memory `Val` tree) and `TapeView`
 /// (borrowed simd-json tape nodes).
@@ -267,6 +282,8 @@ pub(crate) trait ValueView<'a>: Clone {
     /// Return an iterator over the elements of an array node, or `None` if the
     /// current node is not an array.
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
+    /// Return an iterator over the elements of an array node from the end.
+    fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
     /// Fully materialise the current node as a `Val`, allocating as needed.
     fn materialize(&self) -> Val;
 }
@@ -559,6 +576,80 @@ impl<'a> ValueView<'a> for ValView<'a> {
     }
 
     #[inline]
+    fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        match self {
+            Self::Borrowed(Val::Arr(items)) => {
+                Some(Box::new(items.iter().rev().map(Self::Borrowed)))
+            }
+            Self::Borrowed(Val::IntVec(items)) => Some(Box::new(
+                items.iter().rev().copied().map(Val::Int).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::FloatVec(items)) => Some(Box::new(
+                items.iter().rev().copied().map(Val::Float).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::StrVec(items)) => Some(Box::new(
+                items.iter().rev().cloned().map(Val::Str).map(Self::Owned),
+            )),
+            Self::Borrowed(Val::StrSliceVec(items)) => Some(Box::new(
+                items
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .map(Val::StrSlice)
+                    .map(Self::Owned),
+            )),
+            Self::Borrowed(_) => None,
+            Self::Owned(value) => match value {
+                Val::Arr(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .rev()
+                        .map(Self::Owned),
+                )),
+                Val::IntVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .rev()
+                        .map(Val::Int)
+                        .map(Self::Owned),
+                )),
+                Val::FloatVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .rev()
+                        .map(Val::Float)
+                        .map(Self::Owned),
+                )),
+                Val::StrVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .rev()
+                        .map(Val::Str)
+                        .map(Self::Owned),
+                )),
+                Val::StrSliceVec(items) => Some(Box::new(
+                    Arc::clone(items)
+                        .as_ref()
+                        .clone()
+                        .into_iter()
+                        .rev()
+                        .map(Val::StrSlice)
+                        .map(Self::Owned),
+                )),
+                _ => None,
+            },
+        }
+    }
+
+    #[inline]
     fn materialize(&self) -> Val {
         self.value().clone()
     }
@@ -752,6 +843,18 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             remaining: len,
             cur: *idx + 1,
         }))
+    }
+
+    #[inline]
+    fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let tape: &'a crate::data::tape::TapeData = *tape;
+        let indices = tape_array_child_indices(tape, *idx)?;
+        Some(Box::new(indices.into_iter().rev().map(move |child| {
+            Self::Node { tape, idx: child }
+        })))
     }
 
     #[inline]
@@ -964,6 +1067,18 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             remaining: len,
             cur: *idx + 1,
         }))
+    }
+
+    #[inline]
+    fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let tape: &'a crate::data::tape::TapeScratch = *tape;
+        let indices = tape_array_child_indices(tape, *idx)?;
+        Some(Box::new(indices.into_iter().rev().map(move |child| {
+            Self::Node { tape, idx: child }
+        })))
     }
 
     #[inline]
