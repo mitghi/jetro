@@ -5,6 +5,7 @@
 //! allocation. Used by the simd-json tape path so that string values returned
 //! from `Val::StrSlice` / `Val::StrSliceVec` never allocate.
 
+use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -181,6 +182,8 @@ impl From<String> for StrRef {
 /// the backing buffer is owned by `TapeData` and kept alive via `Arc`.
 pub type TapeNode = simd_json::Node<'static>;
 
+const ARRAY_CHILD_INDEX_MIN_LEN: usize = 2;
+
 /// Parsed simd-json tape together with the byte buffer and structural-index buffers
 /// that must remain alive for the duration of the tape's use.
 pub struct TapeData {
@@ -192,6 +195,9 @@ pub struct TapeData {
     _buffers: simd_json::Buffers,
     /// The flat tape of parsed JSON nodes; string nodes borrow from `bytes_buf`.
     pub nodes: Vec<TapeNode>,
+    /// Immutable direct-child tape starts for arrays large enough to benefit
+    /// from positional and reverse access.
+    array_child_index: HashMap<usize, Box<[usize]>>,
     /// Counter of how many subtrees were materialised into `Val`; used in tests
     /// to verify lazy-materialisation assumptions.
     #[cfg(test)]
@@ -205,10 +211,12 @@ impl TapeData {
         Self::parse_inner(&mut bytes)
             .map_err(|e| e.to_string())
             .map(|(nodes, bytes_buf, buffers)| {
+                let array_child_index = build_array_child_index(&nodes);
                 Arc::new(Self {
                     bytes_buf,
                     _buffers: buffers,
                     nodes,
+                    array_child_index,
                     #[cfg(test)]
                     materialized_subtrees: AtomicUsize::new(0),
                 })
@@ -305,6 +313,9 @@ impl TapeData {
         if idx >= len {
             return None;
         }
+        if let Some(children) = self.array_child_index.get(&first) {
+            return children.get(idx).copied();
+        }
         let mut cur = first;
         for _ in 0..idx {
             cur += self.span(cur);
@@ -315,6 +326,9 @@ impl TapeData {
     /// Return all direct array child tape indices for an array whose first
     /// child is at `first` and whose direct child count is `len`.
     pub(crate) fn array_child_starts(&self, first: usize, len: usize) -> Vec<usize> {
+        if let Some(children) = self.array_child_index.get(&first) {
+            return children.to_vec();
+        }
         let mut children = Vec::with_capacity(len);
         let mut cur = first;
         for _ in 0..len {
@@ -322,6 +336,40 @@ impl TapeData {
             cur += self.span(cur);
         }
         children
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
+        self.array_child_index.contains_key(&first)
+    }
+}
+
+fn build_array_child_index(nodes: &[TapeNode]) -> HashMap<usize, Box<[usize]>> {
+    let mut index = HashMap::new();
+    for (node_idx, node) in nodes.iter().enumerate() {
+        let TapeNode::Array { len, .. } = *node else {
+            continue;
+        };
+        if len < ARRAY_CHILD_INDEX_MIN_LEN {
+            continue;
+        }
+        let first = node_idx + 1;
+        let mut children = Vec::with_capacity(len);
+        let mut cur = first;
+        for _ in 0..len {
+            children.push(cur);
+            cur += tape_node_span(nodes, cur);
+        }
+        index.insert(first, children.into_boxed_slice());
+    }
+    index
+}
+
+#[inline]
+fn tape_node_span(nodes: &[TapeNode], i: usize) -> usize {
+    match nodes[i] {
+        TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count + 1,
+        _ => 1,
     }
 }
 pub(crate) struct TapeScratch {
@@ -376,6 +424,7 @@ mod tests {
         let len = tape.root_len();
 
         let children = tape.array_child_starts(first, len);
+        assert!(tape.has_array_child_index(first));
         assert_eq!(children.len(), 3);
         assert_eq!(tape.array_child_start(first, len, 0), Some(children[0]));
         assert_eq!(tape.array_child_start(first, len, 1), Some(children[1]));
@@ -394,5 +443,16 @@ mod tests {
             tape.nodes[children[2]],
             crate::data::tape::TapeNode::String(_)
         ));
+    }
+
+    #[test]
+    fn array_child_index_covers_nested_arrays() {
+        let tape = TapeData::parse(br#"[[1,2],{"xs":[3,4,5]}]"#.to_vec()).unwrap();
+        let root_children = tape.array_child_starts(1, tape.root_len());
+        assert!(tape.has_array_child_index(1));
+
+        let nested_first = root_children[0] + 1;
+        assert!(tape.has_array_child_index(nested_first));
+        assert_eq!(tape.array_child_starts(nested_first, 2), vec![2, 3]);
     }
 }
