@@ -1860,37 +1860,7 @@ impl BuiltinCall {
     #[inline]
     #[cfg(test)]
     pub fn spec(&self) -> BuiltinSpec {
-        let mut spec = self.method.spec();
-        let (cost, can_indexed) = match self.method {
-            BuiltinMethod::Keys | BuiltinMethod::Values | BuiltinMethod::Entries => (1.0, false),
-            BuiltinMethod::Repeat
-            | BuiltinMethod::Indent
-            | BuiltinMethod::PadLeft
-            | BuiltinMethod::PadRight
-            | BuiltinMethod::Center => (2.0, true),
-            BuiltinMethod::IndexOf
-            | BuiltinMethod::LastIndexOf
-            | BuiltinMethod::Scan
-            | BuiltinMethod::StartsWith
-            | BuiltinMethod::EndsWith
-            | BuiltinMethod::StripPrefix
-            | BuiltinMethod::StripSuffix
-            | BuiltinMethod::Matches
-            | BuiltinMethod::ReMatch
-            | BuiltinMethod::ReMatchFirst
-            | BuiltinMethod::ReMatchAll
-            | BuiltinMethod::ReCaptures
-            | BuiltinMethod::ReCapturesAll
-            | BuiltinMethod::ReSplit
-            | BuiltinMethod::ReReplace
-            | BuiltinMethod::ReReplaceAll
-            | BuiltinMethod::ContainsAny
-            | BuiltinMethod::ContainsAll => (2.0, true),
-            _ => (spec.cost, spec.can_indexed),
-        };
-        spec.cost = cost;
-        spec.can_indexed = can_indexed;
-        spec
+        self.method.spec()
     }
 
     /// Returns true if applying this builtin twice is equivalent to applying it once.
