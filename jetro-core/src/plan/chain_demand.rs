@@ -7,7 +7,7 @@ use crate::{
     builtins::registry::propagate_demand as propagate_builtin_demand,
     plan::{
         chain_ir::{ChainOp, MatchRole},
-        demand::{Demand, DemandOperator, PullDemand},
+        demand::{Demand, DemandOperator, PullDemand, ValueNeed},
     },
 };
 #[cfg(test)]
@@ -128,8 +128,17 @@ impl DemandOperator for ChainOp {
                     value: downstream.value.merge(crate::plan::demand::ValueNeed::Predicate),
                     order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
-                // Transform match is 1:1, so demand passes through.
-                MatchRole::Transform => downstream,
+                // Transform match is 1:1 like `map`; positional demand passes
+                // through, but observing the transformed value requires the
+                // full input value needed to compute that transform.
+                MatchRole::Transform => Demand {
+                    value: if downstream.value.requires_payload() {
+                        ValueNeed::Whole
+                    } else {
+                        downstream.value
+                    },
+                    ..downstream
+                },
             },
             ChainOp::Builtin { id, demand_arg } => {
                 propagate_builtin_demand(*id, *demand_arg, downstream)
@@ -218,6 +227,25 @@ mod tests {
         ];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
+    }
+
+    #[test]
+    fn match_transform_preserves_map_value_demand() {
+        let demand = match_op(MatchRole::Transform).propagate_demand(Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Predicate,
+            order: true,
+        });
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+
+        let count_only = match_op(MatchRole::Transform).propagate_demand(Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::CountOnly,
+            order: false,
+        });
+        assert_eq!(count_only.value, ValueNeed::CountOnly);
     }
 
     #[test]
