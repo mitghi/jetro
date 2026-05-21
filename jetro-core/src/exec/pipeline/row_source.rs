@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::data::value::{ObjVecData, Val};
 
-use super::{walk_field_chain, Source, SourceAccessMode};
+use super::{index_from_end, walk_field_chain, Source, SourceAccessMode};
 
 /// Unified row storage that avoids copying when the source owns or borrows an array slice, while also supporting owned `Vec<Val>`.
 pub(super) enum Rows<'a> {
@@ -624,10 +624,6 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
 
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
-}
-
-pub(super) fn index_from_end(len: usize, offset: usize) -> Option<usize> {
-    len.checked_sub(offset.checked_add(1)?)
 }
 
 // Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.

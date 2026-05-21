@@ -38,9 +38,9 @@ mod sink_accumulator;
 mod symbolic;
 mod val_stage_flow;
 pub(crate) use capability::{
-    view_capabilities, view_prefix_capabilities, SourceAccessMode, SourceCapabilities,
-    ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode, ViewSinkCapability,
-    ViewStageCapability,
+    index_from_end, view_capabilities, view_prefix_capabilities, SourceAccessMode,
+    SourceCapabilities, ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+    ViewSinkCapability, ViewStageCapability,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{

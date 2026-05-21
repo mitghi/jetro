@@ -525,7 +525,7 @@ where
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
-            let Some(idx) = index_from_end(len, offset) else {
+            let Some(idx) = pipeline::index_from_end(len, offset) else {
                 return Some(());
             };
             let items = std::iter::once(source.index(idx as i64));
@@ -556,10 +556,6 @@ where
     let items = source.array_iter()?;
     let iter_demand = access.iterator_demand(source_demand);
     drive_view_iter(items, stages, stage_kernels, iter_demand, vm, observe)
-}
-
-fn index_from_end(len: usize, offset: usize) -> Option<usize> {
-    len.checked_sub(offset.checked_add(1)?)
 }
 
 /// Drives an arbitrary `items` iterator through the view-stage frontier, calling
@@ -1939,10 +1935,13 @@ mod tests {
 
     #[test]
     fn view_frontier_ignores_overflowing_from_end_offset() {
-        assert_eq!(super::index_from_end(4, 0), Some(3));
-        assert_eq!(super::index_from_end(4, 3), Some(0));
-        assert_eq!(super::index_from_end(4, 4), None);
-        assert_eq!(super::index_from_end(4, usize::MAX), None);
+        assert_eq!(crate::exec::pipeline::index_from_end(4, 0), Some(3));
+        assert_eq!(crate::exec::pipeline::index_from_end(4, 3), Some(0));
+        assert_eq!(crate::exec::pipeline::index_from_end(4, 4), None);
+        assert_eq!(
+            crate::exec::pipeline::index_from_end(4, usize::MAX),
+            None
+        );
     }
 
     #[test]

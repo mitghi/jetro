@@ -210,6 +210,12 @@ impl SourceAccessMode {
     }
 }
 
+/// Return the absolute index for `offset` counted from the end of a sequence.
+#[inline]
+pub(crate) fn index_from_end(len: usize, offset: usize) -> Option<usize> {
+    len.checked_sub(offset.checked_add(1)?)
+}
+
 impl Stage {
     fn preserves_cardinality(&self) -> bool {
         self.shape().cardinality == BuiltinCardinality::OneToOne

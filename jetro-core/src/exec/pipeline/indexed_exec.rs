@@ -9,7 +9,9 @@ use crate::{
     vm::VM,
 };
 
-use super::{nested::PreparedPlan, row_source, Pipeline, Position, SourceAccessMode, Stage};
+use super::{
+    index_from_end, nested::PreparedPlan, row_source, Pipeline, Position, SourceAccessMode, Stage,
+};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
@@ -28,7 +30,7 @@ pub(super) fn run(
 
     let idx = match pipeline.source_access() {
         SourceAccessMode::Indexed(idx) => idx,
-        SourceAccessMode::IndexedFromEnd(offset) => row_source::index_from_end(len, offset)?,
+        SourceAccessMode::IndexedFromEnd(offset) => index_from_end(len, offset)?,
         SourceAccessMode::IndexedSuffix(count) => len.saturating_sub(count),
         SourceAccessMode::ForwardBounded(_) => 0,
         SourceAccessMode::Reverse { .. } => len.checked_sub(1)?,
