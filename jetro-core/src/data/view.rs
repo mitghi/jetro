@@ -36,7 +36,10 @@ trait TapeLike {
             return None;
         };
         let mut indices = Vec::with_capacity(len);
-        let mut cur = array_idx + 1;
+        let mut cur = match len {
+            0 => return Some(indices),
+            _ => self.array_child_start(array_idx + 1, len, 0)?,
+        };
         for _ in 0..len {
             indices.push(cur);
             cur += self.span(cur);
