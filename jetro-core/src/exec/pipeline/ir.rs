@@ -497,6 +497,15 @@ impl<'a> StageDescriptor<'a> {
             .and_then(|method| builtin_columnar_stage(BuiltinId::from_method(method)))
     }
 
+    /// Returns cost/cardinality shape from the builtin registry, falling back
+    /// to view-stage metadata only for synthetic stages without a method.
+    #[inline]
+    pub(crate) fn shape(self) -> Option<StageShape> {
+        self.method
+            .map(StageShape::from_builtin)
+            .or_else(|| self.view_stage().map(StageShape::from_view_stage))
+    }
+
     /// Returns how this stage affects the sort order of its input stream.
     #[inline]
     pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
@@ -887,17 +896,12 @@ impl Stage {
                     cost: 1.0,
                     selectivity: 1.0,
                 },
-                |desc| {
-                    desc.view_stage()
-                        .map(StageShape::from_view_stage)
-                        .or_else(|| desc.method.map(StageShape::from_builtin))
-                        .unwrap_or(StageShape {
-                            cardinality: BuiltinCardinality::OneToOne,
-                            can_indexed: false,
-                            cost: 1.0,
-                            selectivity: 1.0,
-                        })
-                },
+                |desc| desc.shape().unwrap_or(StageShape {
+                    cardinality: BuiltinCardinality::OneToOne,
+                    can_indexed: false,
+                    cost: 1.0,
+                    selectivity: 1.0,
+                }),
             ),
         }
     }
