@@ -188,7 +188,7 @@ pub(super) fn run_tape_field_chain_with_vm(
     if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
         && matches!(pipeline.source_access(), SourceAccessMode::Indexed(_))
     {
-        let selected = selected_index_pipeline(&pipeline)?;
+        let selected = pipeline.for_selected_single_row()?;
         let iter = source.iter_materialized_for_access(pipeline.source_access());
         return Some(run_streaming_rows_with_vm(&selected, base_env, iter, vm));
     }
@@ -199,22 +199,6 @@ pub(super) fn run_tape_field_chain_with_vm(
         iter,
         vm,
     ))
-}
-
-fn selected_index_pipeline(pipeline: &Pipeline) -> Option<Pipeline> {
-    let mut selected = pipeline.clone();
-    selected.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
-    selected.sink_kernels = selected.sink.body_kernels();
-    selected.source_demand = Pipeline::segment_source_demand(&selected.stages, &selected.sink);
-    selected.payload_demand = Pipeline::segment_payload_demand(
-        &selected.stages,
-        &selected.stage_kernels,
-        &selected.sink,
-        &selected.sink_kernels,
-    );
-    selected.late_projection =
-        Pipeline::late_projection_for(&selected.stages, &selected.stage_kernels);
-    Some(selected)
 }
 
 #[cfg(test)]

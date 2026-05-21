@@ -1524,6 +1524,27 @@ impl Pipeline {
         self.source_capabilities
     }
 
+    /// Returns a clone of this pipeline adapted to consume an iterator that
+    /// already yields exactly the selected source row. Positional `nth`
+    /// semantics have been satisfied by source access, so the remaining stream
+    /// can be consumed as a one-row `first` pipeline.
+    pub(crate) fn for_selected_single_row(&self) -> Option<Self> {
+        let mut selected = self.clone();
+        selected.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
+        selected.sink_kernels = selected.sink.body_kernels();
+        selected.source_demand =
+            Pipeline::segment_source_demand(&selected.stages, &selected.sink);
+        selected.payload_demand = Pipeline::segment_payload_demand(
+            &selected.stages,
+            &selected.stage_kernels,
+            &selected.sink,
+            &selected.sink_kernels,
+        );
+        selected.late_projection =
+            Pipeline::late_projection_for(&selected.stages, &selected.stage_kernels);
+        Some(selected)
+    }
+
     /// Returns the materialization/fallback boundary selected for this pipeline.
     #[inline]
     pub(crate) fn fallback_boundary(&self) -> super::FallbackBoundary {
