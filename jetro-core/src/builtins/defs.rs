@@ -64,9 +64,8 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
 
 // ── Streaming filters ────────────────────────────────────────────────────────
 
-/// Helper: shared spec body for the predicate filter family (Filter / Find / FindAll).
-/// All three are streaming filters with identical pipeline characteristics; they only
-/// differ in their parser-level surface (semantic aliasing).
+/// Helper: shared spec body for streaming predicate filters (`filter` and `find_all`).
+/// `find` has first-match terminal semantics and declares its own filter + first lowering.
 #[inline]
 fn filter_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)

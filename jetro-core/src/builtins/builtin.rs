@@ -95,7 +95,7 @@ pub(crate) trait Builtin {
     /// Streaming row-stage runtime: takes an item plus the per-stage `StreamCtx` and
     /// returns a `StageFlow` (Continue/SkipRow/Stop/TerminalCollected). Default returns
     /// `Continue(item)` (pass-through). Override on streaming-shaped builtins:
-    /// Filter / Find / FindAll → row-predicate filter
+    /// Filter / FindAll → row-predicate filter; Find lowers to filter + first.
     /// Map / FlatMap → row projection
     /// TakeWhile / DropWhile → bounded prefix predicate
     /// Take / Skip → positional slice
