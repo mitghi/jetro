@@ -439,6 +439,25 @@ mod tests {
     }
 
     #[test]
+    fn deep_expanding_builtins_are_positional_barriers() {
+        for method in [
+            BuiltinMethod::Walk,
+            BuiltinMethod::WalkPre,
+            BuiltinMethod::Rec,
+            BuiltinMethod::TracePath,
+            BuiltinMethod::DeepFind,
+            BuiltinMethod::DeepShape,
+            BuiltinMethod::DeepLike,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+            assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
     fn scalar_view_predicates_request_predicate_payload_for_positional_output() {
         for method in [
             BuiltinMethod::IsBlank,

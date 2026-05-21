@@ -2373,7 +2373,10 @@ impl Builtin for UnflattenKeys {
 
 #[inline]
 fn deep_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding).cost(20.0)
+    BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .cost(20.0)
 }
 
 /// `walk(fn)` — post-order walk.
@@ -2415,6 +2418,8 @@ impl Builtin for DeepFind {
     const NAME: &'static str = "deep_find";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .demand_law(BuiltinDemandLaw::FlatMapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .structural(BuiltinStructural::DeepFind)
             .cost(20.0)
     }
@@ -2427,6 +2432,8 @@ impl Builtin for DeepShape {
     const NAME: &'static str = "deep_shape";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .demand_law(BuiltinDemandLaw::FlatMapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .structural(BuiltinStructural::DeepShape)
             .cost(20.0)
     }
@@ -2439,6 +2446,8 @@ impl Builtin for DeepLike {
     const NAME: &'static str = "deep_like";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Deep, BuiltinCardinality::Expanding)
+            .demand_law(BuiltinDemandLaw::FlatMapLike)
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .structural(BuiltinStructural::DeepLike)
             .cost(20.0)
     }
@@ -2506,7 +2515,10 @@ impl Builtin for EquiJoin {
     const METHOD: BuiltinMethod = BuiltinMethod::EquiJoin;
     const NAME: &'static str = "equi_join";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Relational, BuiltinCardinality::Barrier).cost(20.0)
+        BuiltinSpec::new(BuiltinCategory::Relational, BuiltinCardinality::Barrier)
+            .demand_law(BuiltinDemandLaw::OrderBarrier)
+            .order_effect(BuiltinPipelineOrderEffect::Blocks)
+            .cost(20.0)
     }
 }
 
