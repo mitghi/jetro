@@ -5,8 +5,11 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::Arg;
+use crate::builtins::registry::{
+    output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
+};
 use crate::builtins::BuiltinMethod;
+use crate::parse::ast::Arg;
 use crate::vm::{
     CompiledCall, FieldChainData, Opcode, Program,
     disable_opcode_fusion,
@@ -28,7 +31,7 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
 pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
     fn take_const(call: &CompiledCall) -> Option<usize> {
         use crate::parse::ast::Expr;
-        if call.name.as_ref() != "take" {
+        if !pipeline_stage_caps_input_prefix(BuiltinId::from_method(call.method)) {
             return None;
         }
         if call.orig_args.len() != 1 {
@@ -40,15 +43,14 @@ pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
         }
     }
 
-    fn is_demand_aware(method: BuiltinMethod) -> bool {
-        matches!(method, BuiltinMethod::Filter | BuiltinMethod::Map)
-    }
     let mut out = Vec::with_capacity(ops.len());
     let mut i = 0;
     while i < ops.len() {
         if i + 1 < ops.len() {
             if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) = (&ops[i], &ops[i + 1]) {
-                if is_demand_aware(a.method) && a.demand_max_keep.is_none() {
+                if output_cap_receiver(BuiltinId::from_method(a.method))
+                    && a.demand_max_keep.is_none()
+                {
                     if let Some(n) = take_const(b) {
                         let mut new_call = (**a).clone();
                         new_call.demand_max_keep = Some(n);

@@ -190,6 +190,13 @@ pub(crate) fn pipeline_stage_caps_input_prefix(id: BuiltinId) -> bool {
     matches!(demand_law(id), BuiltinDemandLaw::Take)
 }
 
+/// Return true when receiver-mode VM execution can consume a downstream output cap.
+#[inline]
+pub(crate) fn output_cap_receiver(id: BuiltinId) -> bool {
+    id.method()
+        .is_some_and(|method| method.spec().output_cap_receiver)
+}
+
 /// Return true when the stage only changes row order, not membership or row values.
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
@@ -1195,6 +1202,7 @@ mod tests {
                 spec.order_only,
                 "{method:?}"
             );
+            assert_eq!(output_cap_receiver(id), spec.output_cap_receiver, "{method:?}");
             assert_eq!(runtime_hook(id), spec.runtime_hook, "{method:?}");
             let effective_shape =
                 effective_pipeline_shape(id).expect("registered builtin should have shape");

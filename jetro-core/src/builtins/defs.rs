@@ -78,6 +78,7 @@ fn filter_spec() -> BuiltinSpec {
         .logical_shape(BuiltinLogicalShape::Filter)
         .row_stream_op(BuiltinRowStreamOp::Filter)
         .runtime_hook(BuiltinRuntimeHook::Filter)
+        .output_cap_receiver()
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -279,6 +280,7 @@ impl Builtin for Map {
             .logical_shape(BuiltinLogicalShape::Map)
             .row_stream_op(BuiltinRowStreamOp::Map)
             .lowering(BuiltinPipelineLowering::ExprArg)
+            .output_cap_receiver()
             .element()
     }
 

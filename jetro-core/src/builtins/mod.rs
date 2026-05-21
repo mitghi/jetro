@@ -653,6 +653,8 @@ pub struct BuiltinSpec {
     pub order_only: bool,
     /// Runtime hook implementation target when public builtins share executor behavior.
     pub runtime_hook: Option<BuiltinRuntimeHook>,
+    /// Whether receiver-mode VM execution can stop after a downstream output cap.
+    pub output_cap_receiver: bool,
     /// Columnar stage kind for backends that work on typed column vectors.
     pub columnar_stage: Option<BuiltinColumnarStage>,
     /// Structural index backend hint (deep search variants).
@@ -1487,6 +1489,7 @@ impl BuiltinSpec {
             accepts_lambda_arg: false,
             order_only: false,
             runtime_hook: None,
+            output_cap_receiver: false,
             columnar_stage: None,
             structural: None,
             cost: 1.0,
@@ -1576,6 +1579,12 @@ impl BuiltinSpec {
     /// Attaches a shared runtime hook implementation target.
     fn runtime_hook(mut self, hook: BuiltinRuntimeHook) -> Self {
         self.runtime_hook = Some(hook);
+        self
+    }
+
+    /// Marks this builtin as supporting receiver-mode bounded output in the VM.
+    fn output_cap_receiver(mut self) -> Self {
+        self.output_cap_receiver = true;
         self
     }
 
