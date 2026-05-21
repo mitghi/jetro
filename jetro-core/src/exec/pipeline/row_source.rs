@@ -243,7 +243,7 @@ impl<'a> Rows<'a> {
             }
             SourceAccessMode::IndexedFromEnd(offset) => {
                 let rows = self.as_slice();
-                let idx = rows.len().checked_sub(offset.checked_add(1).unwrap_or(usize::MAX));
+                let idx = index_from_end(rows.len(), offset);
                 RowsIter::Single(idx.and_then(|idx| rows.get(idx).cloned()).into_iter())
             }
             SourceAccessMode::ForwardBounded(limit) => match self {
@@ -314,7 +314,7 @@ impl<'a> ValRowSource<'a> {
                 ValRowsIter::Single((idx < data.nrows()).then(|| objvec_row(&data, idx)).into_iter())
             }
             (Self::ObjVec(data), SourceAccessMode::IndexedFromEnd(offset)) => {
-                let idx = data.nrows().checked_sub(offset.checked_add(1).unwrap_or(usize::MAX));
+                let idx = index_from_end(data.nrows(), offset);
                 ValRowsIter::Single(
                     idx.filter(|idx| *idx < data.nrows())
                         .map(|idx| objvec_row(&data, idx))
@@ -481,7 +481,7 @@ impl<'a> TapeRowSource<'a> {
             Self::Single(_) => 1,
             Self::Missing => return None,
         };
-        let idx = len.checked_sub(offset.checked_add(1)?)?;
+        let idx = index_from_end(len, offset)?;
         self.view_at(idx)
     }
 
@@ -564,6 +564,10 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
 
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
+}
+
+fn index_from_end(len: usize, offset: usize) -> Option<usize> {
+    len.checked_sub(offset.checked_add(1)?)
 }
 
 // Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
