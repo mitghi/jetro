@@ -21,7 +21,7 @@ use crate::{
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
-    plan::demand::{Demand, PullDemand, ValueNeed},
+    plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed},
     util::JsonView,
     vm::Program,
 };
@@ -82,10 +82,45 @@ pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
     Some(id.method()?.spec().predicate_sink?)
 }
 
+/// Return the value need for a predicate terminal sink.
+#[inline]
+pub(crate) fn predicate_sink_value_need(sink: BuiltinPredicateSink) -> ValueNeed {
+    match sink {
+        BuiltinPredicateSink::FindOne => ValueNeed::Whole,
+        BuiltinPredicateSink::Any
+        | BuiltinPredicateSink::All
+        | BuiltinPredicateSink::FindIndex
+        | BuiltinPredicateSink::IndicesWhere => ValueNeed::Predicate,
+    }
+}
+
+/// Return scalar-result short-circuit demand for a predicate terminal sink.
+#[inline]
+pub(crate) fn predicate_sink_result_demand(sink: BuiltinPredicateSink) -> SinkResultDemand {
+    match sink {
+        BuiltinPredicateSink::Any | BuiltinPredicateSink::FindIndex => SinkResultDemand::UntilMatch,
+        BuiltinPredicateSink::All => SinkResultDemand::UntilFailure,
+        BuiltinPredicateSink::IndicesWhere | BuiltinPredicateSink::FindOne => {
+            SinkResultDemand::None
+        }
+    }
+}
+
 /// Return membership terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
     Some(id.method()?.spec().membership_sink?)
+}
+
+/// Return scalar-result short-circuit demand for a membership terminal sink.
+#[inline]
+pub(crate) fn membership_sink_result_demand(sink: BuiltinMembershipSink) -> SinkResultDemand {
+    match sink {
+        BuiltinMembershipSink::Includes | BuiltinMembershipSink::Index => {
+            SinkResultDemand::UntilMatch
+        }
+        BuiltinMembershipSink::IndicesOf => SinkResultDemand::None,
+    }
 }
 
 /// Return arg-extreme terminal-sink behavior for builtin `id`, if it has one.
@@ -2497,6 +2532,26 @@ mod tests {
             predicate_sink(BuiltinId::from_method(BuiltinMethod::Count)),
             None
         );
+        assert_eq!(
+            predicate_sink_value_need(BuiltinPredicateSink::Any),
+            ValueNeed::Predicate
+        );
+        assert_eq!(
+            predicate_sink_value_need(BuiltinPredicateSink::FindOne),
+            ValueNeed::Whole
+        );
+        assert_eq!(
+            predicate_sink_result_demand(BuiltinPredicateSink::Any),
+            SinkResultDemand::UntilMatch
+        );
+        assert_eq!(
+            predicate_sink_result_demand(BuiltinPredicateSink::All),
+            SinkResultDemand::UntilFailure
+        );
+        assert_eq!(
+            predicate_sink_result_demand(BuiltinPredicateSink::FindOne),
+            SinkResultDemand::None
+        );
 
         assert_eq!(
             membership_sink(BuiltinId::from_method(BuiltinMethod::Includes)),
@@ -2513,6 +2568,18 @@ mod tests {
         assert_eq!(
             membership_sink(BuiltinId::from_method(BuiltinMethod::Has)),
             None
+        );
+        assert_eq!(
+            membership_sink_result_demand(BuiltinMembershipSink::Includes),
+            SinkResultDemand::UntilMatch
+        );
+        assert_eq!(
+            membership_sink_result_demand(BuiltinMembershipSink::Index),
+            SinkResultDemand::UntilMatch
+        );
+        assert_eq!(
+            membership_sink_result_demand(BuiltinMembershipSink::IndicesOf),
+            SinkResultDemand::None
         );
 
         assert_eq!(

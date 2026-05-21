@@ -4,8 +4,11 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    arg_extreme_wants_max, membership_sink as builtin_membership_sink, numeric_reducer,
-    predicate_sink as builtin_predicate_sink, BuiltinId,
+    arg_extreme_wants_max, membership_sink as builtin_membership_sink,
+    membership_sink_result_demand as builtin_membership_sink_result_demand, numeric_reducer,
+    predicate_sink as builtin_predicate_sink,
+    predicate_sink_result_demand as builtin_predicate_sink_result_demand,
+    predicate_sink_value_need as builtin_predicate_sink_value_need, BuiltinId,
 };
 use crate::builtins::{BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink};
 use crate::parse::ast::Expr;
@@ -91,6 +94,17 @@ impl PredicateSinkOp {
             BuiltinPredicateSink::FindOne => Self::FindOne,
         }
     }
+
+    #[inline]
+    fn into_builtin(self) -> BuiltinPredicateSink {
+        match self {
+            Self::Any => BuiltinPredicateSink::Any,
+            Self::All => BuiltinPredicateSink::All,
+            Self::FindIndex => BuiltinPredicateSink::FindIndex,
+            Self::IndicesWhere => BuiltinPredicateSink::IndicesWhere,
+            Self::FindOne => BuiltinPredicateSink::FindOne,
+        }
+    }
 }
 
 /// Value-membership terminal operation.
@@ -113,6 +127,15 @@ impl MembershipSinkOp {
             BuiltinMembershipSink::IndicesOf => Self::IndicesOf,
         }
     }
+
+    #[inline]
+    fn into_builtin(self) -> BuiltinMembershipSink {
+        match self {
+            Self::Includes => BuiltinMembershipSink::Includes,
+            Self::Index => BuiltinMembershipSink::Index,
+            Self::IndicesOf => BuiltinMembershipSink::IndicesOf,
+        }
+    }
 }
 
 impl PredicateSinkSpec {
@@ -132,24 +155,17 @@ impl PredicateSinkSpec {
         // pull model counts source rows emitted by the stage chain. Treating
         // `any`/`find_index` as `UntilOutput(1)` would stop after one non-matching
         // input row before the predicate sink has produced its scalar result.
+        let sink = self.op.into_builtin();
         Demand {
             pull: PullDemand::All,
-            value: if self.op == PredicateSinkOp::FindOne {
-                ValueNeed::Whole
-            } else {
-                ValueNeed::Predicate
-            },
+            value: builtin_predicate_sink_value_need(sink),
             order: false,
         }
     }
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
     pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
-        match self.op {
-            PredicateSinkOp::Any | PredicateSinkOp::FindIndex => SinkResultDemand::UntilMatch,
-            PredicateSinkOp::All => SinkResultDemand::UntilFailure,
-            PredicateSinkOp::IndicesWhere | PredicateSinkOp::FindOne => SinkResultDemand::None,
-        }
+        builtin_predicate_sink_result_demand(self.op.into_builtin())
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -189,10 +205,7 @@ impl MembershipSinkSpec {
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
     pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
-        match self.op {
-            MembershipSinkOp::Includes | MembershipSinkOp::Index => SinkResultDemand::UntilMatch,
-            MembershipSinkOp::IndicesOf => SinkResultDemand::None,
-        }
+        builtin_membership_sink_result_demand(self.op.into_builtin())
     }
 
     /// Iterates over embedded programs for kernel enumeration.
