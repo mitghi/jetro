@@ -338,6 +338,15 @@ impl TapeData {
         children
     }
 
+    /// Borrow precomputed direct array child starts when the parsed tape
+    /// already indexed this array.
+    #[inline]
+    pub(crate) fn array_child_indexed_starts(&self, first: usize) -> Option<&[usize]> {
+        self.array_child_index
+            .get(&first)
+            .map(|children| &**children)
+    }
+
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index.contains_key(&first)

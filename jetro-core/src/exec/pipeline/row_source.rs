@@ -107,6 +107,13 @@ pub(super) enum TapeRowsIter<'a> {
         tape: &'a crate::data::tape::TapeData,
         children: std::vec::IntoIter<usize>,
     },
+    /// Advances through precomputed array child tape indices from the end
+    /// without allocating a reversed copy.
+    ReverseIndexedArray {
+        tape: &'a crate::data::tape::TapeData,
+        children: &'a [usize],
+        next: usize,
+    },
     /// Single-element iterator for a non-array tape node.
     Single(std::option::IntoIter<crate::data::view::TapeView<'a>>),
     /// Iterator for a `Missing` source; always returns `None`.
@@ -165,6 +172,20 @@ impl<'a> Iterator for TapeRowsIter<'a> {
             }
             Self::ReverseArray { tape, children } => {
                 children.next().map(|idx| TapeView::Node { tape, idx })
+            }
+            Self::ReverseIndexedArray {
+                tape,
+                children,
+                next,
+            } => {
+                if *next == 0 {
+                    return None;
+                }
+                *next -= 1;
+                Some(TapeView::Node {
+                    tape,
+                    idx: children[*next],
+                })
             }
             Self::Single(iter) => iter.next(),
             Self::Empty => None,
@@ -284,7 +305,9 @@ impl<'a> Rows<'a> {
                 }
                 Self::Owned(rows) => RowsIter::OwnedRev(rows.into_iter().rev()),
             },
-            SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => self.iter_cloned(),
+            SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => {
+                self.iter_cloned()
+            }
         }
     }
 
@@ -328,9 +351,11 @@ impl<'a> ValRowSource<'a> {
     /// Converts this source into a row iterator constrained by planned access.
     pub(super) fn iter_for_access(self, access: SourceAccessMode) -> ValRowsIter<'a> {
         match (self, access) {
-            (Self::ObjVec(data), SourceAccessMode::Indexed(idx)) => {
-                ValRowsIter::Single((idx < data.nrows()).then(|| objvec_row(&data, idx)).into_iter())
-            }
+            (Self::ObjVec(data), SourceAccessMode::Indexed(idx)) => ValRowsIter::Single(
+                (idx < data.nrows())
+                    .then(|| objvec_row(&data, idx))
+                    .into_iter(),
+            ),
             (Self::ObjVec(data), SourceAccessMode::IndexedFromEnd(offset)) => {
                 let idx = index_from_end(data.nrows(), offset);
                 ValRowsIter::Single(
@@ -360,7 +385,10 @@ impl<'a> ValRowSource<'a> {
                 let index = data.nrows();
                 ValRowsIter::ObjVecRev { data, index }
             }
-            (Self::ObjVec(data), SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback) => {
+            (
+                Self::ObjVec(data),
+                SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback,
+            ) => {
                 let end = data.nrows();
                 ValRowsIter::ObjVec {
                     data,
@@ -522,6 +550,13 @@ impl<'a> TapeRowSource<'a> {
     fn iter_views_reversed(self) -> TapeRowsIter<'a> {
         match self {
             Self::Array { tape, first, len } => {
+                if let Some(children) = tape.array_child_indexed_starts(first) {
+                    return TapeRowsIter::ReverseIndexedArray {
+                        tape,
+                        children,
+                        next: children.len(),
+                    };
+                }
                 let mut children = tape.array_child_starts(first, len);
                 children.reverse();
                 TapeRowsIter::ReverseArray {
@@ -627,10 +662,8 @@ mod tests {
     use serde_json::json;
 
     fn tape_rows() -> std::sync::Arc<TapeData> {
-        TapeData::parse(
-            br#"{"books":[{"id":1},{"id":2},{"id":3}],"other":[{"id":99}]}"#.to_vec(),
-        )
-        .unwrap()
+        TapeData::parse(br#"{"books":[{"id":1},{"id":2},{"id":3}],"other":[{"id":99}]}"#.to_vec())
+            .unwrap()
     }
 
     #[test]
@@ -680,7 +713,6 @@ mod tests {
         assert_eq!(values, vec![json!({"id": 2}), json!({"id": 3})]);
         assert_eq!(tape.materialized_subtrees(), 2);
     }
-
 
     #[test]
     fn tape_row_source_reverse_access_materializes_from_end() {
