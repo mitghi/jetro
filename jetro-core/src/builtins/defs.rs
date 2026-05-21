@@ -670,6 +670,7 @@ impl Builtin for Len {
             .view_scalar()
             .raw_json_scalar(BuiltinRawJsonScalar::Len)
             .row_stream_op(BuiltinRowStreamOp::Count)
+            .demand_law(BuiltinDemandLaw::Count)
             .count_sink()
     }
     #[inline]
