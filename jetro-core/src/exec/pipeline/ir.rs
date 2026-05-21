@@ -271,30 +271,36 @@ impl Sink {
     where
         F: FnMut(&crate::vm::Program) -> bool,
     {
-        self.sink_programs().into_iter().all(|prog| program_ok(prog))
+        let mut ok = true;
+        self.visit_sink_programs(|prog| {
+            ok &= program_ok(prog);
+        });
+        ok
     }
 
     /// Classifies embedded sink programs into body kernels for payload planning and view routing.
     pub(crate) fn body_kernels(&self) -> Vec<BodyKernel> {
-        self.sink_programs()
-            .into_iter()
-            .map(|p| BodyKernel::classify(p))
-            .collect()
+        let mut kernels = Vec::new();
+        self.visit_sink_programs(|prog| kernels.push(BodyKernel::classify(prog)));
+        kernels
     }
 
     /// Returns all VM programs embedded in this sink, in the same order used by
     /// `sink_kernels`.
-    fn sink_programs(&self) -> Vec<&Arc<Program>> {
+    fn visit_sink_programs<F>(&self, mut visit: F)
+    where
+        F: FnMut(&Arc<Program>),
+    {
         match self {
-            Sink::Reducer(spec) => spec.sink_programs().collect(),
-            Sink::Predicate(spec) => spec.sink_programs().collect(),
-            Sink::Membership(spec) => spec.sink_programs().collect(),
-            Sink::ArgExtreme(spec) => spec.sink_programs().collect(),
+            Sink::Reducer(spec) => spec.sink_programs().for_each(&mut visit),
+            Sink::Predicate(spec) => spec.sink_programs().for_each(&mut visit),
+            Sink::Membership(spec) => spec.sink_programs().for_each(&mut visit),
+            Sink::ArgExtreme(spec) => spec.sink_programs().for_each(&mut visit),
             Sink::Collect
             | Sink::Terminal(_)
             | Sink::SelectMany { .. }
             | Sink::Nth(_)
-            | Sink::ApproxCountDistinct => Vec::new(),
+            | Sink::ApproxCountDistinct => {}
         }
     }
 
