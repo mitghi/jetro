@@ -804,11 +804,16 @@ where
             ViewProjectionResult::Owned(Val::Bool(view.has_key(key.as_ref()).unwrap_or(false))),
         ),
         (Some(BuiltinViewObjectProjection::Missing), BuiltinArgs::Str(key)) => {
-            view.has_key(key.as_ref()).map(|present| {
-                let missing =
-                    !present || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
-                ViewProjectionResult::Owned(Val::Bool(missing))
-            })
+            let missing = view_path_missing(&view, key.as_ref());
+            Some(ViewProjectionResult::Owned(Val::Bool(missing)))
+        }
+        (Some(BuiltinViewObjectProjection::Missing), BuiltinArgs::StrVec(keys)) => {
+            let missing = keys
+                .iter()
+                .filter(|key| view_path_missing(&view, key.as_ref()))
+                .map(|key| Val::Str(std::sync::Arc::clone(key)))
+                .collect();
+            Some(ViewProjectionResult::Owned(Val::arr(missing)))
         }
         (Some(BuiltinViewObjectProjection::GetPath), BuiltinArgs::Str(path)) => {
             let path = super::parse_path_segs(path.as_ref());
@@ -859,6 +864,14 @@ where
         };
     }
     cur
+}
+
+fn view_path_missing<'a, V>(view: &V, path: &str) -> bool
+where
+    V: ValueView<'a>,
+{
+    let path = super::parse_path_segs(path);
+    matches!(walk_view_path(view.clone(), &path).scalar(), JsonView::Null)
 }
 
 fn view_has<'a, V>(view: &V, key: &str) -> Option<bool>
@@ -2890,6 +2903,27 @@ mod tests {
             ),
             Val::Bool(true)
         );
+        assert_eq!(
+            apply(
+                BuiltinMethod::Missing,
+                BuiltinArgs::Str(std::sync::Arc::from("nested.y"))
+            ),
+            Val::Bool(true)
+        );
+        assert!(crate::util::vals_deep_eq(
+            &apply(
+                BuiltinMethod::Missing,
+                BuiltinArgs::StrVec(vec![
+                    std::sync::Arc::from("a"),
+                    std::sync::Arc::from("b"),
+                    std::sync::Arc::from("nested.y"),
+                ])
+            ),
+            &Val::arr(vec![
+                Val::Str(std::sync::Arc::from("b")),
+                Val::Str(std::sync::Arc::from("nested.y")),
+            ])
+        ));
         assert_eq!(
             apply(
                 BuiltinMethod::GetPath,
