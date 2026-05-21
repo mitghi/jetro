@@ -2519,6 +2519,7 @@ impl Builtin for Set {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
             .indexed()
+            .demand_law(BuiltinDemandLaw::MapLike)
             .element()
     }
     #[inline]
@@ -2538,6 +2539,7 @@ impl Builtin for Update {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
             .indexed()
+            .demand_law(BuiltinDemandLaw::MapLike)
             .lambda_arg()
     }
 }
@@ -2555,6 +2557,7 @@ fn streaming_one_to_one_element_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
         .indexed()
         .cost(10.0)
+        .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `lag(n)` — element shifted by N positions.

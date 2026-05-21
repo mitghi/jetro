@@ -1567,6 +1567,19 @@ mod tests {
     }
 
     #[test]
+    fn registry_pipeline_elements_participate_in_demand_model() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if pipeline_element(id) {
+                assert!(
+                    participates_in_demand(id),
+                    "{method:?} is a pipeline element but has no demand metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_view_scalar_projection_matches_json_view_dispatch() {
         for (method, _, _) in all_method_entries() {
             assert_eq!(
