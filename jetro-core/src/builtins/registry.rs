@@ -93,6 +93,15 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
     Some(id.method()?.spec().arg_extreme_sink?)
 }
 
+/// Return whether an arg-extreme sink keeps the largest projected key.
+#[inline]
+pub(crate) fn arg_extreme_wants_max(id: BuiltinId) -> Option<bool> {
+    Some(match arg_extreme_sink(id)? {
+        BuiltinArgExtremeSink::MaxBy => true,
+        BuiltinArgExtremeSink::MinBy => false,
+    })
+}
+
 /// Return the concrete pipeline stage shape for an expression-argument builtin.
 #[inline]
 pub(crate) fn expr_stage(id: BuiltinId) -> Option<BuiltinExprStage> {
@@ -2146,11 +2155,23 @@ mod tests {
             Some(BuiltinArgExtremeSink::MaxBy)
         );
         assert_eq!(
+            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::MaxBy)),
+            Some(true)
+        );
+        assert_eq!(
             arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::MinBy)),
             Some(BuiltinArgExtremeSink::MinBy)
         );
         assert_eq!(
+            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::MinBy)),
+            Some(false)
+        );
+        assert_eq!(
             arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::Max)),
+            None
+        );
+        assert_eq!(
+            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::Max)),
             None
         );
     }
