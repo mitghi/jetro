@@ -26,10 +26,24 @@ pub(super) enum Rows<'a> {
 pub(super) enum RowsIter<'a> {
     /// Iterates over a borrowed slice, cloning each element on demand.
     Borrowed(std::slice::Iter<'a, Val>),
+    /// Iterates over a borrowed slice from the end, cloning each element on demand.
+    BorrowedRev(std::iter::Rev<std::slice::Iter<'a, Val>>),
     /// Iterates over a shared `Arc<Vec<Val>>` by index, cloning each element.
-    Shared { rows: Arc<Vec<Val>>, index: usize },
+    Shared {
+        rows: Arc<Vec<Val>>,
+        index: usize,
+        end: usize,
+    },
+    /// Iterates over a shared `Arc<Vec<Val>>` from the end by index.
+    SharedRev { rows: Arc<Vec<Val>>, index: usize },
     /// Draining iterator over a fully owned `Vec<Val>`.
     Owned(std::vec::IntoIter<Val>),
+    /// Draining iterator over a bounded prefix of a fully owned `Vec<Val>`.
+    OwnedTake(std::iter::Take<std::vec::IntoIter<Val>>),
+    /// Draining reverse iterator over a fully owned `Vec<Val>`.
+    OwnedRev(std::iter::Rev<std::vec::IntoIter<Val>>),
+    /// Single selected row.
+    Single(std::option::IntoIter<Val>),
 }
 
 /// Abstraction over a pipeline row source, handling `ObjVec` columnar data, array-like `Rows`, and single scalars.
@@ -47,9 +61,17 @@ pub(super) enum ValRowsIter<'a> {
     /// Delegates to the underlying `RowsIter`.
     Rows(RowsIter<'a>),
     /// Reconstructs each `ObjVec` row as a `Val::Obj` by index.
-    ObjVec { data: Arc<ObjVecData>, index: usize },
+    ObjVec {
+        data: Arc<ObjVecData>,
+        index: usize,
+        end: usize,
+    },
+    /// Reconstructs `ObjVec` rows from the end by index.
+    ObjVecRev { data: Arc<ObjVecData>, index: usize },
     /// Single-element iterator for scalar sources.
     Single(std::option::IntoIter<Val>),
+    /// Empty row iterator.
+    Empty,
 }
 
 /// Row source backed directly by a `simd-json` tape, enabling zero-copy streaming without building a `Val` tree.
@@ -98,15 +120,23 @@ impl Iterator for ValRowsIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Rows(iter) => iter.next(),
-            Self::ObjVec { data, index } => {
-                if *index >= data.nrows() {
+            Self::ObjVec { data, index, end } => {
+                if *index >= *end {
                     return None;
                 }
                 let row = objvec_row(data, *index);
                 *index += 1;
                 Some(row)
             }
+            Self::ObjVecRev { data, index } => {
+                if *index == 0 {
+                    return None;
+                }
+                *index -= 1;
+                Some(objvec_row(data, *index))
+            }
             Self::Single(iter) => iter.next(),
+            Self::Empty => None,
         }
     }
 }
@@ -155,12 +185,26 @@ impl Iterator for RowsIter<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Borrowed(iter) => iter.next().cloned(),
-            Self::Shared { rows, index } => {
+            Self::BorrowedRev(iter) => iter.next().cloned(),
+            Self::Shared { rows, index, end } => {
+                if *index >= *end {
+                    return None;
+                }
                 let item = rows.get(*index)?.clone();
                 *index += 1;
                 Some(item)
             }
+            Self::SharedRev { rows, index } => {
+                if *index == 0 {
+                    return None;
+                }
+                *index -= 1;
+                rows.get(*index).cloned()
+            }
             Self::Owned(iter) => iter.next(),
+            Self::OwnedTake(iter) => iter.next(),
+            Self::OwnedRev(iter) => iter.next(),
+            Self::Single(iter) => iter.next(),
         }
     }
 }
@@ -179,8 +223,50 @@ impl<'a> Rows<'a> {
     pub(super) fn iter_cloned(self) -> RowsIter<'a> {
         match self {
             Self::Borrowed(rows) => RowsIter::Borrowed(rows.iter()),
-            Self::Shared(rows) => RowsIter::Shared { rows, index: 0 },
+            Self::Shared(rows) => {
+                let end = rows.len();
+                RowsIter::Shared {
+                    rows,
+                    index: 0,
+                    end,
+                }
+            }
             Self::Owned(rows) => RowsIter::Owned(rows.into_iter()),
+        }
+    }
+
+    /// Consumes `Rows` and returns an iterator constrained by planned source access.
+    pub(super) fn iter_for_access(self, access: SourceAccessMode) -> RowsIter<'a> {
+        match access {
+            SourceAccessMode::Indexed(idx) => {
+                RowsIter::Single(self.as_slice().get(idx).cloned().into_iter())
+            }
+            SourceAccessMode::IndexedFromEnd(offset) => {
+                let rows = self.as_slice();
+                let idx = rows.len().checked_sub(offset.checked_add(1).unwrap_or(usize::MAX));
+                RowsIter::Single(idx.and_then(|idx| rows.get(idx).cloned()).into_iter())
+            }
+            SourceAccessMode::ForwardBounded(limit) => match self {
+                Self::Borrowed(rows) => RowsIter::Borrowed(rows[..rows.len().min(limit)].iter()),
+                Self::Shared(rows) => {
+                    let end = rows.len().min(limit);
+                    RowsIter::Shared {
+                        rows,
+                        index: 0,
+                        end,
+                    }
+                }
+                Self::Owned(rows) => RowsIter::OwnedTake(rows.into_iter().take(limit)),
+            },
+            SourceAccessMode::Reverse { .. } => match self {
+                Self::Borrowed(rows) => RowsIter::BorrowedRev(rows.iter().rev()),
+                Self::Shared(rows) => {
+                    let index = rows.len();
+                    RowsIter::SharedRev { rows, index }
+                }
+                Self::Owned(rows) => RowsIter::OwnedRev(rows.into_iter().rev()),
+            },
+            SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => self.iter_cloned(),
         }
     }
 
@@ -208,9 +294,71 @@ impl<'a> ValRowSource<'a> {
     /// Converts this source into a `ValRowsIter` that yields one `Val` per row.
     pub(super) fn iter(self) -> ValRowsIter<'a> {
         match self {
-            Self::ObjVec(data) => ValRowsIter::ObjVec { data, index: 0 },
+            Self::ObjVec(data) => {
+                let end = data.nrows();
+                ValRowsIter::ObjVec {
+                    data,
+                    index: 0,
+                    end,
+                }
+            }
             Self::Rows(rows) => ValRowsIter::Rows(rows.iter_cloned()),
             Self::Single(value) => ValRowsIter::Single(Some(value).into_iter()),
+        }
+    }
+
+    /// Converts this source into a row iterator constrained by planned access.
+    pub(super) fn iter_for_access(self, access: SourceAccessMode) -> ValRowsIter<'a> {
+        match (self, access) {
+            (Self::ObjVec(data), SourceAccessMode::Indexed(idx)) => {
+                ValRowsIter::Single((idx < data.nrows()).then(|| objvec_row(&data, idx)).into_iter())
+            }
+            (Self::ObjVec(data), SourceAccessMode::IndexedFromEnd(offset)) => {
+                let idx = data.nrows().checked_sub(offset.checked_add(1).unwrap_or(usize::MAX));
+                ValRowsIter::Single(
+                    idx.filter(|idx| *idx < data.nrows())
+                        .map(|idx| objvec_row(&data, idx))
+                        .into_iter(),
+                )
+            }
+            (Self::ObjVec(data), SourceAccessMode::ForwardBounded(limit)) if limit == 0 => {
+                let _ = data;
+                ValRowsIter::Empty
+            }
+            (Self::ObjVec(data), SourceAccessMode::ForwardBounded(limit)) => {
+                let end = data.nrows().min(limit);
+                ValRowsIter::ObjVec {
+                    data,
+                    index: 0,
+                    end,
+                }
+            }
+            (Self::ObjVec(data), SourceAccessMode::Reverse { .. }) => {
+                let index = data.nrows();
+                ValRowsIter::ObjVecRev { data, index }
+            }
+            (Self::ObjVec(data), SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback) => {
+                let end = data.nrows();
+                ValRowsIter::ObjVec {
+                    data,
+                    index: 0,
+                    end,
+                }
+            }
+            (Self::Rows(rows), access) => ValRowsIter::Rows(rows.iter_for_access(access)),
+            (Self::Single(value), SourceAccessMode::ForwardBounded(0)) => {
+                let _ = value;
+                ValRowsIter::Empty
+            }
+            (Self::Single(value), SourceAccessMode::Indexed(idx)) if idx > 0 => {
+                let _ = value;
+                ValRowsIter::Empty
+            }
+            (Self::Single(value), SourceAccessMode::IndexedFromEnd(offset)) if offset > 0 => {
+                let _ = value;
+                ValRowsIter::Empty
+            }
+            (Self::Single(value), _) => ValRowsIter::Single(Some(value).into_iter()),
         }
     }
 
@@ -374,9 +522,9 @@ pub(super) fn array_like_rows(recv: &Val) -> Option<Rows<'_>> {
     }
 }
 
-/// Constructs a `ValRowsIter` from `recv` for the streaming execution loop.
-pub(super) fn source_iter(recv: &Val) -> ValRowsIter<'_> {
-    ValRowSource::from_receiver(recv).iter()
+/// Constructs a `ValRowsIter` from `recv` constrained by planned source access.
+pub(super) fn source_iter_for_access(recv: &Val, access: SourceAccessMode) -> ValRowsIter<'_> {
+    ValRowSource::from_receiver(recv).iter_for_access(access)
 }
 
 /// Materialises all rows from `recv` into an owned `Vec<Val>`.
@@ -503,5 +651,21 @@ mod tests {
 
         assert_eq!(values, vec![json!({"id": 3}), json!({"id": 2})]);
         assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+    #[test]
+    fn val_row_source_honors_planned_access_modes() {
+        let rows = Val::arr(vec![Val::Int(1), Val::Int(2), Val::Int(3)]);
+
+        let indexed: Vec<_> =
+            source_iter_for_access(&rows, SourceAccessMode::IndexedFromEnd(0)).collect();
+        let prefix: Vec<_> =
+            source_iter_for_access(&rows, SourceAccessMode::ForwardBounded(2)).collect();
+        let reverse: Vec<_> =
+            source_iter_for_access(&rows, SourceAccessMode::Reverse { outputs: 1 }).collect();
+
+        assert_eq!(indexed, vec![Val::Int(3)]);
+        assert_eq!(prefix, vec![Val::Int(1), Val::Int(2)]);
+        assert_eq!(reverse, vec![Val::Int(3), Val::Int(2), Val::Int(1)]);
     }
 }

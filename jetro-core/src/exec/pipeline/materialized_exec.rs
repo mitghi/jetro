@@ -69,7 +69,34 @@ pub(super) fn run(
         .iter()
         .any(Stage::requires_legacy_materialization);
     if !needs_barrier {
-        return run_streaming_rows_with_vm(pipeline, base_env, row_source::source_iter(&recv), vm);
+        if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
+            && matches!(pipeline.source_access(), SourceAccessMode::Indexed(_))
+        {
+            if let Some(selected) = pipeline.for_selected_single_row() {
+                return run_streaming_rows_with_vm(
+                    &selected,
+                    base_env,
+                    row_source::source_iter_for_access(&recv, pipeline.source_access()),
+                    vm,
+                );
+            }
+        }
+        if matches!(pipeline.source_access(), SourceAccessMode::Reverse { .. }) {
+            if let Some(reversed) = pipeline.for_reversed_select_one() {
+                return run_streaming_rows_with_vm(
+                    &reversed,
+                    base_env,
+                    row_source::source_iter_for_access(&recv, pipeline.source_access()),
+                    vm,
+                );
+            }
+        }
+        return run_streaming_rows_with_vm(
+            pipeline,
+            base_env,
+            row_source::source_iter_for_access(&recv, pipeline.source_access()),
+            vm,
+        );
     }
 
     let pre_iter: LegacyPreIter = {
