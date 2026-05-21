@@ -348,10 +348,10 @@ fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
 }
 
 #[test]
-fn find_count_fusion_yields_same_integer_as_filter_count() {
+fn find_all_count_fusion_yields_same_integer_as_filter_count() {
     let j = j(synth_doc());
     let a = j
-        .collect(r#"$.orders.find(status == "shipped").count()"#)
+        .collect(r#"$.orders.find_all(status == "shipped").count()"#)
         .unwrap();
     let b = j
         .collect(r#"$.orders.filter(status == "shipped").count()"#)
