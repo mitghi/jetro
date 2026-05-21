@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
+    cancellation as builtin_cancellation, is_idempotent as builtin_is_idempotent,
     output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
 };
 use crate::builtins::BuiltinMethod;
@@ -337,32 +338,33 @@ pub(crate) fn pass_root_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Eliminate provably redundant adjacent opcodes: `reverse().reverse()` → identity,
 /// `!!` → identity, double `unique`/`compact`/`sort`, consecutive quantifiers, etc.
 pub(crate) fn pass_redundant_ops(ops: Vec<Opcode>) -> Vec<Opcode> {
+    fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
+        match op {
+            Opcode::CallMethod(call) if call.sub_progs.is_empty() => Some(call),
+            _ => None,
+        }
+    }
+
     let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
     for op in ops {
+        if let (Some(prev), Some(next)) = (out.last().and_then(no_arg_call), no_arg_call(&op)) {
+            let prev_id = BuiltinId::from_method(prev.method);
+            let next_id = BuiltinId::from_method(next.method);
+            if builtin_cancellation(prev_id)
+                .zip(builtin_cancellation(next_id))
+                .is_some_and(|(a, b)| a.cancels_with(b))
+            {
+                out.pop();
+                continue;
+            }
+            if prev.method == next.method && builtin_is_idempotent(next_id) {
+                out.pop();
+                out.push(op);
+                continue;
+            }
+        }
+
         match (&op, out.last()) {
-            (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
-                if a.method == BuiltinMethod::Reverse && b.method == BuiltinMethod::Reverse =>
-            {
-                out.pop();
-                continue;
-            }
-            (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
-                if a.method == b.method
-                    && matches!(a.method, BuiltinMethod::Unique | BuiltinMethod::Compact)
-                    && a.sub_progs.is_empty()
-                    && b.sub_progs.is_empty() =>
-            {
-                out.pop();
-                out.push(op);
-                continue;
-            }
-            (Opcode::CallMethod(b), Some(Opcode::CallMethod(a)))
-                if a.method == BuiltinMethod::Sort && b.method == BuiltinMethod::Sort =>
-            {
-                out.pop();
-                out.push(op);
-                continue;
-            }
             (Opcode::Quantifier(_), Some(Opcode::Quantifier(_))) => {
                 out.pop();
                 out.push(op);
