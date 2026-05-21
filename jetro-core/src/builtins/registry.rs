@@ -1463,6 +1463,7 @@ mod tests {
             BuiltinMethod::DeepMerge,
             BuiltinMethod::Defaults,
             BuiltinMethod::Rename,
+            BuiltinMethod::Pivot,
             BuiltinMethod::Implode,
         ] {
             let demand = propagate_demand(
