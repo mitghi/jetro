@@ -11,6 +11,7 @@ use crate::data::context::{Env, EvalError};
 use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::data::value::Val;
 use crate::data::view::{ValView, ValueView};
+use crate::builtins::registry::{apply_view_projection, BuiltinId, ViewProjectionResult};
 use crate::exec::pipeline;
 use crate::exec::view as view_pipeline;
 use crate::ir::physical::{
@@ -362,7 +363,7 @@ impl ExecCtx<'_, '_> {
                     optional,
                 },
             ) => {
-                if let Some(result) = self.eval_view_scalar_call_fast(*receiver, call, *optional) {
+                if let Some(result) = self.eval_view_call_fast(*receiver, call, *optional) {
                     return Some(result);
                 }
                 let receiver = match self.eval_fast(*receiver)? {
@@ -796,7 +797,7 @@ impl ExecCtx<'_, '_> {
         Ok(cur)
     }
 
-    fn eval_view_scalar_call_fast(
+    fn eval_view_call_fast(
         &mut self,
         receiver: NodeId,
         call: &crate::builtins::BuiltinCall,
@@ -816,7 +817,13 @@ impl ExecCtx<'_, '_> {
             if optional && matches!(view.scalar(), crate::util::JsonView::Null) {
                 return Some(Ok(Val::Null));
             }
-            call.try_apply_json_view(view.scalar()).map(Ok)
+            apply_view_projection(BuiltinId::from_method(call.method), &call.args, view)
+                .map(|result| {
+                    Ok(match result {
+                        ViewProjectionResult::View(view) => view.materialize(),
+                        ViewProjectionResult::Owned(value) => value,
+                    })
+                })
         }
     }
 
