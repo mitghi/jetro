@@ -18,7 +18,7 @@ use crate::{
         BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
         BuiltinViewObjectProjection, BuiltinViewStage, BuiltinArgs,
     },
-    data::{context::EvalError, value::Val},
+    data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
     plan::demand::{Demand, PullDemand, ValueNeed},
     util::JsonView,
@@ -752,6 +752,135 @@ pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelect
 #[inline]
 pub(crate) fn view_projection(id: BuiltinId) -> bool {
     view_scalar_projection(id) || view_object_projection(id).is_some()
+}
+
+/// Result of a view-native builtin application. Some object/path operations
+/// return a borrowed child view, while scalar/object enumeration operations
+/// produce an owned `Val`.
+pub(crate) enum ViewProjectionResult<V> {
+    /// The builtin selected a borrowed child view.
+    View(V),
+    /// The builtin produced an owned result.
+    Owned(Val),
+}
+
+/// Apply a builtin registered as a view projection to a borrowed `ValueView`.
+pub(crate) fn apply_view_projection<'a, V>(
+    id: BuiltinId,
+    args: &BuiltinArgs,
+    view: V,
+) -> Option<ViewProjectionResult<V>>
+where
+    V: ValueView<'a>,
+{
+    match (view_object_projection(id), args) {
+        (Some(BuiltinViewObjectProjection::Has), BuiltinArgs::Str(key)) => {
+            view_has(&view, key.as_ref()).map(|found| ViewProjectionResult::Owned(Val::Bool(found)))
+        }
+        (Some(BuiltinViewObjectProjection::HasAll), BuiltinArgs::StrVec(keys)) => {
+            view_has_all(&view, keys).map(|found| ViewProjectionResult::Owned(Val::Bool(found)))
+        }
+        (Some(BuiltinViewObjectProjection::HasKey), BuiltinArgs::Str(key)) => Some(
+            ViewProjectionResult::Owned(Val::Bool(view.has_key(key.as_ref()).unwrap_or(false))),
+        ),
+        (Some(BuiltinViewObjectProjection::Missing), BuiltinArgs::Str(key)) => {
+            view.has_key(key.as_ref()).map(|present| {
+                let missing =
+                    !present || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
+                ViewProjectionResult::Owned(Val::Bool(missing))
+            })
+        }
+        (Some(BuiltinViewObjectProjection::GetPath), BuiltinArgs::Str(path)) => {
+            let path = super::parse_path_segs(path.as_ref());
+            Some(ViewProjectionResult::View(walk_view_path(view, &path)))
+        }
+        (Some(BuiltinViewObjectProjection::GetPath), BuiltinArgs::Path(path)) => {
+            Some(ViewProjectionResult::View(walk_view_path(view, path)))
+        }
+        (Some(BuiltinViewObjectProjection::HasPath), BuiltinArgs::Str(path)) => {
+            let found = !matches!(
+                walk_view_path(view, &super::parse_path_segs(path.as_ref())).scalar(),
+                JsonView::Null
+            );
+            Some(ViewProjectionResult::Owned(Val::Bool(found)))
+        }
+        (Some(BuiltinViewObjectProjection::HasPath), BuiltinArgs::Path(path)) => {
+            let found = !matches!(walk_view_path(view, path).scalar(), JsonView::Null);
+            Some(ViewProjectionResult::Owned(Val::Bool(found)))
+        }
+        (Some(BuiltinViewObjectProjection::Keys), BuiltinArgs::None) => {
+            view.object_keys().map(ViewProjectionResult::Owned)
+        }
+        (Some(BuiltinViewObjectProjection::Values), BuiltinArgs::None) => {
+            view.object_values().map(ViewProjectionResult::Owned)
+        }
+        (Some(BuiltinViewObjectProjection::Entries), BuiltinArgs::None) => {
+            view.object_entries().map(ViewProjectionResult::Owned)
+        }
+        (Some(BuiltinViewObjectProjection::Pick), BuiltinArgs::StrVec(keys)) => {
+            view.pick_keys(keys).map(ViewProjectionResult::Owned)
+        }
+        (Some(BuiltinViewObjectProjection::Omit), BuiltinArgs::StrVec(keys)) => {
+            view.omit_keys(keys).map(ViewProjectionResult::Owned)
+        }
+        _ => apply_json_view_scalar_hook(id.method()?, args, view.scalar())
+            .map(ViewProjectionResult::Owned),
+    }
+}
+
+fn walk_view_path<'a, V>(mut cur: V, segs: &[crate::builtins::PathSeg]) -> V
+where
+    V: ValueView<'a>,
+{
+    for seg in segs {
+        cur = match seg {
+            crate::builtins::PathSeg::Field(field) => cur.field(field.as_str()),
+            crate::builtins::PathSeg::Index(index) => cur.index(*index),
+        };
+    }
+    cur
+}
+
+fn view_has<'a, V>(view: &V, key: &str) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    if let Some(found) = view.has_key(key) {
+        return Some(found);
+    }
+    if let JsonView::Str(value) = view.scalar() {
+        return Some(value.contains(key));
+    }
+    if let Some(mut iter) = view.array_iter() {
+        return Some(iter.any(|item| scalar_matches_key(item.scalar(), key)));
+    }
+    None
+}
+
+fn view_has_all<'a, V>(view: &V, keys: &[std::sync::Arc<str>]) -> Option<bool>
+where
+    V: ValueView<'a>,
+{
+    for key in keys {
+        if !view_has(view, key.as_ref())? {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+#[inline]
+fn scalar_matches_key(value: JsonView<'_>, key: &str) -> bool {
+    match value {
+        JsonView::Str(value) => value == key,
+        JsonView::Int(value) => value.to_string() == key,
+        JsonView::UInt(value) => value.to_string() == key,
+        JsonView::Float(value) => value.to_string() == key,
+        JsonView::Bool(true) => key == "true",
+        JsonView::Bool(false) => key == "false",
+        JsonView::Null => key == "null",
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => false,
+    }
 }
 
 /// Return true when builtin `id` can evaluate directly against a scalar

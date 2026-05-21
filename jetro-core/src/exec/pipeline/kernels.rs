@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, by_name as builtin_by_name,
+    apply_view_projection, array_selector as builtin_array_selector, by_name as builtin_by_name,
     count_sink_accepts_predicate, expr_stage, numeric_reducer, view_object_projection,
-    view_projection, BuiltinId,
+    view_projection, BuiltinId, ViewProjectionResult,
 };
 use crate::builtins::{
     BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinViewObjectProjection,
@@ -1447,19 +1447,6 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
     }
 }
 
-fn walk_view_path<'a, V>(mut cur: V, segs: &[crate::builtins::PathSeg]) -> V
-where
-    V: ValueView<'a>,
-{
-    for seg in segs {
-        cur = match seg {
-            crate::builtins::PathSeg::Field(field) => cur.field(field.as_str()),
-            crate::builtins::PathSeg::Index(index) => cur.index(*index),
-        };
-    }
-    cur
-}
-
 fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
     match prog.ops.as_ref() {
         [op] => trivial_lit(op),
@@ -2480,82 +2467,13 @@ where
             result.ok().map(ViewKernelValue::Owned)
         }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm)? {
-            ViewKernelValue::View(view) => match (
-                view_object_projection(BuiltinId::from_method(call.method)),
+            ViewKernelValue::View(view) => match apply_view_projection(
+                BuiltinId::from_method(call.method),
                 &call.args,
-            ) {
-                (Some(BuiltinViewObjectProjection::Has), crate::builtins::BuiltinArgs::Str(key)) => {
-                    view_has(&view, key.as_ref())
-                        .map(|found| ViewKernelValue::Owned(Val::Bool(found)))
-                }
-                (
-                    Some(BuiltinViewObjectProjection::HasAll),
-                    crate::builtins::BuiltinArgs::StrVec(keys),
-                ) => view_has_all(&view, keys)
-                    .map(|found| ViewKernelValue::Owned(Val::Bool(found))),
-                (
-                    Some(BuiltinViewObjectProjection::HasKey),
-                    crate::builtins::BuiltinArgs::Str(key),
-                ) => Some(ViewKernelValue::Owned(Val::Bool(
-                    view.has_key(key.as_ref()).unwrap_or(false),
-                ))),
-                (
-                    Some(BuiltinViewObjectProjection::Missing),
-                    crate::builtins::BuiltinArgs::Str(key),
-                ) => view.has_key(key.as_ref()).map(|present| {
-                    let missing =
-                        !present || matches!(view.field(key.as_ref()).scalar(), JsonView::Null);
-                    ViewKernelValue::Owned(Val::Bool(missing))
-                }),
-                (
-                    Some(BuiltinViewObjectProjection::GetPath),
-                    crate::builtins::BuiltinArgs::Str(path),
-                ) => Some(ViewKernelValue::View(walk_view_path(
-                    view,
-                    &crate::builtins::parse_path_segs(path.as_ref()),
-                ))),
-                (
-                    Some(BuiltinViewObjectProjection::GetPath),
-                    crate::builtins::BuiltinArgs::Path(path),
-                ) => Some(ViewKernelValue::View(walk_view_path(view, path))),
-                (
-                    Some(BuiltinViewObjectProjection::HasPath),
-                    crate::builtins::BuiltinArgs::Str(path),
-                ) => {
-                    let found = !matches!(
-                        walk_view_path(view, &crate::builtins::parse_path_segs(path.as_ref()))
-                            .scalar(),
-                        JsonView::Null
-                    );
-                    Some(ViewKernelValue::Owned(Val::Bool(found)))
-                }
-                (
-                    Some(BuiltinViewObjectProjection::HasPath),
-                    crate::builtins::BuiltinArgs::Path(path),
-                ) => {
-                    let found = !matches!(walk_view_path(view, path).scalar(), JsonView::Null);
-                    Some(ViewKernelValue::Owned(Val::Bool(found)))
-                }
-                (Some(BuiltinViewObjectProjection::Keys), crate::builtins::BuiltinArgs::None) => {
-                    view.object_keys().map(ViewKernelValue::Owned)
-                }
-                (Some(BuiltinViewObjectProjection::Values), crate::builtins::BuiltinArgs::None) => {
-                    view.object_values().map(ViewKernelValue::Owned)
-                }
-                (Some(BuiltinViewObjectProjection::Entries), crate::builtins::BuiltinArgs::None) => {
-                    view.object_entries().map(ViewKernelValue::Owned)
-                }
-                (
-                    Some(BuiltinViewObjectProjection::Pick),
-                    crate::builtins::BuiltinArgs::StrVec(keys),
-                ) => view.pick_keys(keys).map(ViewKernelValue::Owned),
-                (
-                    Some(BuiltinViewObjectProjection::Omit),
-                    crate::builtins::BuiltinArgs::StrVec(keys),
-                ) => view.omit_keys(keys).map(ViewKernelValue::Owned),
-                _ => call
-                    .try_apply_json_view(view.scalar())
-                    .map(ViewKernelValue::Owned),
+                view,
+            )? {
+                ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
+                ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
             },
             ViewKernelValue::Owned(value) => call
                 .try_apply(&value)
@@ -2673,48 +2591,6 @@ where
             crate::util::json_cmp_binop(item.scalar(), *op, crate::util::JsonView::from_val(lit)),
         ))),
         BodyKernel::Generic => None,
-    }
-}
-
-fn view_has<'a, V>(view: &V, key: &str) -> Option<bool>
-where
-    V: ValueView<'a>,
-{
-    if let Some(found) = view.has_key(key) {
-        return Some(found);
-    }
-    if let JsonView::Str(value) = view.scalar() {
-        return Some(value.contains(key));
-    }
-    if let Some(mut iter) = view.array_iter() {
-        return Some(iter.any(|item| scalar_matches_key(item.scalar(), key)));
-    }
-    None
-}
-
-fn view_has_all<'a, V>(view: &V, keys: &[Arc<str>]) -> Option<bool>
-where
-    V: ValueView<'a>,
-{
-    for key in keys {
-        if !view_has(view, key.as_ref())? {
-            return Some(false);
-        }
-    }
-    Some(true)
-}
-
-#[inline]
-fn scalar_matches_key(value: JsonView<'_>, key: &str) -> bool {
-    match value {
-        JsonView::Str(value) => value == key,
-        JsonView::Int(value) => value.to_string() == key,
-        JsonView::UInt(value) => value.to_string() == key,
-        JsonView::Float(value) => value.to_string() == key,
-        JsonView::Bool(true) => key == "true",
-        JsonView::Bool(false) => key == "false",
-        JsonView::Null => key == "null",
-        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => false,
     }
 }
 
