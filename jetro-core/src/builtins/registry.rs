@@ -206,7 +206,9 @@ pub(crate) fn stage_elidable_before_sink(stage: BuiltinId, sink: BuiltinId) -> b
     let demand = sink_demand(sink);
     (demand.value == ValueNeed::CountOnly
         && builtin_cardinality(stage) == Some(BuiltinCardinality::OneToOne))
-        || (!demand.order && pipeline_stage_is_order_only(stage))
+        || (matches!(demand.pull, PullDemand::All)
+            && !demand.order
+            && pipeline_stage_is_order_only(stage))
 }
 
 /// Return a cheaper terminal method for `stage.position()` when the stage
@@ -1877,6 +1879,10 @@ mod tests {
         assert!(!stage_elidable_before_sink(
             BuiltinId::from_method(BuiltinMethod::Sort),
             BuiltinId::from_method(BuiltinMethod::Last)
+        ));
+        assert!(!stage_elidable_before_sink(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            BuiltinId::from_method(BuiltinMethod::First)
         ));
         assert!(!pipeline_stage_is_positional(BuiltinId::from_method(
             BuiltinMethod::Filter

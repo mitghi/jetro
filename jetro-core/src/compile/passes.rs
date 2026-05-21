@@ -274,8 +274,7 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                     .map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
-                    if prev.sub_progs.is_empty()
-                        && next.sub_progs.is_empty()
+                    if next.sub_progs.is_empty()
                         && stage_elidable_before_sink(
                             BuiltinId::from_method(prev.method),
                             BuiltinId::from_method(next.method),
