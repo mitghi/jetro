@@ -351,6 +351,9 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
 /// Tries the logical path (`logical_planner → optimizer → logical_lower`) first; falls back
 /// to the legacy `Pipeline::lower()` for shapes the logical planner cannot classify.
 fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
+    if expr_is_direct_view_projection_chain(expr) {
+        return None;
+    }
     let pipeline = lower_via_logical(expr).or_else(|| Pipeline::lower(expr))?;
     if is_trivial_collect_pipeline(&pipeline) {
         return None;
@@ -685,6 +688,11 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         if matches!(base.as_ref(), Expr::Root) && method_start == 0 {
             continue;
         }
+        if method_start + 1 == steps.len()
+            && receiver_pipeline_step_is_direct_view_projection(&steps[method_start])
+        {
+            continue;
+        }
         let Some(mut body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
             continue;
         };
@@ -703,6 +711,15 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         }));
     }
     None
+}
+
+fn receiver_pipeline_step_is_direct_view_projection(step: &Step) -> bool {
+    let (Step::Method(name, args) | Step::OptMethod(name, args)) = step else {
+        return false;
+    };
+    BuiltinCall::from_literal_ast_args(name, args).is_some_and(|call| {
+        view_projection(BuiltinId::from_method(call.method))
+    })
 }
 
 /// Lowers `$` or a pure `$.field[idx]...` chain into a `RootPath` node, enabling tape-native
@@ -833,10 +850,33 @@ fn flush_chain(
     if steps.is_empty() {
         return base;
     }
+    if let PlanNode::RootPath(prefix) = builder.nodes[base.0].kind() {
+        if let Some(suffix) = physical_steps_to_path_steps(steps) {
+            let mut out = Vec::with_capacity(prefix.len() + suffix.len());
+            out.extend(prefix.iter().cloned());
+            out.extend(suffix);
+            steps.clear();
+            return builder.push(PlanNode::RootPath(out));
+        }
+    }
     builder.push(PlanNode::Chain {
         base,
         steps: std::mem::take(steps),
     })
+}
+
+fn physical_steps_to_path_steps(steps: &[PhysicalChainStep]) -> Option<Vec<PhysicalPathStep>> {
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            PhysicalChainStep::Field(key) => {
+                out.push(PhysicalPathStep::Field(Arc::clone(key)));
+            }
+            PhysicalChainStep::Index(index) => out.push(PhysicalPathStep::Index(*index)),
+            PhysicalChainStep::DynIndex(_) => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Lowers scalar and simple compound expressions (literals, identifiers, unary/binary ops,
@@ -1022,7 +1062,12 @@ pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> Quer
         context,
         locals: Vec::new(),
     };
-    if let Some(pipeline) = lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast)) {
+    let top_level_pipeline = if expr_is_direct_view_projection_chain(&ast) {
+        None
+    } else {
+        lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast))
+    };
+    if let Some(pipeline) = top_level_pipeline {
         if !is_scalar_unwrap_pipeline(&pipeline) {
             let (source, mut body) = pipeline.into_source_body();
             mask_active_local_stage_kernels(&mut body, &builder);
@@ -1034,6 +1079,27 @@ pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> Quer
     }
     let root = lower_expr(&mut builder, &ast);
     builder.finish(root)
+}
+
+fn expr_is_direct_view_projection_chain(expr: &Expr) -> bool {
+    let Expr::Chain(base, steps) = expr else {
+        return false;
+    };
+    if steps.is_empty() || !matches!(base.as_ref(), Expr::Root | Expr::Ident(_)) {
+        return false;
+    }
+    let Some((last, prefix)) = steps.split_last() else {
+        return false;
+    };
+    if !receiver_pipeline_step_is_direct_view_projection(last) {
+        return false;
+    }
+    prefix.iter().all(|step| {
+        matches!(
+            step,
+            Step::Field(_) | Step::OptField(_) | Step::Index(_) | Step::DynIndex(_)
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1658,6 +1724,23 @@ mod tests {
             panic!("expected trim call");
         };
         assert!(matches!(plan.node(*receiver), PlanNode::Call { .. }));
+    }
+
+    #[test]
+    fn root_path_view_projection_lowers_to_byte_native_call() {
+        let plan = plan_query(r#"$.user.pick("name")"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert!(plan.execution_facts(*root).is_byte_native());
+        let PlanNode::Call { receiver, .. } = plan.node(*root) else {
+            panic!("expected direct call");
+        };
+        assert!(matches!(
+            plan.node(*receiver),
+            PlanNode::RootPath(steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "user")
+        ));
     }
 
     #[test]

@@ -322,6 +322,12 @@ impl PhysicalNode {
     pub(crate) fn execution_facts(&self) -> ExecutionFacts {
         self.facts
     }
+
+    /// Borrows the operation stored in this annotated node.
+    #[inline]
+    pub(crate) fn kind(&self) -> &PlanNode {
+        &self.kind
+    }
 }
 
 /// A compact bitset recording which backend families a node can use.
