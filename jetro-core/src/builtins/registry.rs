@@ -576,6 +576,13 @@ pub(crate) fn cancellation(id: BuiltinId) -> Option<BuiltinCancellation> {
     id.method().and_then(|method| method.spec().cancellation)
 }
 
+/// Return whether builtin `id` is algebraically idempotent.
+#[inline]
+pub(crate) fn is_idempotent(id: BuiltinId) -> bool {
+    id.method()
+        .is_some_and(|method| method.spec().idempotent)
+}
+
 /// Return whether builtin `id` should bypass streaming and run as a direct
 /// scalar/object call on the receiver produced by the chain.
 #[inline]
@@ -1506,6 +1513,35 @@ mod tests {
             assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
             assert_eq!(demand.value, ValueNeed::Predicate, "{method:?}");
             assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_marks_idempotent_builtins() {
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::Lower,
+            BuiltinMethod::Trim,
+            BuiltinMethod::TrimLeft,
+            BuiltinMethod::TrimRight,
+            BuiltinMethod::Capitalize,
+            BuiltinMethod::TitleCase,
+            BuiltinMethod::SnakeCase,
+            BuiltinMethod::KebabCase,
+            BuiltinMethod::CamelCase,
+            BuiltinMethod::PascalCase,
+            BuiltinMethod::Dedent,
+        ] {
+            assert!(is_idempotent(BuiltinId::from_method(method)), "{method:?}");
+        }
+
+        for method in [
+            BuiltinMethod::Replace,
+            BuiltinMethod::Append,
+            BuiltinMethod::Reverse,
+            BuiltinMethod::ParseInt,
+        ] {
+            assert!(!is_idempotent(BuiltinId::from_method(method)), "{method:?}");
         }
     }
 

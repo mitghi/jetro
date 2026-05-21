@@ -668,6 +668,8 @@ pub struct BuiltinSpec {
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
     pub cancellation: Option<BuiltinCancellation>,
+    /// Whether applying the builtin twice is equivalent to applying it once.
+    pub idempotent: bool,
     /// Columnar stage kind for backends that work on typed column vectors.
     pub columnar_stage: Option<BuiltinColumnarStage>,
     /// Structural index backend hint (deep search variants).
@@ -1477,6 +1479,7 @@ impl BuiltinSpec {
             array_selector: None,
             stage_merge: None,
             cancellation: None,
+            idempotent: false,
             columnar_stage: None,
             structural: None,
             cost: 1.0,
@@ -1542,6 +1545,12 @@ impl BuiltinSpec {
     fn raw_json_scalar(mut self, scalar: BuiltinRawJsonScalar) -> Self {
         self.raw_json_scalar = Some(scalar);
         self.view_native = true;
+        self
+    }
+
+    /// Marks a builtin as algebraically idempotent.
+    fn idempotent(mut self) -> Self {
+        self.idempotent = true;
         self
     }
 
@@ -1898,21 +1907,7 @@ impl BuiltinCall {
     /// The pipeline optimizer uses this to eliminate redundant stages.
     #[inline]
     pub fn is_idempotent(&self) -> bool {
-        matches!(
-            self.method,
-            BuiltinMethod::Upper
-                | BuiltinMethod::Lower
-                | BuiltinMethod::Trim
-                | BuiltinMethod::TrimLeft
-                | BuiltinMethod::TrimRight
-                | BuiltinMethod::Capitalize
-                | BuiltinMethod::TitleCase
-                | BuiltinMethod::SnakeCase
-                | BuiltinMethod::KebabCase
-                | BuiltinMethod::CamelCase
-                | BuiltinMethod::PascalCase
-                | BuiltinMethod::Dedent
-        )
+        registry::is_idempotent(registry::BuiltinId::from_method(self.method))
     }
 
     /// Executes the builtin against `recv` with its pre-decoded static arguments.

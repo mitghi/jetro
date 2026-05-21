@@ -2681,6 +2681,7 @@ fn scalar_view_predicate_element_spec() -> BuiltinSpec {
 macro_rules! scalar_native_element {
     ( $( $ty:ident => $variant:ident, $name:literal
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
+         $( , idempotent: $idempotent:literal )?
          $( , apply: $apply:ident )? ; )* ) => {
         $(
             pub(crate) struct $ty;
@@ -2688,7 +2689,11 @@ macro_rules! scalar_native_element {
                 const METHOD: BuiltinMethod = BuiltinMethod::$variant;
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
-                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                fn spec() -> BuiltinSpec {
+                    let spec = scalar_native_element_spec();
+                    $( let spec = if $idempotent { spec.idempotent() } else { spec }; )?
+                    spec
+                }
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2704,6 +2709,7 @@ macro_rules! scalar_native_element {
 macro_rules! scalar_view_scalar_element {
     ( $( $ty:ident => $variant:ident, $name:literal
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
+         $( , idempotent: $idempotent:literal )?
          $( , apply: $apply:ident )? ; )* ) => {
         $(
             pub(crate) struct $ty;
@@ -2711,7 +2717,11 @@ macro_rules! scalar_view_scalar_element {
                 const METHOD: BuiltinMethod = BuiltinMethod::$variant;
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
-                fn spec() -> BuiltinSpec { scalar_view_scalar_element_spec() }
+                fn spec() -> BuiltinSpec {
+                    let spec = scalar_view_scalar_element_spec();
+                    $( let spec = if $idempotent { spec.idempotent() } else { spec }; )?
+                    spec
+                }
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2746,19 +2756,19 @@ macro_rules! scalar_view_predicate_element {
 }
 
 scalar_native_element! {
-    Capitalize => Capitalize, "capitalize", apply: capitalize_apply;
-    TitleCase => TitleCase, "title_case", apply: title_case_apply;
-    SnakeCase => SnakeCase, "snake_case", apply: snake_case_apply;
-    KebabCase => KebabCase, "kebab_case", apply: kebab_case_apply;
-    CamelCase => CamelCase, "camel_case", apply: camel_case_apply;
-    PascalCase => PascalCase, "pascal_case", apply: pascal_case_apply;
+    Capitalize => Capitalize, "capitalize", idempotent: true, apply: capitalize_apply;
+    TitleCase => TitleCase, "title_case", idempotent: true, apply: title_case_apply;
+    SnakeCase => SnakeCase, "snake_case", idempotent: true, apply: snake_case_apply;
+    KebabCase => KebabCase, "kebab_case", idempotent: true, apply: kebab_case_apply;
+    CamelCase => CamelCase, "camel_case", idempotent: true, apply: camel_case_apply;
+    PascalCase => PascalCase, "pascal_case", idempotent: true, apply: pascal_case_apply;
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
     Type => Type, "type", apply: type_name_apply;
     ToString => ToString, "to_string", apply: to_string_apply;
     ToJson => ToJson, "to_json", apply: to_json_apply;
-    Dedent => Dedent, "dedent", apply: dedent_apply;
+    Dedent => Dedent, "dedent", idempotent: true, apply: dedent_apply;
 }
 
 /// `parse_int(radix)` — string → integer with optional radix (2–36).
@@ -2817,9 +2827,9 @@ scalar_view_scalar_element! {
     Floor => Floor, "floor";
     Round => Round, "round";
     Abs => Abs, "abs";
-    Trim => Trim, "trim", apply: trim_apply;
-    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], apply: trim_left_apply;
-    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], apply: trim_right_apply;
+    Trim => Trim, "trim", idempotent: true, apply: trim_apply;
+    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], idempotent: true, apply: trim_left_apply;
+    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], idempotent: true, apply: trim_right_apply;
     ToNumber => ToNumber, "to_number";
     ToBool => ToBool, "to_bool";
     IndexOf => IndexOf, "index_of";
@@ -2833,7 +2843,9 @@ impl Builtin for Upper {
     const METHOD: BuiltinMethod = BuiltinMethod::Upper;
     const NAME: &'static str = "upper";
     fn spec() -> BuiltinSpec {
-        scalar_view_scalar_element_spec().raw_json_scalar(BuiltinRawJsonScalar::AsciiUpper)
+        scalar_view_scalar_element_spec()
+            .idempotent()
+            .raw_json_scalar(BuiltinRawJsonScalar::AsciiUpper)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2847,7 +2859,9 @@ impl Builtin for Lower {
     const METHOD: BuiltinMethod = BuiltinMethod::Lower;
     const NAME: &'static str = "lower";
     fn spec() -> BuiltinSpec {
-        scalar_view_scalar_element_spec().raw_json_scalar(BuiltinRawJsonScalar::AsciiLower)
+        scalar_view_scalar_element_spec()
+            .idempotent()
+            .raw_json_scalar(BuiltinRawJsonScalar::AsciiLower)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
