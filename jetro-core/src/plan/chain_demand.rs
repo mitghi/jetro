@@ -51,7 +51,10 @@ impl ChainOp {
     #[cfg(test)]
     pub fn spec(&self) -> OpSpec {
         use crate::builtins::{
-            registry::{builtin_cardinality, builtin_category, effective_pipeline_order_effect},
+            registry::{
+                builtin_cardinality, builtin_category, effective_pipeline_order_effect,
+                pipeline_stage_caps_input_prefix,
+            },
             BuiltinCardinality, BuiltinCategory, BuiltinPipelineOrderEffect,
         };
 
@@ -86,14 +89,22 @@ impl ChainOp {
                     | BuiltinCategory::Reducer
                     | BuiltinCategory::Positional
                     | BuiltinCategory::Barrier
+                    | BuiltinCategory::Deep
                     | BuiltinCategory::Relational => ValueKind::Stream,
                     _ => ValueKind::Any,
                 };
                 let output = match category {
-                    BuiltinCategory::Reducer | BuiltinCategory::Positional => ValueKind::Scalar,
+                    BuiltinCategory::Reducer => ValueKind::Scalar,
+                    BuiltinCategory::Positional if !pipeline_stage_caps_input_prefix(*id) => {
+                        ValueKind::Scalar
+                    }
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
-                    | BuiltinCategory::StreamingExpand => ValueKind::Stream,
+                    | BuiltinCategory::StreamingExpand
+                    | BuiltinCategory::Positional
+                    | BuiltinCategory::Barrier
+                    | BuiltinCategory::Deep
+                    | BuiltinCategory::Relational => ValueKind::Stream,
                     _ => ValueKind::Any,
                 };
                 OpSpec {
@@ -195,9 +206,23 @@ mod tests {
         assert_eq!(count.output, ValueKind::Scalar);
         assert_eq!(count.cardinality, BuiltinCardinality::Reducing);
 
+        let take = op(BuiltinMethod::Take).spec();
+        assert_eq!(take.input, ValueKind::Stream);
+        assert_eq!(take.output, ValueKind::Stream);
+
+        let first = op(BuiltinMethod::First).spec();
+        assert_eq!(first.input, ValueKind::Stream);
+        assert_eq!(first.output, ValueKind::Scalar);
+
         let sort = op(BuiltinMethod::Sort).spec();
+        assert_eq!(sort.input, ValueKind::Stream);
+        assert_eq!(sort.output, ValueKind::Stream);
         assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
         assert!(!sort.preserves_order);
+
+        let deep_find = op(BuiltinMethod::DeepFind).spec();
+        assert_eq!(deep_find.input, ValueKind::Stream);
+        assert_eq!(deep_find.output, ValueKind::Stream);
     }
 
     #[test]
