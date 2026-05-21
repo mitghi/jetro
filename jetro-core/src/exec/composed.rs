@@ -313,7 +313,7 @@ where
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
     for v in rows {
-        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if demand.input_satisfied_by(pulled_inputs) {
             break;
         }
         pulled_inputs += 1;
@@ -324,10 +324,7 @@ where
                 if S::done(&acc) {
                     break;
                 }
-                if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                    break;
-                }
-                if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                if demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }
@@ -339,17 +336,11 @@ where
                     if S::done(&acc) {
                         break;
                     }
-                    if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                        break;
-                    }
-                    if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    if demand.output_satisfied_by(emitted_outputs) {
                         break;
                     }
                 }
-                if S::done(&acc)
-                    || matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
-                    || matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n)
-                {
+                if S::done(&acc) || demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }
@@ -372,7 +363,7 @@ where
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
     for v in rows {
-        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if demand.input_satisfied_by(pulled_inputs) {
             break;
         }
         pulled_inputs += 1;
@@ -382,8 +373,7 @@ where
                     return cow.into_owned();
                 }
                 emitted_outputs += 1;
-                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
-                {
+                if demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }
@@ -394,13 +384,11 @@ where
                         return it.into_owned();
                     }
                     emitted_outputs += 1;
-                    if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
-                    {
+                    if demand.output_satisfied_by(emitted_outputs) {
                         break;
                     }
                 }
-                if matches!(demand, PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n)
-                {
+                if demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }
