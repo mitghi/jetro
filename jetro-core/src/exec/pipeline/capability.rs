@@ -204,7 +204,9 @@ impl Stage {
 #[cfg(test)]
 mod source_capability_tests {
     use super::{SourceAccessMode, SourceCapabilities, ViewStageCapability};
+    use crate::builtins::BuiltinViewStage;
     use crate::data::value::Val;
+    use crate::exec::pipeline::Stage;
     use crate::plan::demand::{FieldDemand, FieldSet, PullDemand};
     use std::sync::Arc;
 
@@ -276,6 +278,27 @@ mod source_capability_tests {
         );
 
         assert_eq!(access, SourceAccessMode::Forward);
+    }
+
+    #[test]
+    fn selective_pipeline_prefix_demotes_direct_seek() {
+        let filter = Stage::Filter(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            BuiltinViewStage::Filter,
+        );
+        let map = Stage::Map(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            BuiltinViewStage::Map,
+        );
+
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(1), &[filter]),
+            SourceAccessMode::Reverse { outputs: 1 }
+        );
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(1), &[map]),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
     }
 
     #[test]
