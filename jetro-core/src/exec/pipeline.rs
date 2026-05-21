@@ -884,6 +884,62 @@ mod tests {
     }
 
     #[test]
+    fn sink_factories_cover_registry_terminal_lowerings() {
+        use crate::builtins::registry::{
+            all_method_entries, arg_extreme_sink, builtin_sink, membership_sink, pipeline_lowering,
+            predicate_sink, BuiltinId,
+        };
+        use crate::builtins::{BuiltinPipelineLowering, BuiltinSinkAccumulator};
+        use crate::vm::{Opcode, Program};
+
+        let program = Arc::new(Program::new(vec![Opcode::PushCurrent], "<sink-factory-test>"));
+        for (method, _, _) in all_method_entries() {
+            if pipeline_lowering(BuiltinId::from_method(method))
+                != Some(BuiltinPipelineLowering::TerminalSink)
+            {
+                continue;
+            }
+
+            let id = BuiltinId::from_method(method);
+            let supported = predicate_sink(id).is_some_and(|_| {
+                PredicateSinkSpec::from_method(method, Arc::clone(&program)).is_some()
+            }) || membership_sink(id).is_some_and(|_| {
+                MembershipSinkSpec::from_method(
+                    method,
+                    MembershipSinkTarget::Program(Arc::clone(&program)),
+                )
+                .is_some()
+            }) || arg_extreme_sink(id).is_some_and(|_| {
+                ArgExtremeSinkSpec::from_method(method, Arc::clone(&program)).is_some()
+            }) || builtin_sink(id).is_some_and(|spec| match spec.accumulator {
+                BuiltinSinkAccumulator::ApproxDistinct => {
+                    Sink::approx_distinct_builtin(method).is_some()
+                }
+                BuiltinSinkAccumulator::Count => {
+                    Sink::count_builtin(method).is_some()
+                        && Sink::count_predicate_builtin(
+                            method,
+                            Arc::clone(&program),
+                            Some(Arc::new(Expr::Current)),
+                        )
+                        .is_some()
+                }
+                BuiltinSinkAccumulator::Numeric => Sink::numeric_builtin(method, None, None)
+                    .is_some(),
+                BuiltinSinkAccumulator::SelectOne(_) => {
+                    Sink::terminal_builtin(method).is_some()
+                        && Sink::select_many_builtin(method, 1).is_some()
+                }
+            });
+
+            assert!(
+                supported,
+                "{method:?} declares terminal lowering without a sink factory"
+            );
+        }
+    }
+
+    #[test]
     fn lower_whole_receiver_builtin_not_as_per_element_stage() {
         assert!(lower_query("$.items.join(\",\")").is_none());
     }
