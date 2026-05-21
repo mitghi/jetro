@@ -21,6 +21,7 @@ use crate::{
     data::{context::EvalError, value::Val},
     exec::pipeline::StageFlow,
     plan::demand::{Demand, PullDemand, ValueNeed},
+    util::JsonView,
     vm::Program,
 };
 
@@ -850,6 +851,42 @@ pub(crate) fn apply_scalar_hook(
         };
     }
     crate::for_each_builtin!(trait_arm)
+}
+
+/// Apply a view-scalar builtin directly to a `JsonView` without materializing
+/// the receiver into `Val`.
+#[inline]
+pub(crate) fn apply_json_view_scalar_hook(
+    method: BuiltinMethod,
+    args: &BuiltinArgs,
+    recv: JsonView<'_>,
+) -> Option<Val> {
+    if !method.is_view_scalar_method() {
+        return None;
+    }
+    match (method, args) {
+        (BuiltinMethod::Len, BuiltinArgs::None) => super::json_view_len(recv).map(Val::Int),
+        (method, BuiltinArgs::None) if method.is_string_no_arg_view_scalar() => {
+            let value = super::json_view_str(recv)?;
+            super::str_no_arg_scalar_apply(method, value)
+        }
+        (method, BuiltinArgs::None) if method.is_numeric_no_arg_view_scalar() => {
+            super::numeric_no_arg_scalar_apply(method, recv)
+        }
+        (method, BuiltinArgs::Str(arg)) if method.is_string_arg_view_scalar() => {
+            let value = super::json_view_str(recv)?;
+            super::str_arg_scalar_apply(method, value, arg.as_ref())
+        }
+        (BuiltinMethod::Includes, BuiltinArgs::Val(Val::Str(arg))) => {
+            let value = super::json_view_str(recv)?;
+            Some(Val::Bool(value.contains(arg.as_ref())))
+        }
+        (BuiltinMethod::Includes, BuiltinArgs::Val(Val::StrSlice(arg))) => {
+            let value = super::json_view_str(recv)?;
+            Some(Val::Bool(value.contains(arg.as_str())))
+        }
+        _ => None,
+    }
 }
 
 /// Dispatch the migrated materialized-buffer hook for `method`.

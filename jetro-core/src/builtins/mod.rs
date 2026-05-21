@@ -2501,32 +2501,7 @@ impl BuiltinCall {
     /// Evaluates this builtin directly on a zero-copy `JsonView` without materialising a `Val`.
     /// Only works for view-scalar methods; returns `None` for all other builtins.
     pub fn try_apply_json_view(&self, recv: crate::util::JsonView<'_>) -> Option<Val> {
-        if !self.method.is_view_scalar_method() {
-            return None;
-        }
-        match (self.method, &self.args) {
-            (BuiltinMethod::Len, BuiltinArgs::None) => json_view_len(recv).map(Val::Int),
-            (method, BuiltinArgs::None) if method.is_string_no_arg_view_scalar() => {
-                let value = json_view_str(recv)?;
-                str_no_arg_scalar_apply(method, value)
-            }
-            (method, BuiltinArgs::None) if method.is_numeric_no_arg_view_scalar() => {
-                numeric_no_arg_scalar_apply(method, recv)
-            }
-            (method, BuiltinArgs::Str(arg)) if method.is_string_arg_view_scalar() => {
-                let value = json_view_str(recv)?;
-                str_arg_scalar_apply(method, value, arg.as_ref())
-            }
-            (BuiltinMethod::Includes, BuiltinArgs::Val(Val::Str(arg))) => {
-                let value = json_view_str(recv)?;
-                Some(Val::Bool(value.contains(arg.as_ref())))
-            }
-            (BuiltinMethod::Includes, BuiltinArgs::Val(Val::StrSlice(arg))) => {
-                let value = json_view_str(recv)?;
-                Some(Val::Bool(value.contains(arg.as_str())))
-            }
-            _ => None,
-        }
+        registry::apply_json_view_scalar_hook(self.method, &self.args, recv)
     }
 }
 
