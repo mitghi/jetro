@@ -38,6 +38,23 @@ fn make_noarg_builtin_call(method: BuiltinMethod) -> Opcode {
     )
 }
 
+fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
+    match op {
+        Opcode::CallMethod(call) if call.sub_progs.is_empty() => Some(call),
+        _ => None,
+    }
+}
+
+fn no_arg_calls_cancel(prev: &CompiledCall, next: &CompiledCall) -> bool {
+    builtin_cancellation(BuiltinId::from_method(prev.method))
+        .zip(builtin_cancellation(BuiltinId::from_method(next.method)))
+        .is_some_and(|(a, b)| a.cancels_with(b))
+}
+
+fn no_arg_call_is_redundant(prev: &CompiledCall, next: &CompiledCall) -> bool {
+    prev.method == next.method && builtin_is_idempotent(BuiltinId::from_method(next.method))
+}
+
 /// Demand-annotation pass: when a `filter` or `map` is immediately followed by
 /// `take(n)`, annotate the call's `demand_max_keep` so the inner loop stops early.
 pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
@@ -215,31 +232,17 @@ pub(crate) fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Strength-reduction pass: replace expensive method sequences with cheaper equivalents.
 /// Examples: `sort()[0]` → `min()`, `reverse().first()` → `last()`, `sort().sort()` → `sort()`.
 pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
-    fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
-        match op {
-            Opcode::CallMethod(call) if call.sub_progs.is_empty() => Some(call),
-            _ => None,
-        }
-    }
-
     let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
     for op in ops {
         if let (Some(prev), Some(next)) = (out.last().and_then(no_arg_call), no_arg_call(&op)) {
-            if prev.method == next.method
-                && builtin_is_idempotent(BuiltinId::from_method(next.method))
-            {
+            if no_arg_call_is_redundant(prev, next) {
                 out.pop();
                 out.push(op);
                 continue;
             }
-            if let (Some(a), Some(b)) = (
-                builtin_cancellation(BuiltinId::from_method(prev.method)),
-                builtin_cancellation(BuiltinId::from_method(next.method)),
-            ) {
-                if a.cancels_with(b) {
-                    out.pop();
-                    continue;
-                }
+            if no_arg_calls_cancel(prev, next) {
+                out.pop();
+                continue;
             }
         }
         if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
@@ -351,26 +354,14 @@ pub(crate) fn pass_root_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Eliminate provably redundant adjacent opcodes: `reverse().reverse()` → identity,
 /// `!!` → identity, double `unique`/`compact`/`sort`, consecutive quantifiers, etc.
 pub(crate) fn pass_redundant_ops(ops: Vec<Opcode>) -> Vec<Opcode> {
-    fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
-        match op {
-            Opcode::CallMethod(call) if call.sub_progs.is_empty() => Some(call),
-            _ => None,
-        }
-    }
-
     let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
     for op in ops {
         if let (Some(prev), Some(next)) = (out.last().and_then(no_arg_call), no_arg_call(&op)) {
-            let prev_id = BuiltinId::from_method(prev.method);
-            let next_id = BuiltinId::from_method(next.method);
-            if builtin_cancellation(prev_id)
-                .zip(builtin_cancellation(next_id))
-                .is_some_and(|(a, b)| a.cancels_with(b))
-            {
+            if no_arg_calls_cancel(prev, next) {
                 out.pop();
                 continue;
             }
-            if prev.method == next.method && builtin_is_idempotent(next_id) {
+            if no_arg_call_is_redundant(prev, next) {
                 out.pop();
                 out.push(op);
                 continue;
