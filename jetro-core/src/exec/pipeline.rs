@@ -2509,6 +2509,10 @@ mod tests {
 
         let last = lower_query("$.xs.map(@ + 1).last(2)").unwrap();
         assert_eq!(last.exec_path, PhysicalExecPath::Indexed);
+        assert!(matches!(
+            last.source_access,
+            SourceAccessMode::IndexedSuffix(2)
+        ));
 
         let first_one = lower_query("$.xs.map(@ + 1).first(1)").unwrap();
         assert_eq!(first_one.exec_path, PhysicalExecPath::Indexed);
