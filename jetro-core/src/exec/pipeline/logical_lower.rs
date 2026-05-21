@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
-use crate::exec::pipeline::{Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage};
+use crate::exec::pipeline::{Pipeline, PipelineBody, Sink, Source, Stage};
 use crate::ir::logical::LogicalPlan;
 use crate::parse::ast::Expr;
 
@@ -133,15 +133,30 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         // ── Terminal sinks — strip the default Collect, install the real one ──
         LogicalPlan::First(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Terminal(BuiltinMethod::First)))
+            Some((
+                source,
+                stages,
+                exprs,
+                Sink::terminal_builtin(BuiltinMethod::First)?,
+            ))
         }
         LogicalPlan::Last(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Terminal(BuiltinMethod::Last)))
+            Some((
+                source,
+                stages,
+                exprs,
+                Sink::terminal_builtin(BuiltinMethod::Last)?,
+            ))
         }
         LogicalPlan::Count(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::Reducer(ReducerSpec::count())))
+            Some((
+                source,
+                stages,
+                exprs,
+                Sink::count_builtin(BuiltinMethod::Count)?,
+            ))
         }
         LogicalPlan::Sum(inner) => collect_numeric_sink(*inner, BuiltinMethod::Sum),
         LogicalPlan::Avg(inner) => collect_numeric_sink(*inner, BuiltinMethod::Avg),
@@ -149,7 +164,12 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::Max(inner) => collect_numeric_sink(*inner, BuiltinMethod::Max),
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::ApproxCountDistinct))
+            Some((
+                source,
+                stages,
+                exprs,
+                Sink::approx_distinct_builtin(BuiltinMethod::ApproxCountDistinct)?,
+            ))
         }
 
         // ── VM fallback — cannot lower to a Pipeline ───────────────────────
@@ -173,12 +193,7 @@ fn collect_numeric_sink(
     method: BuiltinMethod,
 ) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     let (source, stages, exprs, _) = collect(inner)?;
-    Some((
-        source,
-        stages,
-        exprs,
-        Sink::Reducer(ReducerSpec::numeric(method, None, None)?),
-    ))
+    Some((source, stages, exprs, Sink::numeric_builtin(method, None, None)?))
 }
 
 // ---------------------------------------------------------------------------

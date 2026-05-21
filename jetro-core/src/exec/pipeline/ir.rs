@@ -33,7 +33,7 @@ use crate::plan::demand::{
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerOp, Sink, Stage,
+    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerOp, ReducerSpec, Sink, Stage,
     ViewMembershipTarget, ViewSinkCapability, ViewStageCapability,
 };
 
@@ -117,6 +117,52 @@ impl From<DemandLanes> for PayloadDemand {
 }
 
 impl Sink {
+    /// Build a no-argument terminal selection sink from builtin metadata.
+    pub(crate) fn terminal_builtin(method: BuiltinMethod) -> Option<Self> {
+        matches!(
+            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            BuiltinSinkAccumulator::SelectOne(_)
+        )
+        .then_some(Sink::Terminal(method))
+    }
+
+    /// Build a plain count reducer from builtin metadata.
+    pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
+        matches!(
+            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            BuiltinSinkAccumulator::Count
+        )
+        .then_some(Sink::Reducer(ReducerSpec::count()))
+    }
+
+    /// Build an approximate distinct count sink from builtin metadata.
+    pub(crate) fn approx_distinct_builtin(method: BuiltinMethod) -> Option<Self> {
+        matches!(
+            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            BuiltinSinkAccumulator::ApproxDistinct
+        )
+        .then_some(Sink::ApproxCountDistinct)
+    }
+
+    /// Build a numeric reducer from builtin metadata and an optional projection program.
+    pub(crate) fn numeric_builtin(
+        method: BuiltinMethod,
+        projection: Option<Arc<Program>>,
+        projection_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        if !matches!(
+            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            BuiltinSinkAccumulator::Numeric
+        ) {
+            return None;
+        }
+        Some(Sink::Reducer(ReducerSpec::numeric(
+            method,
+            projection,
+            projection_expr,
+        )?))
+    }
+
     /// Computes the `SinkDemand` for this sink by consulting its builtin metadata, falling back
     /// to `SinkDemand::RESULT` for sinks with no registered spec.
     pub fn demand(&self) -> SinkDemand {
