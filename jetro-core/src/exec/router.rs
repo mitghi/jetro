@@ -450,13 +450,13 @@ mod tests {
 
         let out = j
             .collect(
-                r#"{"has_email": $.user.has_key("email"), "missing_phone": $.user.missing("phone"), "id": $.user.get_path("meta.id"), "picked": $.user.pick("name"), "keys": $.user.keys()}"#,
+                r#"{"has_email": $.user.has_key("email"), "missing_phone": $.user.missing("phone"), "missing_many": $.user.missing("email", "phone", "meta.name"), "id": $.user.get_path("meta.id"), "picked": $.user.pick("name"), "keys": $.user.keys()}"#,
             )
             .unwrap();
 
         assert_eq!(
             out,
-            json!({"has_email": true, "missing_phone": true, "id": 7, "picked": {"name": "Ada"}, "keys": ["name", "email", "meta"]})
+            json!({"has_email": true, "missing_phone": true, "missing_many": ["phone", "meta.name"], "id": 7, "picked": {"name": "Ada"}, "keys": ["name", "email", "meta"]})
         );
         assert!(!j.root_val_is_materialized());
     }
@@ -814,16 +814,20 @@ mod tests {
     #[test]
     fn view_missing_treats_null_as_missing_without_materialization() {
         let j = Jetro::from_bytes(
-            br#"{"books":[{"isbn":"x"},{"isbn":null}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"books":[{"isbn":"x","meta":{"rating":5}},{"isbn":null,"meta":{}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j
+        let single = j
             .collect(r#"$.books.map(@.missing("isbn")).last()"#)
             .unwrap();
+        let many = j
+            .collect(r#"$.books.map(@.missing("isbn", "meta.rating")).last()"#)
+            .unwrap();
 
-        assert_eq!(out, json!(true));
+        assert_eq!(single, json!(true));
+        assert_eq!(many, json!(["isbn", "meta.rating"]));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
