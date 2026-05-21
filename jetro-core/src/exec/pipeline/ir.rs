@@ -652,13 +652,13 @@ impl Stage {
 
     /// Build a nullary stage from its registry-declared stage shape.
     pub(crate) fn nullary_builtin(method: BuiltinMethod) -> Option<Self> {
-        match builtin_nullary_stage(BuiltinId::from_method(method))? {
-            BuiltinNullaryStage::Reverse => Stage::reverse(),
-            BuiltinNullaryStage::Unique => Some(Stage::UniqueBy(None)),
-            BuiltinNullaryStage::Element => Stage::builtin_call(BuiltinCall::new(
+        match builtin_nullary_stage(BuiltinId::from_method(method)) {
+            Some(BuiltinNullaryStage::Reverse) => Stage::reverse(),
+            Some(BuiltinNullaryStage::Unique) => Some(Stage::UniqueBy(None)),
+            Some(BuiltinNullaryStage::Element) | None => Some(Stage::Builtin(BuiltinCall::new(
                 method,
                 BuiltinArgs::None,
-            )),
+            ))),
         }
     }
 

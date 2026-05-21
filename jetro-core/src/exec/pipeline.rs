@@ -817,6 +817,73 @@ mod tests {
     }
 
     #[test]
+    fn stage_factories_cover_registry_pipeline_lowerings() {
+        use crate::builtins::registry::{all_method_entries, pipeline_lowering, BuiltinId};
+        use crate::builtins::BuiltinPipelineLowering;
+        use crate::vm::{Opcode, Program};
+
+        let program = Arc::new(Program::new(vec![Opcode::PushCurrent], "<factory-test>"));
+        for (method, _, _) in all_method_entries() {
+            let Some(lowering) = pipeline_lowering(BuiltinId::from_method(method)) else {
+                continue;
+            };
+            match lowering {
+                BuiltinPipelineLowering::ExprArg
+                | BuiltinPipelineLowering::TerminalExprArg { .. } => {
+                    assert!(
+                        Stage::expr_stage_builtin(method, Arc::clone(&program)).is_some(),
+                        "{method:?} declares expr lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::Nullary => {
+                    assert!(
+                        Stage::nullary_builtin(method).is_some(),
+                        "{method:?} declares nullary lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::UsizeArg { .. } => {
+                    assert!(
+                        Stage::usize_builtin(method, 1).is_some(),
+                        "{method:?} declares usize lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::StringArg => {
+                    assert!(
+                        Stage::string_builtin(method, Arc::from("x")).is_some(),
+                        "{method:?} declares string lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::StringPairArg => {
+                    assert!(
+                        Stage::string_pair_builtin(method, Arc::from("x"), Arc::from("y"))
+                            .is_some(),
+                        "{method:?} declares string-pair lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::Sort => {
+                    assert!(
+                        Stage::sort_builtin(method, SortSpec::identity()).is_some(),
+                        "{method:?} declares sort lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::IntRangeArg => {
+                    assert!(
+                        Stage::int_range_builtin(method, 0, Some(1)).is_some(),
+                        "{method:?} declares int-range lowering without a stage factory"
+                    );
+                }
+                BuiltinPipelineLowering::TerminalUsizeSink { .. } => {
+                    assert!(
+                        Sink::nth_builtin(method, 0).is_some(),
+                        "{method:?} declares terminal-usize lowering without a sink factory"
+                    );
+                }
+                BuiltinPipelineLowering::TerminalSink => {}
+            }
+        }
+    }
+
+    #[test]
     fn lower_whole_receiver_builtin_not_as_per_element_stage() {
         assert!(lower_query("$.items.join(\",\")").is_none());
     }
