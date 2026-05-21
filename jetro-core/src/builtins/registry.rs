@@ -1620,6 +1620,8 @@ mod tests {
             BuiltinMethod::CamelCase,
             BuiltinMethod::PascalCase,
             BuiltinMethod::Dedent,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Unique,
         ] {
             assert!(is_idempotent(BuiltinId::from_method(method)), "{method:?}");
         }

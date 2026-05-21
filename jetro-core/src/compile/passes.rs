@@ -207,8 +207,24 @@ pub(crate) fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Strength-reduction pass: replace expensive method sequences with cheaper equivalents.
 /// Examples: `sort()[0]` → `min()`, `reverse().first()` → `last()`, `sort().sort()` → `sort()`.
 pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
+    fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
+        match op {
+            Opcode::CallMethod(call) if call.sub_progs.is_empty() => Some(call),
+            _ => None,
+        }
+    }
+
     let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
     for op in ops {
+        if let (Some(prev), Some(next)) = (out.last().and_then(no_arg_call), no_arg_call(&op)) {
+            if prev.method == next.method
+                && builtin_is_idempotent(BuiltinId::from_method(next.method))
+            {
+                out.pop();
+                out.push(op);
+                continue;
+            }
+        }
         if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
             let replaced = match (prev.method, &op) {
                 (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() => {
@@ -244,18 +260,6 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                             BuiltinId::from_method(prev.method),
                             BuiltinId::from_method(next.method),
                         ) =>
-                {
-                    Some(Opcode::CallMethod(Arc::clone(next)))
-                }
-                (BuiltinMethod::Sort, Opcode::CallMethod(next))
-                    if prev.sub_progs.is_empty()
-                        && next.method == BuiltinMethod::Sort
-                        && next.sub_progs.is_empty() =>
-                {
-                    Some(Opcode::CallMethod(Arc::clone(next)))
-                }
-                (BuiltinMethod::Unique, Opcode::CallMethod(next))
-                    if next.method == BuiltinMethod::Unique =>
                 {
                     Some(Opcode::CallMethod(Arc::clone(next)))
                 }

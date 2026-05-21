@@ -1740,8 +1740,31 @@ mod tests {
             Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
             })
             .count();
-        
+
         assert_eq!(sorts, 0, "sort().sort() should collapse: {:?}", prog.ops);
+    }
+
+    #[test]
+    fn keyed_sorts_are_not_blindly_collapsed() {
+        use crate::builtins::BuiltinMethod;
+        use crate::compile::compiler::Compiler;
+        use crate::vm::Opcode;
+
+        let prog = Compiler::compile_str("$.books.sort(price).sort(rating).first()").unwrap();
+        let sorts = prog
+            .ops
+            .iter()
+            .filter(|o| {
+                matches!(o,
+            Opcode::CallMethod(c) if c.method == BuiltinMethod::Sort)
+            })
+            .count();
+
+        assert_eq!(
+            sorts, 2,
+            "keyed sorts must keep their own key programs: {:?}",
+            prog.ops
+        );
     }
 
     #[test]

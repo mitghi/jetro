@@ -1221,6 +1221,7 @@ impl Builtin for Sort {
             .demand_law(BuiltinDemandLaw::OrderBarrier)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .order_only()
+            .idempotent()
             .logical_shape(BuiltinLogicalShape::Sort)
             .lowering(BuiltinPipelineLowering::Sort)
     }
@@ -1621,6 +1622,7 @@ impl Builtin for Unique {
     fn spec() -> BuiltinSpec {
         unique_spec()
             .nullary_stage(BuiltinNullaryStage::Unique)
+            .idempotent()
             .logical_shape(BuiltinLogicalShape::Unique)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
