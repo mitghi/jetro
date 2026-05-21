@@ -125,7 +125,7 @@ impl DemandOperator for ChainOp {
                         PullDemand::NthInput(_) => PullDemand::All,
                         other => other,
                     },
-                    value: downstream.value,
+                    value: downstream.value.merge(crate::plan::demand::ValueNeed::Predicate),
                     order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
                 // Transform match is 1:1, so demand passes through.
@@ -228,6 +228,15 @@ mod tests {
         ];
         let demand = source_demand(&ops, Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::UntilOutput(3));
+    }
+
+    #[test]
+    fn match_predicate_count_keeps_predicate_value_need() {
+        let ops = [match_op(MatchRole::Predicate), op(BuiltinMethod::Count)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Predicate);
+        assert!(!demand.order);
     }
 
     #[test]
