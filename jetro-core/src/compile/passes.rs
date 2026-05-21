@@ -8,6 +8,7 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     cancellation as builtin_cancellation, is_idempotent as builtin_is_idempotent,
     output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
+    stage_elidable_before_sink,
 };
 use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Arg;
@@ -225,24 +226,12 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                 {
                     Some(make_noarg_call(BuiltinMethod::First, "first"))
                 }
-                (
-                    BuiltinMethod::Sort | BuiltinMethod::Reverse | BuiltinMethod::Map,
-                    Opcode::CallMethod(next),
-                ) if next.sub_progs.is_empty()
-                    && (next.method == BuiltinMethod::Len
-                        || next.method == BuiltinMethod::Count) =>
-                {
-                    Some(Opcode::CallMethod(Arc::clone(next)))
-                }
-                (BuiltinMethod::Sort | BuiltinMethod::Reverse, Opcode::CallMethod(next))
+                (_, Opcode::CallMethod(next))
                     if prev.sub_progs.is_empty()
                         && next.sub_progs.is_empty()
-                        && matches!(
-                            next.method,
-                            BuiltinMethod::Sum
-                                | BuiltinMethod::Avg
-                                | BuiltinMethod::Min
-                                | BuiltinMethod::Max
+                        && stage_elidable_before_sink(
+                            BuiltinId::from_method(prev.method),
+                            BuiltinId::from_method(next.method),
                         ) =>
                 {
                     Some(Opcode::CallMethod(Arc::clone(next)))

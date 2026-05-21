@@ -197,6 +197,18 @@ pub(crate) fn output_cap_receiver(id: BuiltinId) -> bool {
         .is_some_and(|method| method.spec().output_cap_receiver)
 }
 
+/// Return true when a stage's work cannot affect a following terminal sink.
+#[inline]
+pub(crate) fn stage_elidable_before_sink(stage: BuiltinId, sink: BuiltinId) -> bool {
+    let Some(sink) = builtin_sink(sink) else {
+        return false;
+    };
+    let demand = sink_demand(sink);
+    (demand.value == ValueNeed::CountOnly
+        && builtin_cardinality(stage) == Some(BuiltinCardinality::OneToOne))
+        || (!demand.order && pipeline_stage_is_order_only(stage))
+}
+
 /// Return true when the stage only changes row order, not membership or row values.
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
@@ -1808,6 +1820,18 @@ mod tests {
         assert!(!pipeline_stage_caps_input_prefix(BuiltinId::from_method(
             BuiltinMethod::Skip
         )));
+        assert!(stage_elidable_before_sink(
+            BuiltinId::from_method(BuiltinMethod::Map),
+            BuiltinId::from_method(BuiltinMethod::Count)
+        ));
+        assert!(stage_elidable_before_sink(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            BuiltinId::from_method(BuiltinMethod::Sum)
+        ));
+        assert!(!stage_elidable_before_sink(
+            BuiltinId::from_method(BuiltinMethod::Sort),
+            BuiltinId::from_method(BuiltinMethod::Last)
+        ));
         assert!(!pipeline_stage_is_positional(BuiltinId::from_method(
             BuiltinMethod::Filter
         )));
