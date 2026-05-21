@@ -1628,6 +1628,14 @@ mod tests {
     }
 
     #[test]
+    fn payload_demand_tracks_literal_builtin_stage_fields() {
+        let p = lower_query(r#"$.books.has_key("isbn").first()"#).unwrap();
+        let demand = p.payload_demand();
+        assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
+        assert_eq!(demand_paths(&demand.result_need), vec!["isbn"]);
+    }
+
+    #[test]
     fn literal_path_helpers_store_preparsed_paths() {
         let p = lower_query(r#"$.books.map(@.get_path("user.name")).last()"#).unwrap();
         assert!(matches!(

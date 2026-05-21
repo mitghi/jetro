@@ -17,7 +17,7 @@ use crate::builtins::registry::{
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
     pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
-    pipeline_streams,
+    pipeline_streams, view_projection,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     view_stage as builtin_view_stage, BuiltinId,
 };
@@ -749,6 +749,14 @@ impl Stage {
             return BodyKernel::NestedPlan(Arc::new(super::NestedPlanKernel::new(Arc::clone(
                 plan,
             ))));
+        }
+        if let Stage::Builtin(call) = self {
+            if view_projection(BuiltinId::from_method(call.method)) {
+                return BodyKernel::BuiltinCall {
+                    receiver: Box::new(BodyKernel::Current),
+                    call: call.clone(),
+                };
+            }
         }
         self.body_program()
             .map(BodyKernel::classify)
@@ -1709,16 +1717,8 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
                 downstream
             } else {
                 DemandLanes {
-                    scan_need: if downstream.scan_need.is_none() {
-                        FieldDemand::None
-                    } else {
-                        FieldDemand::Whole
-                    },
-                    result_need: if downstream.result_need.is_none() {
-                        FieldDemand::None
-                    } else {
-                        FieldDemand::Whole
-                    },
+                    scan_need: builtin_stage_lane_payload(&downstream.scan_need, kernel),
+                    result_need: builtin_stage_lane_payload(&downstream.result_need, kernel),
                 }
             }
         }
@@ -1739,6 +1739,14 @@ fn map_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
             _ => kernel.field_demand(),
         },
         FieldDemand::Whole => kernel.field_demand(),
+    }
+}
+
+fn builtin_stage_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> FieldDemand {
+    if demand.is_none() {
+        FieldDemand::None
+    } else {
+        kernel.field_demand()
     }
 }
 
