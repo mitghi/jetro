@@ -18,6 +18,17 @@ trait TapeLike {
     fn span(&self, i: usize) -> usize;
     fn materialize_at(&self, idx: &mut usize) -> Val;
 
+    fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
+        if idx >= len {
+            return None;
+        }
+        let mut cur = first;
+        for _ in 0..idx {
+            cur += self.span(cur);
+        }
+        Some(cur)
+    }
+
     fn array_child_indices(&self, array_idx: usize) -> Option<Vec<usize>> {
         use crate::data::tape::TapeNode;
 
@@ -819,11 +830,9 @@ impl<'a> ValueView<'a> for TapeView<'a> {
         let Some(target) = normalize_index(len, idx) else {
             return Self::Missing;
         };
-
-        let mut cur = *node + 1;
-        for _ in 0..target {
-            cur += tape.span(cur);
-        }
+        let Some(cur) = tape.array_child_start(*node + 1, len, target) else {
+            return Self::Missing;
+        };
         Self::Node { tape, idx: cur }
     }
 
@@ -1045,10 +1054,9 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
         let Some(target) = normalize_index(len, idx) else {
             return Self::Missing;
         };
-        let mut cur = *node + 1;
-        for _ in 0..target {
-            cur += tape.span(cur);
-        }
+        let Some(cur) = tape.array_child_start(*node + 1, len, target) else {
+            return Self::Missing;
+        };
         Self::Node { tape, idx: cur }
     }
 
