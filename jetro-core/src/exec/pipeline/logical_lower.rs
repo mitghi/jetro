@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{cancellation as builtin_cancellation, BuiltinId};
 use crate::builtins::{BuiltinMethod, BuiltinViewStage};
 use crate::exec::pipeline::{Pipeline, PipelineBody, ReducerSpec, Sink, Source, Stage};
 use crate::ir::logical::LogicalPlan;
@@ -113,9 +112,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
 
         LogicalPlan::Reverse { input } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            let cancel = builtin_cancellation(BuiltinId::from_method(BuiltinMethod::Reverse))
-                .expect("Reverse must have cancellation metadata");
-            stages.push(Stage::Reverse(cancel));
+            stages.push(Stage::reverse()?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }

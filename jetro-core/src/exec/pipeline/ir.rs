@@ -557,6 +557,11 @@ macro_rules! method_stage_descriptor {
 }
 
 impl Stage {
+    /// Build the reverse stage from its registry cancellation metadata.
+    pub(crate) fn reverse() -> Option<Self> {
+        builtin_cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).map(Stage::Reverse)
+    }
+
     /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
     pub(crate) fn usize_builtin(method: BuiltinMethod, value: usize) -> Option<Self> {
         matches!(

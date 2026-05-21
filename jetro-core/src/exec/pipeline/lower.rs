@@ -10,9 +10,9 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_sink, by_name, cancellation as builtin_cancellation, count_sink_accepts_predicate,
-    expr_stage, nullary_stage, pipeline_accepts_arity, pipeline_chain_operator,
-    pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
+    builtin_sink, by_name, count_sink_accepts_predicate, expr_stage, nullary_stage,
+    pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
+    pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
@@ -531,9 +531,7 @@ pub(super) fn lower_method_from_registry(
             }
             match nullary_stage(BuiltinId::from_method(method))? {
                 BuiltinNullaryStage::Reverse => {
-                    let cancel = builtin_cancellation(BuiltinId::from_method(method))
-                        .expect("reverse builtin must define cancellation metadata");
-                    stages.push(Stage::Reverse(cancel));
+                    stages.push(Stage::reverse()?);
                 }
                 BuiltinNullaryStage::Unique => stages.push(Stage::UniqueBy(None)),
                 BuiltinNullaryStage::Element => {
