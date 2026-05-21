@@ -271,39 +271,38 @@ impl Sink {
     where
         F: FnMut(&crate::vm::Program) -> bool,
     {
-        match self {
-            Sink::Collect
-            | Sink::Terminal(_)
-            | Sink::SelectMany { .. }
-            | Sink::Nth(_)
-            | Sink::ApproxCountDistinct => true,
-            Sink::Membership(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
-            Sink::Predicate(spec) => program_ok(&spec.predicate),
-            Sink::ArgExtreme(spec) => program_ok(&spec.key),
-            Sink::Reducer(spec) => spec.sink_programs().all(|prog| program_ok(prog)),
-        }
+        self.sink_programs().into_iter().all(|prog| program_ok(prog))
     }
 
     /// Classifies embedded sink programs into body kernels for payload planning and view routing.
     pub(crate) fn body_kernels(&self) -> Vec<BodyKernel> {
         match self {
-            Sink::Reducer(spec) => spec
+            Sink::Collect
+            | Sink::Terminal(_)
+            | Sink::SelectMany { .. }
+            | Sink::Nth(_)
+            | Sink::ApproxCountDistinct => Vec::new(),
+            _ => self
                 .sink_programs()
+                .into_iter()
                 .map(|p| BodyKernel::classify(p))
                 .collect(),
-            Sink::Predicate(spec) => spec
-                .sink_programs()
-                .map(|p| BodyKernel::classify(p))
-                .collect(),
-            Sink::Membership(spec) => spec
-                .sink_programs()
-                .map(|p| BodyKernel::classify(p))
-                .collect(),
-            Sink::ArgExtreme(spec) => spec
-                .sink_programs()
-                .map(|p| BodyKernel::classify(p))
-                .collect(),
-            _ => Vec::new(),
+        }
+    }
+
+    /// Returns all VM programs embedded in this sink, in the same order used by
+    /// `sink_kernels`.
+    fn sink_programs(&self) -> Vec<&Arc<Program>> {
+        match self {
+            Sink::Reducer(spec) => spec.sink_programs().collect(),
+            Sink::Predicate(spec) => spec.sink_programs().collect(),
+            Sink::Membership(spec) => spec.sink_programs().collect(),
+            Sink::ArgExtreme(spec) => spec.sink_programs().collect(),
+            Sink::Collect
+            | Sink::Terminal(_)
+            | Sink::SelectMany { .. }
+            | Sink::Nth(_)
+            | Sink::ApproxCountDistinct => Vec::new(),
         }
     }
 
