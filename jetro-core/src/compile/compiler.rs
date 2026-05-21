@@ -1,7 +1,7 @@
 //! Compiler: lowers an `Expr` AST to a flat `Arc<[Opcode]>` `Program`.
 //!
 //! `Compiler` runs a sequence of peephole passes (`RootChain` fusion,
-//! `FilterCount` fusion, `ConstFold`, demand annotation) controlled by
+//! strength reduction, constant folding, demand annotation) controlled by
 //! `PassConfig`. Split out of `vm.rs` to keep each file focused.
 
 use smallvec::SmallVec;
@@ -266,16 +266,6 @@ impl Compiler {
         };
         let ops = if cfg.field_chain && !no_fusion {
             cp::pass_field_chain(ops)
-        } else {
-            ops
-        };
-        let ops = if cfg.filter_fusion {
-            cp::pass_field_specialise(ops)
-        } else {
-            ops
-        };
-        let ops = if !no_fusion {
-            cp::pass_list_comp_specialise(ops)
         } else {
             ops
         };
@@ -1092,11 +1082,11 @@ pub struct PassConfig {
     pub root_chain: bool,
     /// Enable consecutive `GetField`/`OptField` → `FieldChain` fusion.
     pub field_chain: bool,
-    /// Enable `FilterCount` fusion (reserved; currently unused at runtime).
+    /// Reserved bit for compile-cache compatibility with older pass configs.
     pub filter_count: bool,
-    /// Enable field/filter specialisation pass.
+    /// Reserved bit for compile-cache compatibility with older pass configs.
     pub filter_fusion: bool,
-    /// Enable find-quantifier optimisation pass (reserved for future use).
+    /// Reserved bit for compile-cache compatibility with older pass configs.
     pub find_quantifier: bool,
     /// Enable strength-reduction (e.g. `sort()[0]` → `min()`).
     pub strength_reduce: bool,

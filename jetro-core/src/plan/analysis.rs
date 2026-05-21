@@ -1,11 +1,9 @@
-//! Forward-flow static analyses over compiled `Program` IR.
+//! Static analyses over compiled `Program` IR and parsed expressions.
 //!
-//! Analyses run on the flat `Arc<[Opcode]>` representation after compilation.
-//! They are conservative (return the `Unknown` top element when uncertain)
-//! and used by the compiler for peephole specialisation and by the planner
-//! for CSE (`dedup_subprograms`). None affect runtime correctness.
-
-#![cfg_attr(test, allow(dead_code))]
+//! Production uses this module for expression purity/selectivity, identifier
+//! scope checks, kind-check folding, and sub-program deduplication. Additional
+//! forward-flow `Program` analyses are kept behind `#[cfg(test)]` as regression
+//! scaffolding for future planner work.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,8 +24,6 @@ use crate::vm::{Opcode, Program};
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VType {
-    /// Unreachable position; join with any type yields that type.
-    Bottom,
     /// Definitely `Val::Null`.
     Null,
     /// Definitely `Val::Bool`.
@@ -57,7 +53,6 @@ impl VType {
             return self;
         }
         match (self, other) {
-            (VType::Bottom, x) | (x, VType::Bottom) => x,
             (VType::Int, VType::Float)
             | (VType::Float, VType::Int)
             | (VType::Int, VType::Num)
@@ -68,26 +63,6 @@ impl VType {
         }
     }
 
-    /// Return `true` only for `Arr`; used to guard array-specific optimisations.
-    #[cfg(test)]
-    pub fn is_array_like(self) -> bool {
-        matches!(self, VType::Arr)
-    }
-    /// Return `true` only for `Obj`; used to guard object-specific optimisations.
-    #[cfg(test)]
-    pub fn is_object_like(self) -> bool {
-        matches!(self, VType::Obj)
-    }
-    /// Return `true` for any numeric variant (`Int`, `Float`, or `Num`).
-    #[cfg(test)]
-    pub fn is_numeric(self) -> bool {
-        matches!(self, VType::Int | VType::Float | VType::Num)
-    }
-    /// Return `true` only when the type is definitely a string.
-    #[cfg(test)]
-    pub fn is_string(self) -> bool {
-        matches!(self, VType::Str)
-    }
 }
 
 /// Nullness lattice element tracking whether a value can ever be `null`.
@@ -102,23 +77,10 @@ pub enum Nullness {
     MaybeNull,
 }
 
-#[cfg(test)]
-impl Nullness {
-    /// Lattice join: any disagreement between `AlwaysNull` and `NonNull` yields `MaybeNull`.
-    pub fn join(self, other: Nullness) -> Nullness {
-        if self == other {
-            return self;
-        }
-        Nullness::MaybeNull
-    }
-}
-
 /// Cardinality lattice element describing how many values a program position produces.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Cardinality {
-    /// Produces no values (empty result / unreachable branch).
-    Zero,
     /// Produces exactly one value.
     One,
     /// Produces zero or one values (e.g. optional field access).
@@ -129,22 +91,6 @@ pub enum Cardinality {
     NotArray,
     /// Cardinality is indeterminate; conservative top element.
     Unknown,
-}
-
-#[cfg(test)]
-impl Cardinality {
-    /// Lattice join: `Zero ⊔ One = ZeroOrOne`; all other mixed pairs collapse to `Unknown`.
-    pub fn join(self, other: Cardinality) -> Cardinality {
-        if self == other {
-            return self;
-        }
-        match (self, other) {
-            (Cardinality::Zero, Cardinality::One) | (Cardinality::One, Cardinality::Zero) => {
-                Cardinality::ZeroOrOne
-            }
-            _ => Cardinality::Unknown,
-        }
-    }
 }
 
 /// Product of all three lattice dimensions for a single program point.
@@ -197,14 +143,6 @@ impl AbstractVal {
             card: Cardinality::NotArray,
         }
     }
-    /// Component-wise lattice join over all three dimensions.
-    pub fn join(self, other: AbstractVal) -> AbstractVal {
-        AbstractVal {
-            ty: self.ty.join(other.ty),
-            null: self.null.join(other.null),
-            card: self.card.join(other.card),
-        }
-    }
 }
 
 /// Run the forward-flow type analysis over `program` and return the abstract
@@ -217,20 +155,6 @@ pub fn infer_result_type(program: &Program) -> AbstractVal {
         apply_op_env(op, &mut stack, &mut env);
     }
     stack.pop().unwrap_or(AbstractVal::UNKNOWN)
-}
-
-/// Like `infer_result_type` but also returns the variable environment so the
-/// caller can inspect inferred types for named bindings.
-#[cfg(test)]
-pub fn infer_result_type_with_env(
-    program: &Program,
-) -> (AbstractVal, HashMap<Arc<str>, AbstractVal>) {
-    let mut stack: Vec<AbstractVal> = Vec::with_capacity(16);
-    let mut env: HashMap<Arc<str>, AbstractVal> = HashMap::new();
-    for op in program.ops.iter() {
-        apply_op_env(op, &mut stack, &mut env);
-    }
-    (stack.pop().unwrap_or(AbstractVal::UNKNOWN), env)
 }
 
 /// Apply a single opcode to the abstract stack, threading the variable environment
@@ -1284,8 +1208,6 @@ pub enum Monotonicity {
     Asc,
     /// The array is in descending order (e.g. after `.sort().reverse()`).
     Desc,
-    /// The value is not an array; monotonicity is not applicable.
-    NotArray,
 }
 
 #[cfg(test)]

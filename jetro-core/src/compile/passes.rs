@@ -17,7 +17,6 @@ use crate::data::value::Val;
 use crate::parse::ast::Arg;
 use crate::vm::{
     CompiledCall, FieldChainData, Opcode, Program,
-    disable_opcode_fusion,
 };
 
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
@@ -199,34 +198,6 @@ pub(crate) fn pass_kind_check_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
         out.push(op);
     }
     out
-}
-
-/// Placeholder for filter/field specialisation fusion; currently a pass-through
-/// that preserves opcodes for future pattern-specific fast paths.
-pub(crate) fn pass_field_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
-    if disable_opcode_fusion() {
-        return ops;
-    }
-    let mut out2: Vec<Opcode> = Vec::with_capacity(ops.len());
-    for op in ops {
-        match op {
-            Opcode::CallMethod(ref b) => {
-                let _ = b;
-            }
-            _ => {}
-        }
-        out2.push(op);
-    }
-    let mut out3: Vec<Opcode> = Vec::with_capacity(out2.len());
-    for op in out2 {
-        out3.push(op);
-    }
-    out3
-}
-
-/// Placeholder for list-comprehension specialisation; currently a pass-through.
-pub(crate) fn pass_list_comp_specialise(ops: Vec<Opcode>) -> Vec<Opcode> {
-    ops
 }
 
 /// Strength-reduction pass: replace expensive method sequences with cheaper equivalents.
