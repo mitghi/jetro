@@ -139,6 +139,15 @@ impl Sink {
         })
     }
 
+    /// Build a terminal usize sink only for builtins with terminal-usize lowering.
+    pub(crate) fn nth_builtin(method: BuiltinMethod, index: usize) -> Option<Self> {
+        matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::TerminalUsizeSink { .. })
+        )
+        .then_some(Sink::Nth(index))
+    }
+
     /// Build a plain count reducer from builtin metadata.
     pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
         matches!(

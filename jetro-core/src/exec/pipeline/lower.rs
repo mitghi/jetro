@@ -535,7 +535,7 @@ pub(super) fn lower_method_from_registry(
                 return None;
             }
             let n = usize_arg_at_least(&args[0], min)?;
-            stages.push(Stage::UsizeBuiltin { method, value: n });
+            stages.push(Stage::usize_builtin(method, n)?);
             stage_exprs.push(None);
             Some(())
         }
@@ -599,7 +599,7 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 1 {
                 return None;
             }
-            *sink = Sink::Nth(usize_arg_at_least(&args[0], min)?);
+            *sink = Sink::nth_builtin(method, usize_arg_at_least(&args[0], min)?)?;
             Some(())
         }
         BuiltinPipelineLowering::TerminalUsizeSink { .. } => None,
