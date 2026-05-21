@@ -561,13 +561,13 @@ pub(super) fn lower_method_from_registry(
         }
         BuiltinPipelineLowering::Sort => match args {
             [] => {
-                stages.push(Stage::Sort(super::SortSpec::identity()));
+                stages.push(Stage::sort_builtin(method, super::SortSpec::identity())?);
                 stage_exprs.push(None);
                 Some(())
             }
             [arg] => {
                 let (spec, expr) = compile_sort_spec(arg)?;
-                stages.push(Stage::Sort(spec));
+                stages.push(Stage::sort_builtin(method, spec)?);
                 stage_exprs.push(expr);
                 Some(())
             }

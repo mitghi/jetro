@@ -89,7 +89,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         // ── Ordering / dedup ───────────────────────────────────────────────
         LogicalPlan::Sort { input, spec } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::Sort(spec));
+            stages.push(Stage::sort_builtin(BuiltinMethod::Sort, spec)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
