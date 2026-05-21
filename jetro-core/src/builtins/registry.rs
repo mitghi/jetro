@@ -2889,6 +2889,32 @@ mod tests {
             }
         }
 
+        fn assert_view_eq(method: BuiltinMethod, args: BuiltinArgs, expected: serde_json::Value) {
+            let actual = apply(method, args);
+            let expected = Val::from(&expected);
+            assert!(
+                crate::util::vals_deep_eq(&actual, &expected),
+                "{method:?}: actual {actual:?}, expected {expected:?}"
+            );
+        }
+
+        assert_eq!(
+            apply(
+                BuiltinMethod::Has,
+                BuiltinArgs::Str(std::sync::Arc::from("a"))
+            ),
+            Val::Bool(true)
+        );
+        assert_eq!(
+            apply(
+                BuiltinMethod::HasAll,
+                BuiltinArgs::StrVec(vec![
+                    std::sync::Arc::from("a"),
+                    std::sync::Arc::from("nested")
+                ])
+            ),
+            Val::Bool(true)
+        );
         assert_eq!(
             apply(
                 BuiltinMethod::HasKey,
@@ -2937,6 +2963,34 @@ mod tests {
                 BuiltinArgs::Str(std::sync::Arc::from("nested.x"))
             ),
             Val::Bool(true)
+        );
+        assert_view_eq(
+            BuiltinMethod::Keys,
+            BuiltinArgs::None,
+            serde_json::json!(["a", "b", "nested"]),
+        );
+        assert_view_eq(
+            BuiltinMethod::Values,
+            BuiltinArgs::None,
+            serde_json::json!([1, null, {"x": 7}]),
+        );
+        assert_view_eq(
+            BuiltinMethod::Entries,
+            BuiltinArgs::None,
+            serde_json::json!([["a", 1], ["b", null], ["nested", {"x": 7}]]),
+        );
+        assert_view_eq(
+            BuiltinMethod::Pick,
+            BuiltinArgs::StrVec(vec![
+                std::sync::Arc::from("nested"),
+                std::sync::Arc::from("a"),
+            ]),
+            serde_json::json!({"nested": {"x": 7}, "a": 1}),
+        );
+        assert_view_eq(
+            BuiltinMethod::Omit,
+            BuiltinArgs::StrVec(vec![std::sync::Arc::from("b")]),
+            serde_json::json!({"a": 1, "nested": {"x": 7}}),
         );
     }
 
