@@ -1542,6 +1542,17 @@ impl Pipeline {
         );
         selected.late_projection =
             Pipeline::late_projection_for(&selected.stages, &selected.stage_kernels);
+        selected.source_access = selected
+            .source_capabilities
+            .choose_stage_access(selected.source_demand.chain.pull, &selected.stages);
+        selected.source_payload_lanes_supported =
+            selected.source_capabilities.supports_payload_lanes(
+                &selected.payload_demand.scan_need,
+                &selected.payload_demand.result_need,
+            );
+        selected.source_selected_materialization_supported = selected
+            .source_capabilities
+            .supports_selected_materialization(selected.source_demand.chain.pull);
         Some(selected)
     }
 
