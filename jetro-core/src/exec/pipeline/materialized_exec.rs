@@ -426,7 +426,11 @@ where
 
 fn restore_reversed_select_many_result(value: Val) -> Val {
     match value {
-        Val::Arr(items) => Val::arr(items.iter().rev().cloned().collect::<Vec<_>>()),
+        Val::Arr(items) => {
+            let mut items = Arc::try_unwrap(items).unwrap_or_else(|items| items.as_ref().clone());
+            items.reverse();
+            Val::arr(items)
+        }
         other => other,
     }
 }
