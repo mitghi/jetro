@@ -640,11 +640,13 @@ fn push_expr_stage(
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
     let id = BuiltinId::from_method(method);
-    match expr_stage(id)? {
+    let stage_kind = expr_stage(id)?;
+    let stage_view = || view_stage(id).or_else(|| stage_kind.view_stage());
+    match stage_kind {
         BuiltinExprStage::Filter => {
             stages.push(Stage::Filter(
                 compile_subexpr(arg)?,
-                view_stage(id)?,
+                stage_view()?,
             ));
             stage_exprs.push(arg_expr(arg));
         }
@@ -654,14 +656,17 @@ fn push_expr_stage(
                 stage_exprs.push(arg_expr(arg));
             }
             None => {
-                stages.push(Stage::Map(compile_subexpr(arg)?, view_stage(id)?));
+                stages.push(Stage::Map(
+                    compile_subexpr(arg)?,
+                    stage_view()?,
+                ));
                 stage_exprs.push(arg_expr(arg));
             }
         },
         BuiltinExprStage::FlatMap => {
             stages.push(Stage::FlatMap(
                 compile_subexpr(arg)?,
-                view_stage(id)?,
+                stage_view()?,
             ));
             stage_exprs.push(arg_expr(arg));
         }

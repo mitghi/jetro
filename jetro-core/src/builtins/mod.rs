@@ -821,6 +821,20 @@ pub enum BuiltinExprStage {
     ExprBuiltin,
 }
 
+impl BuiltinExprStage {
+    /// View-stage shape used when an expression-stage builtin lowers through
+    /// another concrete streaming stage, such as terminal `find_first`.
+    #[inline]
+    pub fn view_stage(self) -> Option<BuiltinViewStage> {
+        match self {
+            Self::Filter => Some(BuiltinViewStage::Filter),
+            Self::Map => Some(BuiltinViewStage::Map),
+            Self::FlatMap => Some(BuiltinViewStage::FlatMap),
+            Self::UniqueBy | Self::ExprBuiltin => None,
+        }
+    }
+}
+
 /// Payload-demand behavior for expression-bearing pipeline stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinExprPayload {
