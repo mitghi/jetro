@@ -10,13 +10,13 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_sink, by_name, count_sink_accepts_predicate, expr_stage, nullary_stage,
-    pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
-    pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
+    builtin_sink, by_name, count_sink_accepts_predicate, expr_stage, pipeline_accepts_arity,
+    pipeline_chain_operator, pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage,
+    BuiltinId,
 };
 use crate::builtins::{
-    BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
+    BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -529,18 +529,7 @@ pub(super) fn lower_method_from_registry(
             if !args.is_empty() {
                 return None;
             }
-            match nullary_stage(BuiltinId::from_method(method))? {
-                BuiltinNullaryStage::Reverse => {
-                    stages.push(Stage::reverse()?);
-                }
-                BuiltinNullaryStage::Unique => stages.push(Stage::UniqueBy(None)),
-                BuiltinNullaryStage::Element => {
-                    stages.push(Stage::Builtin(crate::builtins::BuiltinCall::new(
-                        method,
-                        crate::builtins::BuiltinArgs::None,
-                    )));
-                }
-            }
+            stages.push(Stage::nullary_builtin(method)?);
             stage_exprs.push(None);
             Some(())
         }
