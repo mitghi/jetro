@@ -299,13 +299,19 @@ mod tests {
     }
 
     #[test]
-    fn non_terminal_find_stays_streaming_filter() {
-        let plan = lower("$.xs.find(score > 5).map(name)");
+    fn non_terminal_find_all_stays_streaming_filter() {
+        let plan = lower("$.xs.find_all(score > 5).map(name)");
 
         let LogicalPlan::Map { input, .. } = plan else {
             panic!("expected map");
         };
         assert!(matches!(*input, LogicalPlan::Filter { .. }));
+    }
+
+    #[test]
+    fn non_terminal_find_does_not_lower_as_filter_alias() {
+        let expr = parse("$.xs.find(score > 5).map(name)").expect("parse");
+        assert!(try_lower(&expr).is_none());
     }
 
     #[test]
