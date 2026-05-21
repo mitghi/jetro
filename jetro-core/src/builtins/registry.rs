@@ -8,15 +8,16 @@
 use crate::{
     builtins::{
         builtin::{BarrierCtx, Builtin, StreamCtx},
-        defs, BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancellation, BuiltinCardinality,
-        BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprPayload,
-        BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape, BuiltinMembershipSink,
-        BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda,
-        BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinPipelineShape, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
-        BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
-        BuiltinViewObjectProjection, BuiltinViewStage, BuiltinArgs,
+        defs, BuiltinArgExtremeSink, BuiltinArgs, BuiltinArraySelector, BuiltinCancellation,
+        BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
+        BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
+        BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
+        BuiltinObjectLambda, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
+        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
+        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
+        BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection,
+        BuiltinViewStage,
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
@@ -162,6 +163,17 @@ pub(crate) fn expr_stage_elidable_when_value_unused(id: BuiltinId) -> bool {
         && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
 }
 
+/// Return true when a builtin stage can be dropped entirely once downstream
+/// demand proves its output value is unused. This rule is deliberately metadata
+/// only: the executor may adapt concrete stage variants to builtin ids, but it
+/// must not re-derive the semantic conditions locally.
+#[inline]
+pub(crate) fn stage_elidable_when_value_unused(id: BuiltinId) -> bool {
+    is_pure(id)
+        && builtin_cardinality(id) == Some(BuiltinCardinality::OneToOne)
+        && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
+}
+
 /// Return true when a pipeline stage for `id` must inspect row values to
 /// decide its output membership, ordering, key, or projected value.
 #[inline]
@@ -190,7 +202,10 @@ pub(crate) fn pipeline_stage_consumes_value(id: BuiltinId, has_body: bool) -> bo
 /// the relative order of retained rows.
 #[inline]
 pub(crate) fn pipeline_stage_is_positional(id: BuiltinId) -> bool {
-    matches!(demand_law(id), BuiltinDemandLaw::Take | BuiltinDemandLaw::Skip)
+    matches!(
+        demand_law(id),
+        BuiltinDemandLaw::Take | BuiltinDemandLaw::Skip
+    )
 }
 
 /// Return true when the stage caps upstream input to a bounded prefix.
@@ -647,8 +662,7 @@ pub(crate) fn cancellation(id: BuiltinId) -> Option<BuiltinCancellation> {
 /// Return whether builtin `id` is algebraically idempotent.
 #[inline]
 pub(crate) fn is_idempotent(id: BuiltinId) -> bool {
-    id.method()
-        .is_some_and(|method| method.spec().idempotent)
+    id.method().is_some_and(|method| method.spec().idempotent)
 }
 
 /// Return whether builtin `id` accepts a lambda/expression argument at runtime.
@@ -672,9 +686,7 @@ pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
                     | BuiltinPipelineLowering::Sort
             )
         )
-        || spec
-            .sink
-            .is_some_and(|sink| sink.accepts_predicate)
+        || spec.sink.is_some_and(|sink| sink.accepts_predicate)
 }
 
 /// Return whether builtin `id` should bypass streaming and run as a direct
@@ -1035,24 +1047,26 @@ where
             <defs::Filter as Builtin>::apply_stream(ctx, item, body)
         }
         None => match method {
-        BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::Map => <defs::Map as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::Take => <defs::Take as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::TransformKeys => {
-            <defs::TransformKeys as Builtin>::apply_stream(ctx, item, body)
-        }
-        BuiltinMethod::TransformValues => {
-            <defs::TransformValues as Builtin>::apply_stream(ctx, item, body)
-        }
-        BuiltinMethod::FilterKeys => <defs::FilterKeys as Builtin>::apply_stream(ctx, item, body),
-        BuiltinMethod::FilterValues => {
-            <defs::FilterValues as Builtin>::apply_stream(ctx, item, body)
-        }
-        _ => fallback(item),
+            BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::Map => <defs::Map as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::Take => <defs::Take as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_stream(ctx, item, body),
+            BuiltinMethod::TransformKeys => {
+                <defs::TransformKeys as Builtin>::apply_stream(ctx, item, body)
+            }
+            BuiltinMethod::TransformValues => {
+                <defs::TransformValues as Builtin>::apply_stream(ctx, item, body)
+            }
+            BuiltinMethod::FilterKeys => {
+                <defs::FilterKeys as Builtin>::apply_stream(ctx, item, body)
+            }
+            BuiltinMethod::FilterValues => {
+                <defs::FilterValues as Builtin>::apply_stream(ctx, item, body)
+            }
+            _ => fallback(item),
         },
     }
 }
@@ -1140,40 +1154,42 @@ pub(crate) fn apply_barrier_hook(
             <defs::Filter as Builtin>::apply_barrier(ctx, buf, body)
         }
         None => match method {
-        BuiltinMethod::Reverse => <defs::Reverse as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Sort => <defs::Sort as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Window => <defs::Window as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Chunk => <defs::Chunk as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::CountBy => <defs::CountBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Map => <defs::Map as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Unique => <defs::Unique as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Take => <defs::Take as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::IndicesWhere => {
-            <defs::IndicesWhere as Builtin>::apply_barrier(ctx, buf, body)
-        }
-        BuiltinMethod::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::MinBy => <defs::MinBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::TransformKeys => {
-            <defs::TransformKeys as Builtin>::apply_barrier(ctx, buf, body)
-        }
-        BuiltinMethod::TransformValues => {
-            <defs::TransformValues as Builtin>::apply_barrier(ctx, buf, body)
-        }
-        BuiltinMethod::FilterKeys => <defs::FilterKeys as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::FilterValues => {
-            <defs::FilterValues as Builtin>::apply_barrier(ctx, buf, body)
-        }
-        _ => None,
+            BuiltinMethod::Reverse => <defs::Reverse as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Sort => <defs::Sort as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Window => <defs::Window as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Chunk => <defs::Chunk as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::CountBy => <defs::CountBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Map => <defs::Map as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Unique => <defs::Unique as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Take => <defs::Take as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::IndicesWhere => {
+                <defs::IndicesWhere as Builtin>::apply_barrier(ctx, buf, body)
+            }
+            BuiltinMethod::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::MinBy => <defs::MinBy as Builtin>::apply_barrier(ctx, buf, body),
+            BuiltinMethod::TransformKeys => {
+                <defs::TransformKeys as Builtin>::apply_barrier(ctx, buf, body)
+            }
+            BuiltinMethod::TransformValues => {
+                <defs::TransformValues as Builtin>::apply_barrier(ctx, buf, body)
+            }
+            BuiltinMethod::FilterKeys => {
+                <defs::FilterKeys as Builtin>::apply_barrier(ctx, buf, body)
+            }
+            BuiltinMethod::FilterValues => {
+                <defs::FilterValues as Builtin>::apply_barrier(ctx, buf, body)
+            }
+            _ => None,
         },
     }
 }
@@ -1192,7 +1208,6 @@ impl BuiltinId {
         method_from_id(self)
     }
 }
-
 
 // ── Trait-driven name lookup (replaces builtin_registry! macro) ───────────────
 
@@ -1370,7 +1385,11 @@ mod tests {
             );
             assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
             assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
-            assert_eq!(method.spec().selection_rewrite, spec.selection_rewrite, "{method:?}");
+            assert_eq!(
+                method.spec().selection_rewrite,
+                spec.selection_rewrite,
+                "{method:?}"
+            );
             assert_eq!(builtin_sink(id), spec.sink, "{method:?}");
             assert_eq!(keyed_reducer(id), spec.keyed_reducer, "{method:?}");
             assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
@@ -1382,7 +1401,11 @@ mod tests {
                 spec.order_only,
                 "{method:?}"
             );
-            assert_eq!(output_cap_receiver(id), spec.output_cap_receiver, "{method:?}");
+            assert_eq!(
+                output_cap_receiver(id),
+                spec.output_cap_receiver,
+                "{method:?}"
+            );
             assert_eq!(runtime_hook(id), spec.runtime_hook, "{method:?}");
             let effective_shape =
                 effective_pipeline_shape(id).expect("registered builtin should have shape");
@@ -2339,6 +2362,35 @@ mod tests {
         assert!(!expr_stage_elidable_when_value_unused(
             BuiltinId::from_method(BuiltinMethod::GroupBy)
         ));
+    }
+
+    #[test]
+    fn registry_drives_unused_builtin_stage_elision() {
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::Lower,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::Missing,
+        ] {
+            assert!(
+                stage_elidable_when_value_unused(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Filter,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Take,
+            BuiltinMethod::Count,
+            BuiltinMethod::Unknown,
+        ] {
+            assert!(
+                !stage_elidable_when_value_unused(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
     }
 
     #[test]

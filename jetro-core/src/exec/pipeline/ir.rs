@@ -17,8 +17,10 @@ use crate::builtins::registry::{
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
     pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
-    pipeline_streams, sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
-    view_projection, view_stage as builtin_view_stage, BuiltinId,
+    pipeline_streams, sink_demand as builtin_sink_demand,
+    stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
+    stage_merge as builtin_stage_merge, view_projection, view_stage as builtin_view_stage,
+    BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinCardinality, BuiltinExprPayload, BuiltinExprStage,
@@ -1006,18 +1008,11 @@ impl Stage {
         let Some(desc) = self.descriptor() else {
             return false;
         };
-        if !matches!(self.shape().cardinality, BuiltinCardinality::OneToOne) {
-            return false;
-        }
-        if desc.pipeline_order_effect() != BuiltinPipelineOrderEffect::Preserves {
-            return false;
-        }
-        // Element-wise scalar: keep iff method is pure.
-        // ObjectLambda variants (TransformKeys/TransformValues/FilterKeys/FilterValues): always droppable.
         match self {
             Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
-                desc.method
-                    .is_some_and(|m| builtin_is_pure(BuiltinId::from_method(m)))
+                desc.method.is_some_and(|m| {
+                    builtin_stage_elidable_when_value_unused(BuiltinId::from_method(m))
+                })
             }
             Stage::ExprBuiltin { method, .. } => {
                 expr_stage_elidable_when_value_unused(BuiltinId::from_method(*method))
