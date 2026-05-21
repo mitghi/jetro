@@ -608,6 +608,19 @@ impl Stage {
         })
     }
 
+    /// Build an integer-range stage only for builtins with registry-declared int-range lowering.
+    pub(crate) fn int_range_builtin(
+        method: BuiltinMethod,
+        start: i64,
+        end: Option<i64>,
+    ) -> Option<Self> {
+        matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::IntRangeArg)
+        )
+        .then_some(Stage::IntRangeBuiltin { method, start, end })
+    }
+
     /// Classifies the stage body program, returning `Generic` for stages without a body.
     pub(crate) fn body_kernel(&self) -> BodyKernel {
         if let Stage::CompiledMap(plan) = self {

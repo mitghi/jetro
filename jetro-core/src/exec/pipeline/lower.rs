@@ -589,20 +589,16 @@ pub(super) fn lower_method_from_registry(
         },
         BuiltinPipelineLowering::IntRangeArg => match args {
             [arg] => {
-                stages.push(Stage::IntRangeBuiltin {
-                    method,
-                    start: int_arg(arg)?,
-                    end: None,
-                });
+                stages.push(Stage::int_range_builtin(method, int_arg(arg)?, None)?);
                 stage_exprs.push(None);
                 Some(())
             }
             [start, end] => {
-                stages.push(Stage::IntRangeBuiltin {
+                stages.push(Stage::int_range_builtin(
                     method,
-                    start: int_arg(start)?,
-                    end: Some(int_arg(end)?),
-                });
+                    int_arg(start)?,
+                    Some(int_arg(end)?),
+                )?);
                 stage_exprs.push(None);
                 Some(())
             }
