@@ -65,6 +65,11 @@ impl TapeLike for crate::data::tape::TapeData {
     }
 
     #[inline]
+    fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
+        crate::data::tape::TapeData::array_child_start(self, first, len, idx)
+    }
+
+    #[inline]
     fn materialize_at(&self, idx: &mut usize) -> Val {
         TapeView::materialize_at(self, idx)
     }
