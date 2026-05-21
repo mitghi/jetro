@@ -94,7 +94,13 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
-    let sink = view_suffix_sink_for_demand(capabilities.sink, source_demand);
+    let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
+        .choose_view_access(source_demand, &capabilities.stages);
+    let sink = view_suffix_sink_for_demand(
+        capabilities.sink,
+        source_demand,
+        matches!(source_access, pipeline::SourceAccessMode::Reverse { .. }),
+    );
     let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -1083,7 +1089,7 @@ where
     let suffix = view_suffix_capabilities(body, suffix_start)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, false);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -1119,18 +1125,18 @@ where
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[plan.sort_stage + 1..], &body.sink);
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand);
-    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
-        Some(Ok(sink)) => sink,
-        Some(Err(err)) => return Some(Err(err)),
-        None => return None,
-    };
     let ordered_descending = if matches!(source_demand, PullDemand::LastInput(_)) {
         !plan.descending
     } else {
         plan.descending
     };
     let source_reversed = ordered_descending != plan.descending;
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, source_reversed);
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
     let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
     drive_view_frontier(
@@ -1175,6 +1181,7 @@ where
 fn view_suffix_sink_for_demand(
     sink: pipeline::ViewSinkCapability,
     source_demand: PullDemand,
+    source_reversed: bool,
 ) -> pipeline::ViewSinkCapability {
     match (source_demand, sink) {
         (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
@@ -1186,7 +1193,7 @@ fn view_suffix_sink_for_demand(
         ) => pipeline::ViewSinkCapability::SelectMany {
             n,
             from_end,
-            source_reversed: true,
+            source_reversed,
         },
         (_, sink) => sink,
     }
@@ -1632,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn view_frontier_reverse_demand_uses_reverse_iterator() {
+    fn view_frontier_indexed_suffix_preserves_order() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let observed = Rc::new(std::cell::RefCell::new(Vec::new()));
         let observed_in_closure = Rc::clone(&observed);
@@ -1652,8 +1659,8 @@ mod tests {
         );
 
         assert!(result.is_some());
-        assert_eq!(*observed.borrow(), vec![Val::Int(4), Val::Int(3)]);
-        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(*observed.borrow(), vec![Val::Int(3), Val::Int(4)]);
+        assert_eq!(source.scalar_reads(), 1);
         assert_eq!(source.array_iter_reads(), 1);
     }
 
@@ -1946,7 +1953,7 @@ mod tests {
             source_reversed: false,
         };
 
-        let adjusted = super::view_suffix_sink_for_demand(sink, PullDemand::LastInput(2));
+        let adjusted = super::view_suffix_sink_for_demand(sink, PullDemand::LastInput(2), true);
 
         assert!(matches!(
             adjusted,
