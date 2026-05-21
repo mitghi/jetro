@@ -192,6 +192,12 @@ pub(super) fn run_tape_field_chain_with_vm(
         let iter = source.iter_materialized_for_access(pipeline.source_access());
         return Some(run_streaming_rows_with_vm(&selected, base_env, iter, vm));
     }
+    if matches!(pipeline.source_access(), SourceAccessMode::Reverse { .. }) {
+        if let Some(reversed) = pipeline.for_reversed_select_one() {
+            let iter = source.iter_materialized_for_access(pipeline.source_access());
+            return Some(run_streaming_rows_with_vm(&reversed, base_env, iter, vm));
+        }
+    }
     let iter = source.iter_materialized_for_access(pipeline.source_access());
     Some(run_streaming_rows_with_vm(
         &pipeline,
@@ -835,6 +841,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(out, Val::Int(4));
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn tape_row_bridge_scans_reverse_for_selective_last() {
+        let expr = crate::parse::parser::parse("$.books.filter(active).map(score + 1).last()")
+            .unwrap();
+        let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
+        let (_, body) = pipeline.into_source_body();
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"books":[{"score":1,"active":true},{"score":2,"active":true},{"score":3,"active":false},{"score":4,"active":true}]}"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let mut vm = crate::vm::VM::new();
+        let keys = [Arc::<str>::from("books")];
+
+        let out = super::run_tape_field_chain_with_vm(
+            &body,
+            &tape,
+            &keys,
+            &Env::new(Val::Null),
+            &mut vm,
+        )
+        .expect("tape rows path")
+        .unwrap();
+
+        assert_eq!(out, Val::Int(5));
         assert_eq!(tape.materialized_subtrees(), 1);
     }
 }

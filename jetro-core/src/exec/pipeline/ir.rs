@@ -1531,29 +1531,43 @@ impl Pipeline {
     pub(crate) fn for_selected_single_row(&self) -> Option<Self> {
         let mut selected = self.clone();
         selected.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
-        selected.sink_kernels = selected.sink.body_kernels();
-        selected.source_demand =
-            Pipeline::segment_source_demand(&selected.stages, &selected.sink);
-        selected.payload_demand = Pipeline::segment_payload_demand(
-            &selected.stages,
-            &selected.stage_kernels,
-            &selected.sink,
-            &selected.sink_kernels,
-        );
-        selected.late_projection =
-            Pipeline::late_projection_for(&selected.stages, &selected.stage_kernels);
-        selected.source_access = selected
-            .source_capabilities
-            .choose_stage_access(selected.source_demand.chain.pull, &selected.stages);
-        selected.source_payload_lanes_supported =
-            selected.source_capabilities.supports_payload_lanes(
-                &selected.payload_demand.scan_need,
-                &selected.payload_demand.result_need,
-            );
-        selected.source_selected_materialization_supported = selected
-            .source_capabilities
-            .supports_selected_materialization(selected.source_demand.chain.pull);
+        selected.refresh_planned_facts();
         Some(selected)
+    }
+
+    /// Returns a clone adapted to consume rows in reverse source order for a
+    /// select-one suffix. The source has already inverted traversal order, so a
+    /// semantic `last` becomes a physical `first` over the reversed iterator.
+    pub(crate) fn for_reversed_select_one(&self) -> Option<Self> {
+        if self.sink.select_one_position()? != Position::Last {
+            return None;
+        }
+        let mut reversed = self.clone();
+        reversed.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
+        reversed.refresh_planned_facts();
+        Some(reversed)
+    }
+
+    fn refresh_planned_facts(&mut self) {
+        self.sink_kernels = self.sink.body_kernels();
+        self.source_demand = Pipeline::segment_source_demand(&self.stages, &self.sink);
+        self.payload_demand = Pipeline::segment_payload_demand(
+            &self.stages,
+            &self.stage_kernels,
+            &self.sink,
+            &self.sink_kernels,
+        );
+        self.late_projection = Pipeline::late_projection_for(&self.stages, &self.stage_kernels);
+        self.source_access = self
+            .source_capabilities
+            .choose_stage_access(self.source_demand.chain.pull, &self.stages);
+        self.source_payload_lanes_supported = self.source_capabilities.supports_payload_lanes(
+            &self.payload_demand.scan_need,
+            &self.payload_demand.result_need,
+        );
+        self.source_selected_materialization_supported = self
+            .source_capabilities
+            .supports_selected_materialization(self.source_demand.chain.pull);
     }
 
     /// Returns the materialization/fallback boundary selected for this pipeline.

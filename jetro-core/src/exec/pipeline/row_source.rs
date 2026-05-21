@@ -78,6 +78,11 @@ pub(super) enum TapeRowsIter<'a> {
         // Current tape index.
         cur: usize,
     },
+    /// Advances through precomputed array child tape indices from the end.
+    ReverseArray {
+        tape: &'a crate::data::tape::TapeData,
+        children: std::vec::IntoIter<usize>,
+    },
     /// Single-element iterator for a non-array tape node.
     Single(std::option::IntoIter<crate::data::view::TapeView<'a>>),
     /// Iterator for a `Missing` source; always returns `None`.
@@ -125,6 +130,9 @@ impl<'a> Iterator for TapeRowsIter<'a> {
                 *remaining -= 1;
                 *cur += tape.span(idx);
                 Some(TapeView::Node { tape, idx })
+            }
+            Self::ReverseArray { tape, children } => {
+                children.next().map(|idx| TapeView::Node { tape, idx })
             }
             Self::Single(iter) => iter.next(),
             Self::Empty => None,
@@ -282,9 +290,8 @@ impl<'a> TapeRowSource<'a> {
                 Self::Single(view) if limit > 0 => TapeRowsIter::Single(Some(view).into_iter()),
                 Self::Single(_) | Self::Missing => TapeRowsIter::Empty,
             },
-            SourceAccessMode::Forward
-            | SourceAccessMode::Reverse { .. }
-            | SourceAccessMode::MaterializedFallback => self.iter_views(),
+            SourceAccessMode::Reverse { .. } => self.iter_views_reversed(),
+            SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => self.iter_views(),
         }
     }
 
@@ -328,6 +335,26 @@ impl<'a> TapeRowSource<'a> {
         };
         let idx = len.checked_sub(offset.checked_add(1)?)?;
         self.view_at(idx)
+    }
+
+    fn iter_views_reversed(self) -> TapeRowsIter<'a> {
+        match self {
+            Self::Array { tape, first, len } => {
+                let mut children = Vec::with_capacity(len);
+                let mut cur = first;
+                for _ in 0..len {
+                    children.push(cur);
+                    cur += tape.span(cur);
+                }
+                children.reverse();
+                TapeRowsIter::ReverseArray {
+                    tape,
+                    children: children.into_iter(),
+                }
+            }
+            Self::Single(view) => TapeRowsIter::Single(Some(view).into_iter()),
+            Self::Missing => TapeRowsIter::Empty,
+        }
     }
 }
 
@@ -458,6 +485,23 @@ mod tests {
             .collect();
 
         assert_eq!(values, vec![json!({"id": 1}), json!({"id": 2})]);
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+    #[test]
+    fn tape_row_source_reverse_access_materializes_from_end() {
+        let tape = tape_rows();
+        tape.reset_materialized_subtrees();
+        let keys = [Arc::<str>::from("books")];
+        let rows = TapeRowSource::from_field_chain(&tape, &keys);
+
+        let values: Vec<_> = rows
+            .iter_materialized_for_access(SourceAccessMode::Reverse { outputs: 1 })
+            .take(2)
+            .map(serde_json::Value::from)
+            .collect();
+
+        assert_eq!(values, vec![json!({"id": 3}), json!({"id": 2})]);
         assert_eq!(tape.materialized_subtrees(), 2);
     }
 }
