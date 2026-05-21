@@ -205,7 +205,7 @@ fn decode_method_chain(
                 if let Some(call) =
                     crate::builtins::BuiltinCall::from_pipeline_literal_args(name.as_str(), args)
                 {
-                    stages.push(Stage::Builtin(call));
+                    stages.push(Stage::builtin_call(call)?);
                     stage_exprs.push(None);
                     continue;
                 }
@@ -218,7 +218,7 @@ fn decode_method_chain(
                     if let Some(call) =
                         crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args)
                     {
-                        stages.push(Stage::Builtin(call));
+                        stages.push(Stage::builtin_call(call)?);
                         stage_exprs.push(None);
                         continue;
                     }

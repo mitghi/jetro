@@ -15,8 +15,9 @@ use crate::builtins::registry::{
     expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
     is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
-    pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
-    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
+    pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
+    pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
+    pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     view_stage as builtin_view_stage, BuiltinId,
 };
@@ -654,11 +655,21 @@ impl Stage {
         match builtin_nullary_stage(BuiltinId::from_method(method))? {
             BuiltinNullaryStage::Reverse => Stage::reverse(),
             BuiltinNullaryStage::Unique => Some(Stage::UniqueBy(None)),
-            BuiltinNullaryStage::Element => Some(Stage::Builtin(BuiltinCall::new(
+            BuiltinNullaryStage::Element => Stage::builtin_call(BuiltinCall::new(
                 method,
                 BuiltinArgs::None,
-            ))),
+            )),
         }
+    }
+
+    /// Build a generic builtin-call stage only when registry metadata allows pipeline use.
+    pub(crate) fn builtin_call(call: BuiltinCall) -> Option<Self> {
+        let id = BuiltinId::from_method(call.method);
+        let view_filter_like = matches!(
+            builtin_view_stage(id),
+            Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
+        );
+        (pipeline_element(id) || view_filter_like).then_some(Stage::Builtin(call))
     }
 
     /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
