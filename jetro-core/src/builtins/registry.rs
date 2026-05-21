@@ -1173,6 +1173,12 @@ mod tests {
             assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
             assert_eq!(is_pure(id), spec.pure, "{method:?}");
             assert_eq!(cancellation(id), spec.cancellation, "{method:?}");
+            assert_eq!(is_idempotent(id), spec.idempotent, "{method:?}");
+            assert_eq!(
+                pipeline_stage_is_order_only(id),
+                spec.order_only,
+                "{method:?}"
+            );
             let effective_shape =
                 effective_pipeline_shape(id).expect("registered builtin should have shape");
             let expected_shape = pipeline_shape(id).unwrap_or(BuiltinPipelineShape {
@@ -1189,6 +1195,25 @@ mod tests {
             assert_eq!(
                 dispatches_scalar_direct(id),
                 spec.dispatches_scalar_direct(),
+                "{method:?}"
+            );
+            assert_eq!(
+                accepts_lambda_arg(id),
+                spec.accepts_lambda_arg
+                    || spec.expr_stage.is_some()
+                    || spec.object_lambda.is_some()
+                    || spec.keyed_reducer.is_some()
+                    || spec.arg_extreme_sink.is_some()
+                    || spec.predicate_sink.is_some()
+                    || matches!(
+                        spec.lowering,
+                        Some(
+                            BuiltinPipelineLowering::ExprArg
+                                | BuiltinPipelineLowering::TerminalExprArg { .. }
+                                | BuiltinPipelineLowering::Sort
+                        )
+                    )
+                    || spec.sink.is_some_and(|sink| sink.accepts_predicate),
                 "{method:?}"
             );
         }
