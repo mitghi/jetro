@@ -4,7 +4,9 @@
 
 use indexmap::IndexMap;
 
-use crate::{builtins::BuiltinKeyedReducer, exec::pipeline, data::value::Val, data::view::ValueView};
+use crate::{
+    builtins::BuiltinKeyedReducer, data::value::Val, data::view::ValueView, exec::pipeline,
+};
 
 use super::key::ViewKey;
 
@@ -75,7 +77,8 @@ impl ViewStageReducer {
                 kernel,
                 entries,
             } => {
-                let key = super::eval_view_key_with_vm(item, Some(stage_kernels.get(*kernel)?), vm)?;
+                let key =
+                    super::eval_view_key_with_vm(item, Some(stage_kernels.get(*kernel)?), vm)?;
                 match kind {
                     BuiltinKeyedReducer::Count => match entries.entry(key) {
                         indexmap::map::Entry::Occupied(mut entry) => {

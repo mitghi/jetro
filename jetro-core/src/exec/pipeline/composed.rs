@@ -828,7 +828,7 @@ where
     let mut pulled_inputs = 0usize;
     let mut emitted_outputs = 0usize;
     for row in rows {
-        if matches!(demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if demand.input_satisfied_by(pulled_inputs) {
             break;
         }
         pulled_inputs += 1;
@@ -843,10 +843,7 @@ where
                 if done || sink.done() {
                     break;
                 }
-                if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                    break;
-                }
-                if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                if demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }
@@ -862,17 +859,11 @@ where
                     if done || sink.done() {
                         break;
                     }
-                    if matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
-                        break;
-                    }
-                    if matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+                    if demand.output_satisfied_by(emitted_outputs) {
                         break;
                     }
                 }
-                if sink.done()
-                    || matches!(demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
-                    || matches!(demand, PullDemand::LastInput(n) if emitted_outputs >= n)
-                {
+                if sink.done() || demand.output_satisfied_by(emitted_outputs) {
                     break;
                 }
             }

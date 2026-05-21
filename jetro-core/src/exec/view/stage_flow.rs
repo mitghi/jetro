@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::{exec::pipeline, data::view::ValueView};
+use crate::{data::view::ValueView, exec::pipeline};
 
 use super::key::ViewKey;
 

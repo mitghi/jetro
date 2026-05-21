@@ -121,7 +121,7 @@ pub(super) fn run(
     };
 
     'outer: for item in pre_iter {
-        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if source_demand.input_satisfied_by(pulled_inputs) {
             break 'outer;
         }
         pulled_inputs += 1;
@@ -152,7 +152,7 @@ pub(super) fn run(
             break 'outer;
         }
         emitted_outputs += 1;
-        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+        if source_demand.output_satisfied_by(emitted_outputs) {
             break 'outer;
         }
     }
@@ -195,13 +195,10 @@ pub(super) fn run_tape_field_chain_with_vm(
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
     let planned = planned_stream_for_access(&pipeline);
     let iter = source.iter_materialized_for_access(planned.access);
-    Some(run_streaming_rows_with_vm(
-        planned.pipeline.as_ref(),
-        base_env,
-        iter,
-        vm,
+    Some(
+        run_streaming_rows_with_vm(planned.pipeline.as_ref(), base_env, iter, vm)
+            .map(|out| planned.restore(out)),
     )
-    .map(|out| planned.restore(out)))
 }
 
 #[cfg(test)]
@@ -272,7 +269,7 @@ where
         .collect();
 
     'outer: for mut item in iter {
-        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if source_demand.input_satisfied_by(pulled_inputs) {
             break 'outer;
         }
         if matches!(source_demand, PullDemand::NthInput(n) if pulled_inputs < n) {
@@ -310,8 +307,7 @@ where
                     StageFlow::Stop => break 'outer,
                     StageFlow::TerminalCollected => {
                         emitted_outputs += 1;
-                        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n)
-                        {
+                        if source_demand.output_satisfied_by(emitted_outputs) {
                             break 'outer;
                         }
                         continue 'outer;
@@ -358,7 +354,7 @@ where
             break 'outer;
         }
         emitted_outputs += 1;
-        if matches!(source_demand, PullDemand::UntilOutput(n) if emitted_outputs >= n) {
+        if source_demand.output_satisfied_by(emitted_outputs) {
             break 'outer;
         }
     }
@@ -897,15 +893,10 @@ mod tests {
         let mut vm = crate::vm::VM::new();
         let keys = [Arc::<str>::from("books")];
 
-        let out = super::run_tape_field_chain_with_vm(
-            &body,
-            &tape,
-            &keys,
-            &Env::new(Val::Null),
-            &mut vm,
-        )
-        .expect("tape rows path")
-        .unwrap();
+        let out =
+            super::run_tape_field_chain_with_vm(&body, &tape, &keys, &Env::new(Val::Null), &mut vm)
+                .expect("tape rows path")
+                .unwrap();
 
         assert_eq!(out, Val::Int(4));
         assert_eq!(tape.materialized_subtrees(), 1);
@@ -924,15 +915,10 @@ mod tests {
         let mut vm = crate::vm::VM::new();
         let keys = [Arc::<str>::from("books")];
 
-        let out = super::run_tape_field_chain_with_vm(
-            &body,
-            &tape,
-            &keys,
-            &Env::new(Val::Null),
-            &mut vm,
-        )
-        .expect("tape rows path")
-        .unwrap();
+        let out =
+            super::run_tape_field_chain_with_vm(&body, &tape, &keys, &Env::new(Val::Null), &mut vm)
+                .expect("tape rows path")
+                .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 5]));
         assert_eq!(tape.materialized_subtrees(), 2);
@@ -940,8 +926,8 @@ mod tests {
 
     #[test]
     fn tape_row_bridge_scans_reverse_for_selective_last() {
-        let expr = crate::parse::parser::parse("$.books.filter(active).map(score + 1).last()")
-            .unwrap();
+        let expr =
+            crate::parse::parser::parse("$.books.filter(active).map(score + 1).last()").unwrap();
         let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
         let (_, body) = pipeline.into_source_body();
         let tape = crate::data::tape::TapeData::parse(
@@ -952,15 +938,10 @@ mod tests {
         let mut vm = crate::vm::VM::new();
         let keys = [Arc::<str>::from("books")];
 
-        let out = super::run_tape_field_chain_with_vm(
-            &body,
-            &tape,
-            &keys,
-            &Env::new(Val::Null),
-            &mut vm,
-        )
-        .expect("tape rows path")
-        .unwrap();
+        let out =
+            super::run_tape_field_chain_with_vm(&body, &tape, &keys, &Env::new(Val::Null), &mut vm)
+                .expect("tape rows path")
+                .unwrap();
 
         assert_eq!(out, Val::Int(5));
         assert_eq!(tape.materialized_subtrees(), 1);
@@ -968,8 +949,8 @@ mod tests {
 
     #[test]
     fn materialized_reverse_access_preserves_select_many_order() {
-        let expr = crate::parse::parser::parse("$.books.filter(active).map(score).last(2)")
-            .unwrap();
+        let expr =
+            crate::parse::parser::parse("$.books.filter(active).map(score).last(2)").unwrap();
         let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
         let root_json = serde_json::json!({
             "books": [
@@ -989,8 +970,8 @@ mod tests {
 
     #[test]
     fn tape_row_bridge_preserves_reversed_select_many_order() {
-        let expr = crate::parse::parser::parse("$.books.filter(active).map(score).last(2)")
-            .unwrap();
+        let expr =
+            crate::parse::parser::parse("$.books.filter(active).map(score).last(2)").unwrap();
         let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
         let (_, body) = pipeline.into_source_body();
         let tape = crate::data::tape::TapeData::parse(
@@ -1001,15 +982,10 @@ mod tests {
         let mut vm = crate::vm::VM::new();
         let keys = [Arc::<str>::from("books")];
 
-        let out = super::run_tape_field_chain_with_vm(
-            &body,
-            &tape,
-            &keys,
-            &Env::new(Val::Null),
-            &mut vm,
-        )
-        .expect("tape rows path")
-        .unwrap();
+        let out =
+            super::run_tape_field_chain_with_vm(&body, &tape, &keys, &Env::new(Val::Null), &mut vm)
+                .expect("tape rows path")
+                .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 4]));
         assert_eq!(tape.materialized_subtrees(), 3);

@@ -57,9 +57,13 @@ where
     if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
         return Some(result);
     }
-    if let Some(result) =
-        run_reducing_stage_prefix_then_materialized_suffix(source.clone(), body, cache, base_env, vm)
-    {
+    if let Some(result) = run_reducing_stage_prefix_then_materialized_suffix(
+        source.clone(),
+        body,
+        cache,
+        base_env,
+        vm,
+    ) {
         return Some(result);
     }
     if let Some(result) =
@@ -581,7 +585,7 @@ where
     let mut emitted_outputs = 0usize;
 
     for row in items {
-        if matches!(source_demand, PullDemand::FirstInput(n) if pulled_inputs >= n) {
+        if source_demand.input_satisfied_by(pulled_inputs) {
             break;
         }
         pulled_inputs += 1;
@@ -602,7 +606,7 @@ where
         ) {
             break;
         }
-        if matches!(source_demand, PullDemand::LastInput(n) if emitted_outputs >= n) {
+        if source_demand.output_satisfied_by(emitted_outputs) {
             break;
         }
     }
@@ -633,15 +637,11 @@ where
             ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
             ViewRowAction::Emit => {
                 *emitted_outputs += 1;
-                Some(
-                    if matches!(source_demand, PullDemand::UntilOutput(n) if *emitted_outputs >= n)
-                        || matches!(source_demand, PullDemand::LastInput(n) if *emitted_outputs >= n)
-                    {
-                        ViewDriveFlow::Stop
-                    } else {
-                        ViewDriveFlow::Continue
-                    },
-                )
+                Some(if source_demand.output_satisfied_by(*emitted_outputs) {
+                    ViewDriveFlow::Stop
+                } else {
+                    ViewDriveFlow::Continue
+                })
             }
             ViewRowAction::Stop => Some(ViewDriveFlow::Stop),
         };
@@ -1007,10 +1007,8 @@ where
     let prefix_end = suffix_start + relative_prefix_len;
     let prefix =
         terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
-    let source_demand = pipeline::Pipeline::segment_pull_demand(
-        &body.stages[suffix_start..prefix_end],
-        &body.sink,
-    );
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..prefix_end], &body.sink);
     if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
         let mut selected = Vec::new();
         drive_view_iter(
@@ -1355,11 +1353,7 @@ where
     }
 }
 
-fn eval_map_kernel_with_vm<'a, V>(
-    item: &V,
-    kernel: &pipeline::BodyKernel,
-    vm: &mut VM,
-) -> Option<V>
+fn eval_map_kernel_with_vm<'a, V>(item: &V, kernel: &pipeline::BodyKernel, vm: &mut VM) -> Option<V>
 where
     V: ValueView<'a>,
 {
@@ -1429,11 +1423,7 @@ where
 
 /// Extracts a sort key `Val` from `item`, optionally applying a row program.
 /// Falls back to `item.materialize()` when no key program is specified.
-fn view_sort_key<'a, V>(
-    item: &V,
-    key: Option<&pipeline::RowProgram>,
-    vm: &mut VM,
-) -> Option<Val>
+fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>, vm: &mut VM) -> Option<Val>
 where
     V: ValueView<'a>,
 {
@@ -1460,15 +1450,15 @@ mod tests {
     use crate::data::context::Env;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
-    use crate::vm::VM;
     use crate::exec::pipeline::{
         eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
         MembershipSinkTarget, PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink,
         SourceCapabilities, Stage, ViewKernelValue, ViewSinkCapability, ViewStageCapability,
     };
-    use crate::plan::demand::PullDemand;
     use crate::parse::ast::BinOp;
+    use crate::plan::demand::PullDemand;
     use crate::util::JsonView;
+    use crate::vm::VM;
 
     #[derive(Clone)]
     struct CountingView {
@@ -1561,8 +1551,7 @@ mod tests {
         }
 
         fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
-            self.array_iter_reads
-                .set(self.array_iter_reads.get() + 1);
+            self.array_iter_reads.set(self.array_iter_reads.get() + 1);
             if self.idx.is_some() {
                 return None;
             }
@@ -1580,8 +1569,7 @@ mod tests {
         }
 
         fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
-            self.array_iter_reads
-                .set(self.array_iter_reads.get() + 1);
+            self.array_iter_reads.set(self.array_iter_reads.get() + 1);
             if self.idx.is_some() {
                 return None;
             }
@@ -1938,10 +1926,7 @@ mod tests {
         assert_eq!(crate::exec::pipeline::index_from_end(4, 0), Some(3));
         assert_eq!(crate::exec::pipeline::index_from_end(4, 3), Some(0));
         assert_eq!(crate::exec::pipeline::index_from_end(4, 4), None);
-        assert_eq!(
-            crate::exec::pipeline::index_from_end(4, usize::MAX),
-            None
-        );
+        assert_eq!(crate::exec::pipeline::index_from_end(4, usize::MAX), None);
     }
 
     #[test]
@@ -1980,9 +1965,10 @@ mod tests {
             sink_kernels: Vec::new(),
         };
         let mut vm = VM::new();
-        let first = super::run_terminal_select_projection(first_source.clone(), &first_body, &mut vm)
-            .unwrap()
-            .unwrap();
+        let first =
+            super::run_terminal_select_projection(first_source.clone(), &first_body, &mut vm)
+                .unwrap()
+                .unwrap();
         assert_eq!(first, Val::Int(1));
         assert_eq!(first_source.scalar_reads(), 2);
         assert_eq!(first_source.array_iter_reads(), 0);
@@ -2115,14 +2101,10 @@ mod tests {
         };
 
         let mut vm = crate::vm::VM::new();
-        let includes = super::run_full_with_env(
-            includes_source.clone(),
-            &includes_body,
-            Some(&env),
-            &mut vm,
-        )
-        .unwrap()
-        .unwrap();
+        let includes =
+            super::run_full_with_env(includes_source.clone(), &includes_body, Some(&env), &mut vm)
+                .unwrap()
+                .unwrap();
         assert_eq!(includes, Val::Bool(true));
         assert_eq!(includes_source.materialize_reads(), 0);
         assert_eq!(includes_source.scalar_reads(), 3);

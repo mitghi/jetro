@@ -143,7 +143,6 @@ impl FieldSet {
         }
         out
     }
-
 }
 
 /// Precise value payload need for high-performance planning.
@@ -265,6 +264,24 @@ impl PullDemand {
                 | PullDemand::LastInput(_)
                 | PullDemand::NthInput(_)
                 | PullDemand::UntilOutput(_)
+        )
+    }
+
+    /// Returns true once this demand has consumed enough physical input rows.
+    #[inline]
+    pub(crate) fn input_satisfied_by(self, pulled_inputs: usize) -> bool {
+        matches!(self, PullDemand::FirstInput(n) if pulled_inputs >= n)
+    }
+
+    /// Returns true once this demand has emitted enough semantic output rows.
+    ///
+    /// `LastInput(n)` uses the same output-count stop condition when the
+    /// executor is already traversing the source from the end.
+    #[inline]
+    pub(crate) fn output_satisfied_by(self, emitted_outputs: usize) -> bool {
+        matches!(
+            self,
+            PullDemand::UntilOutput(n) | PullDemand::LastInput(n) if emitted_outputs >= n
         )
     }
 
@@ -402,7 +419,10 @@ mod tests {
             PullDemand::FirstInput(5).cap_inputs(3),
             PullDemand::FirstInput(3)
         );
-        assert_eq!(PullDemand::NthInput(2).cap_inputs(3), PullDemand::NthInput(2));
+        assert_eq!(
+            PullDemand::NthInput(2).cap_inputs(3),
+            PullDemand::NthInput(2)
+        );
         assert_eq!(
             PullDemand::NthInput(3).cap_inputs(3),
             PullDemand::FirstInput(3)
@@ -416,6 +436,18 @@ mod tests {
         assert!(PullDemand::UntilOutput(0).is_zero());
         assert!(!PullDemand::NthInput(0).is_zero());
         assert!(!PullDemand::All.is_zero());
+    }
+
+    #[test]
+    fn pull_demand_satisfaction_helpers_match_executor_stop_rules() {
+        assert!(PullDemand::FirstInput(2).input_satisfied_by(2));
+        assert!(!PullDemand::FirstInput(2).input_satisfied_by(1));
+        assert!(!PullDemand::UntilOutput(2).input_satisfied_by(10));
+
+        assert!(PullDemand::UntilOutput(3).output_satisfied_by(3));
+        assert!(PullDemand::LastInput(3).output_satisfied_by(3));
+        assert!(!PullDemand::FirstInput(3).output_satisfied_by(3));
+        assert!(!PullDemand::NthInput(0).output_satisfied_by(1));
     }
 
     #[test]
