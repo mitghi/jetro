@@ -458,7 +458,6 @@ mod spec_tests {
             BuiltinMethod::Abs,
         ];
         for method in supported {
-            assert!(method.is_view_scalar_method());
             assert!(method.spec().view_scalar);
         }
         assert!(!BuiltinMethod::Sort.spec().view_scalar);

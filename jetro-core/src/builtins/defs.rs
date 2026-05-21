@@ -3104,7 +3104,7 @@ fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
         .view_native()
         .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves);
-    if method.is_view_scalar_method() {
+    if matches!(method, BuiltinMethod::Includes) {
         spec.view_scalar()
     } else {
         spec

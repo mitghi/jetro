@@ -868,7 +868,7 @@ pub(crate) fn apply_json_view_scalar_hook(
     args: &BuiltinArgs,
     recv: JsonView<'_>,
 ) -> Option<Val> {
-    if !method.is_view_scalar_method() {
+    if !view_scalar_projection(BuiltinId::from_method(method)) {
         return None;
     }
     match (method, args) {
@@ -1434,11 +1434,6 @@ mod tests {
             assert_eq!(
                 method.spec().view_scalar,
                 view_scalar_projection(BuiltinId::from_method(method)),
-                "{method:?}"
-            );
-            assert_eq!(
-                view_scalar_projection(BuiltinId::from_method(method)),
-                method.is_view_scalar_method(),
                 "{method:?}"
             );
         }

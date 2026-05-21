@@ -1815,16 +1815,6 @@ impl BuiltinMethod {
         matches!(self, Self::Ceil | Self::Floor | Self::Round | Self::Abs)
     }
 
-    /// Returns true if this method can be evaluated on a raw `JsonView` without materialising.
-    #[inline]
-    pub(crate) fn is_view_scalar_method(self) -> bool {
-        self == Self::Len
-            || self == Self::Includes
-            || self.is_string_arg_view_scalar()
-            || self.is_string_no_arg_view_scalar()
-            || self.is_numeric_no_arg_view_scalar()
-    }
-
     /// Returns the full capability descriptor for this builtin.
     /// Called by the pipeline planner and VM to query cardinality, cost, and feature flags.
     #[inline]
