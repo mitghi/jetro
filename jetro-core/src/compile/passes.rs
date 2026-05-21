@@ -232,6 +232,15 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                 out.push(op);
                 continue;
             }
+            if let (Some(a), Some(b)) = (
+                builtin_cancellation(BuiltinId::from_method(prev.method)),
+                builtin_cancellation(BuiltinId::from_method(next.method)),
+            ) {
+                if a.cancels_with(b) {
+                    out.pop();
+                    continue;
+                }
+            }
         }
         if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
             let replaced = match (prev.method, &op) {
@@ -277,14 +286,6 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                 out.pop();
                 out.push(rep);
                 continue;
-            }
-            if prev.method == BuiltinMethod::Reverse && prev.sub_progs.is_empty() {
-                if let Opcode::CallMethod(next) = &op {
-                    if next.method == BuiltinMethod::Reverse && next.sub_progs.is_empty() {
-                        out.pop();
-                        continue;
-                    }
-                }
             }
         }
         out.push(op);
