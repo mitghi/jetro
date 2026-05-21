@@ -16,7 +16,7 @@ use crate::{
         BuiltinPipelineShape, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
         BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
-        BuiltinViewObjectProjection, BuiltinViewStage,
+        BuiltinViewObjectProjection, BuiltinViewStage, BuiltinArgs,
     },
     data::{context::EvalError, value::Val},
     exec::pipeline::StageFlow,
@@ -820,6 +820,36 @@ where
         }
         _ => fallback(item),
     }
+}
+
+/// Dispatch migrated scalar hooks for a builtin call.
+///
+/// Like the stream/barrier hook dispatchers, this is a static generated match:
+/// no vtable on the hot path, and the executor-facing call site no longer owns
+/// an independent builtin hook table.
+#[inline]
+pub(crate) fn apply_scalar_hook(
+    method: BuiltinMethod,
+    args: &BuiltinArgs,
+    recv: &Val,
+) -> Option<Val> {
+    macro_rules! trait_arm {
+        ( $( $variant:ident ),* $(,)? ) => {
+            match method {
+                $(
+                    BuiltinMethod::$variant => {
+                        if matches!(args, BuiltinArgs::None) {
+                            if let Some(value) = <defs::$variant as Builtin>::apply_one(recv) {
+                                return Some(value);
+                            }
+                        }
+                        <defs::$variant as Builtin>::apply_args(recv, args)
+                    }
+                )*
+            }
+        };
+    }
+    crate::for_each_builtin!(trait_arm)
 }
 
 /// Dispatch the migrated materialized-buffer hook for `method`.

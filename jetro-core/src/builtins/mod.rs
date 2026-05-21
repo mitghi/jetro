@@ -1924,25 +1924,9 @@ impl BuiltinCall {
                 return Some($expr.unwrap_or_else(|| recv.clone()))
             };
         }
-        // Try trait dispatch first. Each migrated builtin overrides `apply_one` (no-arg)
-        // or `apply_args` (any-args). Both default to `None`, falling through to legacy.
-        macro_rules! trait_arm {
-            ( $( $variant:ident ),* $(,)? ) => {
-                match self.method {
-                    $( BuiltinMethod::$variant => {
-                        if matches!(self.args, BuiltinArgs::None) {
-                            if let Some(v) = <defs::$variant as builtin::Builtin>::apply_one(recv) {
-                                return Some(v);
-                            }
-                        }
-                        if let Some(v) = <defs::$variant as builtin::Builtin>::apply_args(recv, &self.args) {
-                            return Some(v);
-                        }
-                    } )*
-                }
-            };
+        if let Some(value) = registry::apply_scalar_hook(self.method, &self.args, recv) {
+            return Some(value);
         }
-        crate::for_each_builtin!(trait_arm);
         match (self.method, &self.args) {
             (BuiltinMethod::ByteLen, BuiltinArgs::None)
             | (BuiltinMethod::IsBlank, BuiltinArgs::None)
