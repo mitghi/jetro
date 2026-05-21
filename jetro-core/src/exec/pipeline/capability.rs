@@ -5,8 +5,8 @@
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
 use crate::builtins::{
-    BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
-    BuiltinViewOutputMode, BuiltinViewStage,
+    BuiltinCardinality, BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec,
+    BuiltinViewInputMode, BuiltinViewOutputMode, BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -77,6 +77,23 @@ impl SourceCapabilities {
         }
     }
 
+    /// Chooses source access for a full pipeline, demoting direct positional
+    /// seeks when the stage prefix changes cardinality and physical source
+    /// positions no longer equal semantic output positions.
+    pub(crate) fn choose_stage_access(
+        self,
+        demand: PullDemand,
+        stages: &[Stage],
+    ) -> SourceAccessMode {
+        let access = self.choose_access(demand);
+        if direct_seek_requires_cardinality_preservation(access)
+            && !stages.iter().all(Stage::preserves_cardinality)
+        {
+            return demote_direct_seek(self, access);
+        }
+        access
+    }
+
     /// Chooses source access for a view prefix, demoting direct seeks when the
     /// prefix can change cardinality and physical positions no longer match
     /// semantic output positions.
@@ -86,22 +103,10 @@ impl SourceCapabilities {
         stages: &[ViewStageCapability],
     ) -> SourceAccessMode {
         let access = self.choose_access(demand);
-        if matches!(access, SourceAccessMode::IndexedFromEnd(_))
+        if direct_seek_requires_cardinality_preservation(access)
             && !ViewStageCapability::all_preserve_cardinality(stages)
         {
-            if self.reverse_stream {
-                return SourceAccessMode::Reverse { outputs: 1 };
-            }
-            if self.forward_stream {
-                return SourceAccessMode::Forward;
-            }
-        }
-        if matches!(access, SourceAccessMode::Indexed(_))
-            && !ViewStageCapability::all_preserve_cardinality(stages)
-        {
-            if self.forward_stream {
-                return SourceAccessMode::Forward;
-            }
+            return demote_direct_seek(self, access);
         }
         access
     }
@@ -126,6 +131,23 @@ impl SourceCapabilities {
     pub(crate) fn supports_selected_materialization(self, demand: PullDemand) -> bool {
         self.selected_row_materialization && demand.permits_selected_materialization()
     }
+}
+
+fn direct_seek_requires_cardinality_preservation(access: SourceAccessMode) -> bool {
+    matches!(
+        access,
+        SourceAccessMode::Indexed(_) | SourceAccessMode::IndexedFromEnd(_)
+    )
+}
+
+fn demote_direct_seek(caps: SourceCapabilities, access: SourceAccessMode) -> SourceAccessMode {
+    if matches!(access, SourceAccessMode::IndexedFromEnd(_)) && caps.reverse_stream {
+        return SourceAccessMode::Reverse { outputs: 1 };
+    }
+    if caps.forward_stream {
+        return SourceAccessMode::Forward;
+    }
+    SourceAccessMode::MaterializedFallback
 }
 
 fn payload_lane_supported(need: &FieldDemand, field_key_read: bool, whole_value_ok: bool) -> bool {
@@ -170,6 +192,12 @@ impl SourceAccessMode {
             }
             Self::Forward | Self::MaterializedFallback => requested,
         }
+    }
+}
+
+impl Stage {
+    fn preserves_cardinality(&self) -> bool {
+        self.shape().cardinality == BuiltinCardinality::OneToOne
     }
 }
 

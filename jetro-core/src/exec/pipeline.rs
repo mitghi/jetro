@@ -521,7 +521,8 @@ impl PipelineBody {
         );
         let late_projection = Pipeline::late_projection_for(&self.stages, &self.stage_kernels);
         let source_capabilities = source.capabilities();
-        let source_access = source_capabilities.choose_access(source_demand.chain.pull);
+        let source_access =
+            source_capabilities.choose_stage_access(source_demand.chain.pull, &self.stages);
         let source_payload_lanes_supported = source_capabilities
             .supports_payload_lanes(&payload_demand.scan_need, &payload_demand.result_need);
         let source_selected_materialization_supported =
@@ -1599,6 +1600,10 @@ mod tests {
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), vec!["price"]);
         assert_eq!(demand_paths(&demand.result_need), vec!["isbn"]);
+        assert!(matches!(
+            p.source_access,
+            SourceAccessMode::Reverse { outputs: 1 }
+        ));
         assert!(matches!(
             p.late_projection,
             Some(LateProjection { prefix_len: 1, .. })
