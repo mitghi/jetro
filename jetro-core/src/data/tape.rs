@@ -297,6 +297,32 @@ impl TapeData {
             _ => 1,
         }
     }
+
+    /// Return the tape index of child `idx` for an array whose first child is
+    /// at `first` and whose direct child count is `len`.
+    #[inline]
+    pub(crate) fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
+        if idx >= len {
+            return None;
+        }
+        let mut cur = first;
+        for _ in 0..idx {
+            cur += self.span(cur);
+        }
+        Some(cur)
+    }
+
+    /// Return all direct array child tape indices for an array whose first
+    /// child is at `first` and whose direct child count is `len`.
+    pub(crate) fn array_child_starts(&self, first: usize, len: usize) -> Vec<usize> {
+        let mut children = Vec::with_capacity(len);
+        let mut cur = first;
+        for _ in 0..len {
+            children.push(cur);
+            cur += self.span(cur);
+        }
+        children
+    }
 }
 pub(crate) struct TapeScratch {
     bytes_buf: Vec<u8>,

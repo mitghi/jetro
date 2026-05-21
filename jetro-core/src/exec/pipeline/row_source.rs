@@ -459,7 +459,7 @@ impl<'a> TapeRowSource<'a> {
             SourceAccessMode::IndexedSuffix(count) => match self {
                 Self::Array { tape, first, len } => {
                     let skip = len.saturating_sub(count);
-                    let cur = array_child_start(tape, first, len, skip).unwrap_or(first);
+                    let cur = tape.array_child_start(first, len, skip).unwrap_or(first);
                     TapeRowsIter::Array {
                         tape,
                         remaining: count.min(len),
@@ -501,7 +501,7 @@ impl<'a> TapeRowSource<'a> {
 
         match self {
             Self::Array { tape, first, len } => {
-                let idx = array_child_start(tape, *first, *len, idx)?;
+                let idx = tape.array_child_start(*first, *len, idx)?;
                 Some(TapeView::Node { tape, idx })
             }
             Self::Single(view) => (idx == 0).then_some(*view),
@@ -522,7 +522,7 @@ impl<'a> TapeRowSource<'a> {
     fn iter_views_reversed(self) -> TapeRowsIter<'a> {
         match self {
             Self::Array { tape, first, len } => {
-                let mut children = array_child_starts(tape, first, len);
+                let mut children = tape.array_child_starts(first, len);
                 children.reverse();
                 TapeRowsIter::ReverseArray {
                     tape,
@@ -533,37 +533,6 @@ impl<'a> TapeRowSource<'a> {
             Self::Missing => TapeRowsIter::Empty,
         }
     }
-}
-
-#[inline]
-fn array_child_start(
-    tape: &crate::data::tape::TapeData,
-    first: usize,
-    len: usize,
-    idx: usize,
-) -> Option<usize> {
-    if idx >= len {
-        return None;
-    }
-    let mut cur = first;
-    for _ in 0..idx {
-        cur += tape.span(cur);
-    }
-    Some(cur)
-}
-
-fn array_child_starts(
-    tape: &crate::data::tape::TapeData,
-    first: usize,
-    len: usize,
-) -> Vec<usize> {
-    let mut children = Vec::with_capacity(len);
-    let mut cur = first;
-    for _ in 0..len {
-        children.push(cur);
-        cur += tape.span(cur);
-    }
-    children
 }
 
 /// Resolves a `Source` to a `Val`, cloning the embedded receiver or walking the field-chain on `root`.

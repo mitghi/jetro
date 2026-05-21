@@ -17,6 +17,21 @@ trait TapeLike {
     fn str_at(&self, i: usize) -> &str;
     fn span(&self, i: usize) -> usize;
     fn materialize_at(&self, idx: &mut usize) -> Val;
+
+    fn array_child_indices(&self, array_idx: usize) -> Option<Vec<usize>> {
+        use crate::data::tape::TapeNode;
+
+        let TapeNode::Array { len, .. } = self.nodes()[array_idx] else {
+            return None;
+        };
+        let mut indices = Vec::with_capacity(len);
+        let mut cur = array_idx + 1;
+        for _ in 0..len {
+            indices.push(cur);
+            cur += self.span(cur);
+        }
+        Some(indices)
+    }
 }
 
 impl TapeLike for crate::data::tape::TapeData {
@@ -242,18 +257,7 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
 }
 
 fn tape_array_child_indices<T: TapeLike>(tape: &T, idx: usize) -> Option<Vec<usize>> {
-    use crate::data::tape::TapeNode;
-
-    let TapeNode::Array { len, .. } = tape.nodes()[idx] else {
-        return None;
-    };
-    let mut indices = Vec::with_capacity(len);
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        indices.push(cur);
-        cur += tape.span(cur);
-    }
-    Some(indices)
+    tape.array_child_indices(idx)
 }
 
 /// Navigation interface shared by all document representations.
