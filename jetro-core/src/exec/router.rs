@@ -450,13 +450,13 @@ mod tests {
 
         let out = j
             .collect(
-                r#"{"has_email": $.user.has_key("email"), "missing_phone": $.user.missing("phone"), "picked": $.user.pick("name"), "keys": $.user.keys()}"#,
+                r#"{"has_email": $.user.has_key("email"), "missing_phone": $.user.missing("phone"), "id": $.user.get_path("meta.id"), "picked": $.user.pick("name"), "keys": $.user.keys()}"#,
             )
             .unwrap();
 
         assert_eq!(
             out,
-            json!({"has_email": true, "missing_phone": true, "picked": {"name": "Ada"}, "keys": ["name", "email", "meta"]})
+            json!({"has_email": true, "missing_phone": true, "id": 7, "picked": {"name": "Ada"}, "keys": ["name", "email", "meta"]})
         );
         assert!(!j.root_val_is_materialized());
     }
