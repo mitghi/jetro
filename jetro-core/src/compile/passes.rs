@@ -6,11 +6,13 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
+    apply_scalar_hook,
     cancellation as builtin_cancellation, is_idempotent as builtin_is_idempotent,
-    output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
+    is_pure as builtin_is_pure, output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
     stage_elidable_before_sink,
 };
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{BuiltinArgs, BuiltinMethod};
+use crate::data::value::Val;
 use crate::parse::ast::Arg;
 use crate::vm::{
     CompiledCall, FieldChainData, Opcode, Program,
@@ -89,44 +91,53 @@ pub(crate) fn pass_nullness_opt_field(ops: Vec<Opcode>) -> Vec<Opcode> {
 /// Fold no-argument method calls on constant operands (e.g. `"hello".len()` → `5`).
 /// Covers `len`, `upper`, `lower`, `trim` on string literals and `len` on non-spread arrays.
 pub(crate) fn pass_method_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
+    fn literal_operand(op: &Opcode) -> Option<Val> {
+        match op {
+            Opcode::PushNull => Some(Val::Null),
+            Opcode::PushBool(b) => Some(Val::Bool(*b)),
+            Opcode::PushInt(n) => Some(Val::Int(*n)),
+            Opcode::PushFloat(f) => Some(Val::Float(*f)),
+            Opcode::PushStr(s) => Some(Val::Str(Arc::clone(s))),
+            _ => None,
+        }
+    }
+
+    fn literal_opcode(value: Val) -> Option<Opcode> {
+        match value {
+            Val::Null => Some(Opcode::PushNull),
+            Val::Bool(b) => Some(Opcode::PushBool(b)),
+            Val::Int(n) => Some(Opcode::PushInt(n)),
+            Val::Float(f) => Some(Opcode::PushFloat(f)),
+            Val::Str(s) => Some(Opcode::PushStr(s)),
+            _ => None,
+        }
+    }
+
     let mut out: Vec<Opcode> = Vec::with_capacity(ops.len());
     for op in ops {
         if let Opcode::CallMethod(c) = &op {
             if c.sub_progs.is_empty() {
-                match (out.last(), c.method) {
-                    (Some(Opcode::PushStr(s)), BuiltinMethod::Len) => {
-                        let n = s.chars().count() as i64;
-                        out.pop();
-                        out.push(Opcode::PushInt(n));
-                        continue;
-                    }
-                    (Some(Opcode::PushStr(s)), BuiltinMethod::Upper) => {
-                        let u: Arc<str> = Arc::from(s.to_uppercase());
-                        out.pop();
-                        out.push(Opcode::PushStr(u));
-                        continue;
-                    }
-                    (Some(Opcode::PushStr(s)), BuiltinMethod::Lower) => {
-                        let u: Arc<str> = Arc::from(s.to_lowercase());
-                        out.pop();
-                        out.push(Opcode::PushStr(u));
-                        continue;
-                    }
-                    (Some(Opcode::PushStr(s)), BuiltinMethod::Trim) => {
-                        let u: Arc<str> = Arc::from(s.trim());
-                        out.pop();
-                        out.push(Opcode::PushStr(u));
-                        continue;
-                    }
-                    (Some(Opcode::MakeArr(progs)), BuiltinMethod::Len) => {
-                        if progs.iter().all(|(_, sp)| !*sp) {
-                            let n = progs.len() as i64;
+                let id = BuiltinId::from_method(c.method);
+                if builtin_is_pure(id) {
+                    if let Some(recv) = out.last().and_then(literal_operand) {
+                        if let Some(value) = apply_scalar_hook(c.method, &BuiltinArgs::None, &recv)
+                            .and_then(literal_opcode)
+                        {
                             out.pop();
-                            out.push(Opcode::PushInt(n));
+                            out.push(value);
                             continue;
                         }
                     }
-                    _ => {}
+                    if let (Some(Opcode::MakeArr(progs)), BuiltinMethod::Len) =
+                        (out.last(), c.method)
+                    {
+                        if progs.iter().all(|(_, sp)| !*sp) {
+                            let len = progs.len() as i64;
+                            out.pop();
+                            out.push(Opcode::PushInt(len));
+                            continue;
+                        }
+                    }
                 }
             }
         }
