@@ -641,6 +641,8 @@ pub struct BuiltinSpec {
     pub membership_sink: Option<BuiltinMembershipSink>,
     /// Array selector kind, used for direct element projection.
     pub array_selector: Option<BuiltinArraySelector>,
+    /// Selection rewrite for an ordered stage followed by a terminal pick or index.
+    pub selection_rewrite: Option<BuiltinSelectionRewrite>,
     /// How adjacent stages of the same kind can be merged (e.g. `take(3).take(2)` → `take(2)`).
     pub stage_merge: Option<BuiltinStageMerge>,
     /// Algebraic cancellation rule (e.g. `reverse().reverse()` = identity).
@@ -1089,6 +1091,57 @@ pub enum BuiltinArraySelector {
     Nth,
 }
 
+/// Rewrite available after a stage has rearranged rows but before selecting
+/// one end. For example, `sort().first()` can become `min()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinSelectionRewrite {
+    /// Replacement for `.first()`.
+    pub first: Option<BuiltinMethod>,
+    /// Replacement for `.last()`.
+    pub last: Option<BuiltinMethod>,
+    /// Replacement for `[0]`.
+    pub index_zero: Option<BuiltinMethod>,
+    /// Replacement for `[-1]`.
+    pub index_minus_one: Option<BuiltinMethod>,
+}
+
+impl BuiltinSelectionRewrite {
+    /// Empty rewrite table.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            first: None,
+            last: None,
+            index_zero: None,
+            index_minus_one: None,
+        }
+    }
+
+    #[inline]
+    pub const fn first(mut self, method: BuiltinMethod) -> Self {
+        self.first = Some(method);
+        self
+    }
+
+    #[inline]
+    pub const fn last(mut self, method: BuiltinMethod) -> Self {
+        self.last = Some(method);
+        self
+    }
+
+    #[inline]
+    pub const fn index_zero(mut self, method: BuiltinMethod) -> Self {
+        self.index_zero = Some(method);
+        self
+    }
+
+    #[inline]
+    pub const fn index_minus_one(mut self, method: BuiltinMethod) -> Self {
+        self.index_minus_one = Some(method);
+        self
+    }
+}
+
 /// Which end of the stream the `SelectOne` sink picks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSelectionPosition {
@@ -1483,6 +1536,7 @@ impl BuiltinSpec {
             predicate_sink: None,
             membership_sink: None,
             array_selector: None,
+            selection_rewrite: None,
             stage_merge: None,
             cancellation: None,
             idempotent: false,
@@ -1561,6 +1615,12 @@ impl BuiltinSpec {
     /// Marks a builtin as algebraically idempotent.
     fn idempotent(mut self) -> Self {
         self.idempotent = true;
+        self
+    }
+
+    /// Attaches a stage-to-selection rewrite table.
+    fn selection_rewrite(mut self, rewrite: BuiltinSelectionRewrite) -> Self {
+        self.selection_rewrite = Some(rewrite);
         self
     }
 

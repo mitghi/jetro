@@ -7,11 +7,12 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     apply_scalar_hook,
-    cancellation as builtin_cancellation, is_idempotent as builtin_is_idempotent,
+    cancellation as builtin_cancellation, canonical_name,
+    index_selection_rewrite, is_idempotent as builtin_is_idempotent,
     is_pure as builtin_is_pure, output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
-    stage_elidable_before_sink,
+    stage_elidable_before_sink, terminal_selection_rewrite,
 };
-use crate::builtins::{BuiltinArgs, BuiltinMethod};
+use crate::builtins::{BuiltinArgs, BuiltinMethod, BuiltinSelectionPosition};
 use crate::data::value::Val;
 use crate::parse::ast::Arg;
 use crate::vm::{
@@ -28,6 +29,13 @@ fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
         orig_args: Arc::from(&[] as &[Arg]),
         demand_max_keep: None,
     }))
+}
+
+fn make_noarg_builtin_call(method: BuiltinMethod) -> Opcode {
+    make_noarg_call(
+        method,
+        canonical_name(BuiltinId::from_method(method)).unwrap_or("unknown"),
+    )
 }
 
 /// Demand-annotation pass: when a `filter` or `map` is immediately followed by
@@ -227,31 +235,31 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
         }
         if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
             let replaced = match (prev.method, &op) {
-                (BuiltinMethod::Sort, Opcode::GetIndex(0)) if prev.sub_progs.is_empty() => {
-                    Some(make_noarg_call(BuiltinMethod::Min, "min"))
+                (_, Opcode::GetIndex(index)) if prev.sub_progs.is_empty() => {
+                    index_selection_rewrite(BuiltinId::from_method(prev.method), *index)
+                        .map(make_noarg_builtin_call)
                 }
-                (BuiltinMethod::Sort, Opcode::GetIndex(-1)) if prev.sub_progs.is_empty() => {
-                    Some(make_noarg_call(BuiltinMethod::Max, "max"))
-                }
-                (BuiltinMethod::Sort, Opcode::CallMethod(next))
-                    if prev.sub_progs.is_empty() && next.method == BuiltinMethod::First =>
+                (_, Opcode::CallMethod(next))
+                    if prev.sub_progs.is_empty()
+                        && next.sub_progs.is_empty()
+                        && next.method == BuiltinMethod::First =>
                 {
-                    Some(make_noarg_call(BuiltinMethod::Min, "min"))
+                    terminal_selection_rewrite(
+                        BuiltinId::from_method(prev.method),
+                        BuiltinSelectionPosition::First,
+                    )
+                    .map(make_noarg_builtin_call)
                 }
-                (BuiltinMethod::Sort, Opcode::CallMethod(next))
-                    if prev.sub_progs.is_empty() && next.method == BuiltinMethod::Last =>
+                (_, Opcode::CallMethod(next))
+                    if prev.sub_progs.is_empty()
+                        && next.sub_progs.is_empty()
+                        && next.method == BuiltinMethod::Last =>
                 {
-                    Some(make_noarg_call(BuiltinMethod::Max, "max"))
-                }
-                (BuiltinMethod::Reverse, Opcode::CallMethod(next))
-                    if next.method == BuiltinMethod::First =>
-                {
-                    Some(make_noarg_call(BuiltinMethod::Last, "last"))
-                }
-                (BuiltinMethod::Reverse, Opcode::CallMethod(next))
-                    if next.method == BuiltinMethod::Last =>
-                {
-                    Some(make_noarg_call(BuiltinMethod::First, "first"))
+                    terminal_selection_rewrite(
+                        BuiltinId::from_method(prev.method),
+                        BuiltinSelectionPosition::Last,
+                    )
+                    .map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
                     if prev.sub_progs.is_empty()

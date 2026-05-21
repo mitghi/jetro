@@ -14,8 +14,9 @@ use super::{
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
-    BuiltinStringPairStage, BuiltinViewObjectProjection, BuiltinViewStage,
+    BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSelectionRewrite, BuiltinSpec,
+    BuiltinStageMerge, BuiltinStructural, BuiltinStringPairStage, BuiltinViewObjectProjection,
+    BuiltinViewStage,
 };
 
 // ── Helpers shared across reducer family ─────────────────────────────────────
@@ -1221,6 +1222,13 @@ impl Builtin for Sort {
             .demand_law(BuiltinDemandLaw::OrderBarrier)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .order_only()
+            .selection_rewrite(
+                BuiltinSelectionRewrite::new()
+                    .first(BuiltinMethod::Min)
+                    .last(BuiltinMethod::Max)
+                    .index_zero(BuiltinMethod::Min)
+                    .index_minus_one(BuiltinMethod::Max),
+            )
             .idempotent()
             .logical_shape(BuiltinLogicalShape::Sort)
             .lowering(BuiltinPipelineLowering::Sort)
@@ -1676,6 +1684,11 @@ impl Builtin for Reverse {
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .order_only()
+            .selection_rewrite(
+                BuiltinSelectionRewrite::new()
+                    .first(BuiltinMethod::Last)
+                    .last(BuiltinMethod::First),
+            )
             .nullary_stage(BuiltinNullaryStage::Reverse)
             .logical_shape(BuiltinLogicalShape::Reverse)
             .row_stream_op(BuiltinRowStreamOp::Reverse)

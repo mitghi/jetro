@@ -209,6 +209,31 @@ pub(crate) fn stage_elidable_before_sink(stage: BuiltinId, sink: BuiltinId) -> b
         || (!demand.order && pipeline_stage_is_order_only(stage))
 }
 
+/// Return a cheaper terminal method for `stage.position()` when the stage
+/// advertises that selection can be expressed directly.
+#[inline]
+pub(crate) fn terminal_selection_rewrite(
+    stage: BuiltinId,
+    position: BuiltinSelectionPosition,
+) -> Option<BuiltinMethod> {
+    let rewrite = stage.method()?.spec().selection_rewrite?;
+    match position {
+        BuiltinSelectionPosition::First => rewrite.first,
+        BuiltinSelectionPosition::Last => rewrite.last,
+    }
+}
+
+/// Return a cheaper terminal method for indexing the result of `stage`.
+#[inline]
+pub(crate) fn index_selection_rewrite(stage: BuiltinId, index: i64) -> Option<BuiltinMethod> {
+    let rewrite = stage.method()?.spec().selection_rewrite?;
+    match index {
+        0 => rewrite.index_zero,
+        -1 => rewrite.index_minus_one,
+        _ => None,
+    }
+}
+
 /// Return true when the stage only changes row order, not membership or row values.
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
@@ -1203,6 +1228,7 @@ mod tests {
             );
             assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
             assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
+            assert_eq!(method.spec().selection_rewrite, spec.selection_rewrite, "{method:?}");
             assert_eq!(builtin_sink(id), spec.sink, "{method:?}");
             assert_eq!(keyed_reducer(id), spec.keyed_reducer, "{method:?}");
             assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
@@ -1826,6 +1852,24 @@ mod tests {
             BuiltinId::from_method(BuiltinMethod::Map),
             BuiltinId::from_method(BuiltinMethod::Count)
         ));
+        assert_eq!(
+            terminal_selection_rewrite(
+                BuiltinId::from_method(BuiltinMethod::Sort),
+                BuiltinSelectionPosition::First
+            ),
+            Some(BuiltinMethod::Min)
+        );
+        assert_eq!(
+            index_selection_rewrite(BuiltinId::from_method(BuiltinMethod::Sort), -1),
+            Some(BuiltinMethod::Max)
+        );
+        assert_eq!(
+            terminal_selection_rewrite(
+                BuiltinId::from_method(BuiltinMethod::Reverse),
+                BuiltinSelectionPosition::Last
+            ),
+            Some(BuiltinMethod::First)
+        );
         assert!(stage_elidable_before_sink(
             BuiltinId::from_method(BuiltinMethod::Sort),
             BuiltinId::from_method(BuiltinMethod::Sum)
