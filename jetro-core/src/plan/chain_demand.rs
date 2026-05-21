@@ -367,6 +367,7 @@ mod tests {
             BuiltinMethod::Matches,
             BuiltinMethod::ContainsAny,
             BuiltinMethod::ContainsAll,
+            BuiltinMethod::Includes,
         ] {
             let ops = [op(method), op(BuiltinMethod::Count)];
             let demand = source_demand(&ops, Demand::RESULT);
@@ -387,6 +388,7 @@ mod tests {
             BuiltinMethod::Matches,
             BuiltinMethod::ContainsAny,
             BuiltinMethod::ContainsAll,
+            BuiltinMethod::Includes,
         ] {
             let ops = [op(method), op(BuiltinMethod::Last)];
             let demand = source_demand(&ops, Demand::RESULT);

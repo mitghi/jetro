@@ -3008,6 +3008,7 @@ impl Builtin for Includes {
         default_scalar_spec(BuiltinMethod::Includes)
             .view_scalar()
             .membership_sink(BuiltinMembershipSink::Includes)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -3090,7 +3091,9 @@ impl Builtin for Missing {
 fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
     let spec = BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
         .indexed()
-        .view_native();
+        .view_native()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves);
     if method.is_view_scalar_method() {
         spec.view_scalar()
     } else {
