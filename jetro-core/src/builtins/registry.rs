@@ -818,9 +818,11 @@ pub(crate) fn pipeline_arity(id: BuiltinId, is_last: bool) -> Option<BuiltinPipe
     };
     match pipeline_lowering(id) {
         Some(BuiltinPipelineLowering::ExprArg)
-        | Some(BuiltinPipelineLowering::TerminalExprArg { .. })
         | Some(BuiltinPipelineLowering::UsizeArg { .. })
         | Some(BuiltinPipelineLowering::StringArg) => Some(BuiltinPipelineArity::Exact(1)),
+        Some(BuiltinPipelineLowering::TerminalExprArg { .. }) => {
+            is_last.then_some(BuiltinPipelineArity::Exact(1))
+        }
         Some(BuiltinPipelineLowering::Nullary) => Some(BuiltinPipelineArity::Exact(0)),
         Some(BuiltinPipelineLowering::StringPairArg) => Some(BuiltinPipelineArity::Exact(2)),
         Some(BuiltinPipelineLowering::IntRangeArg) => {
@@ -2390,6 +2392,24 @@ mod tests {
             BuiltinId::from_method(BuiltinMethod::Includes),
             1,
             false
+        ));
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Find), false),
+            None
+        );
+        assert_eq!(
+            pipeline_arity(BuiltinId::from_method(BuiltinMethod::Find), true),
+            Some(BuiltinPipelineArity::Exact(1))
+        );
+        assert!(!pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Find),
+            1,
+            false
+        ));
+        assert!(pipeline_accepts_arity(
+            BuiltinId::from_method(BuiltinMethod::Find),
+            1,
+            true
         ));
     }
 
