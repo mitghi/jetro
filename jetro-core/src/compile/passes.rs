@@ -10,9 +10,9 @@ use crate::builtins::registry::{
     cancellation as builtin_cancellation, canonical_name,
     index_selection_rewrite, is_idempotent as builtin_is_idempotent,
     is_pure as builtin_is_pure, output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
-    stage_elidable_before_sink, terminal_selection_rewrite,
+    stage_elidable_before_sink, terminal_selection_position, terminal_selection_rewrite,
 };
-use crate::builtins::{BuiltinArgs, BuiltinMethod, BuiltinSelectionPosition};
+use crate::builtins::{BuiltinArgs, BuiltinMethod};
 use crate::data::value::Val;
 use crate::parse::ast::Arg;
 use crate::vm::{
@@ -254,24 +254,17 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                 (_, Opcode::CallMethod(next))
                     if prev.sub_progs.is_empty()
                         && next.sub_progs.is_empty()
-                        && next.method == BuiltinMethod::First =>
+                        && terminal_selection_position(BuiltinId::from_method(next.method))
+                            .is_some() =>
                 {
-                    terminal_selection_rewrite(
-                        BuiltinId::from_method(prev.method),
-                        BuiltinSelectionPosition::First,
-                    )
-                    .map(make_noarg_builtin_call)
-                }
-                (_, Opcode::CallMethod(next))
-                    if prev.sub_progs.is_empty()
-                        && next.sub_progs.is_empty()
-                        && next.method == BuiltinMethod::Last =>
-                {
-                    terminal_selection_rewrite(
-                        BuiltinId::from_method(prev.method),
-                        BuiltinSelectionPosition::Last,
-                    )
-                    .map(make_noarg_builtin_call)
+                    terminal_selection_position(BuiltinId::from_method(next.method))
+                        .and_then(|position| {
+                            terminal_selection_rewrite(
+                                BuiltinId::from_method(prev.method),
+                                position,
+                            )
+                        })
+                        .map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
                     if next.sub_progs.is_empty()
