@@ -14,13 +14,14 @@ use crate::builtins::registry::{
     effective_pipeline_shape, expr_payload, expr_stage_elidable_when_value_unused,
     is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
     pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_stage_consumes_value,
-    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
+    pipeline_lowering, pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinExprPayload, BuiltinMethod, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinCardinality, BuiltinExprPayload, BuiltinMethod, BuiltinPipelineLowering,
+    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
+    BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -556,6 +557,16 @@ macro_rules! method_stage_descriptor {
 }
 
 impl Stage {
+    /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
+    pub(crate) fn usize_builtin(method: BuiltinMethod, value: usize) -> Option<Self> {
+        matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::UsizeArg { .. })
+                | Some(BuiltinPipelineLowering::TerminalUsizeSink { .. })
+        )
+        .then_some(Stage::UsizeBuiltin { method, value })
+    }
+
     /// Classifies the stage body program, returning `Generic` for stages without a body.
     pub(crate) fn body_kernel(&self) -> BodyKernel {
         if let Stage::CompiledMap(plan) = self {

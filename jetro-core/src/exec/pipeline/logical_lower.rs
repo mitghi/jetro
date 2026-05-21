@@ -75,20 +75,14 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         // ── Positional ─────────────────────────────────────────────────────
         LogicalPlan::Take { input, n } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::UsizeBuiltin {
-                method: BuiltinMethod::Take,
-                value: n,
-            });
+            stages.push(Stage::usize_builtin(BuiltinMethod::Take, n)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
 
         LogicalPlan::Skip { input, n } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::UsizeBuiltin {
-                method: BuiltinMethod::Skip,
-                value: n,
-            });
+            stages.push(Stage::usize_builtin(BuiltinMethod::Skip, n)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }

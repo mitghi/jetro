@@ -270,18 +270,15 @@ fn push_path_slice_stages(
     };
 
     if start > 0 {
-        stages.push(Stage::UsizeBuiltin {
-            method: BuiltinMethod::Skip,
-            value: start,
-        });
+        stages.push(Stage::usize_builtin(BuiltinMethod::Skip, start)?);
         stage_exprs.push(None);
     }
 
     if let Some(end) = end {
-        stages.push(Stage::UsizeBuiltin {
-            method: BuiltinMethod::Take,
-            value: end.saturating_sub(start),
-        });
+        stages.push(Stage::usize_builtin(
+            BuiltinMethod::Take,
+            end.saturating_sub(start),
+        )?);
         stage_exprs.push(None);
     }
 
