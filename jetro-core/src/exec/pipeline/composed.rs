@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::builtins::{
     registry::{
         keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
-        terminal_selection_position, view_stage, BuiltinId,
+        view_stage, BuiltinId,
     },
     BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     BuiltinViewStage,
@@ -30,7 +30,7 @@ use crate::vm::{Program, VM};
 use super::ir::program_match_only;
 use super::{
     compute_strategies_with_kernels, eval_kernel_with_vm, ordered_by_key_cmp, row_source,
-    BodyKernel, Pipeline, Sink, Source, Stage, StageStrategy,
+    BodyKernel, Pipeline, Position, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -639,10 +639,9 @@ fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink
     }
     match sink {
         Sink::Collect => Some(ProjectingSink::Collect(Vec::new())),
-        Sink::Terminal(method) => match terminal_selection_position(BuiltinId::from_method(*method))?
-        {
-            BuiltinSelectionPosition::First => Some(ProjectingSink::First(None)),
-            BuiltinSelectionPosition::Last => Some(ProjectingSink::Last(None)),
+        Sink::Terminal(_) => match sink.select_one_position()? {
+            Position::First => Some(ProjectingSink::First(None)),
+            Position::Last => Some(ProjectingSink::Last(None)),
         },
         Sink::Nth(idx) => {
             let target = if matches!(demand, PullDemand::NthInput(_)) {
