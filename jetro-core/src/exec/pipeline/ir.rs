@@ -582,6 +582,32 @@ impl Stage {
         .then_some(Stage::ExprBuiltin { method, body })
     }
 
+    /// Build a string-argument stage only for builtins with registry-declared string lowering.
+    pub(crate) fn string_builtin(method: BuiltinMethod, value: Arc<str>) -> Option<Self> {
+        matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::StringArg)
+        )
+        .then_some(Stage::StringBuiltin { method, value })
+    }
+
+    /// Build a string-pair stage only for builtins with registry-declared string-pair lowering.
+    pub(crate) fn string_pair_builtin(
+        method: BuiltinMethod,
+        first: Arc<str>,
+        second: Arc<str>,
+    ) -> Option<Self> {
+        matches!(
+            pipeline_lowering(BuiltinId::from_method(method)),
+            Some(BuiltinPipelineLowering::StringPairArg)
+        )
+        .then_some(Stage::StringPairBuiltin {
+            method,
+            first,
+            second,
+        })
+    }
+
     /// Classifies the stage body program, returning `Generic` for stages without a body.
     pub(crate) fn body_kernel(&self) -> BodyKernel {
         if let Stage::CompiledMap(plan) = self {

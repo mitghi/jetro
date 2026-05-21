@@ -557,10 +557,7 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 1 {
                 return None;
             }
-            stages.push(Stage::StringBuiltin {
-                method,
-                value: string_arg(&args[0])?,
-            });
+            stages.push(Stage::string_builtin(method, string_arg(&args[0])?)?);
             stage_exprs.push(None);
             Some(())
         }
@@ -568,11 +565,11 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 2 {
                 return None;
             }
-            stages.push(Stage::StringPairBuiltin {
+            stages.push(Stage::string_pair_builtin(
                 method,
-                first: string_arg(&args[0])?,
-                second: string_arg(&args[1])?,
-            });
+                string_arg(&args[0])?,
+                string_arg(&args[1])?,
+            )?);
             stage_exprs.push(None);
             Some(())
         }
