@@ -182,7 +182,7 @@ impl From<String> for StrRef {
 /// the backing buffer is owned by `TapeData` and kept alive via `Arc`.
 pub type TapeNode = simd_json::Node<'static>;
 
-const ARRAY_CHILD_INDEX_MIN_LEN: usize = 2;
+const ARRAY_CHILD_INDEX_MIN_LEN: usize = 32;
 
 /// Parsed simd-json tape together with the byte buffer and structural-index buffers
 /// that must remain alive for the duration of the tape's use.
@@ -433,7 +433,7 @@ mod tests {
         let len = tape.root_len();
 
         let children = tape.array_child_starts(first, len);
-        assert!(tape.has_array_child_index(first));
+        assert!(!tape.has_array_child_index(first));
         assert_eq!(children.len(), 3);
         assert_eq!(tape.array_child_start(first, len, 0), Some(children[0]));
         assert_eq!(tape.array_child_start(first, len, 1), Some(children[1]));
@@ -455,13 +455,15 @@ mod tests {
     }
 
     #[test]
-    fn array_child_index_covers_nested_arrays() {
-        let tape = TapeData::parse(br#"[[1,2],{"xs":[3,4,5]}]"#.to_vec()).unwrap();
+    fn array_child_index_covers_large_nested_arrays() {
+        let nested = (0..40).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        let bytes = format!("[[{}],{{\"xs\":[3,4,5]}}]", nested).into_bytes();
+        let tape = TapeData::parse(bytes).unwrap();
         let root_children = tape.array_child_starts(1, tape.root_len());
-        assert!(tape.has_array_child_index(1));
+        assert!(!tape.has_array_child_index(1));
 
         let nested_first = root_children[0] + 1;
         assert!(tape.has_array_child_index(nested_first));
-        assert_eq!(tape.array_child_starts(nested_first, 2), vec![2, 3]);
+        assert_eq!(tape.array_child_start(nested_first, 40, 39), Some(41));
     }
 }
