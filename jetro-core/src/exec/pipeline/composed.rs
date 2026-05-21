@@ -654,7 +654,7 @@ fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink
         Sink::SelectMany { n, from_end } => Some(ProjectingSink::SelectMany {
             n: *n,
             from_end: *from_end,
-            prepend: *from_end && matches!(demand, PullDemand::LastInput(_)),
+            prepend: *from_end && demand.is_suffix(),
             items: VecDeque::new(),
         }),
         _ => None,
@@ -904,7 +904,7 @@ fn run_lazy_ordered_suffix(
     let final_demand = Pipeline::segment_source_demand(&stages[sort_idx + 1..], sink)
         .chain
         .pull;
-    let ordered_descending = if matches!(final_demand, PullDemand::LastInput(_)) {
+    let ordered_descending = if final_demand.is_suffix() {
         !spec.descending
     } else {
         spec.descending

@@ -17,9 +17,8 @@ use crate::builtins::registry::{
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
     pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
-    pipeline_streams, view_projection,
-    sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
-    view_stage as builtin_view_stage, BuiltinId,
+    pipeline_streams, sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
+    view_projection, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinCardinality, BuiltinExprPayload, BuiltinExprStage,
@@ -249,7 +248,7 @@ impl Sink {
     /// rows it actually emits or retains.
     pub(crate) fn supports_late_projection(&self, demand: PullDemand) -> bool {
         match self {
-            Sink::Collect => !matches!(demand, PullDemand::LastInput(_)),
+            Sink::Collect => !demand.is_suffix(),
             Sink::Terminal(_) => self.select_one_position().is_some(),
             Sink::Nth(_) | Sink::SelectMany { .. } => true,
             _ => false,
@@ -654,10 +653,9 @@ impl Stage {
         match builtin_nullary_stage(BuiltinId::from_method(method)) {
             Some(BuiltinNullaryStage::Reverse) => Stage::reverse(),
             Some(BuiltinNullaryStage::Unique) => Some(Stage::UniqueBy(None)),
-            Some(BuiltinNullaryStage::Element) | None => Some(Stage::Builtin(BuiltinCall::new(
-                method,
-                BuiltinArgs::None,
-            ))),
+            Some(BuiltinNullaryStage::Element) | None => {
+                Some(Stage::Builtin(BuiltinCall::new(method, BuiltinArgs::None)))
+            }
         }
     }
 
@@ -1123,12 +1121,14 @@ impl Stage {
                     cost: 1.0,
                     selectivity: 1.0,
                 },
-                |desc| desc.shape().unwrap_or(StageShape {
-                    cardinality: BuiltinCardinality::OneToOne,
-                    can_indexed: false,
-                    cost: 1.0,
-                    selectivity: 1.0,
-                }),
+                |desc| {
+                    desc.shape().unwrap_or(StageShape {
+                        cardinality: BuiltinCardinality::OneToOne,
+                        can_indexed: false,
+                        cost: 1.0,
+                        selectivity: 1.0,
+                    })
+                },
             ),
         }
     }

@@ -1119,7 +1119,7 @@ where
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[plan.sort_stage + 1..], &body.sink);
-    let ordered_descending = if matches!(source_demand, PullDemand::LastInput(_)) {
+    let ordered_descending = if source_demand.is_suffix() {
         !plan.descending
     } else {
         plan.descending

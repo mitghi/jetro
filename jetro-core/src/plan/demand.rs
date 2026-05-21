@@ -285,6 +285,12 @@ impl PullDemand {
         )
     }
 
+    /// Returns true when the consumer wants a suffix of the input stream.
+    #[inline]
+    pub(crate) fn is_suffix(self) -> bool {
+        matches!(self, PullDemand::LastInput(_))
+    }
+
     /// Return a `PullDemand` capped to at most `n` input elements,
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {
@@ -448,6 +454,9 @@ mod tests {
         assert!(PullDemand::LastInput(3).output_satisfied_by(3));
         assert!(!PullDemand::FirstInput(3).output_satisfied_by(3));
         assert!(!PullDemand::NthInput(0).output_satisfied_by(1));
+
+        assert!(PullDemand::LastInput(1).is_suffix());
+        assert!(!PullDemand::FirstInput(1).is_suffix());
     }
 
     #[test]
