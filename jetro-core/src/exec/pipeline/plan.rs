@@ -6,7 +6,8 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinViewStage;
+use crate::builtins::registry::{view_stage, BuiltinId};
+use crate::builtins::BuiltinMethod;
 use crate::parse::ast::{BinOp, Expr};
 use crate::plan::demand::PullDemand;
 use crate::vm::{Opcode, Program};
@@ -352,7 +353,9 @@ fn fuse_filter_runs(
 
         let merged = merge_filter_programs(&stages[i..j]);
         let merged_kernel = BodyKernel::classify(&merged);
-        stages[i] = Stage::Filter(merged, BuiltinViewStage::Filter);
+        let filter_stage = view_stage(BuiltinId::from_method(BuiltinMethod::Filter))
+            .expect("filter builtin must publish a view stage");
+        stages[i] = Stage::Filter(merged, filter_stage);
         exprs[i] = None;
         kernels[i] = merged_kernel;
         stages.drain(i + 1..j);
