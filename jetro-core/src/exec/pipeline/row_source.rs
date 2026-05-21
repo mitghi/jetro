@@ -566,7 +566,7 @@ fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
 }
 
-fn index_from_end(len: usize, offset: usize) -> Option<usize> {
+pub(super) fn index_from_end(len: usize, offset: usize) -> Option<usize> {
     len.checked_sub(offset.checked_add(1)?)
 }
 
