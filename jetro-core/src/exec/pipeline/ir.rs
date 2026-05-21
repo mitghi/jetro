@@ -11,17 +11,18 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
     columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    effective_pipeline_shape, expr_payload, expr_stage_elidable_when_value_unused,
-    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer, participates_in_demand,
-    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_stage_consumes_value,
-    pipeline_lowering, pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
+    effective_pipeline_shape, expr_payload, expr_stage as builtin_expr_stage,
+    expr_stage_elidable_when_value_unused, is_pure as builtin_is_pure,
+    keyed_reducer as builtin_keyed_reducer, participates_in_demand, pipeline_composed_barrier,
+    pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
+    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinExprPayload, BuiltinMethod, BuiltinPipelineLowering,
-    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinViewStage,
+    BuiltinCardinality, BuiltinExprPayload, BuiltinExprStage, BuiltinMethod,
+    BuiltinPipelineLowering, BuiltinPipelineOrderEffect, BuiltinSelectionPosition,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -570,6 +571,15 @@ impl Stage {
                 | Some(BuiltinPipelineLowering::TerminalUsizeSink { .. })
         )
         .then_some(Stage::UsizeBuiltin { method, value })
+    }
+
+    /// Build a generic expression-argument stage only for registry-declared expression builtins.
+    pub(crate) fn expr_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
+        matches!(
+            builtin_expr_stage(BuiltinId::from_method(method)),
+            Some(BuiltinExprStage::ExprBuiltin)
+        )
+        .then_some(Stage::ExprBuiltin { method, body })
     }
 
     /// Classifies the stage body program, returning `Generic` for stages without a body.

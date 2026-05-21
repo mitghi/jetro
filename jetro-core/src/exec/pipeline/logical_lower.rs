@@ -163,10 +163,7 @@ fn collect_expr_builtin_stage(
     body_expr: Expr,
 ) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     let (source, mut stages, mut exprs, sink) = collect(input)?;
-    stages.push(Stage::ExprBuiltin {
-        method,
-        body: compile_expr_body(&body_expr),
-    });
+    stages.push(Stage::expr_builtin(method, compile_expr_body(&body_expr))?);
     exprs.push(Some(Arc::new(body_expr)));
     Some((source, stages, exprs, sink))
 }

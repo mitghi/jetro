@@ -685,10 +685,7 @@ fn push_expr_builtin(
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    stages.push(Stage::ExprBuiltin {
-        method,
-        body: compile_subexpr(arg)?,
-    });
+    stages.push(Stage::expr_builtin(method, compile_subexpr(arg)?)?);
     stage_exprs.push(arg_expr(arg));
     Some(())
 }
