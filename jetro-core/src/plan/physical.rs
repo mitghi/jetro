@@ -366,7 +366,7 @@ fn is_scalar_unwrap_stages(
     stages: &[crate::exec::pipeline::Stage],
     sink: &crate::exec::pipeline::Sink,
 ) -> bool {
-    use crate::exec::pipeline::{Sink, Stage};
+    use crate::exec::pipeline::Sink;
     if !matches!(sink, Sink::Collect) {
         return false;
     }
@@ -374,14 +374,8 @@ fn is_scalar_unwrap_stages(
         return false;
     }
     stages.iter().all(|stage| {
-        let method = match stage {
-            Stage::Builtin(call) => call.method,
-            Stage::UsizeBuiltin { method, .. }
-            | Stage::StringBuiltin { method, .. }
-            | Stage::StringPairBuiltin { method, .. }
-            | Stage::IntRangeBuiltin { method, .. }
-            | Stage::ExprBuiltin { method, .. } => *method,
-            _ => return false,
+        let Some(method) = stage.method() else {
+            return false;
         };
         dispatches_scalar_direct(BuiltinId::from_method(method))
     })

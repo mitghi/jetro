@@ -893,6 +893,11 @@ impl Stage {
         }
     }
 
+    /// Returns the canonical builtin method for stages backed by builtin metadata.
+    pub(crate) fn method(&self) -> Option<BuiltinMethod> {
+        self.descriptor().and_then(|desc| desc.method)
+    }
+
     /// Returns `true` when this stage can execute using only the materialised receiver, with
     /// `program_ok` used to validate the stage's body program if present.
     pub(crate) fn can_run_with_receiver_only<F>(&self, mut program_ok: F) -> bool
