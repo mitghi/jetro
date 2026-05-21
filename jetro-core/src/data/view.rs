@@ -1198,6 +1198,31 @@ mod tests {
     }
 
     #[test]
+    fn array_reverse_iter_matches_value_order_for_val_and_tape() {
+        use super::TapeView;
+
+        let value = Val::from(&json!({"items": [1, {"id": 2}, [3]]}));
+        let val_items = ValView::new(&value).field("items");
+        let val_rows = val_items
+            .array_iter_rev()
+            .unwrap()
+            .map(|item| serde_json::Value::from(item.materialize()))
+            .collect::<Vec<_>>();
+
+        let tape = crate::data::tape::TapeData::parse(br#"{"items":[1,{"id":2},[3]]}"#.to_vec())
+            .unwrap();
+        let tape_rows = TapeView::root(&tape)
+            .field("items")
+            .array_iter_rev()
+            .unwrap()
+            .map(|item| serde_json::Value::from(item.materialize()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(val_rows, json!([[3], {"id": 2}, 1]).as_array().unwrap().clone());
+        assert_eq!(tape_rows, val_rows);
+    }
+
+    #[test]
     fn val_view_materializes_current_view_only() {
         let value = Val::from(&json!({"items": [{"id": 1}, {"id": 2}]}));
         let item = ValView::new(&value).field("items").index(1);
