@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{BuiltinMethod, BuiltinViewStage};
+use crate::builtins::BuiltinMethod;
 use crate::exec::pipeline::{Pipeline, PipelineBody, Sink, Source, Stage};
 use crate::ir::logical::LogicalPlan;
 use crate::parse::ast::Expr;
@@ -42,7 +42,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::Filter { input, predicate } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&predicate);
-            stages.push(Stage::Filter(prog, BuiltinViewStage::Filter));
+            stages.push(Stage::expr_stage_builtin(BuiltinMethod::Filter, prog)?);
             exprs.push(Some(Arc::new(predicate)));
             Some((source, stages, exprs, sink))
         }
@@ -50,7 +50,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::Map { input, projection } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&projection);
-            stages.push(Stage::Map(prog, BuiltinViewStage::Map));
+            stages.push(Stage::expr_stage_builtin(BuiltinMethod::Map, prog)?);
             exprs.push(Some(Arc::new(projection)));
             Some((source, stages, exprs, sink))
         }
@@ -58,7 +58,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::FlatMap { input, expansion } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&expansion);
-            stages.push(Stage::FlatMap(prog, BuiltinViewStage::FlatMap));
+            stages.push(Stage::expr_stage_builtin(BuiltinMethod::FlatMap, prog)?);
             exprs.push(Some(Arc::new(expansion)));
             Some((source, stages, exprs, sink))
         }
@@ -183,7 +183,7 @@ fn collect_expr_builtin_stage(
     body_expr: Expr,
 ) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     let (source, mut stages, mut exprs, sink) = collect(input)?;
-    stages.push(Stage::expr_builtin(method, compile_expr_body(&body_expr))?);
+    stages.push(Stage::expr_stage_builtin(method, compile_expr_body(&body_expr))?);
     exprs.push(Some(Arc::new(body_expr)));
     Some((source, stages, exprs, sink))
 }

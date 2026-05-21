@@ -656,13 +656,18 @@ impl Stage {
         .then_some(Stage::UsizeBuiltin { method, value })
     }
 
-    /// Build a generic expression-argument stage only for registry-declared expression builtins.
-    pub(crate) fn expr_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
-        matches!(
-            builtin_expr_stage(BuiltinId::from_method(method)),
-            Some(BuiltinExprStage::ExprBuiltin)
-        )
-        .then_some(Stage::ExprBuiltin { method, body })
+    /// Build an expression-bearing stage from registry expression-stage metadata.
+    pub(crate) fn expr_stage_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
+        let id = BuiltinId::from_method(method);
+        let stage_kind = builtin_expr_stage(id)?;
+        let view_stage = || builtin_view_stage(id).or_else(|| stage_kind.view_stage());
+        match stage_kind {
+            BuiltinExprStage::Filter => Some(Stage::Filter(body, view_stage()?)),
+            BuiltinExprStage::Map => Some(Stage::Map(body, view_stage()?)),
+            BuiltinExprStage::FlatMap => Some(Stage::FlatMap(body, view_stage()?)),
+            BuiltinExprStage::UniqueBy => Some(Stage::UniqueBy(Some(body))),
+            BuiltinExprStage::ExprBuiltin => Some(Stage::ExprBuiltin { method, body }),
+        }
     }
 
     /// Build a string-argument stage only for builtins with registry-declared string lowering.

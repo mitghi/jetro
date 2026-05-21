@@ -615,13 +615,9 @@ fn push_expr_stage(
 ) -> Option<()> {
     let id = BuiltinId::from_method(method);
     let stage_kind = expr_stage(id)?;
-    let stage_view = || view_stage(id).or_else(|| stage_kind.view_stage());
     match stage_kind {
         BuiltinExprStage::Filter => {
-            stages.push(Stage::Filter(
-                compile_subexpr(arg)?,
-                stage_view()?,
-            ));
+            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
             stage_exprs.push(arg_expr(arg));
         }
         BuiltinExprStage::Map => match try_decode_map_body(arg) {
@@ -630,22 +626,16 @@ fn push_expr_stage(
                 stage_exprs.push(arg_expr(arg));
             }
             None => {
-                stages.push(Stage::Map(
-                    compile_subexpr(arg)?,
-                    stage_view()?,
-                ));
+                stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
                 stage_exprs.push(arg_expr(arg));
             }
         },
         BuiltinExprStage::FlatMap => {
-            stages.push(Stage::FlatMap(
-                compile_subexpr(arg)?,
-                stage_view()?,
-            ));
+            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
             stage_exprs.push(arg_expr(arg));
         }
         BuiltinExprStage::UniqueBy => {
-            stages.push(Stage::UniqueBy(Some(compile_subexpr(arg)?)));
+            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
             stage_exprs.push(arg_expr(arg));
         }
         // Remaining expression-argument lowerings route through the generic
@@ -664,7 +654,7 @@ fn push_expr_builtin(
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    stages.push(Stage::expr_builtin(method, compile_subexpr(arg)?)?);
+    stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
     stage_exprs.push(arg_expr(arg));
     Some(())
 }
