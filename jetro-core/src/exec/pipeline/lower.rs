@@ -10,9 +10,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_sink, by_name, count_sink_accepts_predicate, expr_stage, pipeline_accepts_arity,
-    pipeline_chain_operator, pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage,
-    BuiltinId,
+    builtin_sink, by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator,
+    pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
@@ -490,9 +489,7 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 // Registry-driven stage factory (formerly stage_factory.rs)
 // ---------------------------------------------------------------------------
 
-use super::{
-    ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerSpec,
-};
+use super::{ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
 
 /// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
 pub(super) fn lower_method_from_registry(
@@ -735,9 +732,7 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Sink::count_builtin(method),
-            [arg] if count_sink_accepts_predicate(BuiltinId::from_method(method)) => Some(Sink::Reducer(
-                ReducerSpec::count_with_predicate(compile_subexpr(arg)?, arg_expr(arg)),
-            )),
+            [arg] => Sink::count_predicate_builtin(method, compile_subexpr(arg)?, arg_expr(arg)),
             _ => None,
         },
         BuiltinSinkAccumulator::Numeric => {

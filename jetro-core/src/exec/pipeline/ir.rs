@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
-    columnar_stage as builtin_columnar_stage, effective_pipeline_order_effect,
-    effective_pipeline_shape, expr_payload, expr_stage as builtin_expr_stage,
-    expr_stage_elidable_when_value_unused, is_pure as builtin_is_pure,
-    keyed_reducer as builtin_keyed_reducer, nullary_stage as builtin_nullary_stage,
-    participates_in_demand, pipeline_composed_barrier, pipeline_legacy_materialized,
-    pipeline_lowering, pipeline_stage_consumes_value, pipeline_stage_is_order_only,
-    pipeline_stage_is_positional, pipeline_streams,
+    columnar_stage as builtin_columnar_stage, count_sink_accepts_predicate,
+    effective_pipeline_order_effect, effective_pipeline_shape, expr_payload,
+    expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
+    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
+    nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
+    pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
+    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
     terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
 };
@@ -146,6 +146,17 @@ impl Sink {
             BuiltinSinkAccumulator::Count
         )
         .then_some(Sink::Reducer(ReducerSpec::count()))
+    }
+
+    /// Build a count reducer with a predicate when the builtin declares predicate-count support.
+    pub(crate) fn count_predicate_builtin(
+        method: BuiltinMethod,
+        predicate: Arc<Program>,
+        predicate_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        count_sink_accepts_predicate(BuiltinId::from_method(method)).then_some(Sink::Reducer(
+            ReducerSpec::count_with_predicate(predicate, predicate_expr),
+        ))
     }
 
     /// Build an approximate distinct count sink from builtin metadata.
