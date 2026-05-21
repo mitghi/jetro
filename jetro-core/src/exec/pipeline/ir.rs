@@ -909,6 +909,33 @@ impl Stage {
         self.descriptor().and_then(|desc| desc.body)
     }
 
+    /// Replaces the body program carried by this stage, preserving the stage shape when possible.
+    pub(crate) fn replace_body_program(&mut self, program: Arc<Program>) -> bool {
+        match self {
+            Stage::Filter(body, _)
+            | Stage::Map(body, _)
+            | Stage::FlatMap(body, _)
+            | Stage::ExprBuiltin { body, .. }
+            | Stage::UniqueBy(Some(body)) => {
+                *body = program;
+                true
+            }
+            Stage::Sort(sort) if sort.key.is_some() => {
+                sort.key = Some(program);
+                true
+            }
+            Stage::CompiledMap(_) => {
+                if let Some(stage) = Stage::expr_stage_builtin(BuiltinMethod::Map, program) {
+                    *self = stage;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
     /// optimisation (requires Map shape and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {

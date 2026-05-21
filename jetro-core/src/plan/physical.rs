@@ -532,19 +532,7 @@ fn mask_active_local_stage_kernels(
 fn recompile_stage_body_for_lexical_env(stage: &mut crate::exec::pipeline::Stage, expr: &Expr) {
     let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
     let program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-stage>"));
-    match stage {
-        crate::exec::pipeline::Stage::Filter(body, _)
-        | crate::exec::pipeline::Stage::Map(body, _)
-        | crate::exec::pipeline::Stage::FlatMap(body, _) => *body = program,
-        crate::exec::pipeline::Stage::ExprBuiltin { body, .. } => *body = program,
-        crate::exec::pipeline::Stage::UniqueBy(Some(body)) => *body = program,
-        crate::exec::pipeline::Stage::Sort(sort) if sort.key.is_some() => sort.key = Some(program),
-        crate::exec::pipeline::Stage::CompiledMap(_) => {
-            *stage =
-                crate::exec::pipeline::Stage::Map(program, crate::builtins::BuiltinViewStage::Map);
-        }
-        _ => {}
-    }
+    stage.replace_body_program(program);
 }
 
 /// Returns `true` if `kernel` references any identifier that is currently a let-bound local.
