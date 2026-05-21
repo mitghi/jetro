@@ -863,10 +863,20 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             return None;
         };
         let tape: &'a crate::data::tape::TapeData = *tape;
+        if let Some(children) = tape.array_child_indexed_starts(*idx + 1) {
+            return Some(Box::new(TapeArrayRevIndexedIter {
+                tape,
+                children,
+                next: children.len(),
+            }));
+        }
         let indices = tape.array_child_indices(*idx)?;
-        Some(Box::new(indices.into_iter().rev().map(move |child| {
-            Self::Node { tape, idx: child }
-        })))
+        Some(Box::new(
+            indices
+                .into_iter()
+                .rev()
+                .map(move |child| Self::Node { tape, idx: child }),
+        ))
     }
 
     #[inline]
@@ -910,6 +920,31 @@ impl<'a> Iterator for TapeArrayIter<'a> {
         })
     }
 }
+
+/// Iterator that yields `TapeView` nodes from a precomputed child-index slice
+/// in reverse order without allocating a reversed copy.
+struct TapeArrayRevIndexedIter<'a> {
+    tape: &'a crate::data::tape::TapeData,
+    children: &'a [usize],
+    next: usize,
+}
+
+impl<'a> Iterator for TapeArrayRevIndexedIter<'a> {
+    type Item = TapeView<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            return None;
+        }
+        self.next -= 1;
+        Some(TapeView::Node {
+            tape: self.tape,
+            idx: self.children[self.next],
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum TapeScratchView<'a> {
     Node {
@@ -1087,9 +1122,12 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
         };
         let tape: &'a crate::data::tape::TapeScratch = *tape;
         let indices = tape.array_child_indices(*idx)?;
-        Some(Box::new(indices.into_iter().rev().map(move |child| {
-            Self::Node { tape, idx: child }
-        })))
+        Some(Box::new(
+            indices
+                .into_iter()
+                .rev()
+                .map(move |child| Self::Node { tape, idx: child }),
+        ))
     }
 
     #[inline]
@@ -1220,8 +1258,8 @@ mod tests {
             .map(|item| serde_json::Value::from(item.materialize()))
             .collect::<Vec<_>>();
 
-        let tape = crate::data::tape::TapeData::parse(br#"{"items":[1,{"id":2},[3]]}"#.to_vec())
-            .unwrap();
+        let tape =
+            crate::data::tape::TapeData::parse(br#"{"items":[1,{"id":2},[3]]}"#.to_vec()).unwrap();
         let tape_rows = TapeView::root(&tape)
             .field("items")
             .array_iter_rev()
@@ -1229,7 +1267,10 @@ mod tests {
             .map(|item| serde_json::Value::from(item.materialize()))
             .collect::<Vec<_>>();
 
-        assert_eq!(val_rows, json!([[3], {"id": 2}, 1]).as_array().unwrap().clone());
+        assert_eq!(
+            val_rows,
+            json!([[3], {"id": 2}, 1]).as_array().unwrap().clone()
+        );
         assert_eq!(tape_rows, val_rows);
     }
 
@@ -1350,11 +1391,15 @@ mod tests {
         );
         assert_eq!(
             tape_book.object_values().map(serde_json::Value::from),
-            stable_tape_book.object_values().map(serde_json::Value::from)
+            stable_tape_book
+                .object_values()
+                .map(serde_json::Value::from)
         );
         assert_eq!(
             tape_book.object_entries().map(serde_json::Value::from),
-            stable_tape_book.object_entries().map(serde_json::Value::from)
+            stable_tape_book
+                .object_entries()
+                .map(serde_json::Value::from)
         );
         assert_eq!(
             tape_book
