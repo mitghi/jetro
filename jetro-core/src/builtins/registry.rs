@@ -2162,6 +2162,37 @@ mod tests {
     }
 
     #[test]
+    fn registry_expression_lowerings_describe_payload_behavior() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let lowering = pipeline_lowering(id);
+            let has_expr_lowering = matches!(
+                lowering,
+                Some(
+                    BuiltinPipelineLowering::ExprArg
+                        | BuiltinPipelineLowering::TerminalExprArg { .. }
+                )
+            );
+            if !has_expr_lowering {
+                continue;
+            }
+
+            match expr_stage(id) {
+                Some(
+                    BuiltinExprStage::Filter
+                    | BuiltinExprStage::Map
+                    | BuiltinExprStage::FlatMap
+                    | BuiltinExprStage::UniqueBy,
+                ) => {}
+                Some(BuiltinExprStage::ExprBuiltin) | None => assert!(
+                    expr_payload(id).is_some(),
+                    "{method:?} has expression lowering without payload metadata"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn registry_drives_unused_expression_stage_elision() {
         for method in [
             BuiltinMethod::TransformKeys,
