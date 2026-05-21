@@ -1064,7 +1064,6 @@ impl BuiltinId {
     }
 }
 
-// ── Main registry macro ───────────────────────────────────────────────────────
 
 // ── Trait-driven name lookup (replaces builtin_registry! macro) ───────────────
 

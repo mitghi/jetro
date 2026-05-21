@@ -2,11 +2,9 @@
 
 WHITESPACE = _{ " " | "\t" | "\n" | "\r" }
 
-// ── Character classes ─────────────────────────────────────────────────────────
 ident_char = _{ ASCII_ALPHANUMERIC | "_" }
 field_char = _{ ASCII_ALPHANUMERIC | "_" | "-" }
 
-// ── Atomic keyword rules ──────────────────────────────────────────────────────
 kw_and    = @{ "and"    ~ !ident_char }
 kw_or     = @{ "or"     ~ !ident_char }
 kw_not    = @{ "not"    ~ !ident_char }
@@ -44,7 +42,6 @@ ident      = @{ !reserved ~ (ASCII_ALPHA | "_") ~ ident_char* }
 loose_ident = @{ (ASCII_ALPHA | "_") ~ ident_char* }
 field_name = @{ (ASCII_ALPHA | "_") ~ field_char* }
 
-// ── Literals ──────────────────────────────────────────────────────────────────
 lit_null      = @{ "null"  ~ !ident_char }
 lit_true      = @{ "true"  ~ !ident_char }
 lit_false     = @{ "false" ~ !ident_char }
@@ -69,12 +66,10 @@ kind_type = @{ ("number" | "string" | "array" | "object" | "bool" | "null") ~ !i
 // ── Cast types (only valid after `as`) — superset of kind_type incl int/float
 cast_type = @{ ("int" | "float" | "number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
 
-// ── Operators ─────────────────────────────────────────────────────────────────
 cmp_op = { "~=" | "==" | "!=" | ">=" | "<=" | ">" | "<" }
 add_op = { "+" | "-" }
 mul_op = { "*" | "/" | "%" }
 
-// ── Slice / Index ─────────────────────────────────────────────────────────────
 // `idx_val` matches an integer (with optional sign). `slice_step` adds a
 // Python-style step (`[start:end:step]` or any subset). `wildcard` is the
 // `[*]` form — sugar for "every element of the array, kept as-is in read
@@ -94,13 +89,11 @@ wildcard      = { "*" }
 idx_only      = { idx_val }
 bracket_inner = { slice_step | slice_full | slice_from | slice_to | wildcard_filter | wildcard | idx_only | expr }
 
-// ── Arguments ─────────────────────────────────────────────────────────────────
 named_arg = { ident ~ ":" ~ expr }
 pos_arg   = { expr }
 arg       = { named_arg | pos_arg }
 arg_list  = { arg ~ ("," ~ arg)* }
 
-// ── Postfix operations ────────────────────────────────────────────────────────
 // Optional (null-propagation / first-of-array) is now a POSTFIX `?` after
 // the step it guards — `.field?`, `.method()?`, `..field?` — not a prefix
 // `?.field`.  The prefix form is no longer accepted.
@@ -121,7 +114,6 @@ inline_filter  = { "{" ~ expr ~ "}" }
 quantifier     = { ("?" ~ !("|" | "?")) | ("!" ~ !"=") }
 postfix = { deep_match | deep_method | descendant | method_call | dyn_field | map_into_shape | field_access | index_access | inline_filter | quantifier }
 
-// ── Expression hierarchy ──────────────────────────────────────────────────────
 expr = { cond_expr }
 
 // Python-style ternary: `a if cond else b` — right-associative, lower precedence
@@ -173,13 +165,11 @@ unary_expr = { unary_neg ~ unary_expr | postfix_expr }
 
 postfix_expr = { primary ~ postfix* }
 
-// ── Comprehension variables ────────────────────────────────────────────────────
 // Bare `a` (single var), `a, b` (pair destructure), or `[a, b]`
 // (explicit array-pattern destructure). The pattern form is sugar for the
 // 2-var form and is bound the same way at runtime.
 comp_vars = { ("[" ~ ident ~ ("," ~ ident)+ ~ "]") | (ident ~ ("," ~ ident)?) }
 
-// ── Comprehensions ─────────────────────────────────────────────────────────────
 // Multiple `if` clauses are conjoined with logical `and` at parse time so the
 // runtime sees a single combined predicate.
 list_comp = { "[" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "]" }
@@ -187,7 +177,6 @@ dict_comp = { "{" ~ expr ~ ":" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_
 set_comp  = { "{" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ "}" }
 gen_comp  = { "(" ~ expr ~ kw_for ~ comp_vars ~ kw_in ~ expr ~ (kw_if ~ expr)* ~ ")" }
 
-// ── Lambda ────────────────────────────────────────────────────────────────────
 // Each parameter is either a bare identifier or an `[a, b, ...]` array-pattern
 // destructure. Array patterns are sugar: `([k, v]) => body` desugars to
 // `__lampat_N => let k = __lampat_N[0] in let v = __lampat_N[1] in body`.
@@ -205,7 +194,6 @@ lambda_expr      = { kw_lambda ~ lambda_params ~ ":" ~ expr }
 arrow_params  = { "(" ~ (lambda_param ~ ("," ~ lambda_param)*)? ~ ")" | lambda_param }
 arrow_lambda  = { arrow_params ~ "=>" ~ expr }
 
-// ── Let ───────────────────────────────────────────────────────────────────────
 // Multi-binding: `let a=x, b=y in body` desugars to nested Let in parser.
 // Tuple binding is parser sugar: `let (a, b) = expr in body` lowers to one
 // synthetic binding plus indexed scalar lets; no runtime tuple-binding opcode.
@@ -214,7 +202,6 @@ let_target  = { let_tuple_target | ident }
 let_binding = { let_target ~ "=" ~ expr }
 let_expr    = { kw_let ~ let_binding ~ ("," ~ let_binding)* ~ kw_in ~ expr }
 
-// ── Object construction ────────────────────────────────────────────────────────
 obj_key_expr     = { loose_ident | lit_str }
 obj_field_dyn    = { "[" ~ expr ~ "]" ~ ":" ~ expr }
 obj_field_opt_v  = { obj_key_expr ~ "?" ~ ":" ~ expr }
@@ -231,15 +218,12 @@ obj_field_short       = { ident }
 obj_field             = { obj_field_dyn | obj_field_opt_v | obj_field_opt | obj_field_spread_deep | obj_field_spread_star | obj_field_spread | obj_field_kv | obj_field_short }
 obj_construct    = { "{" ~ (obj_field ~ ("," ~ obj_field)* ~ ","?)? ~ "}" }
 
-// ── Array construction ─────────────────────────────────────────────────────────
 arr_spread    = { "..." ~ expr }
 arr_elem      = { arr_spread | expr }
 arr_construct = { "[" ~ (arr_elem ~ ("," ~ arr_elem)* ~ ","?)? ~ "]" }
 
-// ── Global function calls ─────────────────────────────────────────────────────
 global_call = { ident ~ "(" ~ arg_list? ~ ")" }
 
-// ── Match expression ──────────────────────────────────────────────────────────
 // Pattern grammar.  Object/array patterns are recognised inside arm heads only,
 // so `{k: pat}` does not collide with `{k: expr}` object literals (those parse
 // as `obj_construct` in expression position).
@@ -317,7 +301,6 @@ match_expr = { kw_match ~ expr ~ kw_with ~ "{" ~ match_arm ~ ("," ~ match_arm)* 
 deep_match_op = @{ "..match!" | "..match" }
 deep_match = { deep_match_op ~ "{" ~ match_arm ~ ("," ~ match_arm)* ~ ","? ~ "}" }
 
-// ── Patch block ───────────────────────────────────────────────────────────────
 pp_wild_filter = { "[" ~ "*" ~ kw_if ~ expr ~ "]" }
 pp_wild        = { "[" ~ "*" ~ "]" }
 pp_index       = { "[" ~ idx_val ~ "]" }
@@ -328,7 +311,6 @@ patch_key      = { ident ~ patch_step* }
 patch_field    = { patch_key ~ ":" ~ expr ~ (kw_when ~ expr)? }
 patch_block    = { kw_patch ~ coalesce_expr ~ "{" ~ (patch_field ~ ("," ~ patch_field)* ~ ","?)? ~ "}" }
 
-// ── Primary ───────────────────────────────────────────────────────────────────
 // `.field` at expression start desugars to `@.field`. Useful inside
 // method arguments where the receiver is implicit (`$.users.filter(.active)`
 // ≡ `$.users.filter(@.active)`). Listed before `current` to avoid leading
@@ -359,5 +341,4 @@ primary = {
     ident
 }
 
-// ── Program ───────────────────────────────────────────────────────────────────
 program = { SOI ~ expr ~ EOI }

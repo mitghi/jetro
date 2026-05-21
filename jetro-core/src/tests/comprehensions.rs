@@ -165,7 +165,6 @@ mod list {
         assert_eq!(out, json!(["Ada", "Bob"]));
     }
 
-    // 2-variable forms ────────────────────────────────────────────────────────
 
     #[test]
     fn two_var_destructure_arrays_of_pairs() {
@@ -210,7 +209,6 @@ mod list {
         assert_eq!(out, json!(["b", "c"]));
     }
 
-    // Object source ───────────────────────────────────────────────────────────
 
     #[test]
     fn object_source_yields_entries() {
@@ -227,7 +225,6 @@ mod list {
         assert_eq!(out, json!(["a", "b"]));
     }
 
-    // Lambdas and let-bindings ────────────────────────────────────────────────
 
     #[test]
     fn iter_via_let_binding() {

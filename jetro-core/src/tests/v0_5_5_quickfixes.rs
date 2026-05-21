@@ -19,7 +19,6 @@
 use super::common::vm_query;
 use serde_json::json;
 
-// ── string escape ──────────────────────────────────────────────────────────
 
 #[test]
 fn string_escape_newline() {
@@ -60,7 +59,6 @@ fn string_escape_unknown_preserved_for_regex() {
     );
 }
 
-// ── has(v) returns boolean ──────────────────────────────────────────────────
 
 #[test]
 fn has_method_array_present() {
@@ -94,7 +92,6 @@ fn has_method_string_substring() {
     );
 }
 
-// ── remove(pred) evaluates predicate ────────────────────────────────────────
 
 #[test]
 fn remove_at_form_negatives() {
@@ -124,7 +121,6 @@ fn remove_value_form_unchanged() {
     );
 }
 
-// ── missing variadic ────────────────────────────────────────────────────────
 
 #[test]
 fn missing_single_key_boolean() {
@@ -153,7 +149,6 @@ fn missing_all_absent() {
     );
 }
 
-// ── update(path, fn) ────────────────────────────────────────────────────────
 
 #[test]
 fn update_increments_nested() {
@@ -173,7 +168,6 @@ fn update_double_deep() {
     );
 }
 
-// ── get_path multi-segment ──────────────────────────────────────────────────
 
 #[test]
 fn get_path_slash_separator() {
@@ -220,7 +214,6 @@ fn has_path_slash_works() {
     );
 }
 
-// ── dedent ──────────────────────────────────────────────────────────────────
 
 #[test]
 fn dedent_two_spaces() {
@@ -238,7 +231,6 @@ fn dedent_preserves_extra_indent() {
     );
 }
 
-// ── now ────────────────────────────────────────────────────────────────────
 
 #[test]
 fn now_returns_positive_int() {
@@ -253,7 +245,6 @@ fn now_in_patch() {
     assert!(v["ts"].as_i64().unwrap() > 0);
 }
 
-// ── enumerate / pairwise on path source ────────────────────────────────────
 
 #[test]
 fn enumerate_on_path_yields_records() {
@@ -283,7 +274,6 @@ fn pairwise_then_diff() {
     );
 }
 
-// ── zip_shape no-arg ────────────────────────────────────────────────────────
 
 #[test]
 fn zip_shape_object_to_rows() {
@@ -311,7 +301,6 @@ fn zip_shape_broadcasts_scalar() {
     assert_eq!(r[1]["tag"], json!("x"));
 }
 
-// ── group_shape no-arg ──────────────────────────────────────────────────────
 
 #[test]
 fn group_shape_buckets_by_keyset() {
@@ -323,7 +312,6 @@ fn group_shape_buckets_by_keyset() {
     assert_eq!(r["id,name"].as_array().unwrap().len(), 2);
 }
 
-// ── partition tuple ────────────────────────────────────────────────────────
 
 #[test]
 fn partition_returns_tuple() {
@@ -401,7 +389,6 @@ fn partition_chained_path_source() {
     assert_eq!(r[1].as_array().unwrap().len(), 1);
 }
 
-// ── approx_count_distinct (HLL) ─────────────────────────────────────────────
 
 #[test]
 fn approx_count_distinct_small_exact() {

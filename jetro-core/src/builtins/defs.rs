@@ -19,7 +19,6 @@ use super::{
     BuiltinViewStage,
 };
 
-// ── Helpers shared across reducer family ─────────────────────────────────────
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
 #[inline]
@@ -62,7 +61,6 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
-// ── Streaming filters ────────────────────────────────────────────────────────
 
 /// Helper: shared spec body for streaming predicate filters (`filter` and `find_all`).
 /// `find` has first-match terminal semantics and declares its own filter + first lowering.
@@ -260,7 +258,6 @@ impl Builtin for Remove {
     }
 }
 
-// ── Streaming one-to-one ─────────────────────────────────────────────────────
 
 /// Per-element projection via lambda; preserves cardinality and order.
 pub(crate) struct Map;
@@ -373,7 +370,6 @@ impl Builtin for FlatMap {
     }
 }
 
-// ── Bounded prefix / positional ──────────────────────────────────────────────
 
 /// Take first N elements; bounded positional slice.
 pub(crate) struct Take;
@@ -541,7 +537,6 @@ impl Builtin for Last {
     }
 }
 
-// ── Bounded prefix predicates ────────────────────────────────────────────────
 
 /// Take elements while predicate holds; stops at first failure.
 pub(crate) struct TakeWhile;
@@ -661,7 +656,6 @@ impl Builtin for DropWhile {
     }
 }
 
-// ── Reducer sinks ────────────────────────────────────────────────────────────
 
 /// Element count via scalar view sink; degenerate non-numeric reducer.
 pub(crate) struct Len;
@@ -955,7 +949,6 @@ impl Builtin for MinBy {
     }
 }
 
-// ── Indexed/element-only streaming ───────────────────────────────────────────
 
 /// `enumerate` — pairs each element with its index. Operates on the
 /// whole receiver array as one unit; NOT marked `.element()` because the
@@ -996,7 +989,6 @@ impl Builtin for Pairwise {
     }
 }
 
-// ── Expanding (no lambda) ────────────────────────────────────────────────────
 
 #[inline]
 fn expand_simple_spec() -> BuiltinSpec {
@@ -1130,7 +1122,6 @@ impl Builtin for Bytes {
     }
 }
 
-// ── Find-first / find-one ────────────────────────────────────────────────────
 
 /// `find_first(pred)` — terminal expr-arg returning first match with First demand.
 pub(crate) struct FindFirst;
@@ -1164,7 +1155,6 @@ impl Builtin for FindOne {
     }
 }
 
-// ── Positional miscellaneous ─────────────────────────────────────────────────
 
 #[inline]
 fn positional_native_spec() -> BuiltinSpec {
@@ -1203,7 +1193,6 @@ impl Builtin for Collect {
     }
 }
 
-// ── Barrier family ───────────────────────────────────────────────────────────
 
 #[inline]
 fn barrier_default_spec() -> BuiltinSpec {
@@ -1433,7 +1422,6 @@ impl Builtin for Fold {
     fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
 }
 
-// ── Keyed reducers ───────────────────────────────────────────────────────────
 
 /// `group_by(key)` — keyed reducer collecting elements per key.
 pub(crate) struct GroupBy;
@@ -1570,7 +1558,6 @@ impl Builtin for IndexBy {
     }
 }
 
-// ── Distinct / unique ────────────────────────────────────────────────────────
 
 #[inline]
 fn unique_spec() -> BuiltinSpec {
@@ -1671,7 +1658,6 @@ impl Builtin for UniqueBy {
     }
 }
 
-// ── Reverse ──────────────────────────────────────────────────────────────────
 
 /// `reverse` — full-barrier order reversal; cancels with adjacent reverse.
 pub(crate) struct Reverse;
@@ -1853,7 +1839,6 @@ impl Builtin for ZipShape {
     }
 }
 
-// ── Object operations ────────────────────────────────────────────────────────
 
 #[inline]
 fn object_element_spec() -> BuiltinSpec {
@@ -2251,7 +2236,6 @@ impl Builtin for FilterValues {
     }
 }
 
-// ── Path operations ──────────────────────────────────────────────────────────
 
 #[inline]
 fn path_element_spec() -> BuiltinSpec {
@@ -2369,7 +2353,6 @@ impl Builtin for UnflattenKeys {
     }
 }
 
-// ── Deep operations ──────────────────────────────────────────────────────────
 
 #[inline]
 fn deep_simple_spec() -> BuiltinSpec {
@@ -2453,7 +2436,6 @@ impl Builtin for DeepLike {
     }
 }
 
-// ── Serialization / relational / mutation ────────────────────────────────────
 
 #[inline]
 fn serialization_spec() -> BuiltinSpec {
@@ -2676,7 +2658,6 @@ impl Builtin for Zscore {
     }
 }
 
-// ── Scalar element-only (basic) ──────────────────────────────────────────────
 
 #[inline]
 fn scalar_native_element_spec() -> BuiltinSpec {
@@ -2924,7 +2905,6 @@ scalar_view_predicate_element! {
     Matches => Matches, "matches";
 }
 
-// ── Scalar with pipeline lowerings ───────────────────────────────────────────
 
 /// `slice(start, end?)` — int-range scalar element with pipeline lowering.
 pub(crate) struct Slice;
@@ -3157,7 +3137,6 @@ fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
     }
 }
 
-// ── Cancellation-aware encode/decode pairs ───────────────────────────────────
 // Each is a scalar element with the same spec body as `scalar_native_element_spec`
 // but advertises an algebraic cancellation rule used by the optimizer to fuse
 // adjacent inverse pairs (e.g. `to_base64(from_base64(x))` → identity).

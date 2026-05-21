@@ -36,10 +36,8 @@ pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
 fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     let method = plan.builtin_method();
     match plan {
-        // ── Leaf: the row source ───────────────────────────────────────────
         LogicalPlan::Source(source) => Some((source, vec![], vec![], Sink::Collect)),
 
-        // ── Streaming transforms ───────────────────────────────────────────
         LogicalPlan::Filter { input, predicate } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&predicate);
@@ -72,7 +70,6 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             collect_expr_builtin_stage(*input, method?, predicate)
         }
 
-        // ── Positional ─────────────────────────────────────────────────────
         LogicalPlan::Take { input, n } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             stages.push(Stage::usize_builtin(method?, n)?);
@@ -87,7 +84,6 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             Some((source, stages, exprs, sink))
         }
 
-        // ── Ordering / dedup ───────────────────────────────────────────────
         LogicalPlan::Sort { input, spec } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             stages.push(Stage::sort_builtin(method?, spec)?);
@@ -118,7 +114,6 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             Some((source, stages, exprs, sink))
         }
 
-        // ── Keyed reducers ─────────────────────────────────────────────────
         LogicalPlan::GroupBy { input, key } => {
             collect_expr_builtin_stage(*input, method?, key)
         }

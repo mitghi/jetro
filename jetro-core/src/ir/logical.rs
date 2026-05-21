@@ -18,28 +18,23 @@ pub(crate) enum LogicalPlan {
     /// Row source (document root, field path, etc.).
     Source(Source),
 
-    // ── Streaming transforms ──────────────────────────────────────────────
     Filter     { input: Box<Self>, predicate: Expr },
     Map        { input: Box<Self>, projection: Expr },
     FlatMap    { input: Box<Self>, expansion: Expr },
     TakeWhile  { input: Box<Self>, predicate: Expr },
     DropWhile  { input: Box<Self>, predicate: Expr },
 
-    // ── Positional ────────────────────────────────────────────────────────
     Take { input: Box<Self>, n: usize },
     Skip { input: Box<Self>, n: usize },
 
-    // ── Ordering / dedup ──────────────────────────────────────────────────
     Sort   { input: Box<Self>, spec: SortSpec },
     Unique { input: Box<Self>, key: Option<Expr> },
     Reverse { input: Box<Self> },
 
-    // ── Keyed reducers ────────────────────────────────────────────────────
     GroupBy  { input: Box<Self>, key: Expr },
     CountBy  { input: Box<Self>, key: Expr },
     IndexBy  { input: Box<Self>, key: Expr },
 
-    // ── Terminal sinks ────────────────────────────────────────────────────
     First  (Box<Self>),
     Last   (Box<Self>),
     Sum    (Box<Self>),
@@ -49,7 +44,6 @@ pub(crate) enum LogicalPlan {
     Count  (Box<Self>),
     ApproxCountDistinct(Box<Self>),
 
-    // ── VM fallback ───────────────────────────────────────────────────────
     /// Any expression the logical planner could not classify; sentinel for the fallback path.
     ScalarExpr,
 }

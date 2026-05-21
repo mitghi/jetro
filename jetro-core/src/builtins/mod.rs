@@ -16,7 +16,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum BuiltinMethod {
-    // ── Object / structural inspection ────────────────────────────────────
     /// Returns the number of elements in an array, object, or string.
     Len = 0,
     /// Returns an array of all keys of an object.
@@ -44,7 +43,6 @@ pub enum BuiltinMethod {
     /// Lifts the current input source into a row stream.
     Rows,
 
-    // ── Numeric aggregates ─────────────────────────────────────────────────
     /// Sums all numeric elements; accepts an optional projection lambda.
     Sum,
     /// Computes the arithmetic mean; accepts an optional projection lambda.
@@ -80,7 +78,6 @@ pub enum BuiltinMethod {
     /// Inverse of `explode`; collapses rows sharing the same non-field keys.
     Implode,
 
-    // ── Streaming / array transforms ──────────────────────────────────────
     /// Keeps only elements for which the predicate is truthy.
     Filter,
     /// Projects each element through the lambda.
@@ -175,7 +172,6 @@ pub enum BuiltinMethod {
     /// Applies named expressions to one value and collects them into an object.
     ZipShape,
 
-    // ── Object transforms ──────────────────────────────────────────────────
     /// Selects a named subset of fields from an object or array of objects.
     Pick,
     /// Removes named fields from an object or array of objects.
@@ -199,7 +195,6 @@ pub enum BuiltinMethod {
     /// Pivots an array of objects into a nested object or flat map.
     Pivot,
 
-    // ── Path operations ────────────────────────────────────────────────────
     /// Retrieves a value at a dot-notation path.
     GetPath,
     /// Sets a value at a dot-notation path, returning the modified document.
@@ -215,13 +210,11 @@ pub enum BuiltinMethod {
     /// Reconstructs a nested object from dot-notation flat keys.
     UnflattenKeys,
 
-    // ── Serialisation ──────────────────────────────────────────────────────
     /// Serialises an array/object to CSV text.
     ToCsv,
     /// Serialises an array/object to TSV text.
     ToTsv,
 
-    // ── Miscellaneous scalar helpers ───────────────────────────────────────
     /// Returns the receiver if non-null; otherwise returns the argument.
     Or,
     /// Returns true if the object contains the given key.
@@ -243,7 +236,6 @@ pub enum BuiltinMethod {
     /// Mutates the receiver in place using a lambda (chain-write terminal).
     Update,
 
-    // ── Numeric / math ─────────────────────────────────────────────────────
     /// Rounds up to the nearest integer.
     Ceil,
     /// Rounds down to the nearest integer.
@@ -275,7 +267,6 @@ pub enum BuiltinMethod {
     /// Normalises each element to its z-score relative to the array mean/std.
     Zscore,
 
-    // ── String transforms ──────────────────────────────────────────────────
     /// Converts a string to all-uppercase.
     Upper,
     /// Converts a string to all-lowercase.
@@ -401,7 +392,6 @@ pub enum BuiltinMethod {
     /// Infers a structural schema description from the value.
     Schema,
 
-    // ── Relational ─────────────────────────────────────────────────────────
     /// Performs an inner equi-join of two arrays of objects on matching key fields.
     EquiJoin,
 

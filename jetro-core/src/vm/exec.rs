@@ -4671,7 +4671,6 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────
 // View-domain match runtime.
 //
 // `exec_match_view` mirrors `VM::exec_match` but operates against a
@@ -4690,7 +4689,6 @@ fn hash_structure_into(v: &Val, h: &mut DefaultHasher, depth: usize) {
 // same query is supported because the chain IR labels stages with the
 // kind they need (`ChainOp::Match` is domain-agnostic; the executor
 // chooses the runtime).
-// ─────────────────────────────────────────────────────────────────────
 
 use crate::data::view::ValueView;
 use crate::util::JsonView;
