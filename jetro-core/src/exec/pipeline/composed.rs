@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::builtins::{
     registry::{
         keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
-        view_stage, BuiltinId,
+        pipeline_stage_caps_input_prefix, pipeline_stage_is_positional, view_stage, BuiltinId,
     },
     BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     BuiltinViewStage,
@@ -84,24 +84,20 @@ impl<'a> ComposedStageBuilder<'a> {
                     keys: Arc::clone(keys),
                 })
             }
-            (
-                Stage::UsizeBuiltin {
-                    method: crate::builtins::BuiltinMethod::Take,
-                    value,
-                },
-                _,
-            ) => Box::new(cmp::Take {
-                remaining: Cell::new(*value),
-            }),
-            (
-                Stage::UsizeBuiltin {
-                    method: crate::builtins::BuiltinMethod::Skip,
-                    value,
-                },
-                _,
-            ) => Box::new(cmp::Skip {
-                remaining: Cell::new(*value),
-            }),
+            (Stage::UsizeBuiltin { method, value }, _)
+                if pipeline_stage_caps_input_prefix(BuiltinId::from_method(*method)) =>
+            {
+                Box::new(cmp::Take {
+                    remaining: Cell::new(*value),
+                })
+            }
+            (Stage::UsizeBuiltin { method, value }, _)
+                if pipeline_stage_is_positional(BuiltinId::from_method(*method)) =>
+            {
+                Box::new(cmp::Skip {
+                    remaining: Cell::new(*value),
+                })
+            }
             (Stage::Builtin(call), _)
                 if view_stage(BuiltinId::from_method(call.method))
                     == Some(BuiltinViewStage::Compact) =>
@@ -857,7 +853,8 @@ where
             cmp::StageOutput::Filtered => continue,
             cmp::StageOutput::Many(items) => {
                 for item in items {
-                    let done = match sink.observe_with_vm(item.as_ref(), projection, stage_builder) {
+                    let done = match sink.observe_with_vm(item.as_ref(), projection, stage_builder)
+                    {
                         Ok(done) => done,
                         Err(err) => return Some(Err(err)),
                     };
