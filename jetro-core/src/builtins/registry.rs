@@ -1498,6 +1498,8 @@ mod tests {
             BuiltinMethod::IndicesOf,
             BuiltinMethod::Replace,
             BuiltinMethod::ReplaceAll,
+            BuiltinMethod::ToCsv,
+            BuiltinMethod::ToTsv,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),

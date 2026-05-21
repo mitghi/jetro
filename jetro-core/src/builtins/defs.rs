@@ -2425,6 +2425,8 @@ impl Builtin for DeepLike {
 fn serialization_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Serialization, BuiltinCardinality::OneToOne)
         .indexed()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .cost(20.0)
 }
 
