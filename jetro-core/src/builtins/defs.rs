@@ -58,6 +58,7 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
         .view_native()
         .predicate_sink(sink)
         .cost(10.0)
+        .demand_law(BuiltinDemandLaw::PredicateMapLike)
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -1158,6 +1159,7 @@ impl Builtin for FindOne {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
             .predicate_sink(BuiltinPredicateSink::FindOne)
             .cost(10.0)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .row_stream_op(BuiltinRowStreamOp::FindFirst)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
@@ -3066,6 +3068,7 @@ impl Builtin for Index {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Index)
             .membership_sink(BuiltinMembershipSink::Index)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -3085,6 +3088,7 @@ impl Builtin for IndicesOf {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::IndicesOf)
             .membership_sink(BuiltinMembershipSink::IndicesOf)
+            .demand_law(BuiltinDemandLaw::PredicateMapLike)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]

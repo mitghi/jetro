@@ -1554,6 +1554,19 @@ mod tests {
     }
 
     #[test]
+    fn registry_pipeline_lowerings_participate_in_demand_model() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if pipeline_lowering(id).is_some() {
+                assert!(
+                    participates_in_demand(id),
+                    "{method:?} has pipeline lowering but no demand metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_view_scalar_projection_matches_json_view_dispatch() {
         for (method, _, _) in all_method_entries() {
             assert_eq!(
