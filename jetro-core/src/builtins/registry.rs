@@ -2771,6 +2771,54 @@ mod tests {
     }
 
     #[test]
+    fn registry_applies_view_projection_ops() {
+        use crate::builtins::BuiltinArgs;
+        use crate::data::view::{ValView, ValueView};
+
+        fn apply(method: BuiltinMethod, args: BuiltinArgs) -> Val {
+            let doc = Val::from(&serde_json::json!({
+                "obj": {"a": 1, "b": null, "nested": {"x": 7}},
+                "arr": ["a", 2, true],
+                "text": "needle haystack"
+            }));
+            let view = ValView::new(&doc).field("obj");
+            match apply_view_projection(BuiltinId::from_method(method), &args, view).unwrap() {
+                ViewProjectionResult::View(view) => view.materialize(),
+                ViewProjectionResult::Owned(value) => value,
+            }
+        }
+
+        assert_eq!(
+            apply(
+                BuiltinMethod::HasKey,
+                BuiltinArgs::Str(std::sync::Arc::from("a"))
+            ),
+            Val::Bool(true)
+        );
+        assert_eq!(
+            apply(
+                BuiltinMethod::Missing,
+                BuiltinArgs::Str(std::sync::Arc::from("b"))
+            ),
+            Val::Bool(true)
+        );
+        assert_eq!(
+            apply(
+                BuiltinMethod::GetPath,
+                BuiltinArgs::Str(std::sync::Arc::from("nested.x"))
+            ),
+            Val::Int(7)
+        );
+        assert_eq!(
+            apply(
+                BuiltinMethod::HasPath,
+                BuiltinArgs::Str(std::sync::Arc::from("nested.x"))
+            ),
+            Val::Bool(true)
+        );
+    }
+
+    #[test]
     fn registry_drives_array_selector_classification() {
         assert_eq!(
             array_selector(BuiltinId::from_method(BuiltinMethod::First)),
