@@ -10,7 +10,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, dispatches_scalar_direct, view_projection, BuiltinId,
+    by_name as builtin_by_name, dispatches_scalar_direct, view_object_projection,
+    view_projection, BuiltinId,
 };
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
@@ -718,7 +719,7 @@ fn receiver_pipeline_step_is_direct_view_projection(step: &Step) -> bool {
         return false;
     };
     BuiltinCall::from_literal_ast_args(name, args).is_some_and(|call| {
-        view_projection(BuiltinId::from_method(call.method))
+        view_object_projection(BuiltinId::from_method(call.method)).is_some()
     })
 }
 
