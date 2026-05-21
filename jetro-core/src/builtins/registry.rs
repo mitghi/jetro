@@ -583,6 +583,43 @@ pub(crate) fn is_idempotent(id: BuiltinId) -> bool {
         .is_some_and(|method| method.spec().idempotent)
 }
 
+/// Return whether builtin `id` accepts a lambda/expression argument at runtime.
+#[inline]
+pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
+    let Some(method) = id.method() else {
+        return false;
+    };
+    let spec = method.spec();
+    spec.expr_stage.is_some()
+        || spec.object_lambda.is_some()
+        || spec.keyed_reducer.is_some()
+        || spec.arg_extreme_sink.is_some()
+        || matches!(
+            spec.lowering,
+            Some(
+                BuiltinPipelineLowering::ExprArg
+                    | BuiltinPipelineLowering::TerminalExprArg { .. }
+                    | BuiltinPipelineLowering::Sort
+            )
+        )
+        || spec
+            .sink
+            .is_some_and(|sink| sink.accepts_predicate)
+        || matches!(
+            method,
+            BuiltinMethod::Any
+                | BuiltinMethod::All
+                | BuiltinMethod::FindIndex
+                | BuiltinMethod::IndicesWhere
+                | BuiltinMethod::FindOne
+                | BuiltinMethod::Accumulate
+                | BuiltinMethod::Fold
+                | BuiltinMethod::Partition
+                | BuiltinMethod::Pivot
+                | BuiltinMethod::Update
+        )
+}
+
 /// Return whether builtin `id` should bypass streaming and run as a direct
 /// scalar/object call on the receiver produced by the chain.
 #[inline]
@@ -1537,6 +1574,56 @@ mod tests {
             BuiltinMethod::ParseInt,
         ] {
             assert!(!is_idempotent(BuiltinId::from_method(method)), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_marks_lambda_arg_builtins() {
+        for method in [
+            BuiltinMethod::Filter,
+            BuiltinMethod::Map,
+            BuiltinMethod::FlatMap,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Any,
+            BuiltinMethod::All,
+            BuiltinMethod::Count,
+            BuiltinMethod::Find,
+            BuiltinMethod::FindAll,
+            BuiltinMethod::FindFirst,
+            BuiltinMethod::FindIndex,
+            BuiltinMethod::GroupBy,
+            BuiltinMethod::CountBy,
+            BuiltinMethod::IndexBy,
+            BuiltinMethod::TakeWhile,
+            BuiltinMethod::DropWhile,
+            BuiltinMethod::MaxBy,
+            BuiltinMethod::MinBy,
+            BuiltinMethod::Accumulate,
+            BuiltinMethod::Fold,
+            BuiltinMethod::Partition,
+            BuiltinMethod::TransformKeys,
+            BuiltinMethod::TransformValues,
+            BuiltinMethod::FilterKeys,
+            BuiltinMethod::FilterValues,
+            BuiltinMethod::Pivot,
+            BuiltinMethod::Update,
+        ] {
+            assert!(
+                accepts_lambda_arg(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::Take,
+            BuiltinMethod::Len,
+            BuiltinMethod::HasKey,
+        ] {
+            assert!(
+                !accepts_lambda_arg(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
         }
     }
 

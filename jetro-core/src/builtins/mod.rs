@@ -454,30 +454,7 @@ impl BuiltinMethod {
     /// Returns true when the method requires a lambda expression as its first argument.
     /// The pipeline planner uses this to distinguish element vs. expression stages.
     pub(crate) fn is_lambda_method(self) -> bool {
-        matches!(
-            self,
-            Self::Filter
-                | Self::Map
-                | Self::FlatMap
-                | Self::Sort
-                | Self::Any
-                | Self::All
-                | Self::Count
-                | Self::GroupBy
-                | Self::CountBy
-                | Self::IndexBy
-                | Self::TakeWhile
-                | Self::DropWhile
-                | Self::Accumulate
-                | Self::Fold
-                | Self::Partition
-                | Self::TransformKeys
-                | Self::TransformValues
-                | Self::FilterKeys
-                | Self::FilterValues
-                | Self::Pivot
-                | Self::Update
-        )
+        registry::accepts_lambda_arg(registry::BuiltinId::from_method(self))
     }
 }
 
