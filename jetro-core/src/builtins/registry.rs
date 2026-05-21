@@ -1456,6 +1456,14 @@ mod tests {
             BuiltinMethod::Keys,
             BuiltinMethod::Values,
             BuiltinMethod::Entries,
+            BuiltinMethod::ToPairs,
+            BuiltinMethod::FromPairs,
+            BuiltinMethod::Invert,
+            BuiltinMethod::Merge,
+            BuiltinMethod::DeepMerge,
+            BuiltinMethod::Defaults,
+            BuiltinMethod::Rename,
+            BuiltinMethod::Implode,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),

@@ -1891,6 +1891,8 @@ impl Builtin for Entries {
 #[inline]
 fn object_simple_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
 }
 
 /// `to_pairs` — convert object to array of `[k, v]` pairs.
