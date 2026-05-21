@@ -664,7 +664,7 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        matches!(self, Self::Map { .. })
+        self.view_stage().cardinality() == BuiltinCardinality::OneToOne
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.

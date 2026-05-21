@@ -1294,7 +1294,7 @@ impl BuiltinViewStage {
         }
     }
 
-/// Returns the output row-count relationship of this stage.
+    /// Returns the output row-count relationship of this stage.
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
