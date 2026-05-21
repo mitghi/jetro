@@ -468,6 +468,14 @@ mod tests {
     }
 
     #[test]
+    fn filter_numeric_reducer_keeps_predicate_payload_need() {
+        let ops = [op(BuiltinMethod::Filter), op(BuiltinMethod::Sum)];
+        let demand = source_demand(&ops, Demand::RESULT);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+    }
+
+    #[test]
     fn take_filter_first_caps_upstream_to_take_bound() {
         let ops = [
             op(BuiltinMethod::Map),

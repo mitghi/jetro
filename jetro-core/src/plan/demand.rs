@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 /// Describes how much of each element's content a pipeline stage actually
 /// needs to read, used to skip deserialisation or evaluation work.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
     /// The stage only counts matching elements; payload can be skipped unless predicates need it.
@@ -34,12 +35,21 @@ impl ValueNeed {
     pub(crate) fn merge(self, other: Self) -> Self {
         use ValueNeed::*;
         match (self, other) {
-            (Whole, _) | (_, Whole) => Whole,
-            (Numeric, _) | (_, Numeric) => Numeric,
-            (Projection, _) | (_, Projection) => Projection,
-            (Predicate, _) | (_, Predicate) => Predicate,
-            (ExistsOnly, _) | (_, ExistsOnly) => ExistsOnly,
             (CountOnly, CountOnly) => CountOnly,
+            (ExistsOnly, ExistsOnly) => ExistsOnly,
+            (Predicate, Predicate) => Predicate,
+            (Projection, Projection) => Projection,
+            (Whole, Whole) => Whole,
+            (Numeric, Numeric) => Numeric,
+            (Whole, _) | (_, Whole) => Whole,
+            (CountOnly, need) | (need, CountOnly) => need,
+            (ExistsOnly, need) | (need, ExistsOnly) => need,
+            (Numeric, Predicate)
+            | (Predicate, Numeric)
+            | (Numeric, Projection)
+            | (Projection, Numeric)
+            | (Predicate, Projection)
+            | (Projection, Predicate) => Whole,
         }
     }
 }
@@ -323,7 +333,7 @@ impl Demand {
 mod tests {
     use std::sync::Arc;
 
-    use super::{FieldDemand, FieldSet, PullDemand, SinkResultDemand};
+    use super::{FieldDemand, FieldSet, PullDemand, SinkResultDemand, ValueNeed};
 
     fn paths(need: FieldDemand) -> Vec<String> {
         match need {
@@ -354,6 +364,26 @@ mod tests {
         assert_eq!(
             paths(FieldDemand::Fields(prefixed)),
             vec!["user.name", "user.address.city"]
+        );
+    }
+
+    #[test]
+    fn value_need_merge_keeps_payload_requirements_conservative() {
+        assert_eq!(
+            ValueNeed::CountOnly.merge(ValueNeed::Predicate),
+            ValueNeed::Predicate
+        );
+        assert_eq!(
+            ValueNeed::ExistsOnly.merge(ValueNeed::Projection),
+            ValueNeed::Projection
+        );
+        assert_eq!(
+            ValueNeed::Numeric.merge(ValueNeed::Predicate),
+            ValueNeed::Whole
+        );
+        assert_eq!(
+            ValueNeed::Projection.merge(ValueNeed::Predicate),
+            ValueNeed::Whole
         );
     }
 
