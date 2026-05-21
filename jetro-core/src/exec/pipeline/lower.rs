@@ -616,36 +616,18 @@ fn push_expr_stage(
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
     let id = BuiltinId::from_method(method);
-    let stage_kind = expr_stage(id)?;
-    match stage_kind {
-        BuiltinExprStage::Filter => {
-            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
-            stage_exprs.push(arg_expr(arg));
-        }
+    match expr_stage(id)? {
         BuiltinExprStage::Map => match try_decode_map_body(arg) {
             Some(plan) => {
                 stages.push(Stage::CompiledMap(Arc::new(plan)));
                 stage_exprs.push(arg_expr(arg));
             }
-            None => {
-                stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
-                stage_exprs.push(arg_expr(arg));
-            }
-        },
-        BuiltinExprStage::FlatMap => {
-            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
-            stage_exprs.push(arg_expr(arg));
+            None => push_expr_builtin(method, arg, stages, stage_exprs)?,
         }
-        BuiltinExprStage::UniqueBy => {
-            stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
-            stage_exprs.push(arg_expr(arg));
-        }
-        // Remaining expression-argument lowerings route through the generic
-        // ExprBuiltin stage. The caller has already checked registry lowering
-        // metadata, so new supported builtins do not need another list here.
-        BuiltinExprStage::ExprBuiltin => {
-            push_expr_builtin(method, arg, stages, stage_exprs)?;
-        }
+        BuiltinExprStage::Filter
+        | BuiltinExprStage::FlatMap
+        | BuiltinExprStage::UniqueBy
+        | BuiltinExprStage::ExprBuiltin => push_expr_builtin(method, arg, stages, stage_exprs)?,
     }
     Some(())
 }
