@@ -1608,6 +1608,22 @@ mod tests {
     }
 
     #[test]
+    fn registry_relational_barriers_request_all_input() {
+        let downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::Whole,
+            order: true,
+        };
+        let id = BuiltinId::from_method(BuiltinMethod::EquiJoin);
+
+        assert!(demand_is_conservative_barrier(id));
+        let demand = propagate_demand(id, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::All);
+        assert_eq!(demand.value, ValueNeed::Whole);
+        assert!(demand.order);
+    }
+
+    #[test]
     fn registry_view_scalar_projection_matches_json_view_dispatch() {
         for (method, _, _) in all_method_entries() {
             assert_eq!(
