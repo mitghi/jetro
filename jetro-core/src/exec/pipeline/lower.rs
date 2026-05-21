@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     builtin_sink, by_name, cancellation as builtin_cancellation, count_sink_accepts_predicate,
     expr_stage, nullary_stage, pipeline_accepts_arity, pipeline_chain_operator,
-    pipeline_lowering, pipeline_stage_is_positional, view_stage, BuiltinId,
+    pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
@@ -397,10 +397,7 @@ fn is_take_stage(stage: &Stage) -> bool {
     stage
         .descriptor()
         .and_then(|desc| desc.method)
-        .is_some_and(|method| {
-            method == BuiltinMethod::Take
-                && pipeline_stage_is_positional(BuiltinId::from_method(method))
-        })
+        .is_some_and(|method| pipeline_stage_caps_input_prefix(BuiltinId::from_method(method)))
 }
 
 // Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode; detects constant filter stages.

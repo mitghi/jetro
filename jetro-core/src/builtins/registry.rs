@@ -184,6 +184,12 @@ pub(crate) fn pipeline_stage_is_positional(id: BuiltinId) -> bool {
     matches!(demand_law(id), BuiltinDemandLaw::Take | BuiltinDemandLaw::Skip)
 }
 
+/// Return true when the stage caps upstream input to a bounded prefix.
+#[inline]
+pub(crate) fn pipeline_stage_caps_input_prefix(id: BuiltinId) -> bool {
+    matches!(demand_law(id), BuiltinDemandLaw::Take)
+}
+
 /// Return true when the stage only changes row order, not membership or row values.
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
@@ -1786,6 +1792,12 @@ mod tests {
             BuiltinMethod::Take
         )));
         assert!(pipeline_stage_is_positional(BuiltinId::from_method(
+            BuiltinMethod::Skip
+        )));
+        assert!(pipeline_stage_caps_input_prefix(BuiltinId::from_method(
+            BuiltinMethod::Take
+        )));
+        assert!(!pipeline_stage_caps_input_prefix(BuiltinId::from_method(
             BuiltinMethod::Skip
         )));
         assert!(!pipeline_stage_is_positional(BuiltinId::from_method(
