@@ -15,8 +15,8 @@ use crate::builtins::registry::{
     BuiltinId,
 };
 use crate::builtins::{
-    BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSelectionPosition,
-    BuiltinSinkAccumulator, BuiltinViewStage,
+    BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
+    BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -731,10 +731,10 @@ fn terminal_sink_for_method(
     let spec = builtin_sink(BuiltinId::from_method(method))?;
     match spec.accumulator {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
-            Some(Sink::ApproxCountDistinct)
+            Sink::approx_distinct_builtin(method)
         }
         BuiltinSinkAccumulator::Count => match args {
-            [] => Some(Sink::Reducer(ReducerSpec::count())),
+            [] => Sink::count_builtin(method),
             [arg] if count_sink_accepts_predicate(BuiltinId::from_method(method)) => Some(Sink::Reducer(
                 ReducerSpec::count_with_predicate(compile_subexpr(arg)?, arg_expr(arg)),
             )),
@@ -751,18 +751,11 @@ fn terminal_sink_for_method(
                 [arg] => arg_expr(arg),
                 _ => return None,
             };
-            Some(Sink::Reducer(ReducerSpec::numeric(
-                method,
-                projection,
-                projection_expr,
-            )?))
+            Sink::numeric_builtin(method, projection, projection_expr)
         }
-        BuiltinSinkAccumulator::SelectOne(position) => match args {
-            [] => Some(Sink::Terminal(method)),
-            [arg] => Some(Sink::SelectMany {
-                n: usize_arg_at_least(arg, 1)?,
-                from_end: matches!(position, BuiltinSelectionPosition::Last),
-            }),
+        BuiltinSinkAccumulator::SelectOne(_) => match args {
+            [] => Sink::terminal_builtin(method),
+            [arg] => Sink::select_many_builtin(method, usize_arg_at_least(arg, 1)?),
             _ => None,
         },
         _ => None,

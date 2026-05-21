@@ -126,6 +126,19 @@ impl Sink {
         .then_some(Sink::Terminal(method))
     }
 
+    /// Build a multi-row selection sink from builtin metadata.
+    pub(crate) fn select_many_builtin(method: BuiltinMethod, n: usize) -> Option<Self> {
+        let BuiltinSinkAccumulator::SelectOne(position) =
+            builtin_sink(BuiltinId::from_method(method))?.accumulator
+        else {
+            return None;
+        };
+        Some(Sink::SelectMany {
+            n,
+            from_end: matches!(position, BuiltinSelectionPosition::Last),
+        })
+    }
+
     /// Build a plain count reducer from builtin metadata.
     pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
         matches!(
