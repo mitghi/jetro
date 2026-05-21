@@ -197,14 +197,8 @@ impl SourceAccessMode {
         match self {
             Self::Reverse { outputs } => PullDemand::LastInput(outputs),
             Self::ForwardBounded(inputs) => PullDemand::FirstInput(inputs),
-            Self::Indexed(_) | Self::IndexedFromEnd(_) | Self::IndexedSuffix(_) => {
-                PullDemand::All
-            }
-            Self::Forward | Self::MaterializedFallback
-                if matches!(requested, PullDemand::LastInput(_)) =>
-            {
-                PullDemand::All
-            }
+            Self::Indexed(_) | Self::IndexedFromEnd(_) | Self::IndexedSuffix(_) => PullDemand::All,
+            Self::Forward | Self::MaterializedFallback if requested.is_suffix() => PullDemand::All,
             Self::Forward | Self::MaterializedFallback => requested,
         }
     }
@@ -323,8 +317,7 @@ mod source_capability_tests {
             SourceAccessMode::IndexedFromEnd(0)
         );
         assert_eq!(
-            SourceCapabilities::VIEW_ARRAY
-                .choose_stage_access(PullDemand::LastInput(2), &[filter]),
+            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(2), &[filter]),
             SourceAccessMode::Reverse { outputs: 2 }
         );
         assert_eq!(
@@ -960,7 +953,10 @@ mod tests {
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
         assert!(matches!(compact, ViewStageCapability::Compact));
-        assert!(matches!(remove, ViewStageCapability::RemoveValue(Val::Int(2))));
+        assert!(matches!(
+            remove,
+            ViewStageCapability::RemoveValue(Val::Int(2))
+        ));
         let cancel = crate::builtins::BuiltinMethod::Reverse
             .spec()
             .cancellation
@@ -1262,7 +1258,10 @@ mod tests {
 
         let prefix = view_prefix_capabilities(&body).unwrap();
         assert_eq!(prefix.consumed_stages, 2);
-        assert!(matches!(prefix.stages[0], ViewStageCapability::Map { kernel: 0 }));
+        assert!(matches!(
+            prefix.stages[0],
+            ViewStageCapability::Map { kernel: 0 }
+        ));
         assert!(matches!(
             prefix.stages[1],
             ViewStageCapability::RemoveValue(Val::Int(2))
