@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::BuiltinMethod;
 use crate::parse::ast::{
     Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
@@ -131,14 +132,12 @@ impl SymbolicEmitter {
         self.out_kernels.push(kernel);
     }
 
-    fn push_expr_stage(&mut self, expr: Expr, kind: ExprStageKind) {
+    fn push_expr_stage(&mut self, expr: Expr, method: BuiltinMethod) {
         let expr = simplify_expr(expr);
         let prog = compile_stage_expr(&expr);
         let kernel = BodyKernel::classify(&prog);
-        let stage = match kind {
-            ExprStageKind::Filter => Stage::Filter(prog, crate::builtins::BuiltinViewStage::Filter),
-            ExprStageKind::Map => Stage::Map(prog, crate::builtins::BuiltinViewStage::Map),
-        };
+        let stage = Stage::expr_stage_builtin(method, prog)
+            .expect("symbolic expression stage must be registry-backed");
         self.out_stages.push(stage);
         self.out_exprs.push(Some(Arc::new(expr)));
         self.out_kernels.push(kernel);
@@ -147,7 +146,7 @@ impl SymbolicEmitter {
     fn flush_predicate(&mut self) {
         if let Some(pred) = self.predicate.take() {
             if !matches!(pred, Expr::Bool(true)) {
-                self.push_expr_stage(pred, ExprStageKind::Filter);
+                self.push_expr_stage(pred, BuiltinMethod::Filter);
             }
         }
     }
@@ -155,7 +154,7 @@ impl SymbolicEmitter {
     fn flush_item(&mut self) {
         if !matches!(self.item, Expr::Current) {
             let item = std::mem::replace(&mut self.item, Expr::Current);
-            self.push_expr_stage(item, ExprStageKind::Map);
+            self.push_expr_stage(item, BuiltinMethod::Map);
         }
     }
 
@@ -190,12 +189,6 @@ impl SymbolicEmitter {
     fn requires_order(&self) -> bool {
         self.demand.chain.order || self.demand.positional.is_some()
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ExprStageKind {
-    Filter,
-    Map,
 }
 
 fn stage_kernel(stage: &Stage) -> BodyKernel {
