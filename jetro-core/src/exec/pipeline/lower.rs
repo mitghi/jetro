@@ -502,7 +502,11 @@ pub(super) fn lower_method_from_registry(
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
     sink: &mut Sink,
 ) -> Option<()> {
-    let Some(lowering) = pipeline_lowering(BuiltinId::from_method(method)) else {
+    let id = BuiltinId::from_method(method);
+    if !pipeline_accepts_arity(id, args.len(), is_last) {
+        return None;
+    }
+    let Some(lowering) = pipeline_lowering(id) else {
         if is_last {
             *sink = terminal_sink_for_method(method, args)?;
             return Some(());
