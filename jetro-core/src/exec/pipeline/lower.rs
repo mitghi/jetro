@@ -351,7 +351,8 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
                     });
                     let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
                     let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
-                    p.stages[i] = Stage::Map(merged, BuiltinViewStage::Map);
+                    p.stages[i] = Stage::expr_stage_builtin(BuiltinMethod::Map, merged)
+                        .expect("map stage must be registry-backed");
                     p.stage_exprs[i] = None;
                     p.stages.remove(i + 1);
                     p.stage_exprs.remove(i + 1);
@@ -368,7 +369,8 @@ fn rewrite_step(p: &mut PipelineBody) -> bool {
                     is_structural: false,
                     ics: p_prog.ics.clone(),
                 });
-                p.stages[i] = Stage::Filter(merged, BuiltinViewStage::Filter);
+                p.stages[i] = Stage::expr_stage_builtin(BuiltinMethod::Filter, merged)
+                    .expect("filter stage must be registry-backed");
                 p.stage_exprs[i] = None;
                 p.stages.remove(i + 1);
                 p.stage_exprs.remove(i + 1);
