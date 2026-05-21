@@ -193,6 +193,13 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
             }
             Some(FieldDemand::Fields(fields))
         }
+        (BuiltinViewObjectProjection::Pick, crate::builtins::BuiltinArgs::StrVec(keys)) => {
+            let mut fields = FieldSet::new();
+            for key in keys {
+                fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
+            }
+            Some(FieldDemand::Fields(fields))
+        }
         (
             BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
             crate::builtins::BuiltinArgs::Str(path),
@@ -2692,6 +2699,10 @@ mod tests {
         );
         assert_eq!(
             field_paths(&key_vec_call(BuiltinMethod::Missing, &["title", "isbn"])),
+            vec!["title", "isbn"]
+        );
+        assert_eq!(
+            field_paths(&key_vec_call(BuiltinMethod::Pick, &["title", "isbn"])),
             vec!["title", "isbn"]
         );
         assert_eq!(
