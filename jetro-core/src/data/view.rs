@@ -256,10 +256,6 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
     Some(Val::obj(out))
 }
 
-fn tape_array_child_indices<T: TapeLike>(tape: &T, idx: usize) -> Option<Vec<usize>> {
-    tape.array_child_indices(idx)
-}
-
 /// Navigation interface shared by all document representations.
 /// Implementations exist for `ValView` (in-memory `Val` tree) and `TapeView`
 /// (borrowed simd-json tape nodes).
@@ -855,7 +851,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             return None;
         };
         let tape: &'a crate::data::tape::TapeData = *tape;
-        let indices = tape_array_child_indices(tape, *idx)?;
+        let indices = tape.array_child_indices(*idx)?;
         Some(Box::new(indices.into_iter().rev().map(move |child| {
             Self::Node { tape, idx: child }
         })))
@@ -1079,7 +1075,7 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             return None;
         };
         let tape: &'a crate::data::tape::TapeScratch = *tape;
-        let indices = tape_array_child_indices(tape, *idx)?;
+        let indices = tape.array_child_indices(*idx)?;
         Some(Box::new(indices.into_iter().rev().map(move |child| {
             Self::Node { tape, idx: child }
         })))
