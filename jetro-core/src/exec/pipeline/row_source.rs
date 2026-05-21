@@ -288,11 +288,6 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
-    /// Returns a `TapeMaterializedRowsIter` that materialises each tape element into an owned `Val` as it iterates.
-    pub(super) fn iter_materialized(self) -> TapeMaterializedRowsIter<'a> {
-        TapeMaterializedRowsIter(self.iter_views())
-    }
-
     /// Returns a materialising iterator constrained by the selected source access mode.
     pub(super) fn iter_materialized_for_access(
         self,

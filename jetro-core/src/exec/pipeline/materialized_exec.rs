@@ -18,8 +18,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
-    is_truthy, BodyKernel, MembershipSinkOp, Pipeline, PipelineBody, Sink, Source, Stage,
-    StageFlow, StageStrategy, TerminalMapCollector,
+    is_truthy, BodyKernel, MembershipSinkOp, Pipeline, PipelineBody, Sink, Source,
+    SourceAccessMode, Stage, StageFlow, StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::registry::{
@@ -185,17 +185,36 @@ pub(super) fn run_tape_field_chain_with_vm(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    let iter = if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_)) {
-        source.iter_materialized()
-    } else {
-        source.iter_materialized_for_access(pipeline.source_access())
-    };
+    if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
+        && matches!(pipeline.source_access(), SourceAccessMode::Indexed(_))
+    {
+        let selected = selected_index_pipeline(&pipeline)?;
+        let iter = source.iter_materialized_for_access(pipeline.source_access());
+        return Some(run_streaming_rows_with_vm(&selected, base_env, iter, vm));
+    }
+    let iter = source.iter_materialized_for_access(pipeline.source_access());
     Some(run_streaming_rows_with_vm(
         &pipeline,
         base_env,
         iter,
         vm,
     ))
+}
+
+fn selected_index_pipeline(pipeline: &Pipeline) -> Option<Pipeline> {
+    let mut selected = pipeline.clone();
+    selected.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
+    selected.sink_kernels = selected.sink.body_kernels();
+    selected.source_demand = Pipeline::segment_source_demand(&selected.stages, &selected.sink);
+    selected.payload_demand = Pipeline::segment_payload_demand(
+        &selected.stages,
+        &selected.stage_kernels,
+        &selected.sink,
+        &selected.sink_kernels,
+    );
+    selected.late_projection =
+        Pipeline::late_projection_for(&selected.stages, &selected.stage_kernels);
+    Some(selected)
 }
 
 #[cfg(test)]
@@ -806,5 +825,32 @@ mod tests {
 
         assert_eq!(out, Val::Int(2));
         assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn tape_row_bridge_applies_indexed_nth_demand_before_materializing() {
+        let expr = crate::parse::parser::parse("$.books.map(score + 1).nth(2)").unwrap();
+        let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
+        let (_, body) = pipeline.into_source_body();
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"books":[{"score":1},{"score":2},{"score":3},{"score":4}]}"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let mut vm = crate::vm::VM::new();
+        let keys = [Arc::<str>::from("books")];
+
+        let out = super::run_tape_field_chain_with_vm(
+            &body,
+            &tape,
+            &keys,
+            &Env::new(Val::Null),
+            &mut vm,
+        )
+        .expect("tape rows path")
+        .unwrap();
+
+        assert_eq!(out, Val::Int(4));
+        assert_eq!(tape.materialized_subtrees(), 1);
     }
 }
