@@ -2895,24 +2895,30 @@ impl Builtin for Slice {
     }
 }
 
+#[inline]
+fn scalar_string_pair_spec(stage: BuiltinStringPairStage) -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native()
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::OneToOne,
+            true,
+            2.0,
+            1.0,
+        ))
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .string_pair_stage(stage)
+        .lowering(BuiltinPipelineLowering::StringPairArg)
+}
+
 /// `replace(needle, with)` — single-replace string-pair scalar.
 pub(crate) struct Replace;
 impl Builtin for Replace {
     const METHOD: BuiltinMethod = BuiltinMethod::Replace;
     const NAME: &'static str = "replace";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
-            .indexed()
-            .view_native()
-            .pipeline_shape(BuiltinPipelineShape::new(
-                BuiltinCardinality::OneToOne,
-                true,
-                2.0,
-                1.0,
-            ))
-            .order_effect(BuiltinPipelineOrderEffect::Preserves)
-            .string_pair_stage(BuiltinStringPairStage::Replace { all: false })
-            .lowering(BuiltinPipelineLowering::StringPairArg)
+        scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: false })
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -2929,18 +2935,7 @@ impl Builtin for ReplaceAll {
     const METHOD: BuiltinMethod = BuiltinMethod::ReplaceAll;
     const NAME: &'static str = "replace_all";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
-            .indexed()
-            .view_native()
-            .pipeline_shape(BuiltinPipelineShape::new(
-                BuiltinCardinality::OneToOne,
-                true,
-                2.0,
-                1.0,
-            ))
-            .order_effect(BuiltinPipelineOrderEffect::Preserves)
-            .string_pair_stage(BuiltinStringPairStage::Replace { all: true })
-            .lowering(BuiltinPipelineLowering::StringPairArg)
+        scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: true })
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {

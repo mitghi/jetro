@@ -1468,6 +1468,8 @@ mod tests {
             BuiltinMethod::FromJson,
             BuiltinMethod::Index,
             BuiltinMethod::IndicesOf,
+            BuiltinMethod::Replace,
+            BuiltinMethod::ReplaceAll,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
