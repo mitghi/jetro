@@ -414,7 +414,7 @@ where
     let mut nth_seen = 0usize;
     let nth_target = match body.sink {
         pipeline::Sink::Nth(_)
-            if matches!(source_demand, PullDemand::NthInput(_))
+            if source_demand.is_nth_input()
                 && pipeline::ViewStageCapability::all_preserve_cardinality(&prefix) =>
         {
             Some(0)

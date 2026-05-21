@@ -640,11 +640,7 @@ fn projecting_sink_for(sink: &Sink, demand: PullDemand) -> Option<ProjectingSink
             Position::Last => Some(ProjectingSink::Last(None)),
         },
         Sink::Nth(idx) => {
-            let target = if matches!(demand, PullDemand::NthInput(_)) {
-                0
-            } else {
-                *idx
-            };
+            let target = if demand.is_nth_input() { 0 } else { *idx };
             Some(ProjectingSink::Nth {
                 target,
                 seen: 0,

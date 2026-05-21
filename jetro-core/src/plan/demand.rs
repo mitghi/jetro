@@ -291,6 +291,20 @@ impl PullDemand {
         matches!(self, PullDemand::LastInput(_))
     }
 
+    /// Returns true while an executor should discard physical input rows
+    /// before reaching a requested positional input.
+    #[inline]
+    pub(crate) fn skips_before_nth(self, pulled_inputs: usize) -> bool {
+        matches!(self, PullDemand::NthInput(n) if pulled_inputs < n)
+    }
+
+    /// Returns true when the source demand has already selected one physical
+    /// input row directly for an nth-position sink.
+    #[inline]
+    pub(crate) fn is_nth_input(self) -> bool {
+        matches!(self, PullDemand::NthInput(_))
+    }
+
     /// Return a `PullDemand` capped to at most `n` input elements,
     /// converting `All` or `UntilOutput` variants to `FirstInput(n)`.
     pub(crate) fn cap_inputs(self, n: usize) -> Self {
@@ -457,6 +471,11 @@ mod tests {
 
         assert!(PullDemand::LastInput(1).is_suffix());
         assert!(!PullDemand::FirstInput(1).is_suffix());
+
+        assert!(PullDemand::NthInput(3).skips_before_nth(2));
+        assert!(!PullDemand::NthInput(3).skips_before_nth(3));
+        assert!(PullDemand::NthInput(3).is_nth_input());
+        assert!(!PullDemand::FirstInput(3).is_nth_input());
     }
 
     #[test]

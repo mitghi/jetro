@@ -272,7 +272,7 @@ where
         if source_demand.input_satisfied_by(pulled_inputs) {
             break 'outer;
         }
-        if matches!(source_demand, PullDemand::NthInput(n) if pulled_inputs < n) {
+        if source_demand.skips_before_nth(pulled_inputs) {
             pulled_inputs += 1;
             continue 'outer;
         }
@@ -316,8 +316,7 @@ where
             }
         }
 
-        if matches!(source_demand, PullDemand::NthInput(_)) && matches!(pipeline.sink, Sink::Nth(_))
-        {
+        if source_demand.is_nth_input() && matches!(pipeline.sink, Sink::Nth(_)) {
             if let Some(projection) = late_projection {
                 return eval_late_projection(&projection.kernel, &item, vm);
             }
@@ -394,7 +393,7 @@ impl PlannedStream<'_> {
 
 fn planned_stream_for_access(pipeline: &Pipeline) -> PlannedStream<'_> {
     let access = pipeline.source_access();
-    if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
+    if pipeline.source_demand().chain.pull.is_nth_input()
         && matches!(access, SourceAccessMode::Indexed(_))
     {
         if let Some(selected) = pipeline.for_selected_single_row() {
