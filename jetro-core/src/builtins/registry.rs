@@ -187,7 +187,7 @@ pub(crate) fn pipeline_stage_is_positional(id: BuiltinId) -> bool {
 /// Return true when the stage only changes row order, not membership or row values.
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
-    matches!(id.method(), Some(BuiltinMethod::Sort | BuiltinMethod::Reverse))
+    id.method().is_some_and(|method| method.spec().order_only)
 }
 
 /// Return true when a builtin category is meaningful as a collection/pipeline

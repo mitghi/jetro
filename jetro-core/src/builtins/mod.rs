@@ -649,6 +649,8 @@ pub struct BuiltinSpec {
     pub idempotent: bool,
     /// Whether the builtin accepts a lambda/expression argument at runtime.
     pub accepts_lambda_arg: bool,
+    /// Whether the builtin changes only row order, not row membership or values.
+    pub order_only: bool,
     /// Columnar stage kind for backends that work on typed column vectors.
     pub columnar_stage: Option<BuiltinColumnarStage>,
     /// Structural index backend hint (deep search variants).
@@ -1460,6 +1462,7 @@ impl BuiltinSpec {
             cancellation: None,
             idempotent: false,
             accepts_lambda_arg: false,
+            order_only: false,
             columnar_stage: None,
             structural: None,
             cost: 1.0,
@@ -1537,6 +1540,12 @@ impl BuiltinSpec {
     /// Marks a builtin as accepting a lambda/expression argument.
     fn lambda_arg(mut self) -> Self {
         self.accepts_lambda_arg = true;
+        self
+    }
+
+    /// Marks a pipeline stage as changing only row order.
+    fn order_only(mut self) -> Self {
+        self.order_only = true;
         self
     }
 

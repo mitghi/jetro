@@ -1216,6 +1216,7 @@ impl Builtin for Sort {
         barrier_default_spec()
             .demand_law(BuiltinDemandLaw::OrderBarrier)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .order_only()
             .logical_shape(BuiltinLogicalShape::Sort)
             .lowering(BuiltinPipelineLowering::Sort)
     }
@@ -1668,6 +1669,7 @@ impl Builtin for Reverse {
             .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .order_only()
             .nullary_stage(BuiltinNullaryStage::Reverse)
             .logical_shape(BuiltinLogicalShape::Reverse)
             .row_stream_op(BuiltinRowStreamOp::Reverse)
