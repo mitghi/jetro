@@ -3333,7 +3333,11 @@ mod tests {
         let omitted_json: serde_json::Value = omitted.expect("omit output").into();
         assert_eq!(omitted_json, serde_json::json!({"title": "b", "score": 2}));
 
-        for method in [BuiltinMethod::Values, BuiltinMethod::Entries] {
+        for method in [
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
+            BuiltinMethod::ToPairs,
+        ] {
             let kernel = BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
                 call: BuiltinCall::new(method, BuiltinArgs::None),

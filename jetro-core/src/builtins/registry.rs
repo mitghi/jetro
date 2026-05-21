@@ -2196,6 +2196,13 @@ mod tests {
             BuiltinMethod::Entries
         )));
         assert_eq!(
+            view_object_projection(BuiltinId::from_method(BuiltinMethod::ToPairs)),
+            Some(BuiltinViewObjectProjection::Entries)
+        );
+        assert!(view_object_items_projection(BuiltinId::from_method(
+            BuiltinMethod::ToPairs
+        )));
+        assert_eq!(
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Pick)),
             Some(BuiltinViewObjectProjection::Pick)
         );

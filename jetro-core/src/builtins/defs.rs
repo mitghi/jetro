@@ -1900,7 +1900,11 @@ pub(crate) struct ToPairs;
 impl Builtin for ToPairs {
     const METHOD: BuiltinMethod = BuiltinMethod::ToPairs;
     const NAME: &'static str = "to_pairs";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+            .view_native()
+            .view_object_projection(BuiltinViewObjectProjection::Entries)
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
