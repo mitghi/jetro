@@ -91,6 +91,15 @@ pub(super) fn run(
                     vm,
                 );
             }
+            if let Some(reversed) = pipeline.for_reversed_select_many() {
+                return run_streaming_rows_with_vm(
+                    &reversed,
+                    base_env,
+                    row_source::source_iter_for_access(&recv, source_access),
+                    vm,
+                )
+                .map(restore_reversed_select_many_result);
+            }
             return run_streaming_rows_with_vm(
                 pipeline,
                 base_env,
@@ -230,6 +239,13 @@ pub(super) fn run_tape_field_chain_with_vm(
         if let Some(reversed) = pipeline.for_reversed_select_one() {
             let iter = source.iter_materialized_for_access(pipeline.source_access());
             return Some(run_streaming_rows_with_vm(&reversed, base_env, iter, vm));
+        }
+        if let Some(reversed) = pipeline.for_reversed_select_many() {
+            let iter = source.iter_materialized_for_access(pipeline.source_access());
+            return Some(
+                run_streaming_rows_with_vm(&reversed, base_env, iter, vm)
+                    .map(restore_reversed_select_many_result),
+            );
         }
         let iter = source.iter_materialized_for_access(SourceAccessMode::Forward);
         return Some(run_streaming_rows_with_vm(&pipeline, base_env, iter, vm));
@@ -406,6 +422,13 @@ where
         return Ok(collector.finish());
     }
     sink_acc.finish_result(false)
+}
+
+fn restore_reversed_select_many_result(value: Val) -> Val {
+    match value {
+        Val::Arr(items) => Val::arr(items.iter().rev().cloned().collect::<Vec<_>>()),
+        other => other,
+    }
 }
 
 fn eval_late_projection(
@@ -909,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_reverse_access_keeps_select_many_order_conservative() {
+    fn materialized_reverse_access_preserves_select_many_order() {
         let expr = crate::parse::parser::parse("$.books.filter(active).map(score).last(2)")
             .unwrap();
         let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
@@ -930,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn tape_row_bridge_keeps_select_many_order_conservative() {
+    fn tape_row_bridge_preserves_reversed_select_many_order() {
         let expr = crate::parse::parser::parse("$.books.filter(active).map(score).last(2)")
             .unwrap();
         let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
@@ -939,6 +962,7 @@ mod tests {
             br#"{"books":[{"score":1,"active":true},{"score":2,"active":true},{"score":3,"active":false},{"score":4,"active":true}]}"#.to_vec(),
         )
         .unwrap();
+        tape.reset_materialized_subtrees();
         let mut vm = crate::vm::VM::new();
         let keys = [Arc::<str>::from("books")];
 
@@ -953,5 +977,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 4]));
+        assert_eq!(tape.materialized_subtrees(), 3);
     }
 }

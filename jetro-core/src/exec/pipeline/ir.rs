@@ -1548,6 +1548,19 @@ impl Pipeline {
         Some(reversed)
     }
 
+    /// Returns a clone adapted to consume rows in reverse source order for a
+    /// bounded suffix sink. The executor must restore final output order after
+    /// collecting the bounded prefix from the reversed iterator.
+    pub(crate) fn for_reversed_select_many(&self) -> Option<Self> {
+        let Sink::SelectMany { n, from_end: true } = self.sink else {
+            return None;
+        };
+        let mut reversed = self.clone();
+        reversed.sink = Sink::SelectMany { n, from_end: false };
+        reversed.refresh_planned_facts();
+        Some(reversed)
+    }
+
     fn refresh_planned_facts(&mut self) {
         self.sink_kernels = self.sink.body_kernels();
         self.source_demand = Pipeline::segment_source_demand(&self.stages, &self.sink);
