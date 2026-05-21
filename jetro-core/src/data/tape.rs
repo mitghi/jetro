@@ -364,3 +364,35 @@ impl TapeScratch {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TapeData;
+
+    #[test]
+    fn array_child_navigation_returns_direct_child_tape_indices() {
+        let tape = TapeData::parse(br#"[{"id":1},[2,3],"x"]"#.to_vec()).unwrap();
+        let first = 1;
+        let len = tape.root_len();
+
+        let children = tape.array_child_starts(first, len);
+        assert_eq!(children.len(), 3);
+        assert_eq!(tape.array_child_start(first, len, 0), Some(children[0]));
+        assert_eq!(tape.array_child_start(first, len, 1), Some(children[1]));
+        assert_eq!(tape.array_child_start(first, len, 2), Some(children[2]));
+        assert_eq!(tape.array_child_start(first, len, 3), None);
+
+        assert!(matches!(
+            tape.nodes[children[0]],
+            crate::data::tape::TapeNode::Object { .. }
+        ));
+        assert!(matches!(
+            tape.nodes[children[1]],
+            crate::data::tape::TapeNode::Array { .. }
+        ));
+        assert!(matches!(
+            tape.nodes[children[2]],
+            crate::data::tape::TapeNode::String(_)
+        ));
+    }
+}
