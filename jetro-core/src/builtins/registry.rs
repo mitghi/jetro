@@ -1645,8 +1645,6 @@ mod tests {
             BuiltinMethod::Pivot,
             BuiltinMethod::Implode,
             BuiltinMethod::FromJson,
-            BuiltinMethod::Index,
-            BuiltinMethod::IndicesOf,
             BuiltinMethod::Replace,
             BuiltinMethod::ReplaceAll,
             BuiltinMethod::ToCsv,
@@ -1682,6 +1680,8 @@ mod tests {
             BuiltinMethod::ContainsAny,
             BuiltinMethod::ContainsAll,
             BuiltinMethod::Includes,
+            BuiltinMethod::Index,
+            BuiltinMethod::IndicesOf,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
