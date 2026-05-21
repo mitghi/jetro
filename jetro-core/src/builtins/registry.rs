@@ -14,7 +14,7 @@ use crate::{
         BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda,
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
         BuiltinPipelineShape, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+        BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
         BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
         BuiltinViewObjectProjection, BuiltinViewStage, BuiltinArgs,
     },
@@ -188,6 +188,12 @@ pub(crate) fn pipeline_stage_is_positional(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn pipeline_stage_is_order_only(id: BuiltinId) -> bool {
     id.method().is_some_and(|method| method.spec().order_only)
+}
+
+/// Return the shared runtime hook implementation target for a builtin, if any.
+#[inline]
+pub(crate) fn runtime_hook(id: BuiltinId) -> Option<BuiltinRuntimeHook> {
+    id.method().and_then(|method| method.spec().runtime_hook)
 }
 
 /// Return true when a builtin category is meaningful as a collection/pipeline
@@ -831,10 +837,11 @@ pub(crate) fn apply_stream_hook_or_else<F>(
 where
     F: FnOnce(Val) -> Result<StageFlow<Val>, EvalError>,
 {
-    match method {
-        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
+    match runtime_hook(BuiltinId::from_method(method)) {
+        Some(BuiltinRuntimeHook::Filter) => {
             <defs::Filter as Builtin>::apply_stream(ctx, item, body)
         }
+        None => match method {
         BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_stream(ctx, item, body),
         BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_stream(ctx, item, body),
         BuiltinMethod::Map => <defs::Map as Builtin>::apply_stream(ctx, item, body),
@@ -853,6 +860,7 @@ where
             <defs::FilterValues as Builtin>::apply_stream(ctx, item, body)
         }
         _ => fallback(item),
+        },
     }
 }
 
@@ -934,7 +942,11 @@ pub(crate) fn apply_barrier_hook(
     buf: &mut Vec<Val>,
     body: Option<&Program>,
 ) -> Option<Result<(), EvalError>> {
-    match method {
+    match runtime_hook(BuiltinId::from_method(method)) {
+        Some(BuiltinRuntimeHook::Filter) => {
+            <defs::Filter as Builtin>::apply_barrier(ctx, buf, body)
+        }
+        None => match method {
         BuiltinMethod::Reverse => <defs::Reverse as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::Sort => <defs::Sort as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::Window => <defs::Window as Builtin>::apply_barrier(ctx, buf, body),
@@ -942,9 +954,6 @@ pub(crate) fn apply_barrier_hook(
         BuiltinMethod::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::CountBy => <defs::CountBy as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(ctx, buf, body),
-        BuiltinMethod::Filter | BuiltinMethod::Find | BuiltinMethod::FindAll => {
-            <defs::Filter as Builtin>::apply_barrier(ctx, buf, body)
-        }
         BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_barrier(ctx, buf, body),
         BuiltinMethod::Map => <defs::Map as Builtin>::apply_barrier(ctx, buf, body),
@@ -972,6 +981,7 @@ pub(crate) fn apply_barrier_hook(
             <defs::FilterValues as Builtin>::apply_barrier(ctx, buf, body)
         }
         _ => None,
+        },
     }
 }
 
@@ -1179,6 +1189,7 @@ mod tests {
                 spec.order_only,
                 "{method:?}"
             );
+            assert_eq!(runtime_hook(id), spec.runtime_hook, "{method:?}");
             let effective_shape =
                 effective_pipeline_shape(id).expect("registered builtin should have shape");
             let expected_shape = pipeline_shape(id).unwrap_or(BuiltinPipelineShape {

@@ -14,7 +14,7 @@ use super::{
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
+    BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSpec, BuiltinStageMerge, BuiltinStructural,
     BuiltinStringPairStage, BuiltinViewObjectProjection, BuiltinViewStage,
 };
 
@@ -77,6 +77,7 @@ fn filter_spec() -> BuiltinSpec {
         .expr_payload(BuiltinExprPayload::PredicateScan)
         .logical_shape(BuiltinLogicalShape::Filter)
         .row_stream_op(BuiltinRowStreamOp::Filter)
+        .runtime_hook(BuiltinRuntimeHook::Filter)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
@@ -143,6 +144,7 @@ impl Builtin for Find {
             .expr_stage(BuiltinExprStage::Filter)
             .logical_shape(BuiltinLogicalShape::FilterThenFirst)
             .row_stream_op(BuiltinRowStreamOp::FindFirst)
+            .runtime_hook(BuiltinRuntimeHook::Filter)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
