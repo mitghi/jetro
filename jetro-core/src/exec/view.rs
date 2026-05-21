@@ -394,18 +394,7 @@ where
     let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
     let position = match &body.sink {
         pipeline::Sink::Nth(_) => TerminalSelectPosition::Nth,
-        _ => {
-            let sink_spec = body.sink.builtin_sink_spec()?;
-            match sink_spec.accumulator {
-                crate::builtins::BuiltinSinkAccumulator::SelectOne(
-                    crate::builtins::BuiltinSelectionPosition::First,
-                ) => TerminalSelectPosition::First,
-                crate::builtins::BuiltinSinkAccumulator::SelectOne(
-                    crate::builtins::BuiltinSelectionPosition::Last,
-                ) => TerminalSelectPosition::Last,
-                _ => return None,
-            }
-        }
+        _ => terminal_select_position(body.sink.select_one_position()?),
     };
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
     let source_demand =
@@ -455,6 +444,13 @@ enum TerminalSelectPosition {
     First,
     Last,
     Nth,
+}
+
+fn terminal_select_position(position: pipeline::Position) -> TerminalSelectPosition {
+    match position {
+        pipeline::Position::First => TerminalSelectPosition::First,
+        pipeline::Position::Last => TerminalSelectPosition::Last,
+    }
 }
 
 /// Action returned by a sink observer after processing one view row.
@@ -1036,18 +1032,7 @@ where
             nth_target = Some(*index);
             TerminalSelectPosition::Nth
         }
-        _ => {
-            let sink_spec = body.sink.builtin_sink_spec()?;
-            match sink_spec.accumulator {
-                crate::builtins::BuiltinSinkAccumulator::SelectOne(
-                    crate::builtins::BuiltinSelectionPosition::First,
-                ) => TerminalSelectPosition::First,
-                crate::builtins::BuiltinSinkAccumulator::SelectOne(
-                    crate::builtins::BuiltinSelectionPosition::Last,
-                ) => TerminalSelectPosition::Last,
-                _ => return None,
-            }
-        }
+        _ => terminal_select_position(body.sink.select_one_position()?),
     };
     let mut selected = Val::Null;
     let mut seen = false;

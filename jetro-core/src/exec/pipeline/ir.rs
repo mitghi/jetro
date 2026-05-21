@@ -257,6 +257,14 @@ impl Sink {
         }
     }
 
+    /// Returns the first/last selection position for terminal select-one sinks.
+    pub(crate) fn select_one_position(&self) -> Option<Position> {
+        match self.builtin_sink_spec()?.accumulator {
+            BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
+            _ => None,
+        }
+    }
+
     /// Returns `true` when every sub-program in the sink (predicate, projection) satisfies
     /// `program_ok`, meaning the sink can execute against a materialised receiver without a
     /// document-root lookup.
