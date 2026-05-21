@@ -912,6 +912,33 @@ mod tests {
     }
 
     #[test]
+    fn tape_row_bridge_applies_indexed_suffix_before_materializing() {
+        let expr = crate::parse::parser::parse("$.books.map(score + 1).last(2)").unwrap();
+        let pipeline = super::super::Pipeline::lower(&expr).expect("pipeline lower");
+        let (_, body) = pipeline.into_source_body();
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"books":[{"score":1},{"score":2},{"score":3},{"score":4}]}"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let mut vm = crate::vm::VM::new();
+        let keys = [Arc::<str>::from("books")];
+
+        let out = super::run_tape_field_chain_with_vm(
+            &body,
+            &tape,
+            &keys,
+            &Env::new(Val::Null),
+            &mut vm,
+        )
+        .expect("tape rows path")
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 5]));
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+    #[test]
     fn tape_row_bridge_scans_reverse_for_selective_last() {
         let expr = crate::parse::parser::parse("$.books.filter(active).map(score + 1).last()")
             .unwrap();

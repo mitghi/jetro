@@ -525,6 +525,15 @@ where
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
+        pipeline::SourceAccessMode::IndexedSuffix(count) => {
+            let len = match source.scalar() {
+                JsonView::ArrayLen(len) => len,
+                _ => return None,
+            };
+            let start = len.saturating_sub(count);
+            let items = source.array_iter()?.skip(start).take(count.min(len));
+            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
+        }
         pipeline::SourceAccessMode::ForwardBounded(inputs) => {
             let items = source.array_iter()?;
             return drive_view_iter(

@@ -29,6 +29,7 @@ pub(super) fn run(
     let idx = match pipeline.source_access() {
         SourceAccessMode::Indexed(idx) => idx,
         SourceAccessMode::IndexedFromEnd(offset) => row_source::index_from_end(len, offset)?,
+        SourceAccessMode::IndexedSuffix(count) => len.saturating_sub(count),
         SourceAccessMode::ForwardBounded(_) => 0,
         SourceAccessMode::Reverse { .. } => len.checked_sub(1)?,
         SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => {

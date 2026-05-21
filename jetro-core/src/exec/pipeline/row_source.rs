@@ -40,6 +40,8 @@ pub(super) enum RowsIter<'a> {
     Owned(std::vec::IntoIter<Val>),
     /// Draining iterator over a bounded prefix of a fully owned `Vec<Val>`.
     OwnedTake(std::iter::Take<std::vec::IntoIter<Val>>),
+    /// Draining iterator over a bounded range of a fully owned `Vec<Val>`.
+    OwnedSkipTake(std::iter::Take<std::iter::Skip<std::vec::IntoIter<Val>>>),
     /// Draining reverse iterator over a fully owned `Vec<Val>`.
     OwnedRev(std::iter::Rev<std::vec::IntoIter<Val>>),
     /// Single selected row.
@@ -203,6 +205,7 @@ impl Iterator for RowsIter<'_> {
             }
             Self::Owned(iter) => iter.next(),
             Self::OwnedTake(iter) => iter.next(),
+            Self::OwnedSkipTake(iter) => iter.next(),
             Self::OwnedRev(iter) => iter.next(),
             Self::Single(iter) => iter.next(),
         }
@@ -246,6 +249,21 @@ impl<'a> Rows<'a> {
                 let idx = index_from_end(rows.len(), offset);
                 RowsIter::Single(idx.and_then(|idx| rows.get(idx).cloned()).into_iter())
             }
+            SourceAccessMode::IndexedSuffix(count) => match self {
+                Self::Borrowed(rows) => {
+                    let start = rows.len().saturating_sub(count);
+                    RowsIter::Borrowed(rows[start..].iter())
+                }
+                Self::Shared(rows) => {
+                    let end = rows.len();
+                    let index = end.saturating_sub(count);
+                    RowsIter::Shared { rows, index, end }
+                }
+                Self::Owned(rows) => {
+                    let start = rows.len().saturating_sub(count);
+                    RowsIter::OwnedSkipTake(rows.into_iter().skip(start).take(count))
+                }
+            },
             SourceAccessMode::ForwardBounded(limit) => match self {
                 Self::Borrowed(rows) => RowsIter::Borrowed(rows[..rows.len().min(limit)].iter()),
                 Self::Shared(rows) => {
@@ -321,6 +339,11 @@ impl<'a> ValRowSource<'a> {
                         .into_iter(),
                 )
             }
+            (Self::ObjVec(data), SourceAccessMode::IndexedSuffix(count)) => {
+                let end = data.nrows();
+                let index = end.saturating_sub(count);
+                ValRowsIter::ObjVec { data, index, end }
+            }
             (Self::ObjVec(data), SourceAccessMode::ForwardBounded(limit)) if limit == 0 => {
                 let _ = data;
                 ValRowsIter::Empty
@@ -355,6 +378,10 @@ impl<'a> ValRowSource<'a> {
                 ValRowsIter::Empty
             }
             (Self::Single(value), SourceAccessMode::IndexedFromEnd(offset)) if offset > 0 => {
+                let _ = value;
+                ValRowsIter::Empty
+            }
+            (Self::Single(value), SourceAccessMode::IndexedSuffix(0)) => {
                 let _ = value;
                 ValRowsIter::Empty
             }
@@ -429,6 +456,22 @@ impl<'a> TapeRowSource<'a> {
                 .view_from_end(offset)
                 .map(|view| TapeRowsIter::Single(Some(view).into_iter()))
                 .unwrap_or(TapeRowsIter::Empty),
+            SourceAccessMode::IndexedSuffix(count) => match self {
+                Self::Array { tape, first, len } => {
+                    let skip = len.saturating_sub(count);
+                    let mut cur = first;
+                    for _ in 0..skip {
+                        cur += tape.span(cur);
+                    }
+                    TapeRowsIter::Array {
+                        tape,
+                        remaining: count.min(len),
+                        cur,
+                    }
+                }
+                Self::Single(view) if count > 0 => TapeRowsIter::Single(Some(view).into_iter()),
+                Self::Single(_) | Self::Missing => TapeRowsIter::Empty,
+            },
             SourceAccessMode::ForwardBounded(limit) => match self {
                 Self::Array { tape, first, len } => TapeRowsIter::Array {
                     tape,
@@ -641,6 +684,23 @@ mod tests {
     }
 
     #[test]
+    fn tape_row_source_indexed_suffix_materializes_only_suffix() {
+        let tape = tape_rows();
+        tape.reset_materialized_subtrees();
+        let keys = [Arc::<str>::from("books")];
+        let rows = TapeRowSource::from_field_chain(&tape, &keys);
+
+        let values: Vec<_> = rows
+            .iter_materialized_for_access(SourceAccessMode::IndexedSuffix(2))
+            .map(serde_json::Value::from)
+            .collect();
+
+        assert_eq!(values, vec![json!({"id": 2}), json!({"id": 3})]);
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+
+    #[test]
     fn tape_row_source_reverse_access_materializes_from_end() {
         let tape = tape_rows();
         tape.reset_materialized_subtrees();
@@ -663,12 +723,15 @@ mod tests {
 
         let indexed: Vec<_> =
             source_iter_for_access(&rows, SourceAccessMode::IndexedFromEnd(0)).collect();
+        let suffix: Vec<_> =
+            source_iter_for_access(&rows, SourceAccessMode::IndexedSuffix(2)).collect();
         let prefix: Vec<_> =
             source_iter_for_access(&rows, SourceAccessMode::ForwardBounded(2)).collect();
         let reverse: Vec<_> =
             source_iter_for_access(&rows, SourceAccessMode::Reverse { outputs: 1 }).collect();
 
         assert_eq!(indexed, vec![Val::Int(3)]);
+        assert_eq!(suffix, vec![Val::Int(2), Val::Int(3)]);
         assert_eq!(prefix, vec![Val::Int(1), Val::Int(2)]);
         assert_eq!(reverse, vec![Val::Int(3), Val::Int(2), Val::Int(1)]);
     }

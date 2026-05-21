@@ -67,6 +67,9 @@ impl SourceCapabilities {
             PullDemand::LastInput(1) if self.indexed_array_child => {
                 SourceAccessMode::IndexedFromEnd(0)
             }
+            PullDemand::LastInput(n) if self.indexed_array_child => {
+                SourceAccessMode::IndexedSuffix(n)
+            }
             PullDemand::FirstInput(1) if self.indexed_array_child => SourceAccessMode::Indexed(0),
             PullDemand::LastInput(n) if self.reverse_stream => {
                 SourceAccessMode::Reverse { outputs: n }
@@ -136,13 +139,21 @@ impl SourceCapabilities {
 fn direct_seek_requires_cardinality_preservation(access: SourceAccessMode) -> bool {
     matches!(
         access,
-        SourceAccessMode::Indexed(_) | SourceAccessMode::IndexedFromEnd(_)
+        SourceAccessMode::Indexed(_)
+            | SourceAccessMode::IndexedFromEnd(_)
+            | SourceAccessMode::IndexedSuffix(_)
     )
 }
 
 fn demote_direct_seek(caps: SourceCapabilities, access: SourceAccessMode) -> SourceAccessMode {
-    if matches!(access, SourceAccessMode::IndexedFromEnd(_)) && caps.reverse_stream {
-        return SourceAccessMode::Reverse { outputs: 1 };
+    if caps.reverse_stream {
+        match access {
+            SourceAccessMode::IndexedFromEnd(_) => return SourceAccessMode::Reverse { outputs: 1 },
+            SourceAccessMode::IndexedSuffix(outputs) => {
+                return SourceAccessMode::Reverse { outputs };
+            }
+            _ => {}
+        }
     }
     if caps.forward_stream {
         return SourceAccessMode::Forward;
@@ -174,6 +185,8 @@ pub(crate) enum SourceAccessMode {
     Indexed(usize),
     /// Seek directly to this array child counted from the end.
     IndexedFromEnd(usize),
+    /// Seek directly to a suffix of `n` array children, preserving input order.
+    IndexedSuffix(usize),
     /// Conservative materialised fallback.
     MaterializedFallback,
 }
@@ -184,7 +197,9 @@ impl SourceAccessMode {
         match self {
             Self::Reverse { outputs } => PullDemand::LastInput(outputs),
             Self::ForwardBounded(inputs) => PullDemand::FirstInput(inputs),
-            Self::Indexed(_) | Self::IndexedFromEnd(_) => PullDemand::All,
+            Self::Indexed(_) | Self::IndexedFromEnd(_) | Self::IndexedSuffix(_) => {
+                PullDemand::All
+            }
             Self::Forward | Self::MaterializedFallback
                 if matches!(requested, PullDemand::LastInput(_)) =>
             {
@@ -218,7 +233,7 @@ mod source_capability_tests {
         );
         assert_eq!(
             SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(2)),
-            SourceAccessMode::Reverse { outputs: 2 }
+            SourceAccessMode::IndexedSuffix(2)
         );
         assert_eq!(
             SourceCapabilities::MATERIALIZED_ARRAY.choose_access(PullDemand::LastInput(1)),
@@ -292,12 +307,23 @@ mod source_capability_tests {
         );
 
         assert_eq!(
-            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(1), &[filter]),
+            SourceCapabilities::VIEW_ARRAY
+                .choose_stage_access(PullDemand::LastInput(1), &[filter.clone()]),
             SourceAccessMode::Reverse { outputs: 1 }
         );
         assert_eq!(
-            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(1), &[map]),
+            SourceCapabilities::VIEW_ARRAY
+                .choose_stage_access(PullDemand::LastInput(1), &[map.clone()]),
             SourceAccessMode::IndexedFromEnd(0)
+        );
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY
+                .choose_stage_access(PullDemand::LastInput(2), &[filter]),
+            SourceAccessMode::Reverse { outputs: 2 }
+        );
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_stage_access(PullDemand::LastInput(2), &[map]),
+            SourceAccessMode::IndexedSuffix(2)
         );
     }
 
