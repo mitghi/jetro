@@ -440,6 +440,27 @@ mod tests {
         assert_eq!(out, json!({"value": "next", "n": 7}));
         assert!(!j.root_val_is_materialized());
     }
+
+    #[test]
+    fn object_builtin_root_path_calls_read_from_tape_without_materializing_root_val() {
+        let j = Jetro::from_bytes(
+            br#"{"user":{"name":"Ada","email":"ada@example.test","meta":{"id":7}},"unused":{"large":[1,2,3]}}"#.to_vec(),
+        )
+        .unwrap();
+
+        let out = j
+            .collect(
+                r#"{"has_email": $.user.has_key("email"), "missing_phone": $.user.missing("phone"), "keys": $.user.keys()}"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!({"has_email": true, "missing_phone": true, "keys": ["name", "email", "meta"]})
+        );
+        assert!(!j.root_val_is_materialized());
+    }
+
     #[test]
     fn deep_match_obj_keys_routes_through_structural_index() {
         // `$..match { {role: "admin"} -> ..., ... }` is lowered to a

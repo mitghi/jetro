@@ -9,7 +9,9 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{by_name as builtin_by_name, dispatches_scalar_direct, BuiltinId};
+use crate::builtins::registry::{
+    by_name as builtin_by_name, dispatches_scalar_direct, view_projection, BuiltinId,
+};
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
@@ -180,8 +182,23 @@ impl PlanBuilder {
                 ExecutionFacts::combine_all(children)
             }
             PlanNode::Local(_) => ExecutionFacts::constant(),
-            PlanNode::Call { receiver, .. }
-            | PlanNode::UnaryNeg(receiver)
+            PlanNode::Call { receiver, call, .. } => {
+                let receiver = self.node_facts(*receiver);
+                if receiver.is_byte_native()
+                    && view_projection(BuiltinId::from_method(call.method))
+                {
+                    ExecutionFacts {
+                        can_avoid_root_materialization: true,
+                        can_use_tape: receiver.can_use_tape,
+                        contains_vm_fallback: false,
+                        may_materialize_source: false,
+                        can_stream_rows: false,
+                    }
+                } else {
+                    ExecutionFacts::combine_all([receiver])
+                }
+            }
+            PlanNode::UnaryNeg(receiver)
             | PlanNode::Not(receiver)
             | PlanNode::Kind { expr: receiver, .. } => {
                 ExecutionFacts::combine_all([self.node_facts(*receiver)])
