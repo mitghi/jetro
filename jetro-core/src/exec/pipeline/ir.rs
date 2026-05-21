@@ -273,7 +273,9 @@ impl Sink {
     {
         let mut ok = true;
         self.visit_sink_programs(|prog| {
-            ok &= program_ok(prog);
+            if ok {
+                ok = program_ok(prog);
+            }
         });
         ok
     }
