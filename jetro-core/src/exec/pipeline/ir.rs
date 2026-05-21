@@ -18,7 +18,7 @@ use crate::builtins::registry::{
     pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
     pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
     sink_demand as builtin_sink_demand, stage_merge as builtin_stage_merge,
-    terminal_selection_position, view_stage as builtin_view_stage, BuiltinId,
+    view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinCardinality, BuiltinExprPayload, BuiltinExprStage,
@@ -249,9 +249,7 @@ impl Sink {
     pub(crate) fn supports_late_projection(&self, demand: PullDemand) -> bool {
         match self {
             Sink::Collect => !matches!(demand, PullDemand::LastInput(_)),
-            Sink::Terminal(method) => {
-                terminal_selection_position(BuiltinId::from_method(*method)).is_some()
-            }
+            Sink::Terminal(_) => self.select_one_position().is_some(),
             Sink::Nth(_) | Sink::SelectMany { .. } => true,
             _ => false,
         }
