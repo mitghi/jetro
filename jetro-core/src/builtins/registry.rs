@@ -174,6 +174,14 @@ pub(crate) fn stage_elidable_when_value_unused(id: BuiltinId) -> bool {
         && effective_pipeline_order_effect(id, false) == BuiltinPipelineOrderEffect::Preserves
 }
 
+/// Return true when a builtin call can be delayed as a view-native projection.
+/// This is stricter than generic stage elision: the stage must be safe to move
+/// across bounded demand and have a borrowed-view implementation.
+#[inline]
+pub(crate) fn stage_delayable_view_projection(id: BuiltinId) -> bool {
+    stage_elidable_when_value_unused(id) && view_projection(id)
+}
+
 /// Return true when a pipeline stage for `id` must inspect row values to
 /// decide its output membership, ordering, key, or projected value.
 #[inline]
@@ -2388,6 +2396,34 @@ mod tests {
         ] {
             assert!(
                 !stage_elidable_when_value_unused(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_drives_delayable_view_projection_classification() {
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::HasKey,
+            BuiltinMethod::Pick,
+        ] {
+            assert!(
+                stage_delayable_view_projection(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Map,
+            BuiltinMethod::Filter,
+            BuiltinMethod::Sort,
+            BuiltinMethod::Rows,
+            BuiltinMethod::Unknown,
+        ] {
+            assert!(
+                !stage_delayable_view_projection(BuiltinId::from_method(method)),
                 "{method:?}"
             );
         }

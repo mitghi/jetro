@@ -13,11 +13,11 @@ use crate::builtins::registry::{
     columnar_stage as builtin_columnar_stage, count_sink_accepts_predicate,
     effective_pipeline_order_effect, effective_pipeline_shape, expr_payload,
     expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
-    is_pure as builtin_is_pure, keyed_reducer as builtin_keyed_reducer,
-    nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
-    pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
-    pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
-    pipeline_streams, sink_demand as builtin_sink_demand,
+    keyed_reducer as builtin_keyed_reducer, nullary_stage as builtin_nullary_stage,
+    participates_in_demand, pipeline_composed_barrier, pipeline_element,
+    pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
+    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
+    sink_demand as builtin_sink_demand, stage_delayable_view_projection,
     stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
     stage_merge as builtin_stage_merge, view_projection, view_stage as builtin_view_stage,
     BuiltinId,
@@ -1655,12 +1655,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
             super::NestedPlanKernel::new(Arc::clone(plan)),
         ))),
         Stage::Builtin(call)
-            if builtin_is_pure(BuiltinId::from_method(call.method))
-                && crate::builtins::registry::view_projection(BuiltinId::from_method(
-                    call.method,
-                ))
-                && builtin_cardinality(BuiltinId::from_method(call.method))
-                    == Some(BuiltinCardinality::OneToOne) =>
+            if stage_delayable_view_projection(BuiltinId::from_method(call.method)) =>
         {
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
