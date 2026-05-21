@@ -647,6 +647,8 @@ pub struct BuiltinSpec {
     pub cancellation: Option<BuiltinCancellation>,
     /// Whether applying the builtin twice is equivalent to applying it once.
     pub idempotent: bool,
+    /// Whether the builtin accepts a lambda/expression argument at runtime.
+    pub accepts_lambda_arg: bool,
     /// Columnar stage kind for backends that work on typed column vectors.
     pub columnar_stage: Option<BuiltinColumnarStage>,
     /// Structural index backend hint (deep search variants).
@@ -1457,6 +1459,7 @@ impl BuiltinSpec {
             stage_merge: None,
             cancellation: None,
             idempotent: false,
+            accepts_lambda_arg: false,
             columnar_stage: None,
             structural: None,
             cost: 1.0,
@@ -1528,6 +1531,12 @@ impl BuiltinSpec {
     /// Marks a builtin as algebraically idempotent.
     fn idempotent(mut self) -> Self {
         self.idempotent = true;
+        self
+    }
+
+    /// Marks a builtin as accepting a lambda/expression argument.
+    fn lambda_arg(mut self) -> Self {
+        self.accepts_lambda_arg = true;
         self
     }
 

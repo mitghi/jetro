@@ -591,6 +591,7 @@ pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
     };
     let spec = method.spec();
     spec.expr_stage.is_some()
+        || spec.accepts_lambda_arg
         || spec.object_lambda.is_some()
         || spec.keyed_reducer.is_some()
         || spec.arg_extreme_sink.is_some()
@@ -606,14 +607,6 @@ pub(crate) fn accepts_lambda_arg(id: BuiltinId) -> bool {
         || spec
             .sink
             .is_some_and(|sink| sink.accepts_predicate)
-        || matches!(
-            method,
-            BuiltinMethod::Accumulate
-                | BuiltinMethod::Fold
-                | BuiltinMethod::Partition
-                | BuiltinMethod::Pivot
-                | BuiltinMethod::Update
-        )
 }
 
 /// Return whether builtin `id` should bypass streaming and run as a direct

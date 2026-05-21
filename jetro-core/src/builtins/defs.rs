@@ -1275,7 +1275,7 @@ pub(crate) struct Partition;
 impl Builtin for Partition {
     const METHOD: BuiltinMethod = BuiltinMethod::Partition;
     const NAME: &'static str = "partition";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
 }
 
 /// `window(n)` — sliding window barrier.
@@ -1404,7 +1404,7 @@ pub(crate) struct Accumulate;
 impl Builtin for Accumulate {
     const METHOD: BuiltinMethod = BuiltinMethod::Accumulate;
     const NAME: &'static str = "accumulate";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
 }
 
 /// `fold(init, fn)` / `fold(fn)` — like `accumulate(...).last()` but
@@ -1415,7 +1415,7 @@ impl Builtin for Fold {
     const METHOD: BuiltinMethod = BuiltinMethod::Fold;
     const NAME: &'static str = "fold";
     const ALIASES: &'static [&'static str] = &["reduce"];
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
 }
 
 // ── Keyed reducers ───────────────────────────────────────────────────────────
@@ -2045,7 +2045,7 @@ pub(crate) struct Pivot;
 impl Builtin for Pivot {
     const METHOD: BuiltinMethod = BuiltinMethod::Pivot;
     const NAME: &'static str = "pivot";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec { object_simple_spec().lambda_arg() }
 }
 
 /// `implode(sep)` — array-to-string with separator.
@@ -2508,7 +2508,9 @@ impl Builtin for Update {
     const METHOD: BuiltinMethod = BuiltinMethod::Update;
     const NAME: &'static str = "update";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne).indexed()
+        BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
+            .indexed()
+            .lambda_arg()
     }
 }
 
