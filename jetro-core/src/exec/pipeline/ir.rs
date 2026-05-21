@@ -276,18 +276,10 @@ impl Sink {
 
     /// Classifies embedded sink programs into body kernels for payload planning and view routing.
     pub(crate) fn body_kernels(&self) -> Vec<BodyKernel> {
-        match self {
-            Sink::Collect
-            | Sink::Terminal(_)
-            | Sink::SelectMany { .. }
-            | Sink::Nth(_)
-            | Sink::ApproxCountDistinct => Vec::new(),
-            _ => self
-                .sink_programs()
-                .into_iter()
-                .map(|p| BodyKernel::classify(p))
-                .collect(),
-        }
+        self.sink_programs()
+            .into_iter()
+            .map(|p| BodyKernel::classify(p))
+            .collect()
     }
 
     /// Returns all VM programs embedded in this sink, in the same order used by
