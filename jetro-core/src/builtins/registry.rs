@@ -1583,6 +1583,36 @@ mod tests {
     }
 
     #[test]
+    fn registry_execution_surfaces_have_explicit_demand_laws() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            let participates = logical_shape(id).is_some()
+                || pipeline_lowering(id).is_some()
+                || pipeline_element(id)
+                || view_stage(id).is_some()
+                || row_stream_op(id).is_some()
+                || structural(id).is_some()
+                || view_projection(id)
+                || spec.sink.is_some()
+                || spec.keyed_reducer.is_some()
+                || spec.numeric_reducer.is_some()
+                || spec.arg_extreme_sink.is_some()
+                || spec.predicate_sink.is_some()
+                || spec.membership_sink.is_some()
+                || spec.array_selector.is_some();
+
+            if participates {
+                assert_ne!(
+                    demand_law(id),
+                    BuiltinDemandLaw::Identity,
+                    "{method:?} is exposed to planning/execution surfaces but inherits Identity demand"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_order_transform_demands_are_conservative_barriers() {
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
