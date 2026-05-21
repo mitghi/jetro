@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::data::value::{ObjVecData, Val};
 
-use super::{walk_field_chain, Source};
+use super::{walk_field_chain, Source, SourceAccessMode};
 
 /// Unified row storage that avoids copying when the source owns or borrows an array slice, while also supporting owned `Vec<Val>`.
 pub(super) enum Rows<'a> {
@@ -258,14 +258,81 @@ impl<'a> TapeRowSource<'a> {
         }
     }
 
+    /// Returns a view iterator constrained by the selected source access mode.
+    ///
+    /// Direct positional access still walks tape spans to locate the selected
+    /// child when an offset table is not available, but it materialises only the
+    /// demanded row instead of every preceding sibling.
+    pub(super) fn iter_views_for_access(self, access: SourceAccessMode) -> TapeRowsIter<'a> {
+        match access {
+            SourceAccessMode::Indexed(idx) => self
+                .view_at(idx)
+                .map(|view| TapeRowsIter::Single(Some(view).into_iter()))
+                .unwrap_or(TapeRowsIter::Empty),
+            SourceAccessMode::IndexedFromEnd(offset) => self
+                .view_from_end(offset)
+                .map(|view| TapeRowsIter::Single(Some(view).into_iter()))
+                .unwrap_or(TapeRowsIter::Empty),
+            SourceAccessMode::ForwardBounded(limit) => match self {
+                Self::Array { tape, first, len } => TapeRowsIter::Array {
+                    tape,
+                    remaining: len.min(limit),
+                    cur: first,
+                },
+                Self::Single(view) if limit > 0 => TapeRowsIter::Single(Some(view).into_iter()),
+                Self::Single(_) | Self::Missing => TapeRowsIter::Empty,
+            },
+            SourceAccessMode::Forward
+            | SourceAccessMode::Reverse { .. }
+            | SourceAccessMode::MaterializedFallback => self.iter_views(),
+        }
+    }
+
     /// Returns a `TapeMaterializedRowsIter` that materialises each tape element into an owned `Val` as it iterates.
     pub(super) fn iter_materialized(self) -> TapeMaterializedRowsIter<'a> {
         TapeMaterializedRowsIter(self.iter_views())
     }
 
+    /// Returns a materialising iterator constrained by the selected source access mode.
+    pub(super) fn iter_materialized_for_access(
+        self,
+        access: SourceAccessMode,
+    ) -> TapeMaterializedRowsIter<'a> {
+        TapeMaterializedRowsIter(self.iter_views_for_access(access))
+    }
+
     /// Returns `true` when the tape source resolves to an array node, making it a multi-row provider.
     pub(super) fn is_array_provider(&self) -> bool {
         matches!(self, Self::Array { .. })
+    }
+
+    fn view_at(&self, idx: usize) -> Option<crate::data::view::TapeView<'a>> {
+        use crate::data::view::TapeView;
+
+        match self {
+            Self::Array { tape, first, len } => {
+                if idx >= *len {
+                    return None;
+                }
+                let mut cur = *first;
+                for _ in 0..idx {
+                    cur += tape.span(cur);
+                }
+                Some(TapeView::Node { tape, idx: cur })
+            }
+            Self::Single(view) => (idx == 0).then_some(*view),
+            Self::Missing => None,
+        }
+    }
+
+    fn view_from_end(&self, offset: usize) -> Option<crate::data::view::TapeView<'a>> {
+        let len = match self {
+            Self::Array { len, .. } => *len,
+            Self::Single(_) => 1,
+            Self::Missing => return None,
+        };
+        let idx = len.checked_sub(offset.checked_add(1)?)?;
+        self.view_at(idx)
     }
 }
 
@@ -352,4 +419,50 @@ fn tape_field(tape: &crate::data::tape::TapeData, idx: usize, key: &str) -> Opti
         cur += tape.span(cur);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::tape::TapeData;
+    use serde_json::json;
+
+    fn tape_rows() -> std::sync::Arc<TapeData> {
+        TapeData::parse(
+            br#"{"books":[{"id":1},{"id":2},{"id":3}],"other":[{"id":99}]}"#.to_vec(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn tape_row_source_materializes_only_indexed_from_end_child() {
+        let tape = tape_rows();
+        tape.reset_materialized_subtrees();
+        let keys = [Arc::<str>::from("books")];
+        let rows = TapeRowSource::from_field_chain(&tape, &keys);
+
+        let values: Vec<_> = rows
+            .iter_materialized_for_access(SourceAccessMode::IndexedFromEnd(0))
+            .map(serde_json::Value::from)
+            .collect();
+
+        assert_eq!(values, vec![json!({"id": 3})]);
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn tape_row_source_prefix_access_bounds_materialization() {
+        let tape = tape_rows();
+        tape.reset_materialized_subtrees();
+        let keys = [Arc::<str>::from("books")];
+        let rows = TapeRowSource::from_field_chain(&tape, &keys);
+
+        let values: Vec<_> = rows
+            .iter_materialized_for_access(SourceAccessMode::ForwardBounded(2))
+            .map(serde_json::Value::from)
+            .collect();
+
+        assert_eq!(values, vec![json!({"id": 1}), json!({"id": 2})]);
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
 }

@@ -185,10 +185,15 @@ pub(super) fn run_tape_field_chain_with_vm(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
+    let iter = if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_)) {
+        source.iter_materialized()
+    } else {
+        source.iter_materialized_for_access(pipeline.source_access())
+    };
     Some(run_streaming_rows_with_vm(
         &pipeline,
         base_env,
-        source.iter_materialized(),
+        iter,
         vm,
     ))
 }
