@@ -2295,7 +2295,10 @@ impl Builtin for HasPath {
 
 #[inline]
 fn path_indexed_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne).indexed()
+    BuiltinSpec::new(BuiltinCategory::Path, BuiltinCardinality::OneToOne)
+        .indexed()
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
 }
 
 /// `set_path(path, val)` — write value at path.

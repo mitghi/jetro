@@ -1500,6 +1500,10 @@ mod tests {
             BuiltinMethod::ReplaceAll,
             BuiltinMethod::ToCsv,
             BuiltinMethod::ToTsv,
+            BuiltinMethod::SetPath,
+            BuiltinMethod::DelPaths,
+            BuiltinMethod::FlattenKeys,
+            BuiltinMethod::UnflattenKeys,
         ] {
             let demand = propagate_demand(
                 BuiltinId::from_method(method),
