@@ -5,6 +5,7 @@
 //! `Arc<Program>` happens only in the lowering pass after optimizer rules have
 //! been applied.
 
+use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
 use crate::exec::pipeline::{SortSpec, Source};
 
@@ -53,7 +54,72 @@ pub(crate) enum LogicalPlan {
     ScalarExpr,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::pipeline::Source;
+
+    #[test]
+    fn logical_nodes_expose_canonical_builtin_methods() {
+        assert_eq!(
+            LogicalPlan::Filter {
+                input: Box::new(LogicalPlan::ScalarExpr),
+                predicate: Expr::Bool(true),
+            }
+            .builtin_method(),
+            Some(BuiltinMethod::Filter)
+        );
+        assert_eq!(
+            LogicalPlan::Unique {
+                input: Box::new(LogicalPlan::ScalarExpr),
+                key: Some(Expr::Current),
+            }
+            .builtin_method(),
+            Some(BuiltinMethod::UniqueBy)
+        );
+        assert_eq!(
+            LogicalPlan::First(Box::new(LogicalPlan::ScalarExpr)).builtin_method(),
+            Some(BuiltinMethod::First)
+        );
+        assert_eq!(
+            LogicalPlan::Source(Source::Receiver(crate::data::value::Val::Null))
+                .builtin_method(),
+            None
+        );
+    }
+}
+
 impl LogicalPlan {
+    /// Returns the canonical builtin method represented by this logical node,
+    /// if the node maps to a pipeline stage or terminal sink.
+    pub(crate) fn builtin_method(&self) -> Option<BuiltinMethod> {
+        Some(match self {
+            LogicalPlan::Filter { .. } => BuiltinMethod::Filter,
+            LogicalPlan::Map { .. } => BuiltinMethod::Map,
+            LogicalPlan::FlatMap { .. } => BuiltinMethod::FlatMap,
+            LogicalPlan::TakeWhile { .. } => BuiltinMethod::TakeWhile,
+            LogicalPlan::DropWhile { .. } => BuiltinMethod::DropWhile,
+            LogicalPlan::Take { .. } => BuiltinMethod::Take,
+            LogicalPlan::Skip { .. } => BuiltinMethod::Skip,
+            LogicalPlan::Sort { .. } => BuiltinMethod::Sort,
+            LogicalPlan::Unique { key: None, .. } => BuiltinMethod::Unique,
+            LogicalPlan::Unique { key: Some(_), .. } => BuiltinMethod::UniqueBy,
+            LogicalPlan::Reverse { .. } => BuiltinMethod::Reverse,
+            LogicalPlan::GroupBy { .. } => BuiltinMethod::GroupBy,
+            LogicalPlan::CountBy { .. } => BuiltinMethod::CountBy,
+            LogicalPlan::IndexBy { .. } => BuiltinMethod::IndexBy,
+            LogicalPlan::First(_) => BuiltinMethod::First,
+            LogicalPlan::Last(_) => BuiltinMethod::Last,
+            LogicalPlan::Sum(_) => BuiltinMethod::Sum,
+            LogicalPlan::Avg(_) => BuiltinMethod::Avg,
+            LogicalPlan::Min(_) => BuiltinMethod::Min,
+            LogicalPlan::Max(_) => BuiltinMethod::Max,
+            LogicalPlan::Count(_) => BuiltinMethod::Count,
+            LogicalPlan::ApproxCountDistinct(_) => BuiltinMethod::ApproxCountDistinct,
+            LogicalPlan::Source(_) | LogicalPlan::ScalarExpr => return None,
+        })
+    }
+
     /// Consumes `self` and returns `(input, node_without_input)` for use in rewrites.
     /// Returns `Err(self)` for `Source` and `ScalarExpr`.
     pub(crate) fn take_input(self) -> Result<(Box<LogicalPlan>, LogicalPlan), LogicalPlan> {

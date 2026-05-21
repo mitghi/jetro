@@ -34,6 +34,7 @@ pub(crate) fn try_lower(plan: LogicalPlan) -> Option<Pipeline> {
 /// expression slots), and the terminal sink.  Returns `None` for plan shapes that cannot be
 /// lowered to a linear pipeline.
 fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
+    let method = plan.builtin_method();
     match plan {
         // ── Leaf: the row source ───────────────────────────────────────────
         LogicalPlan::Source(source) => Some((source, vec![], vec![], Sink::Collect)),
@@ -42,7 +43,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::Filter { input, predicate } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&predicate);
-            stages.push(Stage::expr_stage_builtin(BuiltinMethod::Filter, prog)?);
+            stages.push(Stage::expr_stage_builtin(method?, prog)?);
             exprs.push(Some(Arc::new(predicate)));
             Some((source, stages, exprs, sink))
         }
@@ -50,7 +51,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::Map { input, projection } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&projection);
-            stages.push(Stage::expr_stage_builtin(BuiltinMethod::Map, prog)?);
+            stages.push(Stage::expr_stage_builtin(method?, prog)?);
             exprs.push(Some(Arc::new(projection)));
             Some((source, stages, exprs, sink))
         }
@@ -58,30 +59,30 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         LogicalPlan::FlatMap { input, expansion } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             let prog = compile_expr_body(&expansion);
-            stages.push(Stage::expr_stage_builtin(BuiltinMethod::FlatMap, prog)?);
+            stages.push(Stage::expr_stage_builtin(method?, prog)?);
             exprs.push(Some(Arc::new(expansion)));
             Some((source, stages, exprs, sink))
         }
 
         LogicalPlan::TakeWhile { input, predicate } => {
-            collect_expr_builtin_stage(*input, BuiltinMethod::TakeWhile, predicate)
+            collect_expr_builtin_stage(*input, method?, predicate)
         }
 
         LogicalPlan::DropWhile { input, predicate } => {
-            collect_expr_builtin_stage(*input, BuiltinMethod::DropWhile, predicate)
+            collect_expr_builtin_stage(*input, method?, predicate)
         }
 
         // ── Positional ─────────────────────────────────────────────────────
         LogicalPlan::Take { input, n } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::usize_builtin(BuiltinMethod::Take, n)?);
+            stages.push(Stage::usize_builtin(method?, n)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
 
         LogicalPlan::Skip { input, n } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::usize_builtin(BuiltinMethod::Skip, n)?);
+            stages.push(Stage::usize_builtin(method?, n)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
@@ -89,7 +90,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         // ── Ordering / dedup ───────────────────────────────────────────────
         LogicalPlan::Sort { input, spec } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::sort_builtin(BuiltinMethod::Sort, spec)?);
+            stages.push(Stage::sort_builtin(method?, spec)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
@@ -119,57 +120,37 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
 
         // ── Keyed reducers ─────────────────────────────────────────────────
         LogicalPlan::GroupBy { input, key } => {
-            collect_expr_builtin_stage(*input, BuiltinMethod::GroupBy, key)
+            collect_expr_builtin_stage(*input, method?, key)
         }
 
         LogicalPlan::CountBy { input, key } => {
-            collect_expr_builtin_stage(*input, BuiltinMethod::CountBy, key)
+            collect_expr_builtin_stage(*input, method?, key)
         }
 
         LogicalPlan::IndexBy { input, key } => {
-            collect_expr_builtin_stage(*input, BuiltinMethod::IndexBy, key)
+            collect_expr_builtin_stage(*input, method?, key)
         }
 
         // ── Terminal sinks — strip the default Collect, install the real one ──
         LogicalPlan::First(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((
-                source,
-                stages,
-                exprs,
-                Sink::terminal_builtin(BuiltinMethod::First)?,
-            ))
+            Some((source, stages, exprs, Sink::terminal_builtin(method?)?))
         }
         LogicalPlan::Last(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((
-                source,
-                stages,
-                exprs,
-                Sink::terminal_builtin(BuiltinMethod::Last)?,
-            ))
+            Some((source, stages, exprs, Sink::terminal_builtin(method?)?))
         }
         LogicalPlan::Count(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((
-                source,
-                stages,
-                exprs,
-                Sink::count_builtin(BuiltinMethod::Count)?,
-            ))
+            Some((source, stages, exprs, Sink::count_builtin(method?)?))
         }
-        LogicalPlan::Sum(inner) => collect_numeric_sink(*inner, BuiltinMethod::Sum),
-        LogicalPlan::Avg(inner) => collect_numeric_sink(*inner, BuiltinMethod::Avg),
-        LogicalPlan::Min(inner) => collect_numeric_sink(*inner, BuiltinMethod::Min),
-        LogicalPlan::Max(inner) => collect_numeric_sink(*inner, BuiltinMethod::Max),
+        LogicalPlan::Sum(inner)
+        | LogicalPlan::Avg(inner)
+        | LogicalPlan::Min(inner)
+        | LogicalPlan::Max(inner) => collect_numeric_sink(*inner, method?),
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((
-                source,
-                stages,
-                exprs,
-                Sink::approx_distinct_builtin(BuiltinMethod::ApproxCountDistinct)?,
-            ))
+            Some((source, stages, exprs, Sink::approx_distinct_builtin(method?)?))
         }
 
         // ── VM fallback — cannot lower to a Pipeline ───────────────────────
