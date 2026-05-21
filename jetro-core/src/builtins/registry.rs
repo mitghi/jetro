@@ -508,7 +508,8 @@ fn sink_value_need(value: BuiltinSinkValueNeed) -> ValueNeed {
 }
 
 /// Return `true` if builtin `id` has a non-trivial demand law that can
-/// restrict the amount of input the planner must pull from its source.
+/// either restrict the amount of input the planner must pull from its source
+/// or conservatively widen unsafe downstream pull precision to a full scan.
 #[inline]
 pub(crate) fn participates_in_demand(id: BuiltinId) -> bool {
     demand_law(id) != BuiltinDemandLaw::Identity || demand_is_conservative_barrier(id)
@@ -1799,6 +1800,10 @@ mod tests {
             BuiltinMethod::FlatMap,
             BuiltinMethod::DropWhile,
             BuiltinMethod::Sort,
+            BuiltinMethod::DeepFind,
+            BuiltinMethod::DeepShape,
+            BuiltinMethod::DeepLike,
+            BuiltinMethod::EquiJoin,
             BuiltinMethod::Unknown,
         ] {
             assert!(
