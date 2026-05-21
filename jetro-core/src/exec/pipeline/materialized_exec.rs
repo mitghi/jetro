@@ -5,6 +5,7 @@
 //! from `composed_exec` so migration to the composed substrate can proceed
 //! incrementally without breaking existing correctness.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::{
@@ -69,50 +70,14 @@ pub(super) fn run(
         .iter()
         .any(Stage::requires_legacy_materialization);
     if !needs_barrier {
-        let source_access = pipeline.source_access();
-        if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
-            && matches!(source_access, SourceAccessMode::Indexed(_))
-        {
-            if let Some(selected) = pipeline.for_selected_single_row() {
-                return run_streaming_rows_with_vm(
-                    &selected,
-                    base_env,
-                    row_source::source_iter_for_access(&recv, source_access),
-                    vm,
-                );
-            }
-        }
-        if matches!(source_access, SourceAccessMode::Reverse { .. }) {
-            if let Some(reversed) = pipeline.for_reversed_select_one() {
-                return run_streaming_rows_with_vm(
-                    &reversed,
-                    base_env,
-                    row_source::source_iter_for_access(&recv, source_access),
-                    vm,
-                );
-            }
-            if let Some(reversed) = pipeline.for_reversed_select_many() {
-                return run_streaming_rows_with_vm(
-                    &reversed,
-                    base_env,
-                    row_source::source_iter_for_access(&recv, source_access),
-                    vm,
-                )
-                .map(restore_reversed_select_many_result);
-            }
-            return run_streaming_rows_with_vm(
-                pipeline,
-                base_env,
-                row_source::source_iter_for_access(&recv, SourceAccessMode::Forward),
-                vm,
-            );
-        }
-        return run_streaming_rows_with_vm(
-            pipeline,
+        let planned = planned_stream_for_access(pipeline);
+        let out = run_streaming_rows_with_vm(
+            planned.pipeline.as_ref(),
             base_env,
-            row_source::source_iter_for_access(&recv, source_access),
+            row_source::source_iter_for_access(&recv, planned.access),
             vm,
-        );
+        )?;
+        return Ok(planned.restore(out));
     }
 
     let pre_iter: LegacyPreIter = {
@@ -228,35 +193,15 @@ pub(super) fn run_tape_field_chain_with_vm(
         return None;
     }
     let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
-    if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
-        && matches!(pipeline.source_access(), SourceAccessMode::Indexed(_))
-    {
-        let selected = pipeline.for_selected_single_row()?;
-        let iter = source.iter_materialized_for_access(pipeline.source_access());
-        return Some(run_streaming_rows_with_vm(&selected, base_env, iter, vm));
-    }
-    if matches!(pipeline.source_access(), SourceAccessMode::Reverse { .. }) {
-        if let Some(reversed) = pipeline.for_reversed_select_one() {
-            let iter = source.iter_materialized_for_access(pipeline.source_access());
-            return Some(run_streaming_rows_with_vm(&reversed, base_env, iter, vm));
-        }
-        if let Some(reversed) = pipeline.for_reversed_select_many() {
-            let iter = source.iter_materialized_for_access(pipeline.source_access());
-            return Some(
-                run_streaming_rows_with_vm(&reversed, base_env, iter, vm)
-                    .map(restore_reversed_select_many_result),
-            );
-        }
-        let iter = source.iter_materialized_for_access(SourceAccessMode::Forward);
-        return Some(run_streaming_rows_with_vm(&pipeline, base_env, iter, vm));
-    }
-    let iter = source.iter_materialized_for_access(pipeline.source_access());
+    let planned = planned_stream_for_access(&pipeline);
+    let iter = source.iter_materialized_for_access(planned.access);
     Some(run_streaming_rows_with_vm(
-        &pipeline,
+        planned.pipeline.as_ref(),
         base_env,
         iter,
         vm,
-    ))
+    )
+    .map(|out| planned.restore(out)))
 }
 
 #[cfg(test)]
@@ -432,6 +377,65 @@ fn restore_reversed_select_many_result(value: Val) -> Val {
             Val::arr(items)
         }
         other => other,
+    }
+}
+
+struct PlannedStream<'a> {
+    pipeline: Cow<'a, Pipeline>,
+    access: SourceAccessMode,
+    restore_reversed_select_many: bool,
+}
+
+impl PlannedStream<'_> {
+    fn restore(&self, value: Val) -> Val {
+        if self.restore_reversed_select_many {
+            restore_reversed_select_many_result(value)
+        } else {
+            value
+        }
+    }
+}
+
+fn planned_stream_for_access(pipeline: &Pipeline) -> PlannedStream<'_> {
+    let access = pipeline.source_access();
+    if matches!(pipeline.source_demand().chain.pull, PullDemand::NthInput(_))
+        && matches!(access, SourceAccessMode::Indexed(_))
+    {
+        if let Some(selected) = pipeline.for_selected_single_row() {
+            return PlannedStream {
+                pipeline: Cow::Owned(selected),
+                access,
+                restore_reversed_select_many: false,
+            };
+        }
+    }
+
+    if matches!(access, SourceAccessMode::Reverse { .. }) {
+        if let Some(reversed) = pipeline.for_reversed_select_one() {
+            return PlannedStream {
+                pipeline: Cow::Owned(reversed),
+                access,
+                restore_reversed_select_many: false,
+            };
+        }
+        if let Some(reversed) = pipeline.for_reversed_select_many() {
+            return PlannedStream {
+                pipeline: Cow::Owned(reversed),
+                access,
+                restore_reversed_select_many: true,
+            };
+        }
+        return PlannedStream {
+            pipeline: Cow::Borrowed(pipeline),
+            access: SourceAccessMode::Forward,
+            restore_reversed_select_many: false,
+        };
+    }
+
+    PlannedStream {
+        pipeline: Cow::Borrowed(pipeline),
+        access,
+        restore_reversed_select_many: false,
     }
 }
 
