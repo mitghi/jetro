@@ -1,9 +1,8 @@
 use super::stream_plan::{
-    lower_root_rows_expr, RowStreamPlan, RowStreamPlanError, RowStreamSourceKind,
+    lower_root_rows_expr, root_rows_stream_prefix_len, RowStreamPlan, RowStreamPlanError,
+    RowStreamSourceKind,
 };
-use crate::builtins::registry::{by_name as builtin_by_name, row_stream_op, BuiltinId};
-use crate::builtins::BuiltinMethod;
-use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, Step};
+use crate::parse::ast::{Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField};
 
 pub(super) const STREAM_BINDING: &str = "__jetro_rows_stream_0";
 
@@ -131,22 +130,9 @@ fn lift_root_rows_prefix(
     if !matches!(base.as_ref(), Expr::Root) {
         return Ok(None);
     }
-    let Some((Step::Method(name, args), _)) = steps.split_first() else {
+    let Some(split) = root_rows_stream_prefix_len(expr) else {
         return Ok(None);
     };
-    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
-        || !args.is_empty()
-    {
-        return Ok(None);
-    }
-
-    let mut split = 1usize;
-    while let Some(Step::Method(name, _)) = steps.get(split) {
-        if !is_rows_stream_method(name) {
-            break;
-        }
-        split += 1;
-    }
     if split == steps.len() {
         return Ok(None);
     }
@@ -162,10 +148,6 @@ fn lift_root_rows_prefix(
         Expr::Chain(Box::new(Expr::Ident(STREAM_BINDING.to_string())), suffix)
     };
     Ok(Some((stream, replacement)))
-}
-
-fn is_rows_stream_method(name: &str) -> bool {
-    builtin_by_name(name).is_some_and(|id| row_stream_op(id).is_some())
 }
 
 fn replace_steps(

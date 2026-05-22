@@ -426,6 +426,38 @@ fn root_rows_steps(expr: &Expr) -> Option<&[Step]> {
     Some(rest)
 }
 
+/// Returns the number of leading chain steps that make up a root `$.rows()`
+/// stream prefix, including the `rows()` method itself.
+pub(super) fn root_rows_stream_prefix_len(expr: &Expr) -> Option<usize> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Root) {
+        return None;
+    }
+    let Some((Step::Method(name, args), _)) = steps.split_first() else {
+        return None;
+    };
+    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
+        || !args.is_empty()
+    {
+        return None;
+    }
+
+    let mut split = 1usize;
+    while let Some(Step::Method(name, _)) = steps.get(split) {
+        if !is_rows_stream_method(name) {
+            break;
+        }
+        split += 1;
+    }
+    Some(split)
+}
+
+pub(super) fn is_rows_stream_method(name: &str) -> bool {
+    builtin_by_name(name).is_some_and(|id| row_stream_op(id).is_some())
+}
+
 fn require_arity(name: &str, args: &[Arg], arity: usize) -> Result<(), RowStreamPlanError> {
     if args.len() == arity {
         Ok(())
@@ -472,6 +504,15 @@ mod tests {
         assert!(is_root_rows_expr(&expr));
         let expr = parse("$.items.rows().take(2)").unwrap();
         assert!(!is_root_rows_expr(&expr));
+    }
+
+    #[test]
+    fn detects_root_rows_stream_prefix_for_wrapped_subqueries() {
+        let expr = parse("$.rows().reverse().find($.active).first().id").unwrap();
+        assert_eq!(root_rows_stream_prefix_len(&expr), Some(4));
+
+        let expr = parse("$.items.rows().take(2)").unwrap();
+        assert_eq!(root_rows_stream_prefix_len(&expr), None);
     }
 
     #[test]
