@@ -14,7 +14,7 @@ use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;
 use super::stream_numeric::NumericAccumulator;
 #[cfg(test)]
-use super::stream_plan::query_may_contain_rows_stream;
+use super::stream_plan::parse_rows_stream_candidate_query;
 use super::stream_plan::{
     lower_root_rows_expr, RowStreamDirection, RowStreamPlan, RowStreamPlanError,
     RowStreamSourceKind, RowStreamStage,
@@ -52,11 +52,11 @@ pub(super) fn lower_rows_fanout_query(
     query: &str,
     source: RowStreamSourceKind,
 ) -> Result<Option<RowStreamFanoutPlan>, JetroEngineError> {
-    if !query_may_contain_rows_stream(query) {
-        return Ok(None);
-    }
-    let expr = crate::parse::parser::parse(query)
+    let candidate = parse_rows_stream_candidate_query(query)
         .map_err(|err| JetroEngineError::Eval(crate::EvalError(err.to_string())))?;
+    let Some(expr) = candidate else {
+        return Ok(None);
+    };
     lower_rows_fanout_expr(&expr, source)
         .map_err(|err| JetroEngineError::Eval(crate::EvalError(err.to_string())))
 }

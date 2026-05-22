@@ -407,13 +407,27 @@ pub(super) fn lower_root_rows_query(
     lower_root_rows_expr(&expr, source)
 }
 
+#[cfg(test)]
 pub(super) fn query_may_contain_rows_stream(query: &str) -> bool {
-    if !query.contains("rows") {
-        return false;
-    }
-    crate::parse::parser::parse(query)
+    parse_rows_stream_candidate_query(query)
         .ok()
-        .is_some_and(|expr| expr_contains_root_rows_stream(&expr))
+        .flatten()
+        .is_some()
+}
+
+pub(super) fn parse_rows_stream_candidate_query(
+    query: &str,
+) -> Result<Option<Expr>, RowStreamPlanError> {
+    if !query.contains("rows") {
+        return Ok(None);
+    }
+    let expr = crate::parse::parser::parse(query)
+        .map_err(|err| RowStreamPlanError::new(err.to_string()))?;
+    if expr_contains_root_rows_stream(&expr) {
+        Ok(Some(expr))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(super) fn looks_like_root_rows_query(query: &str) -> bool {

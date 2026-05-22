@@ -1,6 +1,6 @@
 use super::stream_fanout::{lower_rows_fanout_expr, RowStreamFanoutPlan};
 use super::stream_plan::{
-    lower_root_rows_query, query_may_contain_rows_stream, RowStreamPlan, RowStreamSourceKind,
+    lower_root_rows_query, parse_rows_stream_candidate_query, RowStreamPlan, RowStreamSourceKind,
 };
 use super::stream_subquery::{lower_single_rows_subquery, RowStreamSubqueryPlan};
 use crate::{EvalError, JetroEngineError};
@@ -89,11 +89,7 @@ fn ndjson_rows_fanout_plan(query: &str) -> Result<Option<RowStreamFanoutPlan>, J
 fn parse_ndjson_rows_expr(
     query: &str,
 ) -> Result<Option<crate::parse::ast::Expr>, JetroEngineError> {
-    if !query_may_contain_rows_stream(query) {
-        return Ok(None);
-    }
-    crate::parse::parser::parse(query)
-        .map(Some)
+    parse_rows_stream_candidate_query(query)
         .map_err(|err| JetroEngineError::Eval(EvalError(err.to_string())))
 }
 
