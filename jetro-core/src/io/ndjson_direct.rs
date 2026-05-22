@@ -1025,8 +1025,8 @@ fn direct_tape_numeric_stream_plan(
         return None;
     }
     let op = spec.numeric_op()?;
+    let stream = direct_stream_shape(body)?;
     let (predicate, suffix_steps) = if spec.projection.is_some() {
-        let stream = direct_stream_shape(body)?;
         if stream.map.is_some() {
             return None;
         }
@@ -1035,7 +1035,6 @@ fn direct_tape_numeric_stream_plan(
             kernel_to_physical_path(body.sink_kernels.first()?)?,
         )
     } else {
-        let stream = direct_stream_shape(body)?;
         let suffix_steps = direct_stream_map_path(stream.map?)?;
         (stream.predicate, suffix_steps)
     };
