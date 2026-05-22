@@ -792,6 +792,22 @@ mod tests {
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
     #[test]
+    fn view_object_predicate_and_projection_chain_stays_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"meta":{"title":"low"}},{"meta":{"isbn":"x","price":10,"debug":true}},{"meta":{"isbn":"y","price":20,"debug":false}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "price")).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!({"isbn": "y", "price": 20}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+    #[test]
     fn view_has_preserves_array_and_string_membership_without_materialization() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"tags":["sf"],"title":"Dune"},{"tags":["sf","hugo"],"title":"Foundation"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
