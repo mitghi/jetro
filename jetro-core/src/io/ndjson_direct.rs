@@ -1,7 +1,7 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
     direct_scalar_for_plain_sink, logical_shape, terminal_selection_wants_last,
-    view_object_items_projection, view_scalar_projection, BuiltinId,
+    view_object_items_projection, view_scalar_value_projection, BuiltinId,
 };
 use crate::builtins::{BuiltinArraySelector, BuiltinLogicalShape};
 use crate::data::value::Val;
@@ -228,9 +228,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional
-            && view_scalar_projection(BuiltinId::from_method(call.method))
-            && !view_object_items_projection(BuiltinId::from_method(call.method)) =>
+        } if !*optional && view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
         {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
@@ -511,8 +509,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if view_scalar_projection(BuiltinId::from_method(call.method))
-            && !view_object_items_projection(BuiltinId::from_method(call.method)) =>
+        } if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
         {
             if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
@@ -585,7 +582,7 @@ fn direct_object_value_from_node(
             receiver,
             call,
             optional,
-        } if view_scalar_projection(BuiltinId::from_method(call.method)) => {
+        } if view_scalar_value_projection(BuiltinId::from_method(call.method)) => {
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
                 steps: node_path_steps(plan, *receiver)?,
                 call: call.clone(),
@@ -971,7 +968,7 @@ fn direct_tape_predicate_node(
             receiver,
             call,
             optional,
-        } if !*optional && view_scalar_projection(BuiltinId::from_method(call.method)) => {
+        } if !*optional && view_scalar_value_projection(BuiltinId::from_method(call.method)) => {
             direct_tape_predicate_scalar_call(plan, *receiver, call.clone())
         }
         PlanNode::Pipeline { source, body } => {
@@ -1237,7 +1234,7 @@ fn direct_item_predicate_from_kernel(
             Some(acc)
         }
         crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
-            if view_scalar_projection(BuiltinId::from_method(call.method)) =>
+            if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
         {
             Some(NdjsonDirectItemPredicate::ViewScalarCall {
                 suffix_steps: kernel_to_physical_path(receiver)?,
@@ -1277,7 +1274,7 @@ fn direct_projection_value_from_kernel(
             Some(NdjsonDirectProjectionValue::Literal(Val::Bool(*value)))
         }
         crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
-            if view_scalar_projection(BuiltinId::from_method(call.method)) =>
+            if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
         {
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
                 steps: kernel_to_physical_path(receiver)?,

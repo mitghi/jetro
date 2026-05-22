@@ -1025,6 +1025,14 @@ pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
     id.method().is_some_and(|method| method.spec().view_scalar)
 }
 
+/// Return true when builtin `id` is a view-native scalar call usable as a
+/// direct value projection, excluding object-item enumerators that have their
+/// own object projection path.
+#[inline]
+pub(crate) fn view_scalar_value_projection(id: BuiltinId) -> bool {
+    view_scalar_projection(id) && !view_object_items_projection(id)
+}
+
 /// Return raw-byte scalar execution support for builtin `id`, if the operation
 /// can be served directly from a JSON value slice with the given static args.
 #[inline]
@@ -2078,6 +2086,28 @@ mod tests {
                 "{method:?}"
             );
         }
+    }
+
+    #[test]
+    fn registry_classifies_direct_view_scalar_value_projection() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(
+                view_scalar_value_projection(id),
+                view_scalar_projection(id) && !view_object_items_projection(id),
+                "{method:?}"
+            );
+        }
+
+        assert!(view_scalar_value_projection(BuiltinId::from_method(
+            BuiltinMethod::Len
+        )));
+        assert!(!view_scalar_value_projection(BuiltinId::from_method(
+            BuiltinMethod::Keys
+        )));
+        assert!(!view_scalar_value_projection(BuiltinId::from_method(
+            BuiltinMethod::Entries
+        )));
     }
 
     #[test]
