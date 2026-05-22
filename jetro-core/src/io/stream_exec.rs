@@ -64,29 +64,17 @@ impl CompiledRowStream {
         for stage in &mut self.stages {
             match stage {
                 CompiledRowStreamStage::Filter { program, direct } => {
-                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
-                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
-                            self.stats.direct_filter_rows += 1;
-                            if !keep {
-                                self.stats.rows_filtered += 1;
-                                return Ok(RowStreamRowResult::Skip);
-                            }
-                            continue;
-                        }
-                    }
-
-                    let value = ensure_row_stream_value(
+                    let keep = eval_owned_row_predicate(
                         engine,
                         line_no,
+                        program,
+                        direct.as_ref(),
                         &mut row,
                         &mut document,
                         &mut value,
+                        &mut vm,
+                        &mut self.stats,
                     )?;
-                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
-                    let keep = vm
-                        .execute_val_raw_fresh_root(program, value.clone())
-                        .map_err(|err| row_eval_error(line_no, err))?;
-                    self.stats.fallback_filter_rows += 1;
                     if !is_truthy(&keep) {
                         self.stats.rows_filtered += 1;
                         return Ok(RowStreamRowResult::Skip);
@@ -166,29 +154,17 @@ impl CompiledRowStream {
                     matched,
                     direct,
                 } => {
-                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
-                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
-                            self.stats.direct_filter_rows += 1;
-                            if keep {
-                                *matched = true;
-                                self.exhausted = true;
-                                return Ok(RowStreamRowResult::Stop);
-                            }
-                            return Ok(RowStreamRowResult::Skip);
-                        }
-                    }
-                    let value = ensure_row_stream_value(
+                    let keep = eval_owned_row_predicate(
                         engine,
                         line_no,
+                        program,
+                        direct.as_ref(),
                         &mut row,
                         &mut document,
                         &mut value,
+                        &mut vm,
+                        &mut self.stats,
                     )?;
-                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
-                    let keep = vm
-                        .execute_val_raw_fresh_root(program, value)
-                        .map_err(|err| row_eval_error(line_no, err))?;
-                    self.stats.fallback_filter_rows += 1;
                     if is_truthy(&keep) {
                         *matched = true;
                         self.exhausted = true;
@@ -201,29 +177,17 @@ impl CompiledRowStream {
                     failed,
                     direct,
                 } => {
-                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
-                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
-                            self.stats.direct_filter_rows += 1;
-                            if !keep {
-                                *failed = true;
-                                self.exhausted = true;
-                                return Ok(RowStreamRowResult::Stop);
-                            }
-                            return Ok(RowStreamRowResult::Skip);
-                        }
-                    }
-                    let value = ensure_row_stream_value(
+                    let keep = eval_owned_row_predicate(
                         engine,
                         line_no,
+                        program,
+                        direct.as_ref(),
                         &mut row,
                         &mut document,
                         &mut value,
+                        &mut vm,
+                        &mut self.stats,
                     )?;
-                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
-                    let keep = vm
-                        .execute_val_raw_fresh_root(program, value)
-                        .map_err(|err| row_eval_error(line_no, err))?;
-                    self.stats.fallback_filter_rows += 1;
                     if !is_truthy(&keep) {
                         *failed = true;
                         self.exhausted = true;
@@ -236,42 +200,17 @@ impl CompiledRowStream {
                     value: matched,
                     direct,
                 } => {
-                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
-                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
-                            self.stats.direct_filter_rows += 1;
-                            if keep {
-                                if matched.is_some() {
-                                    return Err(row_eval_error(
-                                        line_no,
-                                        EvalError(
-                                            "find_one: expected exactly one element, got multiple"
-                                                .into(),
-                                        ),
-                                    ));
-                                }
-                                *matched = Some(ensure_row_stream_value(
-                                    engine,
-                                    line_no,
-                                    &mut row,
-                                    &mut document,
-                                    &mut value,
-                                )?);
-                            }
-                            return Ok(RowStreamRowResult::Skip);
-                        }
-                    }
-                    let current = ensure_row_stream_value(
+                    let keep = eval_owned_row_predicate(
                         engine,
                         line_no,
+                        program,
+                        direct.as_ref(),
                         &mut row,
                         &mut document,
                         &mut value,
+                        &mut vm,
+                        &mut self.stats,
                     )?;
-                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
-                    let keep = vm
-                        .execute_val_raw_fresh_root(program, current.clone())
-                        .map_err(|err| row_eval_error(line_no, err))?;
-                    self.stats.fallback_filter_rows += 1;
                     if is_truthy(&keep) {
                         if matched.is_some() {
                             return Err(row_eval_error(
@@ -281,7 +220,13 @@ impl CompiledRowStream {
                                 ),
                             ));
                         }
-                        *matched = Some(current);
+                        *matched = Some(ensure_row_stream_value(
+                            engine,
+                            line_no,
+                            &mut row,
+                            &mut document,
+                            &mut value,
+                        )?);
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
@@ -440,6 +385,33 @@ impl CompiledRowStream {
         }
         Ok(None)
     }
+}
+
+fn eval_owned_row_predicate<'a>(
+    engine: &'a JetroEngine,
+    line_no: u64,
+    program: &Program,
+    direct: Option<&NdjsonDirectPredicate>,
+    row: &mut Option<Vec<u8>>,
+    document: &mut Option<Jetro>,
+    value: &mut Option<Val>,
+    vm: &mut Option<std::sync::MutexGuard<'a, VM>>,
+    stats: &mut RowStreamStats,
+) -> Result<Val, JetroEngineError> {
+    if let (Some(predicate), Some(raw_row)) = (direct, row.as_deref()) {
+        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+            stats.direct_filter_rows += 1;
+            return Ok(Val::Bool(keep));
+        }
+    }
+
+    let value = ensure_row_stream_value(engine, line_no, row, document, value)?;
+    let vm = vm.get_or_insert_with(|| engine.lock_vm());
+    let keep = vm
+        .execute_val_raw_fresh_root(program, value)
+        .map_err(|err| row_eval_error(line_no, err))?;
+    stats.fallback_filter_rows += 1;
+    Ok(keep)
 }
 
 pub(super) fn finish_collected_row_stream(
