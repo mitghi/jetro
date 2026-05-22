@@ -1697,8 +1697,6 @@ impl Builtin for Reverse {
     }
 }
 
-// ── Set / array combiners (barriers, no extra metadata) ──────────────────────
-
 #[inline]
 fn barrier_simple_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
@@ -2536,8 +2534,6 @@ impl Builtin for Update {
             .lambda_arg()
     }
 }
-
-// ── Streaming OneToOne (no lambda, indexed, element) ─────────────────────────
 
 #[inline]
 fn streaming_one_to_one_element_spec() -> BuiltinSpec {

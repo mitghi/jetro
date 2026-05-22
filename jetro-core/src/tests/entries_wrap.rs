@@ -94,8 +94,6 @@ fn entries_roundtrip_via_from_pairs() {
     assert_eq!(out, json!({"a": 1, "b": 2}));
 }
 
-// ── Group-by + entries (the canonical broken pipeline) ──────────────────────
-
 #[test]
 fn group_by_entries_canonical_idiom() {
     let doc = json!({

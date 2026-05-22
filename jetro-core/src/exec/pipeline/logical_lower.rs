@@ -148,7 +148,6 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             Some((source, stages, exprs, Sink::approx_distinct_builtin(method?)?))
         }
 
-        // ── VM fallback — cannot lower to a Pipeline ───────────────────────
         LogicalPlan::ScalarExpr => None,
     }
 }

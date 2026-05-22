@@ -60,7 +60,6 @@ literal       = { lit_null | lit_true | lit_false | lit_float | lit_int | lit_fs
 root    = { "$" }
 current = { "@" }
 
-// ── Kind types (only valid in kind_expr position) ─────────────────────────────
 kind_type = @{ ("number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
 
 // ── Cast types (only valid after `as`) — superset of kind_type incl int/float
