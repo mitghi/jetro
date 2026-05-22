@@ -551,7 +551,7 @@ fn direct_tape_plan_for_node(
             if let Some(plan) = direct_tape_numeric_stream_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_count_filtered_plan(plan, source, body) {
+            if let Some(plan) = direct_tape_count_stream_plan(plan, source, body) {
                 return Some(plan);
             }
             if let Some(plan) = direct_tape_positional_stream_plan(plan, source, body) {
@@ -990,7 +990,7 @@ fn direct_tape_predicate_node(
     }
 }
 
-fn direct_tape_count_filtered_plan(
+fn direct_tape_count_stream_plan(
     plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
