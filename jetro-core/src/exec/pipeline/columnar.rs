@@ -1055,7 +1055,6 @@ fn objvec_typed_predicate_projection_collect(
     plit: &Val,
     mk: &str,
 ) -> Option<Result<Val, EvalError>> {
-    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
     let cols = d.typed_cols.as_ref()?;
     let pred_slot = d.slot_of(pk)?;
@@ -1067,16 +1066,7 @@ fn objvec_typed_predicate_projection_collect(
         let r = *rhs;
         let mut out: Vec<i64> = Vec::with_capacity(p.len());
         for (i, &pv) in p.iter().enumerate() {
-            let hit = match pop {
-                B::Eq => pv == r,
-                B::Neq => pv != r,
-                B::Lt => pv < r,
-                B::Lte => pv <= r,
-                B::Gt => pv > r,
-                B::Gte => pv >= r,
-                _ => false,
-            };
-            if hit {
+            if cmp_i64_binop(pv, pop, r) {
                 out.push(m[i]);
             }
         }
@@ -1094,16 +1084,7 @@ fn objvec_typed_predicate_projection_collect(
             if let ObjVecCol::Ints(m) = map_col {
                 let mut out: Vec<i64> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
-                    let hit = match pop {
-                        B::Eq => pv == r,
-                        B::Neq => pv != r,
-                        B::Lt => pv < r,
-                        B::Lte => pv <= r,
-                        B::Gt => pv > r,
-                        B::Gte => pv >= r,
-                        _ => false,
-                    };
-                    if hit {
+                    if cmp_f64_binop(pv, pop, r) {
                         out.push(m[i]);
                     }
                 }
@@ -1112,16 +1093,7 @@ fn objvec_typed_predicate_projection_collect(
             if let ObjVecCol::Floats(m) = map_col {
                 let mut out: Vec<f64> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
-                    let hit = match pop {
-                        B::Eq => pv == r,
-                        B::Neq => pv != r,
-                        B::Lt => pv < r,
-                        B::Lte => pv <= r,
-                        B::Gt => pv > r,
-                        B::Gte => pv >= r,
-                        _ => false,
-                    };
-                    if hit {
+                    if cmp_f64_binop(pv, pop, r) {
                         out.push(m[i]);
                     }
                 }
@@ -1130,16 +1102,7 @@ fn objvec_typed_predicate_projection_collect(
             if let ObjVecCol::Strs(m) = map_col {
                 let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
                 for (i, &pv) in p.iter().enumerate() {
-                    let hit = match pop {
-                        B::Eq => pv == r,
-                        B::Neq => pv != r,
-                        B::Lt => pv < r,
-                        B::Lte => pv <= r,
-                        B::Gt => pv > r,
-                        B::Gte => pv >= r,
-                        _ => false,
-                    };
-                    if hit {
+                    if cmp_f64_binop(pv, pop, r) {
                         out.push(Arc::clone(&m[i]));
                     }
                 }
@@ -1152,16 +1115,7 @@ fn objvec_typed_predicate_projection_collect(
         let r = *rhs;
         let mut out: Vec<Arc<str>> = Vec::with_capacity(p.len());
         for (i, &pv) in p.iter().enumerate() {
-            let hit = match pop {
-                B::Eq => pv == r,
-                B::Neq => pv != r,
-                B::Lt => pv < r,
-                B::Lte => pv <= r,
-                B::Gt => pv > r,
-                B::Gte => pv >= r,
-                _ => false,
-            };
-            if hit {
+            if cmp_i64_binop(pv, pop, r) {
                 out.push(Arc::clone(&m[i]));
             }
         }
@@ -1172,18 +1126,51 @@ fn objvec_typed_predicate_projection_collect(
         let r: &str = rhs.as_ref();
         let mut hits: Vec<usize> = Vec::with_capacity(p.len());
         for (i, ps) in p.iter().enumerate() {
-            let hit = match pop {
-                B::Eq => ps.as_ref() == r,
-                B::Neq => ps.as_ref() != r,
-                _ => false,
-            };
-            if hit {
+            if cmp_str_binop(ps.as_ref(), pop, r) {
                 hits.push(i);
             }
         }
         return Some(Ok(materialise_typed_indices(map_col, &hits)));
     }
     None
+}
+
+#[inline]
+fn cmp_i64_binop(lhs: i64, op: crate::parse::ast::BinOp, rhs: i64) -> bool {
+    use crate::parse::ast::BinOp as B;
+    match op {
+        B::Eq => lhs == rhs,
+        B::Neq => lhs != rhs,
+        B::Lt => lhs < rhs,
+        B::Lte => lhs <= rhs,
+        B::Gt => lhs > rhs,
+        B::Gte => lhs >= rhs,
+        _ => false,
+    }
+}
+
+#[inline]
+fn cmp_f64_binop(lhs: f64, op: crate::parse::ast::BinOp, rhs: f64) -> bool {
+    use crate::parse::ast::BinOp as B;
+    match op {
+        B::Eq => lhs == rhs,
+        B::Neq => lhs != rhs,
+        B::Lt => lhs < rhs,
+        B::Lte => lhs <= rhs,
+        B::Gt => lhs > rhs,
+        B::Gte => lhs >= rhs,
+        _ => false,
+    }
+}
+
+#[inline]
+fn cmp_str_binop(lhs: &str, op: crate::parse::ast::BinOp, rhs: &str) -> bool {
+    use crate::parse::ast::BinOp as B;
+    match op {
+        B::Eq => lhs == rhs,
+        B::Neq => lhs != rhs,
+        _ => false,
+    }
 }
 
 // Returns `None` when the key column is not a homogeneous `Strs`, `Ints`, or `Bools` column.
