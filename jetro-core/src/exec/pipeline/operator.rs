@@ -322,6 +322,11 @@ impl ReducerSpec {
         }
     }
 
+    /// Returns true for a count reducer with no predicate or projection.
+    pub(crate) fn is_plain_count(&self) -> bool {
+        self.op == ReducerOp::Count && self.predicate.is_none() && self.projection.is_none()
+    }
+
     /// Iterates over embedded programs (predicate then projection) for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         self.predicate.iter().chain(self.projection.iter())
@@ -386,6 +391,15 @@ mod tests {
         assert!(
             ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
         );
+    }
+
+    #[test]
+    fn reducer_spec_classifies_plain_count() {
+        assert!(ReducerSpec::count().is_plain_count());
+        assert!(!ReducerSpec::count_with_predicate(empty_program(), None).is_plain_count());
+        assert!(!ReducerSpec::numeric(BuiltinMethod::Sum, None, None)
+            .unwrap()
+            .is_plain_count());
     }
 
     #[test]

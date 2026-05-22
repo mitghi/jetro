@@ -733,9 +733,8 @@ fn pipeline_source_to_steps(
 fn is_plain_count_sink(body: &crate::exec::pipeline::PipelineBody) -> bool {
     body.stages.is_empty()
         && matches!(
-        body.sink,
-        crate::exec::pipeline::Sink::Reducer(ref spec)
-            if spec.op == crate::exec::pipeline::ReducerOp::Count && spec.predicate.is_none()
+            body.sink,
+            crate::exec::pipeline::Sink::Reducer(ref spec) if spec.is_plain_count()
         )
 }
 
