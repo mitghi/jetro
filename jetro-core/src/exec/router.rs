@@ -1861,6 +1861,24 @@ mod tests {
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
     #[test]
+    fn view_object_predicate_and_projection_after_sort_stay_borrowed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"meta":{"isbn":"top","price":30,"debug":1},"score":30},{"meta":{"price":20,"debug":2},"score":20},{"meta":{"isbn":"low","price":10,"debug":3},"score":10}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(
+                r#"$.data.sort_by(-score).filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "price")).last()"#,
+            )
+            .unwrap();
+
+        assert_eq!(out, json!({"isbn": "low", "price": 10}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+    #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let full = Jetro::from_bytes(data.clone()).unwrap();
