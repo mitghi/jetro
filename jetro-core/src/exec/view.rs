@@ -1739,6 +1739,28 @@ mod tests {
     }
 
     #[test]
+    fn view_full_runner_find_one_materializes_only_match() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::FindOne,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Eq, Val::Int(3))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(source.scalar_reads(), 4);
+        assert_eq!(source.materialize_reads(), 1);
+    }
+
+    #[test]
     fn view_full_runner_stops_when_membership_sink_result_is_decided() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let body = PipelineBody {
