@@ -655,7 +655,7 @@ fn direct_tape_sort_extreme_plan_for_node(
         if *optional {
             return None;
         }
-        let want_last = selection_position_wants_last(call.method)?;
+        let want_last = terminal_selection_wants_last(BuiltinId::from_method(call.method))?;
         let PlanNode::Pipeline { source, body } = plan.node(*receiver) else {
             return None;
         };
@@ -685,14 +685,10 @@ fn direct_tape_sort_extreme_plan(
         return None;
     };
     let want_last = match body.sink {
-        Sink::Terminal(method) => selection_position_wants_last(method)?,
+        Sink::Terminal(method) => terminal_selection_wants_last(BuiltinId::from_method(method))?,
         _ => return None,
     };
     direct_tape_sort_extreme_plan_with_position(plan, source, body, suffix_steps, want_last)
-}
-
-fn selection_position_wants_last(method: crate::builtins::BuiltinMethod) -> Option<bool> {
-    terminal_selection_wants_last(BuiltinId::from_method(method))
 }
 
 fn direct_tape_sort_extreme_plan_with_position(
@@ -1074,7 +1070,7 @@ fn direct_tape_positional_stream_plan(
     use crate::exec::pipeline::Sink;
 
     let want_last = match body.sink {
-        Sink::Terminal(method) => selection_position_wants_last(method)?,
+        Sink::Terminal(method) => terminal_selection_wants_last(BuiltinId::from_method(method))?,
         _ => return None,
     };
     let stream = direct_stream_shape(body)?;
@@ -1401,7 +1397,7 @@ fn direct_array_element_source(
     }
     let element = match body.sink {
         Sink::Terminal(method) => {
-            if selection_position_wants_last(method)? {
+            if terminal_selection_wants_last(BuiltinId::from_method(method))? {
                 NdjsonDirectElement::Last
             } else {
                 NdjsonDirectElement::First
