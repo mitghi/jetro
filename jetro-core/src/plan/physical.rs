@@ -1170,18 +1170,15 @@ mod tests {
     #[test]
     fn byte_context_lowers_bare_ident_method_receiver_to_root_path() {
         let plan = plan_query_with_context("attributes.len()", PlanningContext::bytes());
-        let PlanNode::Pipeline { source, body } = root_node(&plan) else {
-            panic!("expected pipeline");
-        };
-        let PipelinePlanSource::Expr(source) = source else {
-            panic!("expected expr source");
+        let PlanNode::Call { receiver, .. } = root_node(&plan) else {
+            panic!("expected direct call");
         };
         assert!(matches!(
-            plan.node(*source),
+            plan.node(*receiver),
             PlanNode::RootPath(steps)
                 if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "attributes")
         ));
-        assert!(body.stages.is_empty());
+        assert!(plan.root_execution_facts().is_byte_native());
     }
 
     #[test]
