@@ -738,7 +738,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
         Expr::Object(fields) => fields.iter().any(|f| match f {
             ObjField::Kv { val, cond, .. } => {
                 expr_uses_ident(val, name)
-                    || cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+                    || cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
             }
             ObjField::Short(n) => n == name,
             ObjField::Dynamic { key, val } => {
@@ -760,7 +760,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
                     BindTarget::Name(n) => n == name,
                     BindTarget::Obj { fields, rest } => {
                         fields.iter().any(|f| f == name)
-                            || rest.as_ref().map_or(false, |r| r == name)
+                            || rest.as_ref().is_some_and(|r| r == name)
                     }
                     BindTarget::Arr(ns) => ns.iter().any(|n| n == name),
                 },
@@ -790,7 +790,8 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             if vars.iter().any(|v| v == name) {
                 return false; // `name` is shadowed by the comprehension binding.
             }
-            expr_uses_ident(expr, name) || cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+            expr_uses_ident(expr, name)
+                || cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
         }
         Expr::DictComp {
             key,
@@ -807,7 +808,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             }
             expr_uses_ident(key, name)
                 || expr_uses_ident(val, name)
-                || cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+                || cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
         }
         Expr::Lambda { params, body } => {
             if params.iter().any(|p| p == name) {
@@ -851,7 +852,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
                     PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
                     _ => false,
                 }) || expr_uses_ident(&op.val, name)
-                    || op.cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+                    || op.cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
             })
         }
         Expr::UpdateBatch {
@@ -876,7 +877,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
                     PathStep::WildcardFilter(e) => expr_uses_ident(e, name),
                     _ => false,
                 }) || expr_uses_ident(&op.val, name)
-                    || op.cond.as_ref().map_or(false, |c| expr_uses_ident(c, name))
+                    || op.cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
             })
         }
         Expr::DeleteMark => false,
