@@ -2073,6 +2073,30 @@ mod tests {
     }
 
     #[test]
+    fn registry_view_object_projection_demands_are_classified() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(projection) = view_object_projection(id) else {
+                continue;
+            };
+            let expected = match projection {
+                BuiltinViewObjectProjection::Has
+                | BuiltinViewObjectProjection::HasAll
+                | BuiltinViewObjectProjection::HasKey
+                | BuiltinViewObjectProjection::Missing
+                | BuiltinViewObjectProjection::HasPath => BuiltinDemandLaw::PredicateMapLike,
+                BuiltinViewObjectProjection::GetPath
+                | BuiltinViewObjectProjection::Keys
+                | BuiltinViewObjectProjection::Values
+                | BuiltinViewObjectProjection::Entries
+                | BuiltinViewObjectProjection::Pick
+                | BuiltinViewObjectProjection::Omit => BuiltinDemandLaw::MapLike,
+            };
+            assert_eq!(demand_law(id), expected, "{method:?}");
+        }
+    }
+
+    #[test]
     fn registry_marks_one_to_one_element_demands() {
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
