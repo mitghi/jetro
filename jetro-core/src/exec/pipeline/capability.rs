@@ -893,7 +893,9 @@ mod tests {
     };
     use crate::parse::ast::BinOp;
 
-    use super::{view_capabilities, view_prefix_capabilities};
+    use super::{
+        view_capabilities, view_never_materializing_stage_range, view_prefix_capabilities,
+    };
 
     #[test]
     fn view_stage_metadata_describes_borrowing_and_materialization() {
@@ -1273,6 +1275,13 @@ mod tests {
         let prefix = view_prefix_capabilities(&body).unwrap();
         assert_eq!(prefix.consumed_stages, 2);
         assert_eq!(prefix.stages.len(), 2);
+        assert_eq!(
+            view_never_materializing_stage_range(&body, 0, 2)
+                .expect("first two stages are view-native")
+                .len(),
+            2
+        );
+        assert!(view_never_materializing_stage_range(&body, 0, 3).is_none());
     }
 
     #[test]
