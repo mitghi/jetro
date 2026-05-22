@@ -268,7 +268,7 @@ impl Pipeline {
             )
         {
             if let Val::ObjVec(d) = &recv {
-                return objvec_typed_filter_map_collect(d, pk, *pop, plit, mk);
+                return objvec_typed_predicate_projection_collect(d, pk, *pop, plit, mk);
             }
         }
         None
@@ -374,7 +374,7 @@ impl Pipeline {
             };
         }
 
-        let filter_map = stage_kernel_pair(
+        let predicate_projection = stage_kernel_pair(
             &self.stages,
             &self.stage_kernels,
             BuiltinColumnarStage::Filter,
@@ -382,7 +382,7 @@ impl Pipeline {
         );
 
         if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
-            filter_map
+            predicate_projection
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -413,7 +413,7 @@ impl Pipeline {
         }
 
         if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks))) =
-            filter_map
+            predicate_projection
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -433,7 +433,7 @@ impl Pipeline {
         }
 
         if let Some((BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk))) =
-            filter_map
+            predicate_projection
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -1048,7 +1048,7 @@ fn objvec_filter_num_slots(
 
 // Returns a typed-vec result (`IntVec`, `FloatVec`, or `StrVec`) when both columns are
 // homogeneous; returns `None` otherwise so the caller can fall back to generic execution.
-fn objvec_typed_filter_map_collect(
+fn objvec_typed_predicate_projection_collect(
     d: &Arc<crate::data::value::ObjVecData>,
     pk: &str,
     pop: crate::parse::ast::BinOp,
