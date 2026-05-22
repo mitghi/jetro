@@ -81,30 +81,17 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
 /// later row-stream stage may follow it.
 #[inline]
 pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
-    if row_stream_numeric_reducer(op).is_some() {
-        return true;
-    }
     matches!(
         op,
         BuiltinRowStreamOp::Last
             | BuiltinRowStreamOp::Count
             | BuiltinRowStreamOp::Any
             | BuiltinRowStreamOp::All
+            | BuiltinRowStreamOp::Sum
+            | BuiltinRowStreamOp::Avg
+            | BuiltinRowStreamOp::Min
+            | BuiltinRowStreamOp::Max
     )
-}
-
-/// Return numeric reducer behavior for a row-stream operation, if any.
-#[inline]
-pub(crate) fn row_stream_numeric_reducer(
-    op: BuiltinRowStreamOp,
-) -> Option<BuiltinNumericReducer> {
-    match op {
-        BuiltinRowStreamOp::Sum => Some(BuiltinNumericReducer::Sum),
-        BuiltinRowStreamOp::Avg => Some(BuiltinNumericReducer::Avg),
-        BuiltinRowStreamOp::Min => Some(BuiltinNumericReducer::Min),
-        BuiltinRowStreamOp::Max => Some(BuiltinNumericReducer::Max),
-        _ => None,
-    }
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
@@ -3057,24 +3044,24 @@ mod tests {
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Count));
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Any));
         assert_eq!(
-            row_stream_numeric_reducer(BuiltinRowStreamOp::Sum),
+            numeric_reducer(BuiltinId::from_method(BuiltinMethod::Sum)),
             Some(BuiltinNumericReducer::Sum)
         );
         assert_eq!(
-            row_stream_numeric_reducer(BuiltinRowStreamOp::Avg),
+            numeric_reducer(BuiltinId::from_method(BuiltinMethod::Avg)),
             Some(BuiltinNumericReducer::Avg)
         );
         assert_eq!(
-            row_stream_numeric_reducer(BuiltinRowStreamOp::Min),
+            numeric_reducer(BuiltinId::from_method(BuiltinMethod::Min)),
             Some(BuiltinNumericReducer::Min)
         );
         assert_eq!(
-            row_stream_numeric_reducer(BuiltinRowStreamOp::Max),
+            numeric_reducer(BuiltinId::from_method(BuiltinMethod::Max)),
             Some(BuiltinNumericReducer::Max)
         );
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Sum));
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Max));
-        assert_eq!(row_stream_numeric_reducer(BuiltinRowStreamOp::Map), None);
+        assert_eq!(numeric_reducer(BuiltinId::from_method(BuiltinMethod::Map)), None);
         assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::FindFirst));
         assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::Map));
     }
@@ -3087,11 +3074,16 @@ mod tests {
                 continue;
             };
 
-            if let Some(reducer) = row_stream_numeric_reducer(op) {
-                assert_eq!(
-                    numeric_reducer(id),
-                    Some(reducer),
-                    "{method:?} row-stream numeric reducer must match builtin reducer metadata"
+            if numeric_reducer(id).is_some() {
+                assert!(
+                    matches!(
+                        op,
+                        BuiltinRowStreamOp::Sum
+                            | BuiltinRowStreamOp::Avg
+                            | BuiltinRowStreamOp::Min
+                            | BuiltinRowStreamOp::Max
+                    ),
+                    "{method:?} numeric reducer must expose a numeric row-stream op, got {op:?}"
                 );
             }
 
