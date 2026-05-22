@@ -731,17 +731,7 @@ fn try_lower_root_path(expr: &Expr) -> Option<PlanNode> {
             if !matches!(base.as_ref(), Expr::Root) {
                 return None;
             }
-            let mut out = Vec::with_capacity(steps.len());
-            for step in steps {
-                match step {
-                    Step::Field(key) | Step::OptField(key) => {
-                        out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
-                    }
-                    Step::Index(idx) => out.push(PhysicalPathStep::Index(*idx)),
-                    _ => return None,
-                }
-            }
-            Some(PlanNode::RootPath(out))
+            Some(PlanNode::RootPath(physical_path_steps(steps)?))
         }
         _ => None,
     }
@@ -772,19 +762,25 @@ fn try_lower_implicit_root_path(builder: &PlanBuilder, expr: &Expr) -> Option<Pl
 
             let mut out = Vec::with_capacity(steps.len() + 1);
             out.push(PhysicalPathStep::Field(Arc::from(name.as_str())));
-            for step in steps {
-                match step {
-                    Step::Field(key) | Step::OptField(key) => {
-                        out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
-                    }
-                    Step::Index(idx) => out.push(PhysicalPathStep::Index(*idx)),
-                    _ => return None,
-                }
-            }
+            out.extend(physical_path_steps(steps)?);
             Some(PlanNode::RootPath(out))
         }
         _ => None,
     }
+}
+
+fn physical_path_steps(steps: &[Step]) -> Option<Vec<PhysicalPathStep>> {
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            Step::Field(key) | Step::OptField(key) => {
+                out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
+            }
+            Step::Index(idx) => out.push(PhysicalPathStep::Index(*idx)),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Lowers a general `Expr::Chain` into a sequence of `PhysicalChainStep`s, flushing accumulated
