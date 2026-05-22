@@ -344,14 +344,19 @@ impl NumOp {
         }
     }
 
+    /// Converts this operation back to the registry numeric-reducer tag.
+    pub(crate) fn builtin_reducer(self) -> BuiltinNumericReducer {
+        match self {
+            NumOp::Sum => BuiltinNumericReducer::Sum,
+            NumOp::Min => BuiltinNumericReducer::Min,
+            NumOp::Max => BuiltinNumericReducer::Max,
+            NumOp::Avg => BuiltinNumericReducer::Avg,
+        }
+    }
+
     /// Returns the `BuiltinMethod` that corresponds to this numeric operation.
     pub(crate) fn method(self) -> BuiltinMethod {
-        match self {
-            NumOp::Sum => BuiltinMethod::Sum,
-            NumOp::Min => BuiltinMethod::Min,
-            NumOp::Max => BuiltinMethod::Max,
-            NumOp::Avg => BuiltinMethod::Avg,
-        }
+        self.builtin_reducer().method()
     }
 
     /// Returns the identity / empty-input value for this operation (`0` for Sum, `null` for others).
@@ -592,6 +597,20 @@ mod tests {
     fn lower_query(q: &str) -> Option<Pipeline> {
         let expr = parser::parse(q).ok()?;
         Pipeline::lower(&expr)
+    }
+
+    #[test]
+    fn numeric_ops_round_trip_through_builtin_reducer_metadata() {
+        for reducer in [
+            BuiltinNumericReducer::Sum,
+            BuiltinNumericReducer::Avg,
+            BuiltinNumericReducer::Min,
+            BuiltinNumericReducer::Max,
+        ] {
+            let op = NumOp::from_builtin_reducer(reducer);
+            assert_eq!(op.builtin_reducer(), reducer);
+            assert_eq!(op.method(), reducer.method());
+        }
     }
 
     fn only_stage_expr(p: &Pipeline) -> &Expr {
