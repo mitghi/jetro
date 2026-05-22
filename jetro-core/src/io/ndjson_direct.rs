@@ -1453,6 +1453,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_element_selection_reuses_pipeline_metadata() {
+        use crate::exec::pipeline::SingleElementSelection;
+
+        assert!(matches!(
+            direct_element_from_selection(SingleElementSelection::First),
+            NdjsonDirectElement::First
+        ));
+        assert!(matches!(
+            direct_element_from_selection(SingleElementSelection::Last),
+            NdjsonDirectElement::Last
+        ));
+        assert!(matches!(
+            direct_element_from_selection(SingleElementSelection::Nth(2)),
+            NdjsonDirectElement::Nth(2)
+        ));
+    }
+
+    #[test]
     fn recognizes_array_find_field_comparison_predicate() {
         let expr = crate::parse::parser::parse(r#"@.custom_attributes.find(@.value == "z")"#)
             .expect("parse");
