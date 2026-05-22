@@ -369,6 +369,14 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
     }
 }
 
+fn raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
+    use crate::parse::ast::Arg;
+    match arg {
+        Arg::Named(_, _) => None,
+        Arg::Pos(e) => Some(Arc::new(e.clone())),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry-driven stage factory (formerly stage_factory.rs)
 // ---------------------------------------------------------------------------
@@ -592,7 +600,7 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Sink::count_builtin(method),
-            [arg] => Sink::count_predicate_builtin(method, compile_subexpr(arg)?, arg_expr(arg)),
+            [arg] => Sink::count_predicate_builtin(method, compile_subexpr(arg)?, raw_arg_expr(arg)),
             _ => None,
         },
         BuiltinSinkAccumulator::Numeric => {
@@ -603,7 +611,7 @@ fn terminal_sink_for_method(
             };
             let projection_expr = match args {
                 [] => None,
-                [arg] => arg_expr(arg),
+                [arg] => raw_arg_expr(arg),
                 _ => return None,
             };
             Sink::numeric_builtin(method, projection, projection_expr)
