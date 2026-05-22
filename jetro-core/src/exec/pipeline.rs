@@ -135,13 +135,14 @@ pub(crate) fn trace_enabled() -> bool {
 fn sink_name(s: &Sink) -> &'static str {
     match s {
         Sink::Collect => "collect",
-        Sink::Reducer(spec) => match spec.op {
-            ReducerOp::Count => "count",
-            ReducerOp::Numeric(NumOp::Sum) => "sum",
-            ReducerOp::Numeric(NumOp::Min) => "min",
-            ReducerOp::Numeric(NumOp::Max) => "max",
-            ReducerOp::Numeric(NumOp::Avg) => "avg",
-        },
+        Sink::Reducer(spec) => spec
+            .method()
+            .and_then(|method| {
+                crate::builtins::registry::canonical_name(
+                    crate::builtins::registry::BuiltinId::from_method(method),
+                )
+            })
+            .unwrap_or("reducer"),
         Sink::Membership(spec) => match spec.op {
             MembershipSinkOp::Includes => "includes",
             MembershipSinkOp::Index => "index",
