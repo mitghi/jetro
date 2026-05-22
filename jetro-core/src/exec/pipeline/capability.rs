@@ -1097,6 +1097,22 @@ mod tests {
             })
         ));
         assert!(matches!(
+            Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::FindOne,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            })
+            .view_capability(&[BodyKernel::FieldCmpLit(
+                Arc::from("score"),
+                BinOp::Eq,
+                Val::Int(10),
+            )]),
+            Some(ViewSinkCapability::Predicate {
+                op: PredicateSinkOp::FindOne,
+                predicate_kernel: 0,
+            })
+        ));
+        assert!(matches!(
             Sink::SelectMany {
                 n: 2,
                 from_end: true,
