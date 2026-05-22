@@ -4506,6 +4506,40 @@ not-json
     }
 
     #[test]
+    fn direct_byte_tape_plan_matches_engine_for_multi_filter_streams() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"attributes":[{"key":"k1","value":"v1","weight":2},{"key":"k2","value":"v2","weight":7},{"key":"k3","value":"v2","weight":11}]}"#;
+        for query in [
+            r#"$.attributes.filter(@.value.contains("2")).filter(@.weight > 5).map(@.key)"#,
+            r#"$.attributes.filter(@.value.contains("2")).filter(@.weight > 5).len()"#,
+            r#"$.attributes.filter(@.value.contains("2")).filter(@.weight > 5).map(@.weight).sum()"#,
+            r#"$.attributes.filter(@.value.contains("2")).filter(@.weight > 5).map({key: @.key, weight: @.weight}).last()"#,
+        ] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should be direct"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte stream should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+
+            let direct: serde_json::Value =
+                serde_json::from_slice(&out).unwrap_or_else(|err| panic!("{query}: {err}"));
+            let engine_value = crate::Jetro::from_bytes(row.to_vec())
+                .unwrap()
+                .collect(query.to_string())
+                .unwrap_or_else(|err| panic!("{query}: {}", err.0));
+            let expected: serde_json::Value =
+                serde_json::from_str(&engine_value.to_string()).unwrap();
+            assert_eq!(direct, expected, "{query}");
+        }
+    }
+
+    #[test]
     fn direct_byte_tape_plan_writes_static_projections() {
         let engine = crate::JetroEngine::new();
         let row = br#"{"id":7,"a":{"b":{"c":1}}}"#;
