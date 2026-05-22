@@ -8,16 +8,17 @@ use std::sync::Arc;
 
 /// Describes how much of each element's content a pipeline stage actually
 /// needs to read, used to skip deserialisation or evaluation work.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueNeed {
     /// The stage only counts matching elements; payload can be skipped unless predicates need it.
     CountOnly,
     /// The stage only needs to know whether at least one element exists.
+    #[allow(dead_code)]
     ExistsOnly,
     /// The stage evaluates a predicate and needs enough of the value to test it.
     Predicate,
     /// The stage only needs fields used by a projection.
+    #[allow(dead_code)]
     Projection,
     /// The full element value is required.
     Whole,

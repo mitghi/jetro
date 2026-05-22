@@ -21,7 +21,6 @@ use crate::vm::CompiledPipeStep;
 use crate::vm::{Opcode, Program};
 
 /// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VType {
     /// Definitely `Val::Null`.
@@ -33,6 +32,7 @@ pub enum VType {
     /// Definitely `Val::Float` (f64).
     Float,
     /// Either `Int` or `Float`; the join of both concrete numeric types.
+    #[cfg(test)]
     Num,
     /// Definitely a string value.
     Str,
@@ -41,6 +41,7 @@ pub enum VType {
     /// Definitely `Val::Obj`.
     Obj,
     /// Any type possible — top element, used when analysis cannot determine the type.
+    #[cfg(test)]
     Unknown,
 }
 
@@ -1311,10 +1312,13 @@ pub fn fold_kind_check(val_ty: VType, target: KindType, negate: bool) -> Option<
     let matches = match (val_ty, target) {
         (VType::Null, KindType::Null) => true,
         (VType::Bool, KindType::Bool) => true,
-        (VType::Int | VType::Float | VType::Num, KindType::Number) => true,
+        (VType::Int | VType::Float, KindType::Number) => true,
+        #[cfg(test)]
+        (VType::Num, KindType::Number) => true,
         (VType::Str, KindType::Str) => true,
         (VType::Arr, KindType::Array) => true,
         (VType::Obj, KindType::Object) => true,
+        #[cfg(test)]
         (VType::Unknown, _) => return None,
         _ => false,
     };
