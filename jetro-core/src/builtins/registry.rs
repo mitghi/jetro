@@ -1968,6 +1968,35 @@ mod tests {
     }
 
     #[test]
+    fn registry_view_capabilities_are_consistent() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert_eq!(
+                view_projection(id),
+                spec.view_scalar || spec.view_object_projection.is_some(),
+                "{method:?}"
+            );
+            if spec.view_scalar {
+                assert!(spec.view_native, "{method:?} view_scalar must be view_native");
+            }
+            if spec.view_object_projection.is_some() {
+                assert!(
+                    spec.view_native,
+                    "{method:?} view_object_projection must be view_native"
+                );
+            }
+            if spec.raw_json_scalar.is_some() {
+                assert!(
+                    spec.view_scalar,
+                    "{method:?} raw_json_scalar must also be a view scalar"
+                );
+                assert!(spec.view_native, "{method:?} raw_json_scalar must be view_native");
+            }
+        }
+    }
+
+    #[test]
     fn registry_marks_one_to_one_element_demands() {
         let downstream = Demand {
             pull: PullDemand::LastInput(1),
