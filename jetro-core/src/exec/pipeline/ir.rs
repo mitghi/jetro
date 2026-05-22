@@ -17,7 +17,8 @@ use crate::builtins::registry::{
     participates_in_demand, pipeline_composed_barrier, pipeline_element,
     pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
     pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
-    sink_demand as builtin_sink_demand, stage_delayable_view_projection,
+    sink_accumulator as builtin_sink_accumulator, sink_demand as builtin_sink_demand,
+    stage_delayable_view_projection,
     stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
     stage_merge as builtin_stage_merge, view_projection, view_stage as builtin_view_stage,
     BuiltinId,
@@ -122,7 +123,7 @@ impl Sink {
     /// Build a no-argument terminal selection sink from builtin metadata.
     pub(crate) fn terminal_builtin(method: BuiltinMethod) -> Option<Self> {
         matches!(
-            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            builtin_sink_accumulator(BuiltinId::from_method(method))?,
             BuiltinSinkAccumulator::SelectOne(_)
         )
         .then_some(Sink::Terminal(method))
@@ -131,7 +132,7 @@ impl Sink {
     /// Build a multi-row selection sink from builtin metadata.
     pub(crate) fn select_many_builtin(method: BuiltinMethod, n: usize) -> Option<Self> {
         let BuiltinSinkAccumulator::SelectOne(position) =
-            builtin_sink(BuiltinId::from_method(method))?.accumulator
+            builtin_sink_accumulator(BuiltinId::from_method(method))?
         else {
             return None;
         };
@@ -153,7 +154,7 @@ impl Sink {
     /// Build a plain count reducer from builtin metadata.
     pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
         matches!(
-            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            builtin_sink_accumulator(BuiltinId::from_method(method))?,
             BuiltinSinkAccumulator::Count
         )
         .then_some(Sink::Reducer(ReducerSpec::count()))
@@ -173,7 +174,7 @@ impl Sink {
     /// Build an approximate distinct count sink from builtin metadata.
     pub(crate) fn approx_distinct_builtin(method: BuiltinMethod) -> Option<Self> {
         matches!(
-            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            builtin_sink_accumulator(BuiltinId::from_method(method))?,
             BuiltinSinkAccumulator::ApproxDistinct
         )
         .then_some(Sink::ApproxCountDistinct)
@@ -186,7 +187,7 @@ impl Sink {
         projection_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
         if !matches!(
-            builtin_sink(BuiltinId::from_method(method))?.accumulator,
+            builtin_sink_accumulator(BuiltinId::from_method(method))?,
             BuiltinSinkAccumulator::Numeric
         ) {
             return None;

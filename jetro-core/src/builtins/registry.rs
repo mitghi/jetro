@@ -714,6 +714,12 @@ pub(crate) fn builtin_sink(id: BuiltinId) -> Option<BuiltinSinkSpec> {
     id.method().and_then(|method| method.spec().sink)
 }
 
+/// Return the sink accumulator behavior for builtin `id`, if the builtin is a terminal sink.
+#[inline]
+pub(crate) fn sink_accumulator(id: BuiltinId) -> Option<BuiltinSinkAccumulator> {
+    Some(builtin_sink(id)?.accumulator)
+}
+
 /// Return keyed reducer metadata for builtin `id`, if the builtin groups rows by a key.
 #[inline]
 pub(crate) fn keyed_reducer(id: BuiltinId) -> Option<BuiltinKeyedReducer> {
@@ -832,7 +838,7 @@ pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
 /// Return terminal select-one position for sinks such as `first` and `last`.
 #[inline]
 pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelectionPosition> {
-    match builtin_sink(id)?.accumulator {
+    match sink_accumulator(id)? {
         BuiltinSinkAccumulator::SelectOne(position) => Some(position),
         _ => None,
     }
@@ -2650,6 +2656,10 @@ mod tests {
             Some(BuiltinPredicateSink::Any)
         );
         assert_eq!(
+            sink_accumulator(BuiltinId::from_method(BuiltinMethod::Any)),
+            None
+        );
+        assert_eq!(
             predicate_sink(BuiltinId::from_method(BuiltinMethod::All)),
             Some(BuiltinPredicateSink::All)
         );
@@ -2660,6 +2670,20 @@ mod tests {
         assert_eq!(
             predicate_sink(BuiltinId::from_method(BuiltinMethod::Count)),
             None
+        );
+        assert_eq!(
+            sink_accumulator(BuiltinId::from_method(BuiltinMethod::Count)),
+            Some(BuiltinSinkAccumulator::Count)
+        );
+        assert_eq!(
+            sink_accumulator(BuiltinId::from_method(BuiltinMethod::Sum)),
+            Some(BuiltinSinkAccumulator::Numeric)
+        );
+        assert_eq!(
+            sink_accumulator(BuiltinId::from_method(BuiltinMethod::First)),
+            Some(BuiltinSinkAccumulator::SelectOne(
+                BuiltinSelectionPosition::First
+            ))
         );
         assert_eq!(
             predicate_sink_value_need(BuiltinPredicateSink::Any),
