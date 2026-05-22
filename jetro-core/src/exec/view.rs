@@ -1703,6 +1703,7 @@ mod tests {
             sink: Sink::Predicate(PredicateSinkSpec {
                 op: PredicateSinkOp::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
@@ -1724,6 +1725,7 @@ mod tests {
             sink: Sink::Predicate(PredicateSinkSpec {
                 op: PredicateSinkOp::All,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
@@ -2154,6 +2156,7 @@ mod tests {
             sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
                 want_max: true,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
             }),
             stage_kernels: Vec::new(),
             sink_kernels: vec![BodyKernel::Current],
@@ -2171,6 +2174,7 @@ mod tests {
             sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
                 want_max: false,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
             }),
             ..max_body
         };

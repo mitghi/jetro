@@ -503,40 +503,76 @@ fn mask_active_local_stage_kernels(
         }
     }
 
-    if let crate::exec::pipeline::Sink::Reducer(spec) = &mut body.sink {
-        let mut kernel_idx = 0usize;
-        if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref()) {
-            if builder
-                .locals
-                .iter()
-                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+    match &mut body.sink {
+        crate::exec::pipeline::Sink::Reducer(spec) => {
+            let mut kernel_idx = 0usize;
+            if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref()) {
+                recompile_sink_program_for_lexical_env(
+                    program,
+                    expr,
+                    body.sink_kernels.get_mut(kernel_idx),
+                    builder,
+                );
+                kernel_idx += 1;
+            }
+            if let (Some(program), Some(expr)) =
+                (&mut spec.projection, spec.projection_expr.as_ref())
             {
-                let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
-                *program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-sink>"));
-                if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
+                recompile_sink_program_for_lexical_env(
+                    program,
+                    expr,
+                    body.sink_kernels.get_mut(kernel_idx),
+                    builder,
+                );
+            }
+        }
+        crate::exec::pipeline::Sink::Predicate(spec) => {
+            if let Some(expr) = spec.predicate_expr.as_ref() {
+                let kernel_idx = spec.predicate_kernel_index();
+                recompile_sink_program_for_lexical_env(
+                    &mut spec.predicate,
+                    expr,
+                    body.sink_kernels.get_mut(kernel_idx),
+                    builder,
+                );
+            }
+        }
+        crate::exec::pipeline::Sink::ArgExtreme(spec) => {
+            if let Some(expr) = spec.key_expr.as_ref() {
+                let kernel_idx = spec.key_kernel_index();
+                recompile_sink_program_for_lexical_env(
+                    &mut spec.key,
+                    expr,
+                    body.sink_kernels.get_mut(kernel_idx),
+                    builder,
+                );
+            }
+        }
+        _ => {
+            for kernel in &mut body.sink_kernels {
+                if kernel_mentions_active_local(kernel, &builder.locals) {
                     *kernel = crate::exec::pipeline::BodyKernel::Generic;
                 }
             }
-            kernel_idx += 1;
         }
-        if let (Some(program), Some(expr)) = (&mut spec.projection, spec.projection_expr.as_ref()) {
-            if builder
-                .locals
-                .iter()
-                .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
-            {
-                let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
-                *program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-sink>"));
-                if let Some(kernel) = body.sink_kernels.get_mut(kernel_idx) {
-                    *kernel = crate::exec::pipeline::BodyKernel::Generic;
-                }
-            }
-        }
-    } else {
-        for kernel in &mut body.sink_kernels {
-            if kernel_mentions_active_local(kernel, &builder.locals) {
-                *kernel = crate::exec::pipeline::BodyKernel::Generic;
-            }
+    }
+}
+
+fn recompile_sink_program_for_lexical_env(
+    program: &mut Arc<crate::vm::Program>,
+    expr: &Expr,
+    kernel: Option<&mut crate::exec::pipeline::BodyKernel>,
+    builder: &PlanBuilder,
+) {
+    if builder
+        .locals
+        .iter()
+        .any(|local| analysis::expr_uses_ident(expr, local.as_ref()))
+    {
+        let lowered = crate::compile::lambda_lower::unwrap_single_lambda(expr);
+        *program = Arc::new(Compiler::compile(&lowered, "<local-aware-pipeline-sink>"));
+        if let Some(kernel) = kernel {
+            *kernel = crate::exec::pipeline::BodyKernel::Generic;
         }
     }
 }

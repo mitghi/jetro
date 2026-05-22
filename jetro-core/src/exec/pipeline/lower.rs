@@ -352,12 +352,9 @@ pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
     use crate::parse::ast::{Arg, Step};
     match arg {
         Arg::Named(_, _) => None,
-        Arg::Pos(Expr::Lambda { params, body }) if params.len() == 1 => {
-            Some(Arc::new(crate::compile::lambda_lower::substitute_current(
-                (**body).clone(),
-                params[0].as_str(),
-            )))
-        }
+        Arg::Pos(Expr::Lambda { params, body }) if params.len() == 1 => Some(Arc::new(
+            crate::compile::lambda_lower::substitute_current((**body).clone(), params[0].as_str()),
+        )),
         Arg::Pos(Expr::Ident(name)) => Some(Arc::new(Expr::Chain(
             Box::new(Expr::Current),
             vec![Step::Field(name.clone())],
@@ -517,7 +514,7 @@ fn push_expr_stage(
                 stage_exprs.push(arg_expr(arg));
             }
             None => push_expr_builtin(method, arg, stages, stage_exprs)?,
-        }
+        },
         BuiltinExprStage::Filter
         | BuiltinExprStage::FlatMap
         | BuiltinExprStage::UniqueBy
@@ -600,7 +597,9 @@ fn terminal_sink_for_method(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Sink::count_builtin(method),
-            [arg] => Sink::count_predicate_builtin(method, compile_subexpr(arg)?, raw_arg_expr(arg)),
+            [arg] => {
+                Sink::count_predicate_builtin(method, compile_subexpr(arg)?, raw_arg_expr(arg))
+            }
             _ => None,
         },
         BuiltinSinkAccumulator::Numeric => {
@@ -635,6 +634,7 @@ fn predicate_sink_for_method(
     Some(Sink::Predicate(PredicateSinkSpec::from_method(
         method,
         compile_subexpr(arg)?,
+        raw_arg_expr(arg),
     )?))
 }
 
@@ -663,5 +663,6 @@ fn arg_extreme_sink_for_method(
     Some(Sink::ArgExtreme(ArgExtremeSinkSpec::from_method(
         method,
         compile_subexpr(arg)?,
+        raw_arg_expr(arg),
     )?))
 }

@@ -2189,6 +2189,63 @@ mod tests {
         assert!(!j.root_val_is_materialized());
     }
     #[test]
+    fn local_ident_predicate_sink_uses_env_not_row_field_kernel() {
+        let expr = r#"let threshold = 10 in $.books.any(threshold > 5)"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Pipeline { body, .. } = plan.node(*body) else {
+            panic!("expected pipeline body");
+        };
+        assert!(matches!(
+            body.sink_kernels.first(),
+            Some(BodyKernel::Generic)
+        ));
+
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"threshold":1},{"threshold":2},{"threshold":3}]}"#.to_vec(),
+        )
+        .unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!(true));
+        assert!(!j.root_val_is_materialized());
+    }
+    #[test]
+    fn local_ident_arg_extreme_sink_uses_env_not_row_field_kernel() {
+        let expr = r#"let key = 10 in $.books.max_by(key).title"#;
+        let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical expression plan");
+        };
+        let PlanNode::Let { body, .. } = plan.node(*root) else {
+            panic!("expected let root");
+        };
+        let PlanNode::Chain { base, .. } = plan.node(*body) else {
+            panic!("expected chain body");
+        };
+        let PlanNode::Pipeline { body, .. } = plan.node(*base) else {
+            panic!("expected pipeline base");
+        };
+        assert!(matches!(
+            body.sink_kernels.first(),
+            Some(BodyKernel::Generic)
+        ));
+
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"first","key":1},{"title":"second","key":99}]}"#.to_vec(),
+        )
+        .unwrap();
+        let out = super::collect_plan_json(&j, &plan).unwrap();
+
+        assert_eq!(out, json!("first"));
+        assert!(!j.root_val_is_materialized());
+    }
+    #[test]
     fn local_ident_compiled_map_body_uses_env_not_inner_row_field() {
         let expr = r#"let label = "fixed" in $.books.map(@.items.map(label).take(1))"#;
         let plan = planner::plan_query_with_context(expr, planner::PlanningContext::bytes());

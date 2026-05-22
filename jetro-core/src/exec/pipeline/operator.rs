@@ -40,6 +40,8 @@ pub struct PredicateSinkSpec {
     pub op: PredicateSinkOp,
     /// Predicate evaluated for each row until the terminal can decide.
     pub predicate: Arc<Program>,
+    /// Source AST for `predicate`, used during lexical-env analysis.
+    pub predicate_expr: Option<Arc<Expr>>,
 }
 
 /// Specification for value-membership terminal sinks (`includes`, `index`, `indices_of`).
@@ -67,6 +69,8 @@ pub struct ArgExtremeSinkSpec {
     pub want_max: bool,
     /// Key expression evaluated for each row.
     pub key: Arc<Program>,
+    /// Source AST for `key`, used during lexical-env analysis.
+    pub key_expr: Option<Arc<Expr>>,
 }
 
 /// Predicate terminal operation.
@@ -141,12 +145,17 @@ impl MembershipSinkOp {
 
 impl PredicateSinkSpec {
     /// Constructs a predicate terminal sink from the builtin method.
-    pub(crate) fn from_method(method: BuiltinMethod, predicate: Arc<Program>) -> Option<Self> {
+    pub(crate) fn from_method(
+        method: BuiltinMethod,
+        predicate: Arc<Program>,
+        predicate_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
         Some(Self {
             op: PredicateSinkOp::from_builtin(builtin_predicate_sink(BuiltinId::from_method(
                 method,
             ))?),
             predicate,
+            predicate_expr,
         })
     }
 
@@ -221,10 +230,15 @@ impl MembershipSinkSpec {
 
 impl ArgExtremeSinkSpec {
     /// Constructs an arg-extreme sink from the terminal builtin method.
-    pub(crate) fn from_method(method: BuiltinMethod, key: Arc<Program>) -> Option<Self> {
+    pub(crate) fn from_method(
+        method: BuiltinMethod,
+        key: Arc<Program>,
+        key_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
         Some(Self {
             want_max: arg_extreme_wants_max(BuiltinId::from_method(method))?,
             key,
+            key_expr,
         })
     }
 
@@ -344,10 +358,12 @@ mod tests {
 
     #[test]
     fn terminal_sink_specs_construct_from_methods() {
-        let predicate = PredicateSinkSpec::from_method(BuiltinMethod::Any, empty_program())
+        let predicate = PredicateSinkSpec::from_method(BuiltinMethod::Any, empty_program(), None)
             .expect("any predicate sink");
         assert_eq!(predicate.op, PredicateSinkOp::Any);
-        assert!(PredicateSinkSpec::from_method(BuiltinMethod::Count, empty_program()).is_none());
+        assert!(
+            PredicateSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
+        );
 
         let membership = MembershipSinkSpec::from_method(
             BuiltinMethod::IndicesOf,
@@ -361,13 +377,15 @@ mod tests {
         )
         .is_none());
 
-        let max_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MaxBy, empty_program())
+        let max_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MaxBy, empty_program(), None)
             .expect("max_by arg-extreme sink");
         assert!(max_by.want_max);
-        let min_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MinBy, empty_program())
+        let min_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MinBy, empty_program(), None)
             .expect("min_by arg-extreme sink");
         assert!(!min_by.want_max);
-        assert!(ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program()).is_none());
+        assert!(
+            ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
+        );
     }
 
     #[test]
@@ -375,6 +393,7 @@ mod tests {
         let any = PredicateSinkSpec {
             op: PredicateSinkOp::Any,
             predicate: empty_program(),
+            predicate_expr: None,
         }
         .demand();
         assert_eq!(any.pull, PullDemand::All);
@@ -384,6 +403,7 @@ mod tests {
             PredicateSinkSpec {
                 op: PredicateSinkOp::Any,
                 predicate: empty_program(),
+                predicate_expr: None,
             }
             .sink_result_demand(),
             SinkResultDemand::UntilMatch
@@ -392,6 +412,7 @@ mod tests {
             PredicateSinkSpec {
                 op: PredicateSinkOp::All,
                 predicate: empty_program(),
+                predicate_expr: None,
             }
             .sink_result_demand(),
             SinkResultDemand::UntilFailure
@@ -400,6 +421,7 @@ mod tests {
         let find_one = PredicateSinkSpec {
             op: PredicateSinkOp::FindOne,
             predicate: empty_program(),
+            predicate_expr: None,
         }
         .demand();
         assert_eq!(find_one.pull, PullDemand::All);
@@ -429,6 +451,7 @@ mod tests {
         let arg_extreme = ArgExtremeSinkSpec {
             want_max: true,
             key: empty_program(),
+            key_expr: None,
         }
         .demand();
         assert_eq!(arg_extreme.pull, PullDemand::All);

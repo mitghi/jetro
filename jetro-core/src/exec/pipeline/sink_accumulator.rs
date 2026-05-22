@@ -557,6 +557,7 @@ mod tests {
         Sink::Predicate(PredicateSinkSpec {
             op,
             predicate: empty_program(),
+            predicate_expr: None,
         })
     }
 

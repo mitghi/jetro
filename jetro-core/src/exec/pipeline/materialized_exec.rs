@@ -810,6 +810,7 @@ mod tests {
             Sink::Predicate(PredicateSinkSpec {
                 op: PredicateSinkOp::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
             }),
             vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(2))],
         );
@@ -829,6 +830,7 @@ mod tests {
             Sink::Predicate(PredicateSinkSpec {
                 op: PredicateSinkOp::All,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
             }),
             vec![BodyKernel::CurrentCmpLit(BinOp::Lt, Val::Int(3))],
         );

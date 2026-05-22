@@ -903,7 +903,7 @@ mod tests {
 
             let id = BuiltinId::from_method(method);
             let supported = predicate_sink(id).is_some_and(|_| {
-                PredicateSinkSpec::from_method(method, Arc::clone(&program)).is_some()
+                PredicateSinkSpec::from_method(method, Arc::clone(&program), None).is_some()
             }) || membership_sink(id).is_some_and(|_| {
                 MembershipSinkSpec::from_method(
                     method,
@@ -911,7 +911,7 @@ mod tests {
                 )
                 .is_some()
             }) || arg_extreme_sink(id).is_some_and(|_| {
-                ArgExtremeSinkSpec::from_method(method, Arc::clone(&program)).is_some()
+                ArgExtremeSinkSpec::from_method(method, Arc::clone(&program), None).is_some()
             }) || builtin_sink(id).is_some_and(|spec| match spec.accumulator {
                 BuiltinSinkAccumulator::ApproxDistinct => {
                     Sink::approx_distinct_builtin(method).is_some()

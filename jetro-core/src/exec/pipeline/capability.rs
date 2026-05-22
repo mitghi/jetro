@@ -1084,6 +1084,7 @@ mod tests {
             Sink::Predicate(PredicateSinkSpec {
                 op: PredicateSinkOp::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
             })
             .view_capability(&[BodyKernel::FieldCmpLit(
                 Arc::from("score"),
@@ -1136,6 +1137,7 @@ mod tests {
             Sink::ArgExtreme(ArgExtremeSinkSpec {
                 want_max: true,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
             })
             .view_capability(&[BodyKernel::FieldRead(Arc::from("score"))]),
             Some(ViewSinkCapability::ArgExtreme {
@@ -1146,6 +1148,7 @@ mod tests {
         assert!(Sink::ArgExtreme(ArgExtremeSinkSpec {
             want_max: false,
             key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            key_expr: None,
         })
         .view_capability(&[BodyKernel::Generic])
         .is_none());
