@@ -836,19 +836,7 @@ fn terminal_collect_prefix_from(
     body: &pipeline::PipelineBody,
     start: usize,
 ) -> Option<Vec<pipeline::ViewStageCapability>> {
-    let mut prefix = Vec::with_capacity(stages.len());
-    for (offset, stage) in stages.iter().enumerate() {
-        let idx = start + offset;
-        let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
-        if !matches!(
-            capability.materialization(),
-            pipeline::ViewMaterialization::Never
-        ) {
-            return None;
-        }
-        prefix.push(capability);
-    }
-    Some(prefix)
+    pipeline::view_never_materializing_stage_range(body, start, start + stages.len())
 }
 
 /// Handles pipelines that begin with a keyed-reduce barrier stage
@@ -1285,14 +1273,9 @@ fn sort_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortBarrierPlan> {
                 });
             }
             _ => {
-                let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
-                if !matches!(
-                    capability.materialization(),
-                    pipeline::ViewMaterialization::Never
-                ) {
-                    return None;
-                }
-                prefix.push(capability);
+                prefix.push(pipeline::view_never_materializing_stage_capability(
+                    body, idx,
+                )?);
             }
         }
     }

@@ -836,13 +836,10 @@ pub(crate) fn view_capabilities(body: &PipelineBody) -> Option<ViewPipelineCapab
 /// Computes the longest view-native stage prefix of `body`; returns `None` when even the first stage is incompatible.
 pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefixCapabilities> {
     let mut stages = Vec::new();
-    for (idx, stage) in body.stages.iter().enumerate() {
-        let Some(capability) = view_stage_capability(body, idx, stage) else {
+    for idx in 0..body.stages.len() {
+        let Some(capability) = view_never_materializing_stage_capability(body, idx) else {
             break;
         };
-        if !matches!(capability.materialization(), ViewMaterialization::Never) {
-            break;
-        }
         stages.push(capability);
     }
     if stages.is_empty() {
@@ -852,6 +849,32 @@ pub(crate) fn view_prefix_capabilities(body: &PipelineBody) -> Option<ViewPrefix
         consumed_stages: stages.len(),
         stages,
     })
+}
+
+/// Returns a view-stage capability only when the stage can run without materializing rows.
+pub(crate) fn view_never_materializing_stage_capability(
+    body: &PipelineBody,
+    idx: usize,
+) -> Option<ViewStageCapability> {
+    let capability = view_stage_capability(body, idx, body.stages.get(idx)?)?;
+    matches!(capability.materialization(), ViewMaterialization::Never).then_some(capability)
+}
+
+/// Computes capabilities for the exact stage range `[start, end)` when every
+/// stage is view-native and never materializes rows.
+pub(crate) fn view_never_materializing_stage_range(
+    body: &PipelineBody,
+    start: usize,
+    end: usize,
+) -> Option<Vec<ViewStageCapability>> {
+    if start > end || end > body.stages.len() {
+        return None;
+    }
+    let mut stages = Vec::with_capacity(end.saturating_sub(start));
+    for idx in start..end {
+        stages.push(view_never_materializing_stage_capability(body, idx)?);
+    }
+    Some(stages)
 }
 
 #[cfg(test)]
