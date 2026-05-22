@@ -2944,6 +2944,34 @@ mod tests {
     }
 
     #[test]
+    fn registry_row_stream_terminal_ops_have_sink_metadata() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(op) = row_stream_op(id) else {
+                continue;
+            };
+
+            if let Some(reducer) = row_stream_numeric_reducer(op) {
+                assert_eq!(
+                    numeric_reducer(id),
+                    Some(reducer),
+                    "{method:?} row-stream numeric reducer must match builtin reducer metadata"
+                );
+            }
+
+            if row_stream_op_is_terminal(op) {
+                let spec = method.spec();
+                assert!(
+                    spec.sink.is_some()
+                        || spec.predicate_sink.is_some()
+                        || spec.numeric_reducer.is_some(),
+                    "{method:?} terminal row-stream op {op:?} has no sink/reducer metadata"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_classifies_pipeline_arity_without_method_special_cases() {
         assert_eq!(
             pipeline_arity(BuiltinId::from_method(BuiltinMethod::Filter), false),
