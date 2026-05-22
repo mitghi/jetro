@@ -1,7 +1,7 @@
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
-    terminal_selection_wants_last, view_object_items_projection, view_scalar_projection,
-    BuiltinId,
+    array_selector as builtin_array_selector, by_name as builtin_by_name,
+    direct_scalar_for_plain_sink, logical_shape, terminal_selection_wants_last,
+    view_object_items_projection, view_scalar_projection, BuiltinId,
 };
 use crate::builtins::{BuiltinArraySelector, BuiltinLogicalShape};
 use crate::data::value::Val;
@@ -197,7 +197,6 @@ fn direct_byte_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDir
 }
 
 fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> {
-    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::ir::physical::QueryRoot;
 
     let QueryRoot::Node(root) = plan.root() else {
@@ -261,18 +260,20 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
             body,
-        } if is_plain_count_sink(body) && keys.len() == 1 => Some(NdjsonDirectBytePlan::Expr(
-            NdjsonDirectByteExpr::ScalarCall {
-                value: Box::new(NdjsonDirectByteExpr::Path(vec![PhysicalPathStep::Field(
-                    keys[0].clone(),
-                )])),
-                call: BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
-            },
-        )),
+        } if plain_sink_direct_scalar_call(body).is_some() && keys.len() == 1 => {
+            Some(NdjsonDirectBytePlan::Expr(
+                NdjsonDirectByteExpr::ScalarCall {
+                    value: Box::new(NdjsonDirectByteExpr::Path(vec![PhysicalPathStep::Field(
+                        keys[0].clone(),
+                    )])),
+                    call: plain_sink_direct_scalar_call(body)?,
+                },
+            ))
+        }
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::Expr(source),
             body,
-        } if is_plain_count_sink(body) => {
+        } if plain_sink_direct_scalar_call(body).is_some() => {
             let steps = root_path_steps(&plan, *source)?;
             if !byte_path_has_root_field(&steps) {
                 return None;
@@ -280,7 +281,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ScalarCall {
                     value: Box::new(NdjsonDirectByteExpr::Path(steps)),
-                    call: BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
+                    call: plain_sink_direct_scalar_call(body)?,
                 },
             ))
         }
@@ -462,7 +463,7 @@ fn direct_tape_plan_for_node(
     plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::builtins::{BuiltinArgs, BuiltinMethod};
+    use crate::builtins::BuiltinArgs;
 
     if let PlanNode::Chain { base, steps } = plan.node(id) {
         if let Some(plan) =
@@ -489,20 +490,20 @@ fn direct_tape_plan_for_node(
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
             body,
-        } if body.stages.is_empty() && is_plain_count_sink(body) => {
+        } if body.stages.is_empty() && plain_sink_direct_scalar_call(body).is_some() => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
                 steps: keys_to_path(keys),
-                call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
+                call: plain_sink_direct_scalar_call(body)?,
                 optional: false,
             })
         }
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::Expr(source),
             body,
-        } if body.stages.is_empty() && is_plain_count_sink(body) => {
+        } if body.stages.is_empty() && plain_sink_direct_scalar_call(body).is_some() => {
             Some(NdjsonDirectTapePlan::ViewScalarCall {
                 steps: node_path_steps(plan, *source)?,
-                call: crate::builtins::BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None),
+                call: plain_sink_direct_scalar_call(body)?,
                 optional: false,
             })
         }
@@ -726,12 +727,19 @@ fn pipeline_source_to_steps(
     }
 }
 
-fn is_plain_count_sink(body: &crate::exec::pipeline::PipelineBody) -> bool {
-    body.stages.is_empty()
-        && matches!(
-            body.sink,
-            crate::exec::pipeline::Sink::Reducer(ref spec) if spec.is_plain_count()
-        )
+fn plain_sink_direct_scalar_call(
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<crate::builtins::BuiltinCall> {
+    if !body.stages.is_empty() {
+        return None;
+    }
+    let crate::exec::pipeline::Sink::Reducer(spec) = &body.sink else {
+        return None;
+    };
+    if !spec.is_plain_count() {
+        return None;
+    }
+    direct_scalar_for_plain_sink(BuiltinId::from_method(spec.method()?))
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {

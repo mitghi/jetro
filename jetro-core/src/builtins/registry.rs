@@ -8,8 +8,9 @@
 use crate::{
     builtins::{
         builtin::{BarrierCtx, Builtin, StreamCtx},
-        defs, BuiltinArgExtremeSink, BuiltinArgs, BuiltinArraySelector, BuiltinCancellation,
-        BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
+        defs, BuiltinArgExtremeSink, BuiltinArgs, BuiltinArraySelector, BuiltinCall,
+        BuiltinCancellation, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
+        BuiltinDemandLaw,
         BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
         BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
         BuiltinObjectLambda, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
@@ -383,6 +384,21 @@ pub(crate) fn count_sink_accepts_predicate(id: BuiltinId) -> bool {
         .and_then(|method| method.spec().sink)
         .map(|sink| sink.accepts_predicate)
         .unwrap_or(false)
+}
+
+/// Return the scalar builtin that is equivalent to applying a plain terminal
+/// sink to one already-selected JSON value. Direct byte/tape planners use this
+/// to keep sink-to-projection rewrites registry-owned instead of encoding them
+/// per backend.
+#[inline]
+pub(crate) fn direct_scalar_for_plain_sink(id: BuiltinId) -> Option<BuiltinCall> {
+    let sink = id.method()?.spec().sink?;
+    match sink.accumulator {
+        BuiltinSinkAccumulator::Count => {
+            Some(BuiltinCall::new(BuiltinMethod::Len, BuiltinArgs::None))
+        }
+        _ => None,
+    }
 }
 
 /// Compute the upstream `Demand` that builtin `id` must place on its source
@@ -1848,6 +1864,27 @@ mod tests {
                     assert!(demand.order, "{method:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn registry_drives_direct_scalar_sink_projection() {
+        let count = direct_scalar_for_plain_sink(BuiltinId::from_method(BuiltinMethod::Count))
+            .expect("count should project as len");
+        assert_eq!(count.method, BuiltinMethod::Len);
+        assert!(matches!(count.args, BuiltinArgs::None));
+
+        for method in [
+            BuiltinMethod::First,
+            BuiltinMethod::Last,
+            BuiltinMethod::Sum,
+            BuiltinMethod::Avg,
+            BuiltinMethod::ApproxCountDistinct,
+        ] {
+            assert!(
+                direct_scalar_for_plain_sink(BuiltinId::from_method(method)).is_none(),
+                "{method:?}"
+            );
         }
     }
 
