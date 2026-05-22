@@ -81,25 +81,14 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
 /// later row-stream stage may follow it.
 #[inline]
 pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
-    matches!(
-        op,
-        BuiltinRowStreamOp::Last
-            | BuiltinRowStreamOp::Count
-            | BuiltinRowStreamOp::Any
-            | BuiltinRowStreamOp::All
-            | BuiltinRowStreamOp::FindOne
-            | BuiltinRowStreamOp::Sum
-            | BuiltinRowStreamOp::Avg
-            | BuiltinRowStreamOp::Min
-            | BuiltinRowStreamOp::Max
-    )
+    op.is_terminal()
 }
 
 /// Return true when a row-stream op cannot be safely partitioned across file
 /// chunks while preserving stream semantics.
 #[inline]
 pub(crate) fn row_stream_op_blocks_parallel_partitioning(op: BuiltinRowStreamOp) -> bool {
-    matches!(op, BuiltinRowStreamOp::DistinctBy | BuiltinRowStreamOp::Last)
+    op.blocks_parallel_partitioning()
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.

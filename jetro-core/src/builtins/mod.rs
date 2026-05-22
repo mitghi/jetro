@@ -940,6 +940,31 @@ pub enum BuiltinRowStreamOp {
     Map,
 }
 
+impl BuiltinRowStreamOp {
+    /// Whether this operation finalizes a `$.rows()` stream.
+    #[inline]
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Last
+                | Self::Count
+                | Self::Any
+                | Self::All
+                | Self::FindOne
+                | Self::Sum
+                | Self::Avg
+                | Self::Min
+                | Self::Max
+        )
+    }
+
+    /// Whether this operation prevents partitioned file execution.
+    #[inline]
+    pub(crate) const fn blocks_parallel_partitioning(self) -> bool {
+        matches!(self, Self::DistinctBy | Self::Last)
+    }
+}
+
 /// Marker that a builtin has a structural (index-based) execution backend.
 /// The query planner may choose the structural path over the generic DFS walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
