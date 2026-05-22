@@ -1325,6 +1325,17 @@ pub(crate) fn by_name(name: &str) -> Option<BuiltinId> {
     None
 }
 
+/// Return true when a global-call form uses its first argument as the receiver.
+/// Non-receiver globals keep every argument as a normal subexpression.
+#[inline]
+pub(crate) fn global_call_uses_receiver_arg(name: &str, arg_len: usize) -> bool {
+    arg_len > 0
+        && !matches!(
+            name,
+            "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
+        )
+}
+
 /// Return the canonical source-level name for builtin `id`.
 #[inline]
 pub(crate) fn canonical_name(id: BuiltinId) -> Option<&'static str> {
@@ -1379,6 +1390,24 @@ mod tests {
             }
         }
         assert_eq!(by_name("missing_builtin"), None);
+    }
+
+    #[test]
+    fn registry_classifies_global_receiver_calls() {
+        assert!(global_call_uses_receiver_arg("upper", 1));
+        assert!(global_call_uses_receiver_arg("unknown_custom", 2));
+        assert!(!global_call_uses_receiver_arg("upper", 0));
+        for name in [
+            "coalesce",
+            "chain",
+            "join",
+            "zip",
+            "zip_longest",
+            "product",
+            "range",
+        ] {
+            assert!(!global_call_uses_receiver_arg(name, 2), "{name}");
+        }
     }
 
     #[test]

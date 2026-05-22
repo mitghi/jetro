@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{registry::global_call_uses_receiver_arg, BuiltinMethod};
 use crate::data::context::EvalError;
 use crate::parse::ast::*;
 use crate::vm::{
@@ -569,11 +569,7 @@ impl Compiler {
             },
 
             Expr::GlobalCall { name, args } => {
-                let is_special = matches!(
-                    name.as_str(),
-                    "coalesce" | "chain" | "join" | "zip" | "zip_longest" | "product" | "range"
-                );
-                if !is_special && !args.is_empty() {
+                if global_call_uses_receiver_arg(name.as_str(), args.len()) {
                     let first = match &args[0] {
                         Arg::Pos(e) | Arg::Named(_, e) => e.clone(),
                     };
