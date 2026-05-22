@@ -224,6 +224,33 @@ mod tests {
     }
 
     #[test]
+    fn document_rows_find_one_preserves_exact_one_semantics() {
+        let engine = JetroEngine::new();
+        let document = engine.parse_value(json!([
+            {"active": false, "id": 1},
+            {"active": true, "id": 2},
+            {"active": false, "id": 3}
+        ]));
+
+        let out = collect_document_rows(&engine, &document, "$.rows().find_one($.active)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(out), json!({"active": true, "id": 2}));
+
+        let none = engine.parse_value(json!([{"active": false}]));
+        let err = collect_document_rows(&engine, &none, "$.rows().find_one($.active)")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("find_one: expected exactly one element, got 0"));
+
+        let many = engine.parse_value(json!([{"active": true}, {"active": true}]));
+        let err = collect_document_rows(&engine, &many, "$.rows().find_one($.active)")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("find_one: expected exactly one element, got multiple"));
+    }
+
+    #[test]
     fn document_rows_scalar_sink_empty_edges_are_finished() {
         let engine = JetroEngine::new();
         let document = engine.parse_value(json!([]));
