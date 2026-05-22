@@ -157,10 +157,7 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
 /// Return whether an arg-extreme sink keeps the largest projected key.
 #[inline]
 pub(crate) fn arg_extreme_wants_max(id: BuiltinId) -> Option<bool> {
-    Some(match arg_extreme_sink(id)? {
-        BuiltinArgExtremeSink::MaxBy => true,
-        BuiltinArgExtremeSink::MinBy => false,
-    })
+    Some(arg_extreme_sink(id)?.wants_max())
 }
 
 /// Return the concrete pipeline stage shape for an expression-argument builtin.

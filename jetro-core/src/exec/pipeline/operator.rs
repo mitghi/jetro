@@ -190,13 +190,7 @@ impl PredicateSinkSpec {
 
     /// Returns the builtin method represented by this predicate sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
-        match self.op {
-            PredicateSinkOp::Any => BuiltinMethod::Any,
-            PredicateSinkOp::All => BuiltinMethod::All,
-            PredicateSinkOp::FindIndex => BuiltinMethod::FindIndex,
-            PredicateSinkOp::IndicesWhere => BuiltinMethod::IndicesWhere,
-            PredicateSinkOp::FindOne => BuiltinMethod::FindOne,
-        }
+        self.op.into_builtin().method()
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -246,11 +240,7 @@ impl MembershipSinkSpec {
 
     /// Returns the builtin method represented by this membership sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
-        match self.op {
-            MembershipSinkOp::Includes => BuiltinMethod::Includes,
-            MembershipSinkOp::Index => BuiltinMethod::Index,
-            MembershipSinkOp::IndicesOf => BuiltinMethod::IndicesOf,
-        }
+        self.op.into_builtin().method()
     }
 
     /// Iterates over embedded programs for kernel enumeration.

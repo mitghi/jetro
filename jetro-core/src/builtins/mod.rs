@@ -1046,6 +1046,14 @@ pub enum BuiltinArgExtremeSink {
     MinBy,
 }
 
+impl BuiltinArgExtremeSink {
+    /// Whether this sink keeps the largest projected key.
+    #[inline]
+    pub(crate) const fn wants_max(self) -> bool {
+        matches!(self, Self::MaxBy)
+    }
+}
+
 /// Predicate terminal sink behavior for builtins with a predicate argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPredicateSink {
@@ -1061,6 +1069,20 @@ pub enum BuiltinPredicateSink {
     FindOne,
 }
 
+impl BuiltinPredicateSink {
+    /// Builtin method represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn method(self) -> BuiltinMethod {
+        match self {
+            Self::Any => BuiltinMethod::Any,
+            Self::All => BuiltinMethod::All,
+            Self::FindIndex => BuiltinMethod::FindIndex,
+            Self::IndicesWhere => BuiltinMethod::IndicesWhere,
+            Self::FindOne => BuiltinMethod::FindOne,
+        }
+    }
+}
+
 /// Membership terminal sink behavior for builtins with a target value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinMembershipSink {
@@ -1070,6 +1092,18 @@ pub enum BuiltinMembershipSink {
     Index,
     /// Returns all zero-based indices matching the target.
     IndicesOf,
+}
+
+impl BuiltinMembershipSink {
+    /// Builtin method represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn method(self) -> BuiltinMethod {
+        match self {
+            Self::Includes => BuiltinMethod::Includes,
+            Self::Index => BuiltinMethod::Index,
+            Self::IndicesOf => BuiltinMethod::IndicesOf,
+        }
+    }
 }
 
 /// Builtin array-child selector behavior.
