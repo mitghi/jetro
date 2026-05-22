@@ -1336,6 +1336,17 @@ pub(crate) fn global_call_uses_receiver_arg(name: &str, arg_len: usize) -> bool 
         )
 }
 
+/// Return the builtin method name used by `$..method(...)` deep traversal.
+#[inline]
+pub(crate) fn deep_method_name(name: &str) -> String {
+    match name {
+        "find" | "find_all" | "findAll" => "deep_find".to_string(),
+        "shape" => "deep_shape".to_string(),
+        "like" => "deep_like".to_string(),
+        other => format!("deep_{other}"),
+    }
+}
+
 /// Return the canonical source-level name for builtin `id`.
 #[inline]
 pub(crate) fn canonical_name(id: BuiltinId) -> Option<&'static str> {
@@ -1408,6 +1419,16 @@ mod tests {
         ] {
             assert!(!global_call_uses_receiver_arg(name, 2), "{name}");
         }
+    }
+
+    #[test]
+    fn registry_maps_deep_method_names() {
+        assert_eq!(deep_method_name("find"), "deep_find");
+        assert_eq!(deep_method_name("find_all"), "deep_find");
+        assert_eq!(deep_method_name("findAll"), "deep_find");
+        assert_eq!(deep_method_name("shape"), "deep_shape");
+        assert_eq!(deep_method_name("like"), "deep_like");
+        assert_eq!(deep_method_name("parent"), "deep_parent");
     }
 
     #[test]

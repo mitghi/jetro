@@ -12,10 +12,10 @@ use pest_derive::Parser;
 use std::{fmt, sync::Arc};
 
 use super::ast::*;
-use crate::data::value::Val;
 use super::write_terminal::{
     build_patch_op, is_chain_write_terminal, steps_to_path as write_steps_to_path,
 };
+use crate::{builtins::registry::deep_method_name, data::value::Val};
 
 const INVALID_HAS_ARRAY_RHS: &str = "__jetro_invalid_has_array_rhs";
 
@@ -1433,17 +1433,11 @@ fn parse_postfix_step(pair: Pair<Rule>) -> Vec<Step> {
             }
         }
         Rule::deep_method => {
-            // `$..find(pred)` etc. are parsed here and mapped to `deep_*` method names.
+            // `$..find(pred)` etc. are parsed here and mapped to deep method names.
             let mut mi = inner_pair.into_inner();
             let name = mi.next().unwrap().as_str().to_string();
             let args = mi.next().map(parse_arg_list).unwrap_or_default();
-            let mapped = match name.as_str() {
-                "find" | "find_all" | "findAll" => "deep_find".to_string(),
-                "shape" => "deep_shape".to_string(),
-                "like" => "deep_like".to_string(),
-                other => format!("deep_{}", other),
-            };
-            vec![Step::Method(mapped, args)]
+            vec![Step::Method(deep_method_name(name.as_str()), args)]
         }
         Rule::deep_match => {
             // `$..match { arms }` (collect all) and `$..match! { arms }`
