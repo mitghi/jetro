@@ -1908,4 +1908,63 @@ mod tests {
         );
         assert_eq!(Sink::Collect.single_element_selection(), None);
     }
+
+    #[test]
+    fn sink_constructors_follow_builtin_sink_metadata() {
+        assert!(matches!(
+            Sink::terminal_builtin(BuiltinMethod::First),
+            Some(Sink::Terminal(BuiltinMethod::First))
+        ));
+        assert!(matches!(
+            Sink::terminal_builtin(BuiltinMethod::Last),
+            Some(Sink::Terminal(BuiltinMethod::Last))
+        ));
+        assert!(Sink::terminal_builtin(BuiltinMethod::Count).is_none());
+
+        assert!(matches!(
+            Sink::select_many_builtin(BuiltinMethod::First, 2),
+            Some(Sink::SelectMany {
+                n: 2,
+                from_end: false
+            })
+        ));
+        assert!(matches!(
+            Sink::select_many_builtin(BuiltinMethod::Last, 2),
+            Some(Sink::SelectMany {
+                n: 2,
+                from_end: true
+            })
+        ));
+        assert!(Sink::select_many_builtin(BuiltinMethod::Sum, 2).is_none());
+
+        assert!(matches!(
+            Sink::count_builtin(BuiltinMethod::Count),
+            Some(Sink::Reducer(spec)) if spec.is_plain_count()
+        ));
+        assert!(Sink::count_builtin(BuiltinMethod::Sum).is_none());
+
+        for method in [
+            BuiltinMethod::Sum,
+            BuiltinMethod::Avg,
+            BuiltinMethod::Min,
+            BuiltinMethod::Max,
+        ] {
+            assert!(
+                Sink::numeric_builtin(method, None, None)
+                    .and_then(|sink| match sink {
+                        Sink::Reducer(spec) => spec.method(),
+                        _ => None,
+                    })
+                    == Some(method),
+                "{method:?}"
+            );
+        }
+        assert!(Sink::numeric_builtin(BuiltinMethod::Count, None, None).is_none());
+
+        assert!(matches!(
+            Sink::approx_distinct_builtin(BuiltinMethod::ApproxCountDistinct),
+            Some(Sink::ApproxCountDistinct)
+        ));
+        assert!(Sink::approx_distinct_builtin(BuiltinMethod::Count).is_none());
+    }
 }
