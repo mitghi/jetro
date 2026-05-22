@@ -4327,11 +4327,14 @@ not-json
             "$.attributes.map(@.value).first()",
             "$.attributes.map(@.value).last()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key)"#,
+            r#"$.attributes.filter(@.value.contains("_3")).filter(@.weight > 10).map(@.key)"#,
             r#"$.attributes.filter(@.value.contains("_3")).map(@.key.upper())"#,
             r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key, value: @.value}).first()"#,
             r#"$.attributes.filter(@.value.contains("_3")).len()"#,
+            r#"$.attributes.filter(@.value.contains("_3")).filter(@.weight > 10).len()"#,
             "$.attributes.map(@.weight).sum()",
             r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+            r#"$.attributes.filter(@.value.contains("_3")).filter(@.weight > 10).map(@.weight).sum()"#,
             "$.attributes.sort_by(@.value).last().key",
         ] {
             let plan =
@@ -4407,17 +4410,27 @@ not-json
     #[test]
     fn direct_byte_tape_plan_counts_filtered_rows() {
         let engine = crate::JetroEngine::new();
-        let query = r#"attributes.filter(@.value.contains("_3")).len()"#;
-        let plan = super::direct_tape_plan(&engine, query).expect("filter count should be direct");
-        assert!(super::tape_plan_can_write_byte_row(&plan));
+        let row =
+            br#"{"attributes":[{"value":"a_3","weight":2},{"value":"b","weight":7},{"value":"c_3","weight":9}]}"#;
+        for (query, expected) in [
+            (r#"attributes.filter(@.value.contains("_3")).len()"#, "2"),
+            (
+                r#"attributes.filter(@.value.contains("_3")).filter(@.weight > 5).len()"#,
+                "1",
+            ),
+            ("attributes.len()", "3"),
+        ] {
+            let plan =
+                super::direct_tape_plan(&engine, query).expect("filter count should be direct");
+            assert!(super::tape_plan_can_write_byte_row(&plan), "{query}");
 
-        let row = br#"{"attributes":[{"value":"a_3"},{"value":"b"},{"value":"c_3"}]}"#;
-        let mut out = Vec::new();
-        let mut scratch = Vec::new();
-        let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
-            .expect("byte count should write");
-        assert!(matches!(wrote, super::BytePlanWrite::Done));
-        assert_eq!(out, b"2");
+            let mut out = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote = super::write_ndjson_byte_tape_plan_row(&mut out, row, &plan, &mut scratch)
+                .expect("byte count should write");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+            assert_eq!(std::str::from_utf8(&out).unwrap(), expected, "{query}");
+        }
     }
 
     #[test]
@@ -4462,6 +4475,10 @@ not-json
             ("attributes.map(@.key.upper())", r#"["K1","K2"]"#),
             (
                 r#"attributes.filter(@.value.contains("2")).map(@.key)"#,
+                r#"["k2"]"#,
+            ),
+            (
+                r#"attributes.filter(@.value.contains("2")).filter(@.key == "k2").map(@.key)"#,
                 r#"["k2"]"#,
             ),
             (

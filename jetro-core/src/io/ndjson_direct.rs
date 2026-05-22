@@ -1020,25 +1020,21 @@ fn direct_tape_count_filtered_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
+    use crate::exec::pipeline::{ReducerOp, Sink};
 
-    if body.stages.len() != 1 {
-        return None;
-    }
-    let Stage::Filter(_, _) = body.stages.first()? else {
-        return None;
-    };
     let Sink::Reducer(spec) = &body.sink else {
         return None;
     };
     if spec.op != ReducerOp::Count || spec.predicate.is_some() {
         return None;
     }
+    let stream = direct_stream_shape(body)?;
+    if stream.map.is_some() {
+        return None;
+    }
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate: Some(direct_item_predicate_from_kernel(
-            body.stage_kernels.first()?,
-        )?),
+        predicate: stream.predicate,
         sink: NdjsonDirectStreamSink::Count,
     }))
 }
@@ -1143,24 +1139,34 @@ fn direct_stream_shape(
 ) -> Option<DirectStreamShape> {
     use crate::exec::pipeline::Stage;
 
-    match body.stages.as_slice() {
-        [Stage::Map(_, _)] => Some(DirectStreamShape {
-            predicate: None,
-            map: Some(direct_stream_map_from_kernel(body.stage_kernels.first()?)?),
-        }),
-        [Stage::Filter(_, _)] => Some(DirectStreamShape {
-            predicate: Some(direct_item_predicate_from_kernel(
-                body.stage_kernels.first()?,
-            )?),
-            map: None,
-        }),
-        [Stage::Filter(_, _), Stage::Map(_, _)] => Some(DirectStreamShape {
-            predicate: Some(direct_item_predicate_from_kernel(
-                body.stage_kernels.first()?,
-            )?),
-            map: Some(direct_stream_map_from_kernel(body.stage_kernels.get(1)?)?),
-        }),
-        _ => None,
+    let mut predicate = None;
+    let mut map = None;
+    for (idx, stage) in body.stages.iter().enumerate() {
+        match stage {
+            Stage::Filter(_, _) if map.is_none() => {
+                let next = direct_item_predicate_from_kernel(body.stage_kernels.get(idx)?)?;
+                predicate = Some(combine_direct_item_predicate(predicate, next));
+            }
+            Stage::Map(_, _) if map.is_none() && idx + 1 == body.stages.len() => {
+                map = Some(direct_stream_map_from_kernel(body.stage_kernels.get(idx)?)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(DirectStreamShape { predicate, map })
+}
+
+fn combine_direct_item_predicate(
+    lhs: Option<NdjsonDirectItemPredicate>,
+    rhs: NdjsonDirectItemPredicate,
+) -> NdjsonDirectItemPredicate {
+    match lhs {
+        Some(lhs) => NdjsonDirectItemPredicate::Binary {
+            lhs: Box::new(lhs),
+            op: crate::parse::ast::BinOp::And,
+            rhs: Box::new(rhs),
+        },
+        None => rhs,
     }
 }
 
