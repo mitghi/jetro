@@ -10,8 +10,7 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, dispatches_scalar_direct, view_object_projection,
-    view_projection, BuiltinId,
+    by_name as builtin_by_name, dispatches_scalar_direct, view_projection, BuiltinId,
 };
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
@@ -719,7 +718,7 @@ fn receiver_pipeline_step_is_direct_view_projection(step: &Step) -> bool {
         return false;
     };
     BuiltinCall::from_literal_ast_args(name, args).is_some_and(|call| {
-        view_object_projection(BuiltinId::from_method(call.method)).is_some()
+        view_projection(BuiltinId::from_method(call.method))
     })
 }
 
@@ -1741,6 +1740,27 @@ mod tests {
             plan.node(*receiver),
             PlanNode::RootPath(steps)
                 if matches!(steps.as_slice(), [PhysicalPathStep::Field(key)] if key.as_ref() == "user")
+        ));
+    }
+
+    #[test]
+    fn root_path_scalar_view_projection_lowers_to_byte_native_call() {
+        let plan = plan_query(r#"$.user.name.upper()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert!(plan.execution_facts(*root).is_byte_native());
+        let PlanNode::Call { receiver, .. } = plan.node(*root) else {
+            panic!("expected direct call");
+        };
+        assert!(matches!(
+            plan.node(*receiver),
+            PlanNode::RootPath(steps)
+                if matches!(
+                    steps.as_slice(),
+                    [PhysicalPathStep::Field(user), PhysicalPathStep::Field(name)]
+                    if user.as_ref() == "user" && name.as_ref() == "name"
+                )
         ));
     }
 
