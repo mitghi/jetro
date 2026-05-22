@@ -1031,15 +1031,14 @@ fn direct_tape_numeric_stream_plan(
         return None;
     };
     let (predicate, suffix_steps) = if spec.projection.is_some() {
-        let predicate = match direct_stream_shape(body) {
-            Some(DirectStreamShape {
-                predicate,
-                map: None,
-            }) => predicate,
-            None if body.stages.is_empty() => None,
-            _ => return None,
-        };
-        (predicate, kernel_to_physical_path(body.sink_kernels.first()?)?)
+        let stream = direct_stream_shape(body)?;
+        if stream.map.is_some() {
+            return None;
+        }
+        (
+            stream.predicate,
+            kernel_to_physical_path(body.sink_kernels.first()?)?,
+        )
     } else {
         let stream = direct_stream_shape(body)?;
         let suffix_steps = direct_stream_map_path(stream.map?)?;
