@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     arg_extreme_wants_max, membership_sink as builtin_membership_sink,
-    membership_sink_result_demand as builtin_membership_sink_result_demand, numeric_reducer,
+    membership_sink_result_demand as builtin_membership_sink_result_demand,
+    membership_sink_value_need as builtin_membership_sink_value_need, numeric_reducer,
     predicate_sink as builtin_predicate_sink,
     predicate_sink_result_demand as builtin_predicate_sink_result_demand,
     predicate_sink_value_need as builtin_predicate_sink_value_need, BuiltinId,
@@ -198,7 +199,7 @@ impl MembershipSinkSpec {
         // executor loop when it has enough information.
         Demand {
             pull: PullDemand::All,
-            value: ValueNeed::Whole,
+            value: builtin_membership_sink_value_need(self.op.into_builtin()),
             order: false,
         }
     }

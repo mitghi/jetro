@@ -112,6 +112,12 @@ pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
     Some(id.method()?.spec().membership_sink?)
 }
 
+/// Return the value need for a membership terminal sink.
+#[inline]
+pub(crate) fn membership_sink_value_need(_sink: BuiltinMembershipSink) -> ValueNeed {
+    ValueNeed::Whole
+}
+
 /// Return scalar-result short-circuit demand for a membership terminal sink.
 #[inline]
 pub(crate) fn membership_sink_result_demand(sink: BuiltinMembershipSink) -> SinkResultDemand {
@@ -2568,6 +2574,14 @@ mod tests {
         assert_eq!(
             membership_sink(BuiltinId::from_method(BuiltinMethod::Has)),
             None
+        );
+        assert_eq!(
+            membership_sink_value_need(BuiltinMembershipSink::Includes),
+            ValueNeed::Whole
+        );
+        assert_eq!(
+            membership_sink_value_need(BuiltinMembershipSink::IndicesOf),
+            ValueNeed::Whole
         );
         assert_eq!(
             membership_sink_result_demand(BuiltinMembershipSink::Includes),
