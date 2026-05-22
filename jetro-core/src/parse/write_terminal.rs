@@ -1,19 +1,49 @@
 use super::ast::{Arg, Expr, PatchOp, PathStep, Step};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainWriteTerminal {
+    Set,
+    Modify,
+    Delete,
+    Unset,
+    Merge,
+    DeepMerge,
+    Update,
+}
+
+impl ChainWriteTerminal {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "set" => Some(Self::Set),
+            "modify" => Some(Self::Modify),
+            "delete" => Some(Self::Delete),
+            "unset" => Some(Self::Unset),
+            "merge" => Some(Self::Merge),
+            "deep_merge" | "deepMerge" => Some(Self::DeepMerge),
+            "update" => Some(Self::Update),
+            _ => None,
+        }
+    }
+
+    fn is_pipeline_fusion(self) -> bool {
+        matches!(self, Self::Set | Self::Modify | Self::Delete | Self::Unset)
+    }
+
+    fn merge_method(self) -> Option<&'static str> {
+        match self {
+            Self::Merge => Some("merge"),
+            Self::DeepMerge => Some("deep_merge"),
+            _ => None,
+        }
+    }
+}
+
 /// Chain-write terminals that lower to patch/update AST nodes.
 ///
 /// `.replace` is intentionally absent because it is the two-arg string
 /// builtin, not a chain-write terminal.
 pub(crate) fn is_chain_write_terminal(name: &str) -> bool {
-    is_patch_write_terminal(name) || name == "update"
-}
-
-/// Chain-write terminals that can be represented as a single [`PatchOp`].
-pub(crate) fn is_patch_write_terminal(name: &str) -> bool {
-    matches!(
-        name,
-        "set" | "modify" | "delete" | "unset" | "merge" | "deep_merge" | "deepMerge"
-    )
+    ChainWriteTerminal::from_name(name).is_some()
 }
 
 /// Chain-write terminals that pipeline fusion may speculatively lift.
@@ -21,7 +51,7 @@ pub(crate) fn is_patch_write_terminal(name: &str) -> bool {
 /// Merge-style terminals remain parser-lowered for rooted chains only until
 /// pipe-stage semantics are covered by focused tests.
 pub(crate) fn is_pipeline_fusion_terminal(name: &str) -> bool {
-    matches!(name, "set" | "modify" | "delete" | "unset")
+    ChainWriteTerminal::from_name(name).is_some_and(ChainWriteTerminal::is_pipeline_fusion)
 }
 
 /// Convert chain steps into patch path steps.
@@ -54,13 +84,13 @@ pub(crate) fn steps_to_path(
 
 /// Build the patch operation for a chain-write terminal.
 pub(crate) fn build_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> Option<PatchOp> {
-    match name {
-        "set" => Some(PatchOp {
+    match ChainWriteTerminal::from_name(name)? {
+        ChainWriteTerminal::Set => Some(PatchOp {
             path,
             val: arg_expr(args.first()?).clone(),
             cond: None,
         }),
-        "modify" => {
+        ChainWriteTerminal::Modify => {
             let val = match arg_expr(args.first()?).clone() {
                 Expr::Lambda { params, body } => {
                     if let Some(param) = params.into_iter().next() {
@@ -81,7 +111,7 @@ pub(crate) fn build_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> O
                 cond: None,
             })
         }
-        "delete" => {
+        ChainWriteTerminal::Delete => {
             if !args.is_empty() {
                 return None;
             }
@@ -91,23 +121,21 @@ pub(crate) fn build_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> O
                 cond: None,
             })
         }
-        "merge" | "deep_merge" | "deepMerge" => {
+        terminal @ (ChainWriteTerminal::Merge | ChainWriteTerminal::DeepMerge) => {
             let arg = arg_expr(args.first()?).clone();
-            let method = if name == "merge" {
-                "merge"
-            } else {
-                "deep_merge"
-            };
             Some(PatchOp {
                 path,
                 val: Expr::Chain(
                     Box::new(Expr::Current),
-                    vec![Step::Method(method.to_string(), vec![Arg::Pos(arg)])],
+                    vec![Step::Method(
+                        terminal.merge_method()?.to_string(),
+                        vec![Arg::Pos(arg)],
+                    )],
                 ),
                 cond: None,
             })
         }
-        "unset" => {
+        ChainWriteTerminal::Unset => {
             let key = match arg_expr(args.first()?) {
                 Expr::Str(key) | Expr::Ident(key) => key.clone(),
                 _ => return None,
@@ -120,7 +148,7 @@ pub(crate) fn build_patch_op(name: &str, args: &[Arg], path: Vec<PathStep>) -> O
                 cond: None,
             })
         }
-        _ => None,
+        ChainWriteTerminal::Update => None,
     }
 }
 
