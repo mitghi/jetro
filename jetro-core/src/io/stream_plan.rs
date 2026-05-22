@@ -6,7 +6,8 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, row_stream_op, row_stream_op_is_terminal, BuiltinId,
+    by_name as builtin_by_name, row_stream_numeric_reducer, row_stream_op,
+    row_stream_op_is_terminal, BuiltinId,
 };
 use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinRowStreamOp};
 use crate::parse::ast::{Arg, Expr, Step};
@@ -109,17 +110,28 @@ impl RowStreamStage {
     }
 
     pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
-        match self {
-            RowStreamStage::Sum => Some(BuiltinNumericReducer::Sum),
-            RowStreamStage::Avg => Some(BuiltinNumericReducer::Avg),
-            RowStreamStage::Min => Some(BuiltinNumericReducer::Min),
-            RowStreamStage::Max => Some(BuiltinNumericReducer::Max),
-            _ => None,
-        }
+        row_stream_numeric_reducer(self.row_stream_op())
     }
 
     fn blocks_parallel_partitioning(&self) -> bool {
         matches!(self, RowStreamStage::DistinctBy(_) | RowStreamStage::Last)
+    }
+
+    fn row_stream_op(&self) -> BuiltinRowStreamOp {
+        match self {
+            RowStreamStage::Filter(_) => BuiltinRowStreamOp::Filter,
+            RowStreamStage::DistinctBy(_) => BuiltinRowStreamOp::DistinctBy,
+            RowStreamStage::Take(_) => BuiltinRowStreamOp::Take,
+            RowStreamStage::Map(_) => BuiltinRowStreamOp::Map,
+            RowStreamStage::Last => BuiltinRowStreamOp::Last,
+            RowStreamStage::Count => BuiltinRowStreamOp::Count,
+            RowStreamStage::Sum => BuiltinRowStreamOp::Sum,
+            RowStreamStage::Avg => BuiltinRowStreamOp::Avg,
+            RowStreamStage::Min => BuiltinRowStreamOp::Min,
+            RowStreamStage::Max => BuiltinRowStreamOp::Max,
+            RowStreamStage::Any(_) => BuiltinRowStreamOp::Any,
+            RowStreamStage::All(_) => BuiltinRowStreamOp::All,
+        }
     }
 }
 
