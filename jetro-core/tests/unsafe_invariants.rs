@@ -1,4 +1,4 @@
-use jetro_core::Jetro;
+use jetro_core::{Jetro, JetroEngine};
 use serde_json::{json, Value};
 
 fn j(document: Value) -> Jetro {
@@ -662,6 +662,34 @@ fn has_object_key() {
     assert_eq!(q("$ has 'absent'", &doc).unwrap(), json!(false));
     assert_eq!(q("$.has_key('name')", &doc).unwrap(), json!(true));
     assert_eq!(q("$.has_key('absent')", &doc).unwrap(), json!(false));
+}
+
+#[test]
+fn object_path_helpers_match_value_backend_through_maps() {
+    let doc = json!({
+        "items": [
+            {"meta": {"isbn": "a", "score": 10, "user": {"name": "Ada"}}},
+            {"meta": {"score": null, "user": {"name": "Grace"}, "extra": true}},
+            {"meta": {"isbn": "c", "score": 30, "user": {}}}
+        ]
+    });
+    let engine = JetroEngine::new();
+    let tape = j(doc.clone());
+
+    for query in [
+        r#"$.items.map(meta.has_key("isbn"))"#,
+        r#"$.items.map(meta.missing("isbn", "score"))"#,
+        r#"$.items.map(meta.get_path("user.name"))"#,
+        r#"$.items.map(meta.has_path("user.name"))"#,
+        r#"$.items.map(meta.pick(isbn, score))"#,
+        r#"$.items.map(meta.omit(extra))"#,
+        r#"$.items.map(meta.keys())"#,
+        r#"$.items.map(meta.entries().count())"#,
+    ] {
+        let from_tape = tape.collect(query).unwrap();
+        let from_value = engine.collect_value(doc.clone(), query).unwrap();
+        assert_eq!(from_tape, from_value, "{query}");
+    }
 }
 
 #[test]
