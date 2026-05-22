@@ -36,7 +36,7 @@ use crate::plan::demand::{
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerOp, ReducerSpec, Sink, Stage,
+    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerSpec, Sink, Stage,
     ViewMembershipTarget, ViewSinkCapability, ViewStageCapability,
 };
 
@@ -1682,7 +1682,7 @@ fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
         Sink::Collect | Sink::Terminal(_) | Sink::SelectMany { .. } | Sink::Nth(_) => {
             DemandLanes::RESULT
         }
-        Sink::Reducer(spec) if spec.op == ReducerOp::Count => {
+        Sink::Reducer(spec) if spec.is_count() => {
             let mut lanes = DemandLanes::NONE;
             if let Some(idx) = spec.predicate_kernel_index() {
                 lanes.merge_scan(kernel_payload_need(sink_kernels, idx));

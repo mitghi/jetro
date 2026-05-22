@@ -322,9 +322,14 @@ impl ReducerSpec {
         }
     }
 
+    /// Returns true for any count reducer, including predicate-bearing count sinks.
+    pub(crate) fn is_count(&self) -> bool {
+        self.op == ReducerOp::Count
+    }
+
     /// Returns true for a count reducer with no predicate or projection.
     pub(crate) fn is_plain_count(&self) -> bool {
-        self.op == ReducerOp::Count && self.predicate.is_none() && self.projection.is_none()
+        self.is_count() && self.predicate.is_none() && self.projection.is_none()
     }
 
     /// Iterates over embedded programs (predicate then projection) for kernel enumeration.
