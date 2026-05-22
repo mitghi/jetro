@@ -3014,7 +3014,7 @@ impl Builtin for Rows {
     }
 }
 
-// ── Wildcard-default methods now made explicit (so all methods have defs entries) ──
+// Wildcard-default methods are explicit so all methods have defs entries.
 
 /// `from_json` — string → JSON value (default scalar element).
 pub(crate) struct FromJson;
@@ -3267,7 +3267,7 @@ impl Builtin for ReverseStr {
     }
 }
 
-// ── Re-export Builtin trait constants used by cancellation impls (already imported above) ──
+// Re-export Builtin trait constants used by cancellation impls.
 
 /// `or(default)` — coalesce: returns recv unless null/missing, else default.
 pub(crate) struct Or;
@@ -3284,7 +3284,7 @@ impl Builtin for Or {
     }
 }
 
-// ── Multi-arg scalar element methods (need apply_args) ──
+// Multi-arg scalar element methods need apply_args.
 
 macro_rules! str_arg_scalar_native {
     ( $( $ty:ident, $name:literal $( , aliases: [ $( $alias:literal ),* $(,)? ] )?, $apply:ident ; )* ) => {
@@ -3405,7 +3405,7 @@ impl Builtin for HasKey {
     }
 }
 
-// ── More multi-arg scalar element methods ──
+// Additional multi-arg scalar element methods.
 
 // Str-arg cases that extend the str_arg_scalar_native pattern.
 str_arg_scalar_native! {

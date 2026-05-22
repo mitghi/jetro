@@ -1,16 +1,16 @@
-//! Jetro core — parser, compiler, and VM for the Jetro JSON query language.
+//! Jetro core: parser, compiler, and VM for the Jetro JSON query language.
 //!
 //! # Execution path
 //!
 //! ```text
 //! source text
-//!   │  parse::parser::parse() → Expr AST
-//!   │  plan::physical::plan_query() → QueryPlan (physical IR)
-//!   │  exec::router::collect_*() → dispatches to:
-//!   │    StructuralIndex backend  (jetro-experimental bitmap)
-//!   │    ViewPipeline backend     (borrowed tape/Val navigation)
-//!   │    Pipeline backend         (pull-based composed stages)
-//!   └─  VM fallback               (bytecode stack machine)
+//!   parse::parser::parse() -> Expr AST
+//!   plan::physical::plan_query() -> QueryPlan (physical IR)
+//!   exec::router::collect_*() -> dispatches to:
+//!     StructuralIndex backend  (jetro-experimental bitmap)
+//!     ViewPipeline backend     (borrowed tape/Val navigation)
+//!     Pipeline backend         (pull-based composed stages)
+//!     VM fallback              (bytecode stack machine)
 //! ```
 //!
 //! # Quick start

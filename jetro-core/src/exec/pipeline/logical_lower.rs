@@ -126,7 +126,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             collect_expr_builtin_stage(*input, method?, key)
         }
 
-        // ── Terminal sinks — strip the default Collect, install the real one ──
+        // Terminal sinks strip the default Collect and install the real sink.
         LogicalPlan::First(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
             Some((source, stages, exprs, Sink::terminal_builtin(method?)?))

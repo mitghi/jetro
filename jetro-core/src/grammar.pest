@@ -62,7 +62,7 @@ current = { "@" }
 
 kind_type = @{ ("number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
 
-// ── Cast types (only valid after `as`) — superset of kind_type incl int/float
+// Cast types are only valid after `as`; this is a superset of kind_type.
 cast_type = @{ ("int" | "float" | "number" | "string" | "array" | "object" | "bool" | "null") ~ !ident_char }
 
 cmp_op = { "~=" | "==" | "!=" | ">=" | "<=" | ">" | "<" }

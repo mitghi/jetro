@@ -1288,7 +1288,7 @@ impl BuiltinId {
     }
 }
 
-// ── Trait-driven name lookup (replaces builtin_registry! macro) ───────────────
+// Trait-driven name lookup replaces the old builtin_registry! macro.
 
 #[inline]
 pub(crate) fn method_from_id(id: BuiltinId) -> Option<BuiltinMethod> {
