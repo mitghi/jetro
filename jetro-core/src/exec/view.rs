@@ -111,7 +111,7 @@ where
         None => return None,
     };
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &capabilities.stages,
@@ -119,7 +119,9 @@ where
         source_demand,
         vm,
         |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(sink_acc.finish_result(false))
 }
@@ -155,7 +157,7 @@ fn observe_view_sink<'a, V>(
     sink_acc: &mut pipeline::SinkAccumulator,
     sink_kernels: &[pipeline::BodyKernel],
     vm: &mut VM,
-) -> Option<ViewRowAction>
+) -> Option<Result<ViewRowAction, EvalError>>
 where
     V: ValueView<'a>,
 {
@@ -166,7 +168,7 @@ where
                 pipeline::ViewMaterialization::SinkOutputRows
             );
             sink_acc.observe_collect(item.materialize());
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         }
         pipeline::ViewSinkCapability::Builtin {
             accumulator,
@@ -175,7 +177,7 @@ where
             ..
         } => {
             if !view_sink_predicate_matches(item, *predicate_kernel, sink_kernels, vm)? {
-                return Some(ViewRowAction::Skip);
+                return Some(Ok(ViewRowAction::Skip));
             }
             let sink_done = sink_acc.observe_builtin_lazy(
                 *accumulator,
@@ -187,19 +189,19 @@ where
                 },
                 || Some(eval_view_key_scalar(item)?.object_key().to_string()),
             )?;
-            Some(if sink_done {
+            Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else {
                 ViewRowAction::Emit
-            })
+            }))
         }
         pipeline::ViewSinkCapability::Nth { index } => {
             let sink_done = sink_acc.observe_nth_lazy(*index, || item.materialize());
-            Some(if sink_done {
+            Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else {
                 ViewRowAction::Emit
-            })
+            }))
         }
         pipeline::ViewSinkCapability::Predicate {
             op,
@@ -207,16 +209,18 @@ where
         } => {
             let kernel = sink_kernels.get(*predicate_kernel)?;
             let matched = eval_filter_kernel_with_vm(item, kernel, vm)?;
-            let sink_done = sink_acc
-                .observe_predicate_lazy(*op, matched, || item.materialize())
-                .ok()?;
-            Some(if sink_done {
+            let sink_done =
+                match sink_acc.observe_predicate_lazy(*op, matched, || item.materialize()) {
+                    Ok(done) => done,
+                    Err(err) => return Some(Err(err)),
+                };
+            Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else if matched {
                 ViewRowAction::Emit
             } else {
                 ViewRowAction::Skip
-            })
+            }))
         }
         pipeline::ViewSinkCapability::Membership { op, target } => {
             let pipeline::ViewMembershipTarget::Literal(target) = target else {
@@ -224,13 +228,13 @@ where
             };
             let matched = view_membership_matches(item, target);
             let sink_done = sink_acc.observe_membership_match(*op, matched);
-            Some(if sink_done {
+            Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else if matched {
                 ViewRowAction::Emit
             } else {
                 ViewRowAction::Skip
-            })
+            }))
         }
         pipeline::ViewSinkCapability::ArgExtreme {
             want_max,
@@ -238,7 +242,7 @@ where
         } => {
             let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(*key_kernel)?, vm)?;
             sink_acc.observe_arg_extreme_lazy(*want_max, key, || item.materialize());
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         }
         pipeline::ViewSinkCapability::SelectMany {
             n,
@@ -249,11 +253,11 @@ where
                 sink_acc.observe_select_many_lazy(*n, *from_end, *source_reversed, || {
                     item.materialize()
                 });
-            Some(if sink_done {
+            Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else {
                 ViewRowAction::Emit
-            })
+            }))
         }
     }
 }
@@ -338,7 +342,7 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix.consumed_stages], &body.sink);
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix.stages,
@@ -347,9 +351,11 @@ where
         vm,
         |item, _vm| {
             boundary_rows.push(item.materialize());
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(run_materialized_suffix(
         body,
@@ -375,7 +381,7 @@ where
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
@@ -384,9 +390,11 @@ where
         vm,
         |item, vm| {
             collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(Ok(collector.finish()))
 }
@@ -423,7 +431,7 @@ where
         _ => None,
     };
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &prefix,
@@ -434,17 +442,19 @@ where
             if let Some(target) = nth_target {
                 if nth_seen < target {
                     nth_seen += 1;
-                    return Some(ViewRowAction::Emit);
+                    return Some(Ok(ViewRowAction::Emit));
                 }
             }
             selected = eval_owned_scalar_or_value_kernel_with_vm(item, &project_kernel, vm)?;
             seen = true;
-            Some(match position {
+            Some(Ok(match position {
                 TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
                 TerminalSelectPosition::Last => ViewRowAction::Emit,
-            })
+            }))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(Ok(if seen { selected } else { Val::Null }))
 }
@@ -492,13 +502,13 @@ fn drive_view_frontier<'a, V, F>(
     source_demand: PullDemand,
     vm: &mut VM,
     observe: F,
-) -> Option<()>
+) -> Option<Result<(), EvalError>>
 where
     V: ValueView<'a>,
-    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     if source_demand.is_zero() {
-        return Some(());
+        return Some(Ok(()));
     }
     let access = source_capabilities.choose_view_access(source_demand, stages);
     match access {
@@ -519,7 +529,7 @@ where
                 _ => return None,
             };
             if idx >= len {
-                return Some(());
+                return Some(Ok(()));
             }
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
@@ -530,7 +540,7 @@ where
                 _ => return None,
             };
             let Some(idx) = pipeline::index_from_end(len, offset) else {
-                return Some(());
+                return Some(Ok(()));
             };
             let items = std::iter::once(source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
@@ -572,11 +582,11 @@ fn drive_view_iter<'a, V, I, F>(
     source_demand: PullDemand,
     vm: &mut VM,
     mut observe: F,
-) -> Option<()>
+) -> Option<Result<(), EvalError>>
 where
     V: ValueView<'a>,
     I: IntoIterator<Item = V>,
-    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     let mut op_state: Vec<ViewStageState> = (0..stages.len())
         .map(|_| ViewStageState::default())
@@ -590,20 +600,21 @@ where
         }
         pulled_inputs += 1;
 
-        if matches!(
-            drive_view_item(
-                row,
-                0,
-                stages,
-                &mut op_state,
-                stage_kernels,
-                source_demand,
-                &mut emitted_outputs,
-                vm,
-                &mut observe,
-            )?,
-            ViewDriveFlow::Stop
-        ) {
+        let flow = match drive_view_item(
+            row,
+            0,
+            stages,
+            &mut op_state,
+            stage_kernels,
+            source_demand,
+            &mut emitted_outputs,
+            vm,
+            &mut observe,
+        )? {
+            Ok(flow) => flow,
+            Err(err) => return Some(Err(err)),
+        };
+        if matches!(flow, ViewDriveFlow::Stop) {
             break;
         }
         if source_demand.output_satisfied_by(emitted_outputs) {
@@ -611,7 +622,7 @@ where
         }
     }
 
-    Some(())
+    Some(Ok(()))
 }
 
 /// Recursively applies one view stage to `item`, then advances to the next stage.
@@ -627,24 +638,25 @@ fn drive_view_item<'a, V, F>(
     emitted_outputs: &mut usize,
     vm: &mut VM,
     observe: &mut F,
-) -> Option<ViewDriveFlow>
+) -> Option<Result<ViewDriveFlow, EvalError>>
 where
     V: ValueView<'a>,
-    F: FnMut(&V, &mut VM) -> Option<ViewRowAction>,
+    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     let Some(stage) = stages.get(stage_idx).cloned() else {
-        return match observe(&item, vm)? {
-            ViewRowAction::Skip => Some(ViewDriveFlow::Continue),
-            ViewRowAction::Emit => {
+        return Some(match observe(&item, vm)? {
+            Ok(ViewRowAction::Skip) => Ok(ViewDriveFlow::Continue),
+            Err(err) => Err(err),
+            Ok(ViewRowAction::Emit) => {
                 *emitted_outputs += 1;
-                Some(if source_demand.output_satisfied_by(*emitted_outputs) {
+                Ok(if source_demand.output_satisfied_by(*emitted_outputs) {
                     ViewDriveFlow::Stop
                 } else {
                     ViewDriveFlow::Continue
                 })
             }
-            ViewRowAction::Stop => Some(ViewDriveFlow::Stop),
-        };
+            Ok(ViewRowAction::Stop) => Ok(ViewDriveFlow::Stop),
+        });
     };
 
     if let pipeline::ViewStageCapability::FlatMap { kernel } = stage {
@@ -655,24 +667,25 @@ where
         );
         let kernel = stage_kernels.get(kernel)?;
         for child in eval_flat_map_kernel(&item, kernel, vm)? {
-            if matches!(
-                drive_view_item(
-                    child,
-                    stage_idx + 1,
-                    stages,
-                    op_state,
-                    stage_kernels,
-                    source_demand,
-                    emitted_outputs,
-                    vm,
-                    observe,
-                )?,
-                ViewDriveFlow::Stop
-            ) {
-                return Some(ViewDriveFlow::Stop);
+            let flow = match drive_view_item(
+                child,
+                stage_idx + 1,
+                stages,
+                op_state,
+                stage_kernels,
+                source_demand,
+                emitted_outputs,
+                vm,
+                observe,
+            )? {
+                Ok(flow) => flow,
+                Err(err) => return Some(Err(err)),
+            };
+            if matches!(flow, ViewDriveFlow::Stop) {
+                return Some(Ok(ViewDriveFlow::Stop));
             }
         }
-        return Some(ViewDriveFlow::Continue);
+        return Some(Ok(ViewDriveFlow::Continue));
     }
 
     match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels, vm)? {
@@ -687,8 +700,8 @@ where
             vm,
             observe,
         ),
-        ViewStageFlow::Drop => Some(ViewDriveFlow::Continue),
-        ViewStageFlow::Stop => Some(ViewDriveFlow::Stop),
+        ViewStageFlow::Drop => Some(Ok(ViewDriveFlow::Continue)),
+        ViewStageFlow::Stop => Some(Ok(ViewDriveFlow::Stop)),
     }
 }
 
@@ -858,7 +871,7 @@ where
     }
     let source_demand = body.pull_demand();
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
@@ -867,9 +880,11 @@ where
         vm,
         |item, vm| {
             plan.reducer.observe(item, &body.stage_kernels, vm)?;
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(run_materialized_value_suffix(
         body,
@@ -914,7 +929,7 @@ where
 
     let mut sorter =
         pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
@@ -924,9 +939,11 @@ where
         |item, vm| {
             let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     let winners = sorter.finish();
     if let Some(collect_plan) = collect_suffix {
@@ -976,7 +993,7 @@ where
     V: ValueView<'a>,
 {
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
-    drive_view_iter(
+    if let Err(err) = drive_view_iter(
         rows,
         &plan.prefix,
         stage_kernels,
@@ -984,9 +1001,11 @@ where
         vm,
         |item, vm| {
             collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(Ok(collector.finish()))
 }
@@ -1011,7 +1030,7 @@ where
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..prefix_end], &body.sink);
     if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
         let mut selected = Vec::new();
-        drive_view_iter(
+        if let Err(err) = drive_view_iter(
             rows.iter().cloned(),
             &prefix,
             &body.stage_kernels,
@@ -1023,9 +1042,11 @@ where
                     &project_kernel,
                     vm,
                 )?);
-                Some(ViewRowAction::Emit)
+                Some(Ok(ViewRowAction::Emit))
             },
-        )?;
+        )? {
+            return Some(Err(err));
+        }
         if from_end && source_reversed {
             selected.reverse();
         }
@@ -1043,7 +1064,7 @@ where
     let mut seen = false;
     let mut selected_index = 0usize;
 
-    drive_view_iter(
+    if let Err(err) = drive_view_iter(
         rows.iter().cloned(),
         &prefix,
         &body.stage_kernels,
@@ -1053,17 +1074,19 @@ where
             if let Some(target) = nth_target {
                 if selected_index < target {
                     selected_index += 1;
-                    return Some(ViewRowAction::Skip);
+                    return Some(Ok(ViewRowAction::Skip));
                 }
             }
             selected = eval_owned_scalar_or_value_kernel_with_vm(item, &project_kernel, vm)?;
             seen = true;
-            Some(match position {
+            Some(Ok(match position {
                 TerminalSelectPosition::First | TerminalSelectPosition::Nth => ViewRowAction::Stop,
                 TerminalSelectPosition::Last => ViewRowAction::Emit,
-            })
+            }))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(Ok(if seen { selected } else { Val::Null }))
 }
@@ -1091,14 +1114,16 @@ where
     };
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
-    drive_view_iter(
+    if let Err(err) = drive_view_iter(
         rows.iter().cloned(),
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
         vm,
         |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(sink_acc.finish_result(false))
 }
@@ -1133,7 +1158,7 @@ where
     };
     let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
-    drive_view_frontier(
+    if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
         &plan.prefix,
@@ -1143,9 +1168,11 @@ where
         |item, vm| {
             let key = view_sort_key(item, plan.key_program.as_ref(), vm)?;
             sorter.push_keyed(key, item.clone());
-            Some(ViewRowAction::Emit)
+            Some(Ok(ViewRowAction::Emit))
         },
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
@@ -1160,14 +1187,16 @@ where
         return Some(out);
     }
 
-    drive_view_iter(
+    if let Err(err) = drive_view_iter(
         ordered,
         &suffix.stages,
         &body.stage_kernels,
         source_demand,
         vm,
         |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
-    )?;
+    )? {
+        return Some(Err(err));
+    }
 
     Some(sink_acc.finish_result(false))
 }
@@ -1611,7 +1640,7 @@ mod tests {
             &mut vm,
             move |_, _| {
                 observed_in_closure.set(observed_in_closure.get() + 1);
-                Some(super::ViewRowAction::Emit)
+                Some(Ok(super::ViewRowAction::Emit))
             },
         );
 
@@ -1638,7 +1667,7 @@ mod tests {
             &mut vm,
             move |item, _| {
                 observed_in_closure.borrow_mut().push(item.materialize());
-                Some(super::ViewRowAction::Emit)
+                Some(Ok(super::ViewRowAction::Emit))
             },
         );
 
@@ -1758,6 +1787,41 @@ mod tests {
         assert_eq!(out, Val::Int(3));
         assert_eq!(source.scalar_reads(), 4);
         assert_eq!(source.materialize_reads(), 1);
+    }
+
+    #[test]
+    fn view_full_runner_find_one_preserves_exact_one_errors() {
+        let empty_source = CountingView::root(&[1, 2, 3]);
+        let empty_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: PredicateSinkOp::FindOne,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(9))],
+        };
+        let err = super::run_full(empty_source.clone(), &empty_body)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.0, "find_one: expected exactly one element, got 0");
+        assert_eq!(empty_source.materialize_reads(), 0);
+
+        let multi_source = CountingView::root(&[1, 2, 3]);
+        let multi_body = PipelineBody {
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1))],
+            ..empty_body
+        };
+        let err = super::run_full(multi_source.clone(), &multi_body)
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            err.0,
+            "find_one: expected exactly one element, got multiple"
+        );
+        assert_eq!(multi_source.materialize_reads(), 1);
     }
 
     #[test]
@@ -1905,9 +1969,10 @@ mod tests {
             &mut vm,
             |_, _| {
                 observed += 1;
-                Some(super::ViewRowAction::Emit)
+                Some(Ok(super::ViewRowAction::Emit))
             },
         )
+        .unwrap()
         .unwrap();
 
         assert_eq!(observed, 0);
@@ -1936,9 +2001,10 @@ mod tests {
             &mut vm,
             |_, _| {
                 observed += 1;
-                Some(super::ViewRowAction::Emit)
+                Some(Ok(super::ViewRowAction::Emit))
             },
         )
+        .unwrap()
         .unwrap();
 
         assert_eq!(observed, 4);
