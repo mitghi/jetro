@@ -95,12 +95,12 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
             match key {
                 None => {
-                    stages.push(Stage::UniqueBy(None));
+                    stages.push(Stage::nullary_builtin(method?)?);
                     exprs.push(None);
                 }
                 Some(key_expr) => {
                     let prog = compile_expr_body(&key_expr);
-                    stages.push(Stage::UniqueBy(Some(prog)));
+                    stages.push(Stage::expr_stage_builtin(method?, prog)?);
                     exprs.push(Some(Arc::new(key_expr)));
                 }
             }
@@ -109,7 +109,7 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
 
         LogicalPlan::Reverse { input } => {
             let (source, mut stages, mut exprs, sink) = collect(*input)?;
-            stages.push(Stage::reverse()?);
+            stages.push(Stage::nullary_builtin(method?)?);
             exprs.push(None);
             Some((source, stages, exprs, sink))
         }
