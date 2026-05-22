@@ -1015,7 +1015,7 @@ fn direct_tape_numeric_stream_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{ReducerOp, Sink};
+    use crate::exec::pipeline::Sink;
 
     let Sink::Reducer(spec) = &body.sink else {
         return None;
@@ -1023,9 +1023,7 @@ fn direct_tape_numeric_stream_plan(
     if spec.predicate.is_some() {
         return None;
     }
-    let ReducerOp::Numeric(op) = spec.op else {
-        return None;
-    };
+    let op = spec.numeric_op()?;
     let (predicate, suffix_steps) = if spec.projection.is_some() {
         let stream = direct_stream_shape(body)?;
         if stream.map.is_some() {
