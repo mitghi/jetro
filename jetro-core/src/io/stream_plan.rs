@@ -426,9 +426,7 @@ fn root_rows_steps(expr: &Expr) -> Option<&[Step]> {
     let Some((Step::Method(name, args), rest)) = steps.split_first() else {
         return None;
     };
-    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
-        || !args.is_empty()
-    {
+    if !is_root_rows_method(name, args) {
         return None;
     }
     Some(rest)
@@ -446,9 +444,7 @@ pub(super) fn root_rows_stream_prefix_len(expr: &Expr) -> Option<usize> {
     let Some((Step::Method(name, args), _)) = steps.split_first() else {
         return None;
     };
-    if builtin_by_name(name) != Some(BuiltinId::from_method(BuiltinMethod::Rows))
-        || !args.is_empty()
-    {
+    if !is_root_rows_method(name, args) {
         return None;
     }
 
@@ -460,6 +456,10 @@ pub(super) fn root_rows_stream_prefix_len(expr: &Expr) -> Option<usize> {
         split += 1;
     }
     Some(split)
+}
+
+fn is_root_rows_method(name: &str, args: &[Arg]) -> bool {
+    builtin_by_name(name) == Some(BuiltinId::from_method(BuiltinMethod::Rows)) && args.is_empty()
 }
 
 pub(super) fn is_rows_stream_method(name: &str) -> bool {
