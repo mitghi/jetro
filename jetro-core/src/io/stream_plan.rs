@@ -407,6 +407,10 @@ pub(super) fn lower_root_rows_query(
     lower_root_rows_expr(&expr, source)
 }
 
+pub(super) fn query_may_contain_rows_stream(query: &str) -> bool {
+    query.contains("$.rows")
+}
+
 pub(super) fn looks_like_root_rows_query(query: &str) -> bool {
     let query = query.trim_start();
     query.starts_with("$.rows(") || query.starts_with("$.rows.")
@@ -727,6 +731,10 @@ mod tests {
 
     #[test]
     fn root_rows_query_guard_is_specific() {
+        assert!(query_may_contain_rows_stream(
+            r#"let stream = $.rows() in stream.count()"#
+        ));
+        assert!(!query_may_contain_rows_stream("$.items"));
         assert!(looks_like_root_rows_query("$.rows().take(1)"));
         assert!(looks_like_root_rows_query("  $.rows().reverse()"));
         assert!(!looks_like_root_rows_query("$.name"));
