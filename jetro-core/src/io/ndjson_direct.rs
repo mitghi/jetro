@@ -560,9 +560,6 @@ fn direct_tape_plan_for_node(
             if let Some(plan) = direct_tape_collect_stream_plan(plan, source, body) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_map_path_plan(plan, source, body) {
-                return Some(plan);
-            }
             if !body.can_run_with_view() {
                 return None;
             }
@@ -993,28 +990,6 @@ fn direct_tape_predicate_node(
     }
 }
 
-fn direct_tape_map_path_plan(
-    plan: &QueryPlan,
-    source: &crate::ir::physical::PipelinePlanSource,
-    body: &crate::exec::pipeline::PipelineBody,
-) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{Sink, Stage};
-
-    if !matches!(body.sink, Sink::Collect) || body.stages.len() != 1 {
-        return None;
-    }
-    let Stage::Map(_, _) = body.stages.first()? else {
-        return None;
-    };
-    let source_steps = pipeline_source_to_steps(plan, source)?;
-    let kernel = body.stage_kernels.first()?;
-    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
-        source_steps,
-        predicate: None,
-        sink: NdjsonDirectStreamSink::Collect(direct_stream_map_from_kernel(kernel)?),
-    }))
-}
-
 fn direct_tape_count_filtered_plan(
     plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
@@ -1088,15 +1063,12 @@ fn direct_tape_collect_stream_plan(
         return None;
     }
     let stream = direct_stream_shape(body)?;
-    let Some(predicate) = stream.predicate else {
-        return None;
-    };
     let Some(map) = stream.map else {
         return None;
     };
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate: Some(predicate),
+        predicate: stream.predicate,
         sink: NdjsonDirectStreamSink::Collect(map),
     }))
 }
