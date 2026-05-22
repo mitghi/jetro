@@ -548,10 +548,7 @@ fn direct_tape_plan_for_node(
             if let Some(plan) = direct_tape_sort_extreme_plan(plan, source, body, Vec::new()) {
                 return Some(plan);
             }
-            if let Some(plan) = direct_tape_filter_numeric_reduce_path_plan(plan, source, body) {
-                return Some(plan);
-            }
-            if let Some(plan) = direct_tape_numeric_reduce_path_plan(plan, source, body) {
+            if let Some(plan) = direct_tape_numeric_stream_plan(plan, source, body) {
                 return Some(plan);
             }
             if let Some(plan) = direct_tape_count_filtered_plan(plan, source, body) {
@@ -1046,12 +1043,12 @@ fn direct_tape_count_filtered_plan(
     }))
 }
 
-fn direct_tape_numeric_reduce_path_plan(
+fn direct_tape_numeric_stream_plan(
     plan: &QueryPlan,
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
+    use crate::exec::pipeline::{ReducerOp, Sink};
 
     let Sink::Reducer(spec) = &body.sink else {
         return None;
@@ -1062,50 +1059,24 @@ fn direct_tape_numeric_reduce_path_plan(
     let ReducerOp::Numeric(op) = spec.op else {
         return None;
     };
-    let suffix_steps = match body.stages.as_slice() {
-        [Stage::Map(_, _)] if spec.projection.is_none() => {
-            kernel_to_physical_path(body.stage_kernels.first()?)?
-        }
-        [] if spec.projection.is_some() => kernel_to_physical_path(body.sink_kernels.first()?)?,
-        _ => return None,
+    let (predicate, suffix_steps) = if spec.projection.is_some() {
+        let predicate = match direct_stream_shape(body) {
+            Some(DirectStreamShape {
+                predicate,
+                map: None,
+            }) => predicate,
+            None if body.stages.is_empty() => None,
+            _ => return None,
+        };
+        (predicate, kernel_to_physical_path(body.sink_kernels.first()?)?)
+    } else {
+        let stream = direct_stream_shape(body)?;
+        let suffix_steps = direct_stream_map_path(stream.map?)?;
+        (stream.predicate, suffix_steps)
     };
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate: None,
-        sink: NdjsonDirectStreamSink::Numeric { suffix_steps, op },
-    }))
-}
-
-fn direct_tape_filter_numeric_reduce_path_plan(
-    plan: &QueryPlan,
-    source: &crate::ir::physical::PipelinePlanSource,
-    body: &crate::exec::pipeline::PipelineBody,
-) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{ReducerOp, Sink, Stage};
-
-    let Sink::Reducer(spec) = &body.sink else {
-        return None;
-    };
-    if spec.predicate.is_some() {
-        return None;
-    }
-    let ReducerOp::Numeric(op) = spec.op else {
-        return None;
-    };
-    let (predicate, suffix_steps) = match body.stages.as_slice() {
-        [Stage::Filter(_, _), Stage::Map(_, _)] if spec.projection.is_none() => (
-            direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
-            kernel_to_physical_path(body.stage_kernels.get(1)?)?,
-        ),
-        [Stage::Filter(_, _)] if spec.projection.is_some() => (
-            direct_item_predicate_from_kernel(body.stage_kernels.first()?)?,
-            kernel_to_physical_path(body.sink_kernels.first()?)?,
-        ),
-        _ => return None,
-    };
-    Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
-        source_steps: pipeline_source_to_steps(plan, source)?,
-        predicate: Some(predicate),
+        predicate,
         sink: NdjsonDirectStreamSink::Numeric { suffix_steps, op },
     }))
 }
@@ -1212,6 +1183,13 @@ fn direct_stream_map_from_kernel(
         ));
     }
     None
+}
+
+fn direct_stream_map_path(map: NdjsonDirectStreamMap) -> Option<NdjsonPhysicalPath> {
+    match map {
+        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(steps)) => Some(steps),
+        _ => None,
+    }
 }
 
 fn direct_item_predicate_from_kernel(
