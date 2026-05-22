@@ -72,6 +72,8 @@
   rows-root detection, parsed rows-stream guards, and stream finalization.
 - Routed NDJSON scalar calls, object-item projection, positional selection,
   array selectors, `find`, and direct count planning through builtin metadata.
+- Added exact-one `$.rows().find_one(...)` stream support with zero/multiple
+  match errors preserved across NDJSON rows and document rows.
 - Added direct stream parity coverage and direct-vs-fallback object projection
   equivalence checks for byte-writable tape output.
 - Preserved row-stream direct execution while keeping unsupported expressions
