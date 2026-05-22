@@ -422,28 +422,23 @@ impl CompiledRowStream {
     }
 
     pub(super) fn finish_result(&self) -> Result<Option<Val>, EvalError> {
-        self.stages.iter().find_map(|stage| match stage {
-            CompiledRowStreamStage::Last { value } => Some(value.clone().unwrap_or(Val::Null)),
-            CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
-            CompiledRowStreamStage::Numeric { acc } => Some(acc.value()),
-            CompiledRowStreamStage::Any { matched, .. } => Some(Val::Bool(*matched)),
-            CompiledRowStreamStage::All { failed, .. } => Some(Val::Bool(!*failed)),
-            CompiledRowStreamStage::FindOne { value, .. } => Some(value.clone()?),
-            _ => None,
-        })
-        .map(Some)
-        .ok_or_else(|| EvalError("find_one: expected exactly one element, got 0".into()))
-        .or_else(|err| {
-            if self
-                .stages
-                .iter()
-                .any(|stage| matches!(stage, CompiledRowStreamStage::FindOne { .. }))
-            {
-                Err(err)
-            } else {
-                Ok(None)
-            }
-        })
+        for stage in &self.stages {
+            let value = match stage {
+                CompiledRowStreamStage::Last { value } => value.clone().unwrap_or(Val::Null),
+                CompiledRowStreamStage::Count { count } => Val::Int(*count as i64),
+                CompiledRowStreamStage::Numeric { acc } => acc.value(),
+                CompiledRowStreamStage::Any { matched, .. } => Val::Bool(*matched),
+                CompiledRowStreamStage::All { failed, .. } => Val::Bool(!*failed),
+                CompiledRowStreamStage::FindOne { value, .. } => {
+                    return value.clone().map(Some).ok_or_else(|| {
+                        EvalError("find_one: expected exactly one element, got 0".into())
+                    });
+                }
+                _ => continue,
+            };
+            return Ok(Some(value));
+        }
+        Ok(None)
     }
 }
 
