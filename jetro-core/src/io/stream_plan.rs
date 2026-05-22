@@ -904,6 +904,42 @@ mod tests {
     }
 
     #[test]
+    fn row_stream_stages_report_predicate_sink_metadata() {
+        let expr = parse("$.rows().any($.active)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        let (sink, _) = plan
+            .stages
+            .last()
+            .and_then(RowStreamStage::predicate_sink)
+            .expect("any sink metadata");
+        assert_eq!(sink, BuiltinPredicateSink::Any);
+
+        let expr = parse("$.rows().all($.active)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        let (sink, _) = plan
+            .stages
+            .last()
+            .and_then(RowStreamStage::predicate_sink)
+            .expect("all sink metadata");
+        assert_eq!(sink, BuiltinPredicateSink::All);
+
+        let expr = parse("$.rows().find_one($.active)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        let (sink, _) = plan
+            .stages
+            .last()
+            .and_then(RowStreamStage::predicate_sink)
+            .expect("find_one sink metadata");
+        assert_eq!(sink, BuiltinPredicateSink::FindOne);
+    }
+
+    #[test]
     fn scalar_result_classification_comes_from_stream_demand() {
         let take_one = lower_root_rows_query("$.rows().take(1)", RowStreamSourceKind::NdjsonRows)
             .unwrap()
