@@ -12,7 +12,7 @@ use crate::parse::ast::{
     Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
 
-use super::{ir::SinkDemand, BodyKernel, ReducerOp, Sink, Stage};
+use super::{ir::SinkDemand, BodyKernel, Sink, Stage};
 
 /// Demand-driven symbolic optimiser: tracks the current-element expression symbolically
 /// through map stages, substitutes `@` into downstream predicates, and drops stages whose
@@ -168,9 +168,9 @@ impl SymbolicEmitter {
     fn finish(&mut self, sink: &mut Sink) {
         self.flush_predicate();
         match sink {
-            Sink::Reducer(spec) if spec.op == ReducerOp::Count => {}
+            Sink::Reducer(spec) if spec.is_plain_count() => {}
             Sink::Reducer(spec)
-                if matches!(spec.op, ReducerOp::Numeric(_))
+                if spec.numeric_op().is_some()
                     && spec.projection.is_none()
                     && !matches!(self.item, Expr::Current) =>
             {
