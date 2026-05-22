@@ -991,12 +991,12 @@ fn direct_tape_count_stream_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{ReducerOp, Sink};
+    use crate::exec::pipeline::Sink;
 
     let Sink::Reducer(spec) = &body.sink else {
         return None;
     };
-    if spec.op != ReducerOp::Count || spec.predicate.is_some() {
+    if !spec.is_plain_count() {
         return None;
     }
     let stream = direct_stream_shape(body)?;
