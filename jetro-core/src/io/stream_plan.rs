@@ -51,6 +51,10 @@ impl RowStreamPlan {
     pub(super) fn refresh_demand(&mut self) {
         self.demand = RowStreamDemand::from_plan(self);
     }
+
+    pub(super) fn returns_scalar_value(&self) -> bool {
+        self.demand.retained_limit == Some(1) || self.demand.scalar_output
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -691,6 +695,24 @@ mod tests {
             all_plan.stages.last(),
             Some(RowStreamStage::All(_))
         ));
+    }
+
+    #[test]
+    fn scalar_result_classification_comes_from_stream_demand() {
+        let take_one = lower_root_rows_query("$.rows().take(1)", RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        assert!(take_one.returns_scalar_value());
+
+        let count = lower_root_rows_query("$.rows().count()", RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        assert!(count.returns_scalar_value());
+
+        let take_many = lower_root_rows_query("$.rows().take(2)", RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+        assert!(!take_many.returns_scalar_value());
     }
 
     #[test]

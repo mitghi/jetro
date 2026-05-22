@@ -92,7 +92,7 @@ pub(super) fn lower_rows_fanout_expr(
         let Some(stream) = lower_consumer_stream(init, &stream_name, &source)? else {
             return Ok(None);
         };
-        let scalar = stream.demand.retained_limit == Some(1) || stream.demand.scalar_output;
+        let scalar = stream.returns_scalar_value();
         consumers.push(RowStreamFanoutConsumer {
             binding: name.clone(),
             stream,
@@ -137,7 +137,7 @@ fn rewrite_let_stream_fanout_body(
         builder.next_id += 1;
         builder.consumers.push(RowStreamFanoutConsumer {
             binding: binding.clone(),
-            scalar: stream.demand.retained_limit == Some(1) || stream.demand.scalar_output,
+            scalar: stream.returns_scalar_value(),
             stream,
         });
         return Ok(Expr::Ident(binding));
@@ -334,7 +334,7 @@ impl FanoutBuilder {
         }
         self.consumers.push(RowStreamFanoutConsumer {
             binding,
-            scalar: stream.demand.retained_limit == Some(1) || stream.demand.scalar_output,
+            scalar: stream.returns_scalar_value(),
             stream,
         });
         true
