@@ -1227,6 +1227,23 @@ mod tests {
         assert_eq!(j.tape_materialized_subtrees(), 1);
     }
     #[test]
+    fn tape_predicate_scalar_sinks_do_not_materialize_rows() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":9},{"name":"bob","score":2}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let any = j.collect(r#"$.people.any(score > 8)"#).unwrap();
+        let all = j.collect(r#"$.people.all(score > 0)"#).unwrap();
+
+        assert_eq!(any, json!(true));
+        assert_eq!(all, json!(true));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+    #[test]
     fn tape_static_arg_scalar_filter_materializes_only_output_subtree() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"bob"},{"name":"ada"},{"name":"amy"}],"unused":{"large":[1,2,3,4]}}"#
