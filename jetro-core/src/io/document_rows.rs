@@ -1,10 +1,9 @@
-use super::stream_exec::CompiledRowStream;
+use super::stream_exec::{finish_collected_row_stream, CompiledRowStream};
 use super::stream_plan::{lower_root_rows_query, RowStreamPlan, RowStreamSourceKind};
 use super::stream_source::{DocumentRowSource, ValueRowSource};
 use super::stream_types::RowStreamRowResult;
 use crate::data::value::Val;
 use crate::{EvalError, Jetro, JetroEngine};
-use std::sync::Arc;
 
 pub(crate) fn collect_document_rows(
     engine: &JetroEngine,
@@ -36,14 +35,7 @@ fn run_document_rows(
         }
     }
 
-    let stats = stream.stats().clone();
-    if let Some(value) = stream.finish() {
-        Ok((value, stats))
-    } else if plan.demand.retained_limit == Some(1) {
-        Ok((out.into_iter().next().unwrap_or(Val::Null), stats))
-    } else {
-        Ok((Val::Arr(Arc::new(out)), stats))
-    }
+    Ok(finish_collected_row_stream(plan, &stream, out))
 }
 
 fn apply_document_row(

@@ -27,7 +27,7 @@ pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
     write_val_line_with_options,
 };
-use super::stream_exec::CompiledRowStream;
+use super::stream_exec::{finish_collected_row_stream, CompiledRowStream};
 use super::stream_fanout::{
     drive_ndjson_rows_fanout_file, drive_ndjson_rows_fanout_file_with_stats,
 };
@@ -1531,16 +1531,7 @@ where
         }
     }
 
-    if let Some(value) = executor.finish() {
-        Ok((value, executor.stats().clone()))
-    } else if plan.demand.retained_limit == Some(1) {
-        Ok((
-            out.into_iter().next().unwrap_or(Val::Null),
-            executor.stats().clone(),
-        ))
-    } else {
-        Ok((Val::Arr(std::sync::Arc::new(out)), executor.stats().clone()))
-    }
+    Ok(finish_collected_row_stream(plan, &executor, out))
 }
 
 pub(super) fn collect_row_stream_result(

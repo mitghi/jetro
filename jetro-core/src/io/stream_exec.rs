@@ -14,6 +14,7 @@ use crate::data::value::Val;
 use crate::util::is_truthy;
 use crate::vm::opcode::Program;
 use crate::{EvalError, Jetro, JetroEngine, JetroEngineError, VM};
+use std::sync::Arc;
 
 pub(super) struct CompiledRowStream {
     stages: Vec<CompiledRowStreamStage>,
@@ -361,6 +362,22 @@ impl CompiledRowStream {
     }
 }
 
+pub(super) fn finish_collected_row_stream(
+    plan: &RowStreamPlan,
+    stream: &CompiledRowStream,
+    out: Vec<Val>,
+) -> (Val, RowStreamStats) {
+    let stats = stream.stats().clone();
+    let value = if let Some(value) = stream.finish() {
+        value
+    } else if plan.demand.retained_limit == Some(1) {
+        out.into_iter().next().unwrap_or(Val::Null)
+    } else {
+        Val::Arr(Arc::new(out))
+    };
+    (value, stats)
+}
+
 fn ensure_row_stream_value(
     engine: &JetroEngine,
     line_no: u64,
@@ -443,13 +460,14 @@ impl CompiledRowStreamStage {
             },
             RowStreamStage::Last => Self::Last { value: None },
             RowStreamStage::Count => Self::Count { count: 0 },
-            RowStreamStage::Sum | RowStreamStage::Avg | RowStreamStage::Min | RowStreamStage::Max => {
-                Self::Numeric {
-                    acc: NumericAccumulator::from_reducer(
-                        stage.numeric_reducer().expect("numeric reducer"),
-                    ),
-                }
-            }
+            RowStreamStage::Sum
+            | RowStreamStage::Avg
+            | RowStreamStage::Min
+            | RowStreamStage::Max => Self::Numeric {
+                acc: NumericAccumulator::from_reducer(
+                    stage.numeric_reducer().expect("numeric reducer"),
+                ),
+            },
             RowStreamStage::Any(expr) => Self::Any {
                 program: Compiler::compile(expr, "<ndjson-rows-any>"),
                 matched: false,
