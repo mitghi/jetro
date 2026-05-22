@@ -1878,6 +1878,76 @@ mod tests {
     }
 
     #[test]
+    fn registry_pipeline_lowerings_have_execution_metadata() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            match pipeline_lowering(id) {
+                Some(BuiltinPipelineLowering::ExprArg) => {
+                    assert!(
+                        spec.expr_stage.is_some()
+                            || spec.object_lambda.is_some()
+                            || spec.keyed_reducer.is_some()
+                            || spec.arg_extreme_sink.is_some()
+                            || spec.structural.is_some()
+                            || matches!(
+                                spec.logical_shape,
+                                Some(
+                                    BuiltinLogicalShape::TakeWhile | BuiltinLogicalShape::DropWhile
+                                )
+                            ),
+                        "{method:?} has ExprArg lowering but no expression execution metadata"
+                    );
+                }
+                Some(BuiltinPipelineLowering::TerminalExprArg { terminal }) => {
+                    assert!(
+                        spec.logical_shape.is_some()
+                            || spec.keyed_reducer.is_some()
+                            || spec.predicate_sink.is_some(),
+                        "{method:?} has TerminalExprArg lowering but no terminal expression metadata"
+                    );
+                    assert!(
+                        terminal_selection_position(BuiltinId::from_method(terminal)).is_some(),
+                        "{method:?} TerminalExprArg target {terminal:?} is not a select-one sink"
+                    );
+                }
+                Some(BuiltinPipelineLowering::TerminalSink) => {
+                    assert!(
+                        spec.sink.is_some()
+                            || spec.predicate_sink.is_some()
+                            || spec.membership_sink.is_some()
+                            || spec.arg_extreme_sink.is_some(),
+                        "{method:?} has TerminalSink lowering but no sink metadata"
+                    );
+                }
+                Some(BuiltinPipelineLowering::TerminalUsizeSink { .. }) => {
+                    assert!(
+                        spec.array_selector.is_some()
+                            || matches!(demand_law(id), BuiltinDemandLaw::Nth),
+                        "{method:?} has TerminalUsizeSink lowering but no positional metadata"
+                    );
+                }
+                Some(BuiltinPipelineLowering::Nullary) => {
+                    assert!(
+                        spec.nullary_stage.is_some()
+                            || spec.view_object_projection.is_some()
+                            || spec.view_scalar,
+                        "{method:?} has Nullary lowering but no nullary/view execution metadata"
+                    );
+                }
+                Some(
+                    BuiltinPipelineLowering::UsizeArg { .. }
+                    | BuiltinPipelineLowering::StringArg
+                    | BuiltinPipelineLowering::StringPairArg
+                    | BuiltinPipelineLowering::IntRangeArg
+                    | BuiltinPipelineLowering::Sort,
+                )
+                | None => {}
+            }
+        }
+    }
+
+    #[test]
     fn registry_pipeline_elements_participate_in_demand_model() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
