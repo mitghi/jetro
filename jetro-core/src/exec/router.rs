@@ -1212,6 +1212,21 @@ mod tests {
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
     #[test]
+    fn tape_find_one_materializes_only_matching_result_row() {
+        let j = Jetro::from_bytes(
+            br#"{"people":[{"name":"al","score":1},{"name":"ada","score":9},{"name":"bob","score":2}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.people.find_one(name == "ada")"#).unwrap();
+
+        assert_eq!(out, json!({"name": "ada", "score": 9}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 1);
+    }
+    #[test]
     fn tape_static_arg_scalar_filter_materializes_only_output_subtree() {
         let j = Jetro::from_bytes(
             br#"{"people":[{"name":"bob"},{"name":"ada"},{"name":"amy"}],"unused":{"large":[1,2,3,4]}}"#
