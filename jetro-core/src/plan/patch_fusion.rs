@@ -650,7 +650,7 @@ fn expr_reads_update_focus(expr: &Expr) -> bool {
         Expr::Object(fields) => fields.iter().any(|field| match field {
             ObjField::Kv { val, cond, .. } => {
                 expr_reads_update_focus(val)
-                    || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+                    || cond.as_ref().is_some_and(expr_reads_update_focus)
             }
             ObjField::Dynamic { key, val } => {
                 expr_reads_update_focus(key) || expr_reads_update_focus(val)
@@ -679,7 +679,9 @@ fn expr_reads_update_focus(expr: &Expr) -> bool {
         } => {
             expr_reads_update_focus(expr)
                 || expr_reads_update_focus(iter)
-                || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+                || cond
+                    .as_ref()
+                    .is_some_and(|expr| expr_reads_update_focus(expr.as_ref()))
         }
         Expr::DictComp {
             key,
@@ -691,7 +693,9 @@ fn expr_reads_update_focus(expr: &Expr) -> bool {
             expr_reads_update_focus(key)
                 || expr_reads_update_focus(val)
                 || expr_reads_update_focus(iter)
-                || cond.as_ref().is_some_and(|expr| expr_reads_update_focus(expr))
+                || cond
+                    .as_ref()
+                    .is_some_and(|expr| expr_reads_update_focus(expr.as_ref()))
         }
         Expr::Lambda { body, .. } => expr_reads_update_focus(body),
         Expr::Let { init, body, .. } => {
@@ -754,7 +758,7 @@ fn arg_reads_update_focus(arg: &Arg) -> bool {
 fn match_arm_reads_update_focus(arm: &crate::parse::ast::MatchArm) -> bool {
     arm.guard
         .as_ref()
-        .is_some_and(|expr| expr_reads_update_focus(expr))
+        .is_some_and(expr_reads_update_focus)
         || expr_reads_update_focus(&arm.body)
 }
 
