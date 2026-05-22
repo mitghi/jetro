@@ -3013,6 +3013,10 @@ mod tests {
             Some(BuiltinRowStreamOp::FindFirst)
         );
         assert_eq!(
+            row_stream_op(BuiltinId::from_method(BuiltinMethod::FindOne)),
+            None
+        );
+        assert_eq!(
             row_stream_op(BuiltinId::from_method(BuiltinMethod::UniqueBy)),
             Some(BuiltinRowStreamOp::DistinctBy)
         );

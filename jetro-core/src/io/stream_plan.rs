@@ -849,6 +849,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_rows_stream_find_one_until_exact_one_sink_exists() {
+        let expr = parse("$.rows().find_one(active == true)").unwrap();
+        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(err, "unsupported rows() stream method find_one()");
+    }
+
+    #[test]
     fn lowers_rows_stream_predicate_sinks() {
         let any = parse("$.rows().any($.active)").unwrap();
         let any_plan = lower_root_rows_expr(&any, RowStreamSourceKind::NdjsonRows)
