@@ -2840,6 +2840,51 @@ mod tests {
     }
 
     #[test]
+    fn registry_terminal_sink_specs_report_registered_methods() {
+        use crate::exec::pipeline::{
+            MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec,
+        };
+        use crate::vm::Program;
+        use std::sync::Arc;
+
+        let program = Arc::new(Program::new(Vec::new(), "<sink-method-test>"));
+        for method in [
+            BuiltinMethod::Any,
+            BuiltinMethod::All,
+            BuiltinMethod::FindIndex,
+            BuiltinMethod::IndicesWhere,
+            BuiltinMethod::FindOne,
+        ] {
+            let spec = PredicateSinkSpec::from_method(method, Arc::clone(&program), None)
+                .unwrap_or_else(|| panic!("{method:?} should be a predicate sink"));
+            assert_eq!(spec.method(), method, "{method:?}");
+            assert_eq!(
+                predicate_sink(BuiltinId::from_method(spec.method())),
+                predicate_sink(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Includes,
+            BuiltinMethod::Index,
+            BuiltinMethod::IndicesOf,
+        ] {
+            let spec = MembershipSinkSpec::from_method(
+                method,
+                MembershipSinkTarget::Literal(Val::Int(1)),
+            )
+            .unwrap_or_else(|| panic!("{method:?} should be a membership sink"));
+            assert_eq!(spec.method(), method, "{method:?}");
+            assert_eq!(
+                membership_sink(BuiltinId::from_method(spec.method())),
+                membership_sink(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_drives_logical_shapes() {
         assert_eq!(
             logical_shape(BuiltinId::from_method(BuiltinMethod::Filter)),
