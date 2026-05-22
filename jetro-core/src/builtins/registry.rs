@@ -95,6 +95,13 @@ pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
     )
 }
 
+/// Return true when a row-stream op cannot be safely partitioned across file
+/// chunks while preserving stream semantics.
+#[inline]
+pub(crate) fn row_stream_op_blocks_parallel_partitioning(op: BuiltinRowStreamOp) -> bool {
+    matches!(op, BuiltinRowStreamOp::DistinctBy | BuiltinRowStreamOp::Last)
+}
+
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
@@ -3135,6 +3142,15 @@ mod tests {
                     | BuiltinRowStreamOp::FindOne
             );
             assert_eq!(row_stream_op_is_terminal(op), expected_terminal, "{op:?}");
+            let expected_blocks_parallel = matches!(
+                op,
+                BuiltinRowStreamOp::DistinctBy | BuiltinRowStreamOp::Last
+            );
+            assert_eq!(
+                row_stream_op_blocks_parallel_partitioning(op),
+                expected_blocks_parallel,
+                "{op:?}"
+            );
         }
     }
 

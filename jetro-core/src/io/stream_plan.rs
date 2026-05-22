@@ -7,7 +7,7 @@
 
 use crate::builtins::registry::{
     by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op,
-    row_stream_op_is_terminal, BuiltinId,
+    row_stream_op_blocks_parallel_partitioning, row_stream_op_is_terminal, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamOp,
@@ -133,9 +133,9 @@ impl RowStreamStage {
     }
 
     fn blocks_parallel_partitioning(&self) -> bool {
-        matches!(self, RowStreamStage::DistinctBy(_) | RowStreamStage::Last)
+        row_stream_op(BuiltinId::from_method(self.builtin_method()))
+            .is_some_and(row_stream_op_blocks_parallel_partitioning)
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
