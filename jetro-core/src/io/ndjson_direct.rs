@@ -1372,7 +1372,7 @@ fn direct_array_element_source(
     plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
-    use crate::exec::pipeline::Sink;
+    use crate::exec::pipeline::SingleElementSelection;
     use crate::ir::physical::PipelinePlanSource;
 
     if let PlanNode::Call {
@@ -1403,24 +1403,10 @@ fn direct_array_element_source(
     if !body.stages.is_empty() {
         return None;
     }
-    let element = match body.sink {
-        Sink::Terminal(method) => {
-            if terminal_selection_wants_last(BuiltinId::from_method(method))? {
-                NdjsonDirectElement::Last
-            } else {
-                NdjsonDirectElement::First
-            }
-        }
-        Sink::SelectMany {
-            n: 1,
-            from_end: false,
-        } => NdjsonDirectElement::First,
-        Sink::SelectMany {
-            n: 1,
-            from_end: true,
-        } => NdjsonDirectElement::Last,
-        Sink::Nth(n) => NdjsonDirectElement::Nth(n),
-        _ => return None,
+    let element = match body.sink.single_element_selection()? {
+        SingleElementSelection::First => NdjsonDirectElement::First,
+        SingleElementSelection::Last => NdjsonDirectElement::Last,
+        SingleElementSelection::Nth(n) => NdjsonDirectElement::Nth(n),
     };
     let source_steps = match source {
         PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),

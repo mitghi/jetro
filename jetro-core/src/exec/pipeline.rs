@@ -54,6 +54,7 @@ pub use ir::{
     FallbackBoundary, LateProjection, PayloadDemand, PhysicalExecPath, Plan, Position, SinkDemand,
     StageStrategy,
 };
+pub(crate) use ir::SingleElementSelection;
 pub use kernels::{eval_cmp_op, BodyKernel};
 #[cfg(test)]
 pub(crate) use kernels::eval_kernel;

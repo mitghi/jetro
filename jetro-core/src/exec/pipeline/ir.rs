@@ -49,6 +49,17 @@ pub enum Position {
     Last,
 }
 
+/// Exact single-row selection performed by a terminal sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SingleElementSelection {
+    /// Select the first retained row.
+    First,
+    /// Select the last retained row.
+    Last,
+    /// Select the retained row at the zero-based index.
+    Nth(usize),
+}
+
 /// Combined demand description for a sink: how many elements to pull from upstream, plus an
 /// optional positional preference used to pick between top-K and bottom-K sort strategies.
 #[derive(Debug, Clone, Copy)]
@@ -262,6 +273,24 @@ impl Sink {
     pub(crate) fn select_one_position(&self) -> Option<Position> {
         match self.builtin_sink_spec()?.accumulator {
             BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
+            _ => None,
+        }
+    }
+
+    /// Returns the exact single-row selection represented by this sink, if the
+    /// sink emits exactly one retained row without evaluating sink programs.
+    pub(crate) fn single_element_selection(&self) -> Option<SingleElementSelection> {
+        match self {
+            Sink::Terminal(_) => match self.select_one_position()? {
+                Position::First => Some(SingleElementSelection::First),
+                Position::Last => Some(SingleElementSelection::Last),
+            },
+            Sink::SelectMany { n: 1, from_end } => Some(if *from_end {
+                SingleElementSelection::Last
+            } else {
+                SingleElementSelection::First
+            }),
+            Sink::Nth(index) => Some(SingleElementSelection::Nth(*index)),
             _ => None,
         }
     }
@@ -1841,4 +1870,42 @@ fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
         .get(idx)
         .map(BodyKernel::field_demand)
         .unwrap_or(FieldDemand::Whole)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sink_reports_exact_single_element_selection() {
+        assert_eq!(
+            Sink::Terminal(BuiltinMethod::First).single_element_selection(),
+            Some(SingleElementSelection::First)
+        );
+        assert_eq!(
+            Sink::Terminal(BuiltinMethod::Last).single_element_selection(),
+            Some(SingleElementSelection::Last)
+        );
+        assert_eq!(
+            Sink::SelectMany {
+                n: 1,
+                from_end: false,
+            }
+            .single_element_selection(),
+            Some(SingleElementSelection::First)
+        );
+        assert_eq!(
+            Sink::SelectMany {
+                n: 1,
+                from_end: true,
+            }
+            .single_element_selection(),
+            Some(SingleElementSelection::Last)
+        );
+        assert_eq!(
+            Sink::Nth(2).single_element_selection(),
+            Some(SingleElementSelection::Nth(2))
+        );
+        assert_eq!(Sink::Collect.single_element_selection(), None);
+    }
 }
