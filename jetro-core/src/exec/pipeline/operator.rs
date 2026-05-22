@@ -218,6 +218,11 @@ impl MembershipSinkSpec {
         builtin_membership_sink_result_demand(self.op.into_builtin())
     }
 
+    /// Returns true for the boolean membership sink.
+    pub(crate) fn is_includes(&self) -> bool {
+        self.op == MembershipSinkOp::Includes
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         match &self.target {

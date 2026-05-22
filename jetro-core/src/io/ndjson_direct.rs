@@ -1309,7 +1309,7 @@ fn direct_tape_predicate_membership_sink(
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectPredicate> {
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
-    use crate::exec::pipeline::{MembershipSinkOp, MembershipSinkTarget, Sink};
+    use crate::exec::pipeline::{MembershipSinkTarget, Sink};
 
     if !body.stages.is_empty() {
         return None;
@@ -1317,7 +1317,7 @@ fn direct_tape_predicate_membership_sink(
     let Sink::Membership(spec) = &body.sink else {
         return None;
     };
-    if spec.op != MembershipSinkOp::Includes {
+    if !spec.is_includes() {
         return None;
     }
     let MembershipSinkTarget::Literal(target) = &spec.target else {
