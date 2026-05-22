@@ -743,7 +743,7 @@ impl ViewSinkCapability {
             } => *materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
             Self::Predicate { op, .. } => {
-                if *op == PredicateSinkOp::FindOne {
+                if op.is_find_one() {
                     ViewMaterialization::SinkFinalRow
                 } else {
                     ViewMaterialization::Never

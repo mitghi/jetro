@@ -110,6 +110,11 @@ impl PredicateSinkOp {
             Self::FindOne => BuiltinPredicateSink::FindOne,
         }
     }
+
+    #[inline]
+    pub(crate) fn is_find_one(self) -> bool {
+        self == Self::FindOne
+    }
 }
 
 /// Value-membership terminal operation.
@@ -180,7 +185,7 @@ impl PredicateSinkSpec {
 
     /// Returns true for the terminal sink that returns the matching row itself.
     pub(crate) fn is_find_one(&self) -> bool {
-        self.op == PredicateSinkOp::FindOne
+        self.op.is_find_one()
     }
 
     /// Returns the builtin method represented by this predicate sink.
