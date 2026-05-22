@@ -36,8 +36,8 @@ use crate::plan::demand::{
 use crate::vm::{CompiledObjEntry, Opcode, Program};
 
 use super::{
-    BodyKernel, Pipeline, PipelineBody, PredicateSinkOp, ReducerSpec, Sink, Stage,
-    ViewMembershipTarget, ViewSinkCapability, ViewStageCapability,
+    BodyKernel, Pipeline, PipelineBody, ReducerSpec, Sink, Stage, ViewMembershipTarget,
+    ViewSinkCapability, ViewStageCapability,
 };
 
 /// Indicates whether a positional terminal sink wants the first or the last qualifying element.
@@ -1706,7 +1706,7 @@ fn sink_payload_lanes(sink: &Sink, sink_kernels: &[BodyKernel]) -> DemandLanes {
                 sink_kernels,
                 spec.predicate_kernel_index(),
             ));
-            if spec.op == PredicateSinkOp::FindOne {
+            if spec.is_find_one() {
                 lanes.merge_result(FieldDemand::Whole);
             }
             lanes

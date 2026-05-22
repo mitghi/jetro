@@ -178,6 +178,11 @@ impl PredicateSinkSpec {
         builtin_predicate_sink_result_demand(self.op.into_builtin())
     }
 
+    /// Returns true for the terminal sink that returns the matching row itself.
+    pub(crate) fn is_find_one(&self) -> bool {
+        self.op == PredicateSinkOp::FindOne
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.predicate)

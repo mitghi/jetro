@@ -463,7 +463,7 @@ impl<'a> SinkAccumulator<'a> {
 
     /// Fallible finalisation for sinks whose terminal semantics can fail.
     pub(crate) fn finish_result(self, unwrap_single_collect_obj: bool) -> Result<Val, EvalError> {
-        if matches!(self.sink, Sink::Predicate(spec) if spec.op == PredicateSinkOp::FindOne) {
+        if matches!(self.sink, Sink::Predicate(spec) if spec.is_find_one()) {
             return self.predicate_value.ok_or_else(|| {
                 EvalError("find_one: expected exactly one element, got 0".into())
             });
