@@ -186,20 +186,10 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
         ) => {
             Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key))))
         }
-        (BuiltinViewObjectProjection::Missing, crate::builtins::BuiltinArgs::StrVec(keys)) => {
-            let mut fields = FieldSet::new();
-            for key in keys {
-                fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
-            }
-            Some(FieldDemand::Fields(fields))
-        }
-        (BuiltinViewObjectProjection::Pick, crate::builtins::BuiltinArgs::StrVec(keys)) => {
-            let mut fields = FieldSet::new();
-            for key in keys {
-                fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
-            }
-            Some(FieldDemand::Fields(fields))
-        }
+        (
+            BuiltinViewObjectProjection::Missing | BuiltinViewObjectProjection::Pick,
+            crate::builtins::BuiltinArgs::StrVec(keys),
+        ) => Some(field_demand_for_keys(keys)),
         (
             BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
             crate::builtins::BuiltinArgs::Str(path),
@@ -212,6 +202,14 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
         ) => path_field_demand(path),
         _ => None,
     }
+}
+
+fn field_demand_for_keys(keys: &[Arc<str>]) -> FieldDemand {
+    let mut fields = FieldSet::new();
+    for key in keys {
+        fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
+    }
+    FieldDemand::Fields(fields)
 }
 
 fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
