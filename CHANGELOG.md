@@ -2,7 +2,96 @@
 
 ## 0.5.13
 
-_Unreleased._
+### Release focus
+
+- **Builtin registry authority**. Continued moving builtin planning facts into
+  the central registry/spec catalog so logical lowering, physical planning,
+  pipeline lowering, tape/view execution, NDJSON direct execution, and trace
+  labels consume the same metadata instead of maintaining local builtin
+  classifications.
+- **Demand/tape/view hardening**. Expanded demand propagation, source access
+  remapping, indexed tape child access, delayed view projection, and borrowed
+  object helper execution so positional sinks and projection-heavy chains stay
+  lazy where legal.
+- **Cold-path performance cleanup**. Reused VM state through nested view
+  kernels, lambda kernels, flat-map paths, sort keys, late projection, and
+  builtin hooks to avoid avoidable per-stage setup in cold executions.
+- **Correctness proof expansion**. Added backend parity and registry invariant
+  tests for reducer, sink, object helper, membership, predicate, NDJSON direct,
+  and barrier behavior.
+
+### Builtin registry and planning
+
+- Centralized terminal sink metadata, reducer metadata, keyed reducer facts,
+  membership sink behavior, object-lambda metadata, array selector metadata,
+  expression payload facts, view projection facts, scalar hook dispatch, and
+  stage lowering shapes behind builtin definitions and registry helpers.
+- Routed logical planning, pipeline lowering, symbolic lowering, structural
+  planning, NDJSON direct planning, row-stream planning, and trace labels
+  through registry lookup helpers.
+- Added registry guardrails for builtin identity, canonical names, arity,
+  lowering metadata links, view capability metadata, sink method metadata,
+  row-stream sink metadata, and direct scalar value projection eligibility.
+- Centralized positional selection metadata for `first`, `last`, `take(1)`,
+  and `nth`, including late projection and NDJSON direct element selection.
+- Centralized direct count/scalar sink projection metadata so direct byte/tape
+  planners no longer rematch sink builtins locally.
+
+### Demand, tape, and view execution
+
+- Added indexed tape array-child navigation and adaptive child indexing for
+  first, last, nth, reverse, and suffix access paths.
+- Routed tape view child seeks through the tape index and reduced reverse/suffix
+  clone work.
+- Added conservative demand guards for deep builtins, relational barriers,
+  expression payloads, scalar predicates, predicate-map stages, slice stages,
+  order transforms, match predicate/transform roles, and pipeline element
+  demand.
+- Kept object projection helpers such as `pick`, `omit`, `keys`, `entries`,
+  `missing`, `get_path`, `has_path`, and `has_key` tape/view-native where
+  possible.
+- Added delayed nested compiled-map projection and nested plan field-demand
+  tracking so nested view execution can defer pure projection work.
+
+### Pipeline and VM cleanup
+
+- Shared stage factories and sink factories across logical lowering, rewrites,
+  and execution metadata.
+- Encapsulated pipeline stage methods, payload accessors, stored demand facts,
+  row-source access remapping, and sink accumulator metadata.
+- Removed stale VM, view, compiler-pass, match-role, borrowed-value ingest, and
+  dead-code suppressions that were no longer wired.
+- Reused the same VM instance through view collection, nested array kernels,
+  lambda kernels, flat-map paths, sort keys, terminal map collection, late
+  projection, numeric view kernels, and builtin hooks.
+
+### NDJSON and row streams
+
+- Shared direct stream planning, row-stream terminal detection, direct scalar
+  output, direct collect planning, numeric reducer planning, filter folding,
+  rows-root detection, parsed rows-stream guards, and stream finalization.
+- Routed NDJSON scalar calls, object-item projection, positional selection,
+  array selectors, `find`, and direct count planning through builtin metadata.
+- Added direct stream parity coverage and direct-vs-fallback object projection
+  equivalence checks for byte-writable tape output.
+- Preserved row-stream direct execution while keeping unsupported expressions
+  on the correctness fallback path.
+
+### Correctness and validation
+
+- Added parity coverage comparing tape-backed `Jetro::from_bytes` with
+  value-backed `JetroEngine::collect_value` for object/path helpers through
+  maps.
+- Added parity coverage for reducers, positional sinks, `sort_by(...).take(...)`,
+  `flat_map(...).unique().sort()`, `take_while(...).last()`, and
+  `drop_while(...).first()`.
+- Added demand and metadata tests for borrowed object helpers, direct path view
+  projection, map-like demand, object transforms, predicate scalar sinks,
+  membership scalar sinks, and indexed suffix planning.
+- Validation completed on this branch with:
+  `cargo check --workspace`, `cargo test -p jetro-core --release`,
+  `cargo test --workspace --release`, and
+  `cargo run -p jetro-core --release --example bench_cold`.
 
 ## 0.5.12
 
