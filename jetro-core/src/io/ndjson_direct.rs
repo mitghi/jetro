@@ -1509,4 +1509,20 @@ mod tests {
         let expr = crate::parse::parser::parse(r#"@.items.find(@ == 0)"#).expect("parse");
         assert!(direct_array_any_predicate_expr(&expr).is_none());
     }
+
+    #[test]
+    fn direct_count_on_path_uses_scalar_sink_projection() {
+        let engine = JetroEngine::new();
+        assert_eq!(
+            direct_writer_plan_kind(&engine, "$.attributes.count()"),
+            Some((
+                Some(NdjsonDirectPlanKind::ByteExpr),
+                NdjsonDirectPlanKind::TapeScalarCall,
+            ))
+        );
+        assert_eq!(
+            direct_writer_plan_kind(&engine, "$.attributes.filter(@.active).count()"),
+            Some((None, NdjsonDirectPlanKind::TapeStreamCount))
+        );
+    }
 }
