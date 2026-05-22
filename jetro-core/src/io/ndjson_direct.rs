@@ -3,7 +3,7 @@ use crate::builtins::registry::{
     direct_scalar_for_plain_sink, logical_shape, terminal_selection_wants_last,
     view_object_items_projection, view_scalar_value_projection, BuiltinId,
 };
-use crate::builtins::{BuiltinArraySelector, BuiltinLogicalShape};
+use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
@@ -1378,17 +1378,18 @@ fn direct_array_element_source(
         if *optional {
             return None;
         }
-        let element = match builtin_array_selector(BuiltinId::from_method(call.method))? {
-            BuiltinArraySelector::First => NdjsonDirectElement::First,
-            BuiltinArraySelector::Last => NdjsonDirectElement::Last,
-            BuiltinArraySelector::Nth => {
-                let crate::builtins::BuiltinArgs::I64(n) = &call.args else {
-                    return None;
-                };
-                NdjsonDirectElement::Nth(usize::try_from(*n).ok()?)
-            }
+        let arg = match &call.args {
+            crate::builtins::BuiltinArgs::I64(n) => Some(*n),
+            _ => None,
         };
-        return Some((node_path_steps(plan, *receiver)?, element));
+        let selection = SingleElementSelection::from_array_selector(
+            builtin_array_selector(BuiltinId::from_method(call.method))?,
+            arg,
+        )?;
+        return Some((
+            node_path_steps(plan, *receiver)?,
+            direct_element_from_selection(selection),
+        ));
     }
 
     let PlanNode::Pipeline { source, body } = plan.node(id) else {
@@ -1397,16 +1398,22 @@ fn direct_array_element_source(
     if !body.stages.is_empty() {
         return None;
     }
-    let element = match body.sink.single_element_selection()? {
-        SingleElementSelection::First => NdjsonDirectElement::First,
-        SingleElementSelection::Last => NdjsonDirectElement::Last,
-        SingleElementSelection::Nth(n) => NdjsonDirectElement::Nth(n),
-    };
+    let element = direct_element_from_selection(body.sink.single_element_selection()?);
     let source_steps = match source {
         PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),
         PipelinePlanSource::Expr(source) => node_path_steps(plan, *source)?,
     };
     Some((source_steps, element))
+}
+
+fn direct_element_from_selection(
+    selection: crate::exec::pipeline::SingleElementSelection,
+) -> NdjsonDirectElement {
+    match selection {
+        crate::exec::pipeline::SingleElementSelection::First => NdjsonDirectElement::First,
+        crate::exec::pipeline::SingleElementSelection::Last => NdjsonDirectElement::Last,
+        crate::exec::pipeline::SingleElementSelection::Nth(n) => NdjsonDirectElement::Nth(n),
+    }
 }
 
 fn node_path_steps(

@@ -24,9 +24,10 @@ use crate::builtins::registry::{
     BuiltinId,
 };
 use crate::builtins::{
-    BuiltinArgs, BuiltinCall, BuiltinCardinality, BuiltinExprPayload, BuiltinExprStage,
-    BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering, BuiltinPipelineOrderEffect,
-    BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinCardinality, BuiltinExprPayload,
+    BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
+    BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
+    BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -58,6 +59,21 @@ pub(crate) enum SingleElementSelection {
     Last,
     /// Select the retained row at the zero-based index.
     Nth(usize),
+}
+
+impl SingleElementSelection {
+    /// Convert registry array-selector metadata plus its optional integer argument into a
+    /// single-element selection.
+    pub(crate) fn from_array_selector(
+        selector: BuiltinArraySelector,
+        arg: Option<i64>,
+    ) -> Option<Self> {
+        match selector {
+            BuiltinArraySelector::First => Some(Self::First),
+            BuiltinArraySelector::Last => Some(Self::Last),
+            BuiltinArraySelector::Nth => Some(Self::Nth(usize::try_from(arg?).ok()?)),
+        }
+    }
 }
 
 /// Combined demand description for a sink: how many elements to pull from upstream, plus an
@@ -1889,6 +1905,22 @@ mod tests {
 
     #[test]
     fn sink_reports_exact_single_element_selection() {
+        assert_eq!(
+            SingleElementSelection::from_array_selector(BuiltinArraySelector::First, None),
+            Some(SingleElementSelection::First)
+        );
+        assert_eq!(
+            SingleElementSelection::from_array_selector(BuiltinArraySelector::Last, None),
+            Some(SingleElementSelection::Last)
+        );
+        assert_eq!(
+            SingleElementSelection::from_array_selector(BuiltinArraySelector::Nth, Some(2)),
+            Some(SingleElementSelection::Nth(2))
+        );
+        assert_eq!(
+            SingleElementSelection::from_array_selector(BuiltinArraySelector::Nth, Some(-1)),
+            None
+        );
         assert_eq!(
             Sink::Terminal(BuiltinMethod::First).single_element_selection(),
             Some(SingleElementSelection::First)
