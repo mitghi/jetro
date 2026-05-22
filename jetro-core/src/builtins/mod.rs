@@ -2535,18 +2535,6 @@ impl BuiltinCall {
             };
         }
 
-        if method == BuiltinMethod::Pick {
-            let mut keys = Vec::with_capacity(args.len());
-            for arg in args {
-                match arg {
-                    Arg::Pos(Expr::Ident(value)) => keys.push(Arc::from(value.as_str())),
-                    Arg::Pos(Expr::Str(value)) => keys.push(Arc::from(value.as_str())),
-                    _ => return None,
-                }
-            }
-            return Some(Self::new(method, BuiltinArgs::StrVec(keys)));
-        }
-
         Self::from_static_args(
             method,
             name,
