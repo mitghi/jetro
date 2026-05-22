@@ -3,6 +3,8 @@
 //! `plan::chain_ir` owns only the operator description. This module maps that
 //! representation onto the shared planning demand model.
 
+#[cfg(test)]
+use crate::builtins::BuiltinCardinality;
 use crate::{
     builtins::registry::propagate_demand as propagate_builtin_demand,
     plan::{
@@ -10,8 +12,6 @@ use crate::{
         demand::{Demand, DemandOperator, PullDemand, ValueNeed},
     },
 };
-#[cfg(test)]
-use crate::builtins::BuiltinCardinality;
 
 /// Describes whether a pipeline slot carries a homogeneous stream, a single
 /// scalar result, or an unconstrained mix of values.
@@ -80,8 +80,7 @@ impl ChainOp {
                         preserves_order: true,
                     };
                 };
-                let cardinality =
-                    builtin_cardinality(*id).unwrap_or(BuiltinCardinality::OneToOne);
+                let cardinality = builtin_cardinality(*id).unwrap_or(BuiltinCardinality::OneToOne);
                 let input = match category {
                     BuiltinCategory::StreamingOneToOne
                     | BuiltinCategory::StreamingFilter
@@ -136,7 +135,9 @@ impl DemandOperator for ChainOp {
                         PullDemand::NthInput(_) => PullDemand::All,
                         other => other,
                     },
-                    value: downstream.value.merge(crate::plan::demand::ValueNeed::Predicate),
+                    value: downstream
+                        .value
+                        .merge(crate::plan::demand::ValueNeed::Predicate),
                     order: downstream.order || !matches!(downstream.pull, PullDemand::All),
                 },
                 // Transform match is 1:1 like `map`; positional demand passes
@@ -475,6 +476,50 @@ mod tests {
             let demand = source_demand(&ops, Demand::RESULT);
             assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
             assert_eq!(demand.value, ValueNeed::Predicate, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn scalar_map_like_helpers_preserve_positional_demand() {
+        for method in [
+            BuiltinMethod::Keys,
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
+            BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::ToString,
+            BuiltinMethod::ToNumber,
+            BuiltinMethod::Upper,
+            BuiltinMethod::Lower,
+            BuiltinMethod::Trim,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Last)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
+            assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn scalar_map_like_helpers_do_not_force_payload_when_counted() {
+        for method in [
+            BuiltinMethod::Keys,
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
+            BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
+            BuiltinMethod::GetPath,
+            BuiltinMethod::ToString,
+            BuiltinMethod::ToNumber,
+            BuiltinMethod::Upper,
+            BuiltinMethod::Lower,
+            BuiltinMethod::Trim,
+        ] {
+            let ops = [op(method), op(BuiltinMethod::Count)];
+            let demand = source_demand(&ops, Demand::RESULT);
+            assert_eq!(demand.pull, PullDemand::All, "{method:?}");
+            assert_eq!(demand.value, ValueNeed::CountOnly, "{method:?}");
         }
     }
 
