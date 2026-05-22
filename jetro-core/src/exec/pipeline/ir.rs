@@ -981,20 +981,27 @@ impl Stage {
     /// Returns `true` when this stage can be consumed by the `TerminalMapCollector`
     /// optimisation (requires Map shape and a body program).
     pub(crate) fn can_use_terminal_map_collector(&self) -> bool {
-        matches!(self, Stage::Map(_, _))
+        self.expr_stage_kind() == Some(BuiltinExprStage::Map) && self.body_program().is_some()
     }
 
     /// Returns `true` when this stage performs a per-element value transformation that the
     /// demand optimiser can track symbolically (substitute `@` in downstream predicates).
-    /// Direct Stage-variant match — no executor enum lookup.
     pub(crate) fn is_symbolic_map_stage(&self) -> bool {
-        matches!(self, Stage::Map(_, _))
+        self.expr_stage_kind() == Some(BuiltinExprStage::Map)
     }
 
     /// Returns `true` when this stage is a filter whose predicate can be substituted symbolically
     /// by the demand optimiser after a map transformation.
     pub(crate) fn is_symbolic_filter_stage(&self) -> bool {
-        matches!(self, Stage::Filter(_, _))
+        self.expr_stage_kind() == Some(BuiltinExprStage::Filter)
+    }
+
+    /// Registry expression-stage shape for builtin-backed stages.
+    #[inline]
+    fn expr_stage_kind(&self) -> Option<BuiltinExprStage> {
+        self.descriptor()
+            .and_then(|desc| desc.method)
+            .and_then(|method| builtin_expr_stage(BuiltinId::from_method(method)))
     }
 
     /// Returns `true` when this stage uses a positional / bounded executor (e.g. `Take`, `Skip`),
@@ -1876,6 +1883,10 @@ fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
 mod tests {
     use super::*;
 
+    fn empty_program() -> Arc<Program> {
+        Arc::new(Program::new(Vec::new(), "<pipeline-ir-test>"))
+    }
+
     #[test]
     fn sink_reports_exact_single_element_selection() {
         assert_eq!(
@@ -1966,5 +1977,23 @@ mod tests {
             Some(Sink::ApproxCountDistinct)
         ));
         assert!(Sink::approx_distinct_builtin(BuiltinMethod::Count).is_none());
+    }
+
+    #[test]
+    fn symbolic_stage_classification_uses_builtin_expr_metadata() {
+        let map = Stage::expr_stage_builtin(BuiltinMethod::Map, empty_program()).unwrap();
+        assert!(map.is_symbolic_map_stage());
+        assert!(!map.is_symbolic_filter_stage());
+        assert!(map.can_use_terminal_map_collector());
+
+        let filter = Stage::expr_stage_builtin(BuiltinMethod::Filter, empty_program()).unwrap();
+        assert!(filter.is_symbolic_filter_stage());
+        assert!(!filter.is_symbolic_map_stage());
+        assert!(!filter.can_use_terminal_map_collector());
+
+        let flat_map = Stage::expr_stage_builtin(BuiltinMethod::FlatMap, empty_program()).unwrap();
+        assert!(!flat_map.is_symbolic_map_stage());
+        assert!(!flat_map.is_symbolic_filter_stage());
+        assert!(!flat_map.can_use_terminal_map_collector());
     }
 }
