@@ -5,7 +5,9 @@
 //! It deliberately contains stream semantics only; byte/tape and materialized
 //! execution details live behind source/projector implementations.
 
-use crate::builtins::registry::{by_name as builtin_by_name, row_stream_op, BuiltinId};
+use crate::builtins::registry::{
+    by_name as builtin_by_name, row_stream_op, row_stream_op_is_terminal, BuiltinId,
+};
 use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinRowStreamOp};
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
@@ -226,84 +228,79 @@ pub(super) fn lower_root_rows_expr(
                 "unsupported rows() stream method {name}()"
             )));
         };
-        match row_stream_op(id) {
-            Some(BuiltinRowStreamOp::Reverse) => {
+        let Some(op) = row_stream_op(id) else {
+            return Err(RowStreamPlanError::new(format!(
+                "unsupported rows() stream method {name}()"
+            )));
+        };
+        match op {
+            BuiltinRowStreamOp::Reverse => {
                 require_arity(name, args, 0)?;
                 plan.direction = match plan.direction {
                     RowStreamDirection::Forward => RowStreamDirection::Reverse,
                     RowStreamDirection::Reverse => RowStreamDirection::Forward,
                 };
             }
-            Some(BuiltinRowStreamOp::Filter) => {
+            BuiltinRowStreamOp::Filter => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Filter(expr));
             }
-            Some(BuiltinRowStreamOp::FindFirst) => {
+            BuiltinRowStreamOp::FindFirst => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Filter(expr));
                 plan.stages.push(RowStreamStage::Take(1));
             }
-            Some(BuiltinRowStreamOp::DistinctBy) => {
+            BuiltinRowStreamOp::DistinctBy => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::DistinctBy(expr));
             }
-            Some(BuiltinRowStreamOp::Take) => {
+            BuiltinRowStreamOp::Take => {
                 let n = single_usize_arg(name, args)?;
                 plan.stages.push(RowStreamStage::Take(n));
             }
-            Some(BuiltinRowStreamOp::First) => {
+            BuiltinRowStreamOp::First => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Take(1));
             }
-            Some(BuiltinRowStreamOp::Last) => {
+            BuiltinRowStreamOp::Last => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Last);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Count) => {
+            BuiltinRowStreamOp::Count => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Sum) => {
+            BuiltinRowStreamOp::Sum => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Sum);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Avg) => {
+            BuiltinRowStreamOp::Avg => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Avg);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Min) => {
+            BuiltinRowStreamOp::Min => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Min);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Max) => {
+            BuiltinRowStreamOp::Max => {
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Max);
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Any) => {
+            BuiltinRowStreamOp::Any => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Any(expr));
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::All) => {
+            BuiltinRowStreamOp::All => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::All(expr));
-                terminal = Some(name.as_str());
             }
-            Some(BuiltinRowStreamOp::Map) => {
+            BuiltinRowStreamOp::Map => {
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Map(expr));
             }
-            None => {
-                return Err(RowStreamPlanError::new(format!(
-                    "unsupported rows() stream method {name}()"
-                )));
-            }
+        }
+        if row_stream_op_is_terminal(op) {
+            terminal = Some(name.as_str());
         }
     }
 

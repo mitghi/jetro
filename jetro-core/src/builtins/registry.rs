@@ -76,6 +76,23 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
     id.method().and_then(|method| method.spec().row_stream_op)
 }
 
+/// Return true when a row-stream method finalises the stream result and no
+/// later row-stream stage may follow it.
+#[inline]
+pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
+    matches!(
+        op,
+        BuiltinRowStreamOp::Last
+            | BuiltinRowStreamOp::Count
+            | BuiltinRowStreamOp::Sum
+            | BuiltinRowStreamOp::Avg
+            | BuiltinRowStreamOp::Min
+            | BuiltinRowStreamOp::Max
+            | BuiltinRowStreamOp::Any
+            | BuiltinRowStreamOp::All
+    )
+}
+
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
@@ -2700,6 +2717,11 @@ mod tests {
             row_stream_op(BuiltinId::from_method(BuiltinMethod::Sort)),
             None
         );
+        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Last));
+        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Count));
+        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Any));
+        assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::FindFirst));
+        assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::Map));
     }
 
     #[test]
