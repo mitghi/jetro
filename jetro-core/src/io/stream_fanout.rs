@@ -508,7 +508,7 @@ where
             direct_first_predicate: direct_first_match_predicate(&consumer.stream),
             direct_cmp: direct_first_match_cmp(&consumer.stream),
             direct_count: direct_count_consumer(&consumer.stream),
-            direct_sum: direct_sum_consumer(&consumer.stream),
+            direct_numeric: direct_numeric_consumer(&consumer.stream),
             direct_predicate_sink: direct_predicate_sink_consumer(&consumer.stream),
             done: false,
             stream: CompiledRowStream::new(&consumer.stream),
@@ -580,7 +580,7 @@ struct RunningConsumer {
     direct_first_predicate: Option<NdjsonDirectPredicate>,
     direct_cmp: Option<DirectCmp>,
     direct_count: Option<DirectCount>,
-    direct_sum: Option<DirectSum>,
+    direct_numeric: Option<DirectNumericReducer>,
     direct_predicate_sink: Option<DirectPredicateSink>,
     done: bool,
     stream: CompiledRowStream,
@@ -592,8 +592,8 @@ impl RunningConsumer {
         if let Some(count) = self.direct_count.as_ref() {
             return Some(Val::Int(count.count as i64));
         }
-        if let Some(sum) = self.direct_sum.as_ref() {
-            return Some(sum.acc.value());
+        if let Some(numeric) = self.direct_numeric.as_ref() {
+            return Some(numeric.acc.value());
         }
         if let Some(sink) = self.direct_predicate_sink.as_ref() {
             return Some(sink.value());
@@ -612,7 +612,7 @@ struct DirectCount {
     limit: Option<usize>,
     count: usize,
 }
-struct DirectSum {
+struct DirectNumericReducer {
     predicates: Vec<NdjsonDirectPredicate>,
     value_path: NdjsonPhysicalPath,
     acc: NumericAccumulator,
@@ -714,7 +714,7 @@ fn direct_count_consumer(plan: &RowStreamPlan) -> Option<DirectCount> {
         count: 0,
     })
 }
-fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
+fn direct_numeric_consumer(plan: &RowStreamPlan) -> Option<DirectNumericReducer> {
     let [prefix @ .., RowStreamStage::Map(map), terminal] = plan.stages.as_slice() else {
         return None;
     };
@@ -724,7 +724,7 @@ fn direct_sum_consumer(plan: &RowStreamPlan) -> Option<DirectSum> {
         _ => return None,
     };
     let predicates = direct_filter_prefix(prefix)?;
-    Some(DirectSum {
+    Some(DirectNumericReducer {
         predicates,
         value_path,
         acc: NumericAccumulator::from_reducer(reducer),
@@ -840,10 +840,10 @@ fn apply_fanout_row(
             }
             continue;
         }
-        if let Some(sum) = consumer.direct_sum.as_mut() {
-            if eval_ndjson_byte_predicates_all(&row, &sum.predicates)? {
-                if let Some(value) = raw_json_path_view(&row, &sum.value_path) {
-                    sum.acc.add_view(value);
+        if let Some(numeric) = consumer.direct_numeric.as_mut() {
+            if eval_ndjson_byte_predicates_all(&row, &numeric.predicates)? {
+                if let Some(value) = raw_json_path_view(&row, &numeric.value_path) {
+                    numeric.acc.add_view(value);
                 }
             }
             continue;
@@ -1013,13 +1013,13 @@ impl DirectFanoutReducer {
                 },
             });
         }
-        if let Some(sum) = direct_sum_consumer(&consumer.stream) {
+        if let Some(numeric) = direct_numeric_consumer(&consumer.stream) {
             return Some(Self {
                 binding: consumer.binding.clone(),
                 kind: DirectFanoutReducerKind::Numeric {
-                    predicates: sum.predicates,
-                    value_path: sum.value_path,
-                    acc: sum.acc,
+                    predicates: numeric.predicates,
+                    value_path: numeric.value_path,
+                    acc: numeric.acc,
                 },
             });
         }
@@ -1443,7 +1443,7 @@ mod tests {
         let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
             .unwrap()
             .expect("fanout plan");
-        assert!(direct_sum_consumer(&plan.consumers[2].stream).is_some());
+        assert!(direct_numeric_consumer(&plan.consumers[2].stream).is_some());
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
@@ -1479,7 +1479,7 @@ mod tests {
         assert!(plan
             .consumers
             .iter()
-            .all(|consumer| direct_sum_consumer(&consumer.stream).is_some()));
+            .all(|consumer| direct_numeric_consumer(&consumer.stream).is_some()));
         let engine = JetroEngine::new();
         let mut out = Vec::new();
         super::super::ndjson::run_ndjson_file_with_options(
