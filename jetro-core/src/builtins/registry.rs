@@ -2477,8 +2477,13 @@ mod tests {
         for method in [
             BuiltinMethod::Upper,
             BuiltinMethod::GetPath,
+            BuiltinMethod::Has,
+            BuiltinMethod::HasAll,
             BuiltinMethod::HasKey,
+            BuiltinMethod::HasPath,
+            BuiltinMethod::Missing,
             BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
         ] {
             assert!(
                 stage_delayable_view_projection(BuiltinId::from_method(method)),
@@ -2865,10 +2870,16 @@ mod tests {
     fn registry_drives_view_projection_classification() {
         for method in [
             BuiltinMethod::Has,
+            BuiltinMethod::HasAll,
             BuiltinMethod::HasKey,
             BuiltinMethod::Missing,
             BuiltinMethod::GetPath,
             BuiltinMethod::HasPath,
+            BuiltinMethod::Keys,
+            BuiltinMethod::Values,
+            BuiltinMethod::Entries,
+            BuiltinMethod::Pick,
+            BuiltinMethod::Omit,
         ] {
             let id = BuiltinId::from_method(method);
             assert!(view_object_projection(id).is_some(), "{method:?}");
