@@ -133,34 +133,24 @@ pub(crate) fn trace_enabled() -> bool {
 
 /// Returns a short human-readable label for `s`, used in pipeline trace output.
 fn sink_name(s: &Sink) -> &'static str {
+    fn method_name(method: BuiltinMethod) -> &'static str {
+        crate::builtins::registry::canonical_name(
+            crate::builtins::registry::BuiltinId::from_method(method),
+        )
+        .unwrap_or("builtin")
+    }
+
     match s {
         Sink::Collect => "collect",
         Sink::Reducer(spec) => spec
             .method()
-            .and_then(|method| {
-                crate::builtins::registry::canonical_name(
-                    crate::builtins::registry::BuiltinId::from_method(method),
-                )
-            })
+            .map(method_name)
             .unwrap_or("reducer"),
-        Sink::Membership(spec) => match spec.op {
-            MembershipSinkOp::Includes => "includes",
-            MembershipSinkOp::Index => "index",
-            MembershipSinkOp::IndicesOf => "indices_of",
-        },
-        Sink::Predicate(spec) => match spec.op {
-            PredicateSinkOp::Any => "any",
-            PredicateSinkOp::All => "all",
-            PredicateSinkOp::FindIndex => "find_index",
-            PredicateSinkOp::IndicesWhere => "indices_where",
-            PredicateSinkOp::FindOne => "find_one",
-        },
+        Sink::Membership(spec) => method_name(spec.method()),
+        Sink::Predicate(spec) => method_name(spec.method()),
         Sink::ArgExtreme(spec) if spec.want_max => "max_by",
         Sink::ArgExtreme(_) => "min_by",
-        Sink::Terminal(method) => crate::builtins::registry::canonical_name(
-            crate::builtins::registry::BuiltinId::from_method(*method),
-        )
-        .unwrap_or("terminal"),
+        Sink::Terminal(method) => method_name(*method),
         Sink::SelectMany {
             from_end: false, ..
         } => "first_n",

@@ -183,6 +183,17 @@ impl PredicateSinkSpec {
         self.op == PredicateSinkOp::FindOne
     }
 
+    /// Returns the builtin method represented by this predicate sink.
+    pub(crate) fn method(&self) -> BuiltinMethod {
+        match self.op {
+            PredicateSinkOp::Any => BuiltinMethod::Any,
+            PredicateSinkOp::All => BuiltinMethod::All,
+            PredicateSinkOp::FindIndex => BuiltinMethod::FindIndex,
+            PredicateSinkOp::IndicesWhere => BuiltinMethod::IndicesWhere,
+            PredicateSinkOp::FindOne => BuiltinMethod::FindOne,
+        }
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.predicate)
@@ -226,6 +237,15 @@ impl MembershipSinkSpec {
     /// Returns true for the boolean membership sink.
     pub(crate) fn is_includes(&self) -> bool {
         self.op == MembershipSinkOp::Includes
+    }
+
+    /// Returns the builtin method represented by this membership sink.
+    pub(crate) fn method(&self) -> BuiltinMethod {
+        match self.op {
+            MembershipSinkOp::Includes => BuiltinMethod::Includes,
+            MembershipSinkOp::Index => BuiltinMethod::Index,
+            MembershipSinkOp::IndicesOf => BuiltinMethod::IndicesOf,
+        }
     }
 
     /// Iterates over embedded programs for kernel enumeration.
