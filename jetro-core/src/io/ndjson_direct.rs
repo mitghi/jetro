@@ -1210,28 +1210,10 @@ fn direct_item_predicate_from_kernel(
             })
         }
         crate::exec::pipeline::BodyKernel::And(items) => {
-            let mut iter = items.iter().map(direct_item_predicate_from_kernel);
-            let mut acc = iter.next()??;
-            for item in iter {
-                acc = NdjsonDirectItemPredicate::Binary {
-                    lhs: Box::new(acc),
-                    op: crate::parse::ast::BinOp::And,
-                    rhs: Box::new(item?),
-                };
-            }
-            Some(acc)
+            combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::And)
         }
         crate::exec::pipeline::BodyKernel::Or(items) => {
-            let mut iter = items.iter().map(direct_item_predicate_from_kernel);
-            let mut acc = iter.next()??;
-            for item in iter {
-                acc = NdjsonDirectItemPredicate::Binary {
-                    lhs: Box::new(acc),
-                    op: crate::parse::ast::BinOp::Or,
-                    rhs: Box::new(item?),
-                };
-            }
-            Some(acc)
+            combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::Or)
         }
         crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
             if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
@@ -1243,6 +1225,22 @@ fn direct_item_predicate_from_kernel(
         }
         _ => None,
     }
+}
+
+fn combine_direct_item_predicate_kernels(
+    items: &[crate::exec::pipeline::BodyKernel],
+    op: crate::parse::ast::BinOp,
+) -> Option<NdjsonDirectItemPredicate> {
+    let mut iter = items.iter().map(direct_item_predicate_from_kernel);
+    let mut acc = iter.next()??;
+    for item in iter {
+        acc = NdjsonDirectItemPredicate::Binary {
+            lhs: Box::new(acc),
+            op,
+            rhs: Box::new(item?),
+        };
+    }
+    Some(acc)
 }
 
 fn kernel_to_physical_path(
