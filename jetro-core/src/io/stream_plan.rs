@@ -408,7 +408,12 @@ pub(super) fn lower_root_rows_query(
 }
 
 pub(super) fn query_may_contain_rows_stream(query: &str) -> bool {
-    query.contains("$.rows")
+    if !query.contains("rows") {
+        return false;
+    }
+    crate::parse::parser::parse(query)
+        .ok()
+        .is_some_and(|expr| expr_contains_root_rows_stream(&expr))
 }
 
 pub(super) fn looks_like_root_rows_query(query: &str) -> bool {
@@ -430,6 +435,166 @@ fn root_rows_steps(expr: &Expr) -> Option<&[Step]> {
         return None;
     }
     Some(rest)
+}
+
+fn expr_contains_root_rows_stream(expr: &Expr) -> bool {
+    if root_rows_steps(expr).is_some() {
+        return true;
+    }
+
+    match expr {
+        Expr::FString(parts) => parts.iter().any(|part| match part {
+            crate::parse::ast::FStringPart::Lit(_) => false,
+            crate::parse::ast::FStringPart::Interp { expr, .. } => {
+                expr_contains_root_rows_stream(expr)
+            }
+        }),
+        Expr::Chain(base, steps) => {
+            expr_contains_root_rows_stream(base) || steps.iter().any(step_contains_root_rows_stream)
+        }
+        Expr::BinOp(lhs, _, rhs) | Expr::Coalesce(lhs, rhs) => {
+            expr_contains_root_rows_stream(lhs) || expr_contains_root_rows_stream(rhs)
+        }
+        Expr::UnaryNeg(inner) | Expr::Not(inner) | Expr::Cast { expr: inner, .. } => {
+            expr_contains_root_rows_stream(inner)
+        }
+        Expr::Kind { expr: inner, .. } => expr_contains_root_rows_stream(inner),
+        Expr::Object(fields) => fields.iter().any(obj_field_contains_root_rows_stream),
+        Expr::Array(elems) => elems.iter().any(array_elem_contains_root_rows_stream),
+        Expr::Pipeline { base, steps } => {
+            expr_contains_root_rows_stream(base)
+                || steps.iter().any(|step| match step {
+                    crate::parse::ast::PipeStep::Forward(expr) => {
+                        expr_contains_root_rows_stream(expr)
+                    }
+                    crate::parse::ast::PipeStep::Bind(_) => false,
+                })
+        }
+        Expr::ListComp {
+            expr, iter, cond, ..
+        }
+        | Expr::SetComp {
+            expr, iter, cond, ..
+        }
+        | Expr::GenComp {
+            expr, iter, cond, ..
+        } => {
+            expr_contains_root_rows_stream(expr)
+                || expr_contains_root_rows_stream(iter)
+                || cond
+                    .as_deref()
+                    .is_some_and(expr_contains_root_rows_stream)
+        }
+        Expr::DictComp {
+            key,
+            val,
+            iter,
+            cond,
+            ..
+        } => {
+            expr_contains_root_rows_stream(key)
+                || expr_contains_root_rows_stream(val)
+                || expr_contains_root_rows_stream(iter)
+                || cond
+                    .as_deref()
+                    .is_some_and(expr_contains_root_rows_stream)
+        }
+        Expr::Lambda { body, .. } => expr_contains_root_rows_stream(body),
+        Expr::Let { init, body, .. } => {
+            expr_contains_root_rows_stream(init) || expr_contains_root_rows_stream(body)
+        }
+        Expr::IfElse { cond, then_, else_ } => {
+            expr_contains_root_rows_stream(cond)
+                || expr_contains_root_rows_stream(then_)
+                || expr_contains_root_rows_stream(else_)
+        }
+        Expr::Try { body, default } => {
+            expr_contains_root_rows_stream(body) || expr_contains_root_rows_stream(default)
+        }
+        Expr::GlobalCall { args, .. } => args.iter().any(arg_contains_root_rows_stream),
+        Expr::Patch { root, ops } | Expr::UpdateBatch { root, ops, .. } => {
+            expr_contains_root_rows_stream(root)
+                || ops.iter().any(|op| {
+                    expr_contains_root_rows_stream(&op.val)
+                        || op.cond.as_ref().is_some_and(expr_contains_root_rows_stream)
+                        || op.path.iter().any(path_step_contains_root_rows_stream)
+                })
+        }
+        Expr::Match { scrutinee, arms } => {
+            expr_contains_root_rows_stream(scrutinee)
+                || arms.iter().any(|arm| {
+                    arm.guard
+                        .as_ref()
+                        .is_some_and(expr_contains_root_rows_stream)
+                        || expr_contains_root_rows_stream(&arm.body)
+                })
+        }
+        Expr::Null
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Root
+        | Expr::Current
+        | Expr::Ident(_)
+        | Expr::DeleteMark => false,
+    }
+}
+
+fn step_contains_root_rows_stream(step: &Step) -> bool {
+    match step {
+        Step::DynIndex(expr) | Step::InlineFilter(expr) => expr_contains_root_rows_stream(expr),
+        Step::Method(_, args) | Step::OptMethod(_, args) => {
+            args.iter().any(arg_contains_root_rows_stream)
+        }
+        Step::DeepMatch { arms, .. } => arms.iter().any(|arm| {
+            arm.guard
+                .as_ref()
+                .is_some_and(expr_contains_root_rows_stream)
+                || expr_contains_root_rows_stream(&arm.body)
+        }),
+        _ => false,
+    }
+}
+
+fn arg_contains_root_rows_stream(arg: &Arg) -> bool {
+    match arg {
+        Arg::Pos(expr) | Arg::Named(_, expr) => expr_contains_root_rows_stream(expr),
+    }
+}
+
+fn array_elem_contains_root_rows_stream(elem: &crate::parse::ast::ArrayElem) -> bool {
+    match elem {
+        crate::parse::ast::ArrayElem::Expr(expr)
+        | crate::parse::ast::ArrayElem::Spread(expr) => expr_contains_root_rows_stream(expr),
+    }
+}
+
+fn obj_field_contains_root_rows_stream(field: &crate::parse::ast::ObjField) -> bool {
+    match field {
+        crate::parse::ast::ObjField::Kv { val, cond, .. } => {
+            expr_contains_root_rows_stream(val)
+                || cond
+                    .as_ref()
+                    .is_some_and(expr_contains_root_rows_stream)
+        }
+        crate::parse::ast::ObjField::Dynamic { key, val } => {
+            expr_contains_root_rows_stream(key) || expr_contains_root_rows_stream(val)
+        }
+        crate::parse::ast::ObjField::Spread(expr)
+        | crate::parse::ast::ObjField::SpreadDeep(expr) => expr_contains_root_rows_stream(expr),
+        crate::parse::ast::ObjField::Short(_) => false,
+    }
+}
+
+fn path_step_contains_root_rows_stream(step: &crate::parse::ast::PathStep) -> bool {
+    match step {
+        crate::parse::ast::PathStep::DynIndex(expr) => expr_contains_root_rows_stream(expr),
+        crate::parse::ast::PathStep::WildcardFilter(expr) => {
+            expr_contains_root_rows_stream(expr)
+        }
+        _ => false,
+    }
 }
 
 /// Returns the number of leading chain steps that make up a root `$.rows()`
@@ -734,7 +899,11 @@ mod tests {
         assert!(query_may_contain_rows_stream(
             r#"let stream = $.rows() in stream.count()"#
         ));
+        assert!(query_may_contain_rows_stream(
+            r#"{hit: match $.meta with { _ -> $.rows().find(active) }}"#
+        ));
         assert!(!query_may_contain_rows_stream("$.items"));
+        assert!(!query_may_contain_rows_stream(r#""$.rows().take(1)""#));
         assert!(looks_like_root_rows_query("$.rows().take(1)"));
         assert!(looks_like_root_rows_query("  $.rows().reverse()"));
         assert!(!looks_like_root_rows_query("$.name"));
