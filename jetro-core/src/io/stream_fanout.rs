@@ -545,7 +545,7 @@ where
     let mut env = Env::new(Val::Null);
     for consumer in consumers {
         merge_fanout_consumer_stats(&mut stats, consumer.stream.stats());
-        let value = if let Some(value) = consumer.finish_value() {
+        let value = if let Some(value) = consumer.finish_value().map_err(JetroEngineError::Eval)? {
             value
         } else if consumer.scalar {
             consumer.values.into_iter().next().unwrap_or(Val::Null)
@@ -588,17 +588,17 @@ struct RunningConsumer {
 }
 
 impl RunningConsumer {
-    fn finish_value(&self) -> Option<Val> {
+    fn finish_value(&self) -> Result<Option<Val>, crate::EvalError> {
         if let Some(count) = self.direct_count.as_ref() {
-            return Some(Val::Int(count.count as i64));
+            return Ok(Some(Val::Int(count.count as i64)));
         }
         if let Some(numeric) = self.direct_numeric.as_ref() {
-            return Some(numeric.acc.value());
+            return Ok(Some(numeric.acc.value()));
         }
         if let Some(sink) = self.direct_predicate_sink.as_ref() {
-            return Some(sink.value());
+            return Ok(Some(sink.value()));
         }
-        self.stream.finish()
+        self.stream.finish_result()
     }
 }
 #[derive(Clone)]

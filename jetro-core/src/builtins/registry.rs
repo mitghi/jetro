@@ -87,6 +87,7 @@ pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
             | BuiltinRowStreamOp::Count
             | BuiltinRowStreamOp::Any
             | BuiltinRowStreamOp::All
+            | BuiltinRowStreamOp::FindOne
             | BuiltinRowStreamOp::Sum
             | BuiltinRowStreamOp::Avg
             | BuiltinRowStreamOp::Min
@@ -3014,7 +3015,7 @@ mod tests {
         );
         assert_eq!(
             row_stream_op(BuiltinId::from_method(BuiltinMethod::FindOne)),
-            None
+            Some(BuiltinRowStreamOp::FindOne)
         );
         assert_eq!(
             row_stream_op(BuiltinId::from_method(BuiltinMethod::UniqueBy)),
@@ -3047,6 +3048,7 @@ mod tests {
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Last));
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Count));
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Any));
+        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::FindOne));
         assert_eq!(
             numeric_reducer(BuiltinId::from_method(BuiltinMethod::Sum)),
             Some(BuiltinNumericReducer::Sum)

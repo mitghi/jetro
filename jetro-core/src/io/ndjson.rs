@@ -1531,7 +1531,7 @@ where
         }
     }
 
-    Ok(finish_collected_row_stream(plan, &executor, out))
+    finish_collected_row_stream(plan, &executor, out).map_err(JetroEngineError::Eval)
 }
 
 pub(super) fn collect_row_stream_result(
@@ -1769,7 +1769,7 @@ fn emit_row_stream_finish<W: Write>(
     if external_limit.is_some_and(|limit| *emitted >= limit) {
         return Ok(());
     }
-    if let Some(value) = executor.finish() {
+    if let Some(value) = executor.finish_result().map_err(JetroEngineError::Eval)? {
         if write_val_line_with_options(writer, &value, options)? {
             *emitted += 1;
         }

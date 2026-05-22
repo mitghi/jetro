@@ -1162,6 +1162,58 @@ fn rows_stream_find_all_alias_filters_rows() {
 }
 
 #[test]
+fn rows_stream_find_one_returns_exactly_one_match() {
+    let engine = JetroEngine::new();
+    let input = br#"{"active":false,"id":1}
+{"active":true,"id":2}
+{"active":false,"id":3}
+"#;
+    let mut out = Vec::new();
+
+    let rows = engine
+        .run_ndjson(Cursor::new(input), "$.rows().find_one($.active)", &mut out)
+        .expect("single find_one match should finish");
+
+    assert_eq!(rows, 1);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"active\":true,\"id\":2}\n"
+    );
+}
+
+#[test]
+fn rows_stream_find_one_errors_on_zero_or_multiple_matches() {
+    let engine = JetroEngine::new();
+
+    let mut none_out = Vec::new();
+    let none = engine
+        .run_ndjson(
+            Cursor::new(br#"{"active":false,"id":1}
+"#),
+            "$.rows().find_one($.active)",
+            &mut none_out,
+        )
+        .expect_err("zero find_one matches should error");
+    assert!(none.to_string().contains("find_one: expected exactly one element, got 0"));
+
+    let mut many_out = Vec::new();
+    let many = engine
+        .run_ndjson(
+            Cursor::new(
+                br#"{"active":true,"id":1}
+{"active":true,"id":2}
+"#,
+            ),
+            "$.rows().find_one($.active)",
+            &mut many_out,
+        )
+        .expect_err("multiple find_one matches should error");
+    assert!(many
+        .to_string()
+        .contains("find_one: expected exactly one element, got multiple"));
+}
+
+#[test]
 fn rows_stream_scalar_sink_empty_edges_are_finished() {
     let engine = JetroEngine::new();
     let empty = b"";

@@ -35,7 +35,7 @@ fn run_document_rows(
         }
     }
 
-    Ok(finish_collected_row_stream(plan, &stream, out))
+    finish_collected_row_stream(plan, &stream, out)
 }
 
 fn apply_document_row(

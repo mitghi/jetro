@@ -81,6 +81,7 @@ pub(crate) enum RowStreamStage {
     Numeric(BuiltinNumericReducer),
     Any(Expr),
     All(Expr),
+    FindOne(Expr),
 }
 
 impl RowStreamStage {
@@ -92,6 +93,7 @@ impl RowStreamStage {
                 | RowStreamStage::Numeric(_)
                 | RowStreamStage::Any(_)
                 | RowStreamStage::All(_)
+                | RowStreamStage::FindOne(_)
         )
     }
 
@@ -246,6 +248,10 @@ pub(super) fn lower_root_rows_expr(
                 let expr = single_expr_arg(name, args)?.clone();
                 plan.stages.push(RowStreamStage::Filter(expr));
                 plan.stages.push(RowStreamStage::Take(1));
+            }
+            BuiltinRowStreamOp::FindOne => {
+                let expr = single_expr_arg(name, args)?.clone();
+                plan.stages.push(RowStreamStage::FindOne(expr));
             }
             BuiltinRowStreamOp::DistinctBy => {
                 let expr = single_expr_arg(name, args)?.clone();
@@ -849,13 +855,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rows_stream_find_one_until_exact_one_sink_exists() {
+    fn lowers_rows_stream_find_one_as_exact_one_sink() {
         let expr = parse("$.rows().find_one(active == true)").unwrap();
-        let err = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
-            .unwrap_err()
-            .to_string();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
 
-        assert_eq!(err, "unsupported rows() stream method find_one()");
+        assert!(plan.demand.scalar_output);
+        assert!(matches!(
+            plan.stages.last(),
+            Some(RowStreamStage::FindOne(_))
+        ));
     }
 
     #[test]

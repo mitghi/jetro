@@ -71,6 +71,7 @@ fn row_stage_inspection(
         crate::io::RowStreamStage::Numeric(reducer) => (numeric_reducer_label(*reducer), None),
         crate::io::RowStreamStage::Any(_) => ("any", None),
         crate::io::RowStreamStage::All(_) => ("all", None),
+        crate::io::RowStreamStage::FindOne(_) => ("find-one", None),
     };
     super::report::PipelineStageInspection {
         index,
@@ -144,6 +145,7 @@ fn row_sink_label(stages: &[crate::io::RowStreamStage]) -> &'static str {
         Some(crate::io::RowStreamStage::Numeric(reducer)) => numeric_reducer_label(*reducer),
         Some(crate::io::RowStreamStage::Any(_)) => "any",
         Some(crate::io::RowStreamStage::All(_)) => "all",
+        Some(crate::io::RowStreamStage::FindOne(_)) => "find-one",
         _ => "collect",
     }
 }

@@ -231,6 +231,60 @@ impl CompiledRowStream {
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
+                CompiledRowStreamStage::FindOne {
+                    program,
+                    value: matched,
+                    direct,
+                } => {
+                    if let (Some(predicate), Some(raw_row)) = (direct.as_ref(), row.as_deref()) {
+                        if let Some(keep) = eval_ndjson_byte_predicate_row(raw_row, predicate)? {
+                            self.stats.direct_filter_rows += 1;
+                            if keep {
+                                if matched.is_some() {
+                                    return Err(row_eval_error(
+                                        line_no,
+                                        EvalError(
+                                            "find_one: expected exactly one element, got multiple"
+                                                .into(),
+                                        ),
+                                    ));
+                                }
+                                *matched = Some(ensure_row_stream_value(
+                                    engine,
+                                    line_no,
+                                    &mut row,
+                                    &mut document,
+                                    &mut value,
+                                )?);
+                            }
+                            return Ok(RowStreamRowResult::Skip);
+                        }
+                    }
+                    let current = ensure_row_stream_value(
+                        engine,
+                        line_no,
+                        &mut row,
+                        &mut document,
+                        &mut value,
+                    )?;
+                    let vm = vm.get_or_insert_with(|| engine.lock_vm());
+                    let keep = vm
+                        .execute_val_raw_fresh_root(program, current.clone())
+                        .map_err(|err| row_eval_error(line_no, err))?;
+                    self.stats.fallback_filter_rows += 1;
+                    if is_truthy(&keep) {
+                        if matched.is_some() {
+                            return Err(row_eval_error(
+                                line_no,
+                                EvalError(
+                                    "find_one: expected exactly one element, got multiple".into(),
+                                ),
+                            ));
+                        }
+                        *matched = Some(current);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Map { program, direct } => {
                     if let Some(raw_row) = row.as_deref() {
                         if let Some(bytes) = write_direct_map(raw_row, direct.as_ref())? {
@@ -340,6 +394,23 @@ impl CompiledRowStream {
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
+                CompiledRowStreamStage::FindOne {
+                    program,
+                    value: matched,
+                    ..
+                } => {
+                    let keep = vm.execute_val_raw_fresh_root(program, value.clone())?;
+                    self.stats.fallback_filter_rows += 1;
+                    if is_truthy(&keep) {
+                        if matched.is_some() {
+                            return Err(EvalError(
+                                "find_one: expected exactly one element, got multiple".into(),
+                            ));
+                        }
+                        *matched = Some(value);
+                    }
+                    return Ok(RowStreamRowResult::Skip);
+                }
                 CompiledRowStreamStage::Map { program, .. } => {
                     value = vm.execute_val_raw_fresh_root(program, value)?;
                     self.stats.fallback_project_rows += 1;
@@ -350,14 +421,28 @@ impl CompiledRowStream {
         Ok(RowStreamRowResult::Emit(value))
     }
 
-    pub(super) fn finish(&self) -> Option<Val> {
+    pub(super) fn finish_result(&self) -> Result<Option<Val>, EvalError> {
         self.stages.iter().find_map(|stage| match stage {
             CompiledRowStreamStage::Last { value } => Some(value.clone().unwrap_or(Val::Null)),
             CompiledRowStreamStage::Count { count } => Some(Val::Int(*count as i64)),
             CompiledRowStreamStage::Numeric { acc } => Some(acc.value()),
             CompiledRowStreamStage::Any { matched, .. } => Some(Val::Bool(*matched)),
             CompiledRowStreamStage::All { failed, .. } => Some(Val::Bool(!*failed)),
+            CompiledRowStreamStage::FindOne { value, .. } => Some(value.clone()?),
             _ => None,
+        })
+        .map(Some)
+        .ok_or_else(|| EvalError("find_one: expected exactly one element, got 0".into()))
+        .or_else(|err| {
+            if self
+                .stages
+                .iter()
+                .any(|stage| matches!(stage, CompiledRowStreamStage::FindOne { .. }))
+            {
+                Err(err)
+            } else {
+                Ok(None)
+            }
         })
     }
 }
@@ -366,16 +451,16 @@ pub(super) fn finish_collected_row_stream(
     plan: &RowStreamPlan,
     stream: &CompiledRowStream,
     out: Vec<Val>,
-) -> (Val, RowStreamStats) {
+) -> Result<(Val, RowStreamStats), EvalError> {
     let stats = stream.stats().clone();
-    let value = if let Some(value) = stream.finish() {
+    let value = if let Some(value) = stream.finish_result()? {
         value
     } else if plan.demand.retained_limit == Some(1) {
         out.into_iter().next().unwrap_or(Val::Null)
     } else {
         Val::Arr(Arc::new(out))
     };
-    (value, stats)
+    Ok((value, stats))
 }
 
 fn ensure_row_stream_value(
@@ -436,6 +521,11 @@ enum CompiledRowStreamStage {
         failed: bool,
         direct: Option<NdjsonDirectPredicate>,
     },
+    FindOne {
+        program: Program,
+        value: Option<Val>,
+        direct: Option<NdjsonDirectPredicate>,
+    },
     Map {
         program: Program,
         direct: Option<NdjsonDirectTapePlan>,
@@ -471,6 +561,11 @@ impl CompiledRowStreamStage {
             RowStreamStage::All(expr) => Self::All {
                 program: Compiler::compile(expr, "<ndjson-rows-all>"),
                 failed: false,
+                direct: direct_tape_predicate_for_expr(expr),
+            },
+            RowStreamStage::FindOne(expr) => Self::FindOne {
+                program: Compiler::compile(expr, "<ndjson-rows-find-one>"),
+                value: None,
                 direct: direct_tape_predicate_for_expr(expr),
             },
             RowStreamStage::Map(expr) => Self::Map {

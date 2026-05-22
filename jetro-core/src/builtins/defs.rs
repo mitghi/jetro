@@ -1150,6 +1150,7 @@ impl Builtin for FindOne {
             .predicate_sink(BuiltinPredicateSink::FindOne)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .row_stream_op(BuiltinRowStreamOp::FindOne)
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }

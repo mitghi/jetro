@@ -912,6 +912,8 @@ pub enum BuiltinRowStreamOp {
     Filter,
     /// Keep the first row matching the predicate.
     FindFirst,
+    /// Return the only row matching the predicate, erroring on zero or multiple matches.
+    FindOne,
     /// Deduplicate rows by a key expression.
     DistinctBy,
     /// Keep a bounded prefix.
