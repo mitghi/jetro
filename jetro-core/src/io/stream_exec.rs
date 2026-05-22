@@ -460,13 +460,8 @@ impl CompiledRowStreamStage {
             },
             RowStreamStage::Last => Self::Last { value: None },
             RowStreamStage::Count => Self::Count { count: 0 },
-            RowStreamStage::Sum
-            | RowStreamStage::Avg
-            | RowStreamStage::Min
-            | RowStreamStage::Max => Self::Numeric {
-                acc: NumericAccumulator::from_reducer(
-                    stage.numeric_reducer().expect("numeric reducer"),
-                ),
+            RowStreamStage::Numeric(reducer) => Self::Numeric {
+                acc: NumericAccumulator::from_reducer(*reducer),
             },
             RowStreamStage::Any(expr) => Self::Any {
                 program: Compiler::compile(expr, "<ndjson-rows-any>"),

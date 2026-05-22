@@ -6,8 +6,8 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, row_stream_numeric_reducer, row_stream_op,
-    row_stream_op_is_terminal, BuiltinId,
+    by_name as builtin_by_name, numeric_reducer, row_stream_op, row_stream_op_is_terminal,
+    BuiltinId,
 };
 use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinRowStreamOp};
 use crate::parse::ast::{Arg, Expr, Step};
@@ -78,10 +78,7 @@ pub(crate) enum RowStreamStage {
     Map(Expr),
     Last,
     Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
+    Numeric(BuiltinNumericReducer),
     Any(Expr),
     All(Expr),
 }
@@ -92,10 +89,7 @@ impl RowStreamStage {
             self,
             RowStreamStage::Last
                 | RowStreamStage::Count
-                | RowStreamStage::Sum
-                | RowStreamStage::Avg
-                | RowStreamStage::Min
-                | RowStreamStage::Max
+                | RowStreamStage::Numeric(_)
                 | RowStreamStage::Any(_)
                 | RowStreamStage::All(_)
         )
@@ -110,29 +104,16 @@ impl RowStreamStage {
     }
 
     pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
-        row_stream_numeric_reducer(self.row_stream_op())
+        match self {
+            RowStreamStage::Numeric(reducer) => Some(*reducer),
+            _ => None,
+        }
     }
 
     fn blocks_parallel_partitioning(&self) -> bool {
         matches!(self, RowStreamStage::DistinctBy(_) | RowStreamStage::Last)
     }
 
-    fn row_stream_op(&self) -> BuiltinRowStreamOp {
-        match self {
-            RowStreamStage::Filter(_) => BuiltinRowStreamOp::Filter,
-            RowStreamStage::DistinctBy(_) => BuiltinRowStreamOp::DistinctBy,
-            RowStreamStage::Take(_) => BuiltinRowStreamOp::Take,
-            RowStreamStage::Map(_) => BuiltinRowStreamOp::Map,
-            RowStreamStage::Last => BuiltinRowStreamOp::Last,
-            RowStreamStage::Count => BuiltinRowStreamOp::Count,
-            RowStreamStage::Sum => BuiltinRowStreamOp::Sum,
-            RowStreamStage::Avg => BuiltinRowStreamOp::Avg,
-            RowStreamStage::Min => BuiltinRowStreamOp::Min,
-            RowStreamStage::Max => BuiltinRowStreamOp::Max,
-            RowStreamStage::Any(_) => BuiltinRowStreamOp::Any,
-            RowStreamStage::All(_) => BuiltinRowStreamOp::All,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -286,21 +267,17 @@ pub(super) fn lower_root_rows_expr(
                 require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
             }
-            BuiltinRowStreamOp::Sum => {
+            BuiltinRowStreamOp::Sum
+            | BuiltinRowStreamOp::Avg
+            | BuiltinRowStreamOp::Min
+            | BuiltinRowStreamOp::Max => {
                 require_arity(name, args, 0)?;
-                plan.stages.push(RowStreamStage::Sum);
-            }
-            BuiltinRowStreamOp::Avg => {
-                require_arity(name, args, 0)?;
-                plan.stages.push(RowStreamStage::Avg);
-            }
-            BuiltinRowStreamOp::Min => {
-                require_arity(name, args, 0)?;
-                plan.stages.push(RowStreamStage::Min);
-            }
-            BuiltinRowStreamOp::Max => {
-                require_arity(name, args, 0)?;
-                plan.stages.push(RowStreamStage::Max);
+                let reducer = numeric_reducer(id).ok_or_else(|| {
+                    RowStreamPlanError::new(format!(
+                        "rows() stream method {name}() is missing numeric reducer metadata"
+                    ))
+                })?;
+                plan.stages.push(RowStreamStage::Numeric(reducer));
             }
             BuiltinRowStreamOp::Any => {
                 let expr = single_expr_arg(name, args)?.clone();
@@ -854,7 +831,10 @@ mod tests {
             .unwrap();
 
         assert!(plan.demand.scalar_output);
-        assert!(matches!(plan.stages.last(), Some(RowStreamStage::Sum)));
+        assert!(matches!(
+            plan.stages.last(),
+            Some(RowStreamStage::Numeric(BuiltinNumericReducer::Sum))
+        ));
     }
 
     #[test]

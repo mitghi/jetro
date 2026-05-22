@@ -68,10 +68,7 @@ fn row_stage_inspection(
         crate::io::RowStreamStage::Map(_) => ("map", None),
         crate::io::RowStreamStage::Last => ("last", None),
         crate::io::RowStreamStage::Count => ("count", None),
-        crate::io::RowStreamStage::Sum => ("sum", None),
-        crate::io::RowStreamStage::Avg => ("avg", None),
-        crate::io::RowStreamStage::Min => ("min", None),
-        crate::io::RowStreamStage::Max => ("max", None),
+        crate::io::RowStreamStage::Numeric(reducer) => (numeric_reducer_label(*reducer), None),
         crate::io::RowStreamStage::Any(_) => ("any", None),
         crate::io::RowStreamStage::All(_) => ("all", None),
     };
@@ -144,13 +141,19 @@ fn row_sink_label(stages: &[crate::io::RowStreamStage]) -> &'static str {
         Some(crate::io::RowStreamStage::Map(_)) => "collect",
         Some(crate::io::RowStreamStage::Last) => "last",
         Some(crate::io::RowStreamStage::Count) => "count",
-        Some(crate::io::RowStreamStage::Sum) => "sum",
-        Some(crate::io::RowStreamStage::Avg) => "avg",
-        Some(crate::io::RowStreamStage::Min) => "min",
-        Some(crate::io::RowStreamStage::Max) => "max",
+        Some(crate::io::RowStreamStage::Numeric(reducer)) => numeric_reducer_label(*reducer),
         Some(crate::io::RowStreamStage::Any(_)) => "any",
         Some(crate::io::RowStreamStage::All(_)) => "all",
         _ => "collect",
+    }
+}
+
+fn numeric_reducer_label(reducer: crate::builtins::BuiltinNumericReducer) -> &'static str {
+    match reducer {
+        crate::builtins::BuiltinNumericReducer::Sum => "sum",
+        crate::builtins::BuiltinNumericReducer::Avg => "avg",
+        crate::builtins::BuiltinNumericReducer::Min => "min",
+        crate::builtins::BuiltinNumericReducer::Max => "max",
     }
 }
 
