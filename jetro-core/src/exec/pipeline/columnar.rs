@@ -10,7 +10,6 @@ use std::sync::Arc;
 use crate::builtins::BuiltinColumnarStage;
 use crate::{data::context::EvalError, data::value::Val};
 
-use super::ReducerOp;
 use super::{
     eval_cmp_op, num_finalise, num_fold, walk_field_chain, BodyKernel, NumOp, Pipeline,
     PipelineData, Sink, Source, Stage,
@@ -78,15 +77,8 @@ fn stage_program<'a>(
     stage.body_program()
 }
 
-fn reducer_op(sink: &Sink) -> Option<ReducerOp> {
-    match sink {
-        Sink::Reducer(spec) if spec.predicate.is_none() => Some(spec.op),
-        _ => None,
-    }
-}
-
 fn is_count_sink(sink: &Sink) -> bool {
-    matches!(reducer_op(sink), Some(ReducerOp::Count))
+    matches!(sink, Sink::Reducer(spec) if spec.is_plain_count())
 }
 
 fn identity_numeric_sink(sink: &Sink) -> Option<NumOp> {
