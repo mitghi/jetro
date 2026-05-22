@@ -386,6 +386,33 @@ fn run_ndjson_writes_static_object_projection_directly() {
 }
 
 #[test]
+fn run_ndjson_direct_and_fallback_object_projection_match() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":7,"name":"Ada","score":42}
+{"id":8,"name":"Grace","score":11}
+"#;
+    let direct_query = r#"{id: id, label: name.upper(), score: score}"#;
+    let fallback_query = r#"{id: id + 0, label: name.upper(), score: score + 0}"#;
+    let mut direct = Vec::new();
+    let mut fallback = Vec::new();
+
+    assert_eq!(
+        ndjson_writer_path_kind(&engine, direct_query),
+        Some(NdjsonWriterPathKind::ByteWritableTape)
+    );
+    assert_eq!(ndjson_writer_path_kind(&engine, fallback_query), None);
+
+    engine
+        .run_ndjson(Cursor::new(input), direct_query, &mut direct)
+        .expect("direct object projection should write");
+    engine
+        .run_ndjson(Cursor::new(input), fallback_query, &mut fallback)
+        .expect("fallback object projection should write");
+
+    assert_eq!(direct, fallback);
+}
+
+#[test]
 fn run_ndjson_writes_static_array_projection_directly() {
     let engine = JetroEngine::new();
     let input = br#"{"id":7,"name":"Ada","score":42}

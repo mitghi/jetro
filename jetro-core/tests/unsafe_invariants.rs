@@ -693,6 +693,39 @@ fn object_path_helpers_match_value_backend_through_maps() {
 }
 
 #[test]
+fn reducers_and_barriers_match_value_backend() {
+    let doc = json!({
+        "orders": [
+            {"id": 1, "status": "open", "price": 10, "tags": ["a", "b"]},
+            {"id": 2, "status": "closed", "price": 30, "tags": ["b"]},
+            {"id": 3, "status": "open", "price": 20, "tags": []},
+            {"id": 4, "status": "open", "price": null, "tags": ["c"]}
+        ]
+    });
+    let engine = JetroEngine::new();
+    let tape = j(doc.clone());
+
+    for query in [
+        r#"$.orders.filter(status == "open").count()"#,
+        r#"$.orders.filter(status == "open").map(price).sum()"#,
+        r#"$.orders.filter(status == "open").map(price).min()"#,
+        r#"$.orders.filter(status == "open").map(price).max()"#,
+        r#"$.orders.filter(status == "open").map(price).avg()"#,
+        r#"$.orders.filter(status == "open").first()"#,
+        r#"$.orders.filter(status == "open").last()"#,
+        r#"$.orders.filter(status == "open").nth(1)"#,
+        r#"$.orders.sort_by(price).take(2).map(id)"#,
+        r#"$.orders.flat_map(tags).unique().sort()"#,
+        r#"$.orders.take_while(price < 25).last()"#,
+        r#"$.orders.drop_while(price < 25).first()"#,
+    ] {
+        let from_tape = tape.collect(query).unwrap();
+        let from_value = engine.collect_value(doc.clone(), query).unwrap();
+        assert_eq!(from_tape, from_value, "{query}");
+    }
+}
+
+#[test]
 fn has_substring() {
     assert_eq!(q("$ has 'foo'", &json!("foobar")).unwrap(), json!(true));
     assert_eq!(q("$ has 'baz'", &json!("foobar")).unwrap(), json!(false));
