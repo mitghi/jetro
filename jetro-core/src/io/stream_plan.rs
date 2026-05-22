@@ -9,7 +9,9 @@ use crate::builtins::registry::{
     by_name as builtin_by_name, numeric_reducer, row_stream_op, row_stream_op_is_terminal,
     BuiltinId,
 };
-use crate::builtins::{BuiltinMethod, BuiltinNumericReducer, BuiltinRowStreamOp};
+use crate::builtins::{
+    BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamOp,
+};
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
 
@@ -108,6 +110,15 @@ impl RowStreamStage {
     pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
         match self {
             RowStreamStage::Numeric(reducer) => Some(*reducer),
+            _ => None,
+        }
+    }
+
+    pub(super) fn predicate_sink(&self) -> Option<(BuiltinPredicateSink, &Expr)> {
+        match self {
+            RowStreamStage::Any(expr) => Some((BuiltinPredicateSink::Any, expr)),
+            RowStreamStage::All(expr) => Some((BuiltinPredicateSink::All, expr)),
+            RowStreamStage::FindOne(expr) => Some((BuiltinPredicateSink::FindOne, expr)),
             _ => None,
         }
     }

@@ -20,6 +20,7 @@ use super::stream_plan::{
     RowStreamSourceKind, RowStreamStage,
 };
 use super::stream_types::RowStreamStats;
+use crate::builtins::BuiltinPredicateSink;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
@@ -734,17 +735,15 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
     let [prefix @ .., terminal] = plan.stages.as_slice() else {
         return None;
     };
-    let (test, mode) = match terminal {
-        RowStreamStage::Any(expr) => (
-            direct_tape_predicate_for_expr(expr)?,
-            DirectPredicateSinkMode::Any { matched: false },
-        ),
-        RowStreamStage::All(expr) => (
-            direct_tape_predicate_for_expr(expr)?,
-            DirectPredicateSinkMode::All { failed: false },
-        ),
-        _ => return None,
+    let (sink, expr) = terminal.predicate_sink()?;
+    let mode = match sink {
+        BuiltinPredicateSink::Any => DirectPredicateSinkMode::Any { matched: false },
+        BuiltinPredicateSink::All => DirectPredicateSinkMode::All { failed: false },
+        BuiltinPredicateSink::FindIndex
+        | BuiltinPredicateSink::IndicesWhere
+        | BuiltinPredicateSink::FindOne => return None,
     };
+    let test = direct_tape_predicate_for_expr(expr)?;
     let predicates = direct_filter_prefix(prefix)?;
     Some(DirectPredicateSink {
         predicates,
