@@ -1,9 +1,9 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
-    terminal_selection_position, view_object_items_projection, view_scalar_projection,
+    terminal_selection_wants_last, view_object_items_projection, view_scalar_projection,
     BuiltinId,
 };
-use crate::builtins::{BuiltinArraySelector, BuiltinLogicalShape, BuiltinSelectionPosition};
+use crate::builtins::{BuiltinArraySelector, BuiltinLogicalShape};
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
@@ -692,10 +692,7 @@ fn direct_tape_sort_extreme_plan(
 }
 
 fn selection_position_wants_last(method: crate::builtins::BuiltinMethod) -> Option<bool> {
-    match terminal_selection_position(BuiltinId::from_method(method))? {
-        BuiltinSelectionPosition::First => Some(false),
-        BuiltinSelectionPosition::Last => Some(true),
-    }
+    terminal_selection_wants_last(BuiltinId::from_method(method))
 }
 
 fn direct_tape_sort_extreme_plan_with_position(
