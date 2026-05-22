@@ -1223,6 +1223,19 @@ pub enum BuiltinNumericReducer {
     Max,
 }
 
+impl BuiltinNumericReducer {
+    /// Builtin method represented by this reducer.
+    #[inline]
+    pub(crate) const fn method(self) -> BuiltinMethod {
+        match self {
+            Self::Sum => BuiltinMethod::Sum,
+            Self::Avg => BuiltinMethod::Avg,
+            Self::Min => BuiltinMethod::Min,
+            Self::Max => BuiltinMethod::Max,
+        }
+    }
+}
+
 /// Describes how two adjacent identical stages can be collapsed into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStageMerge {

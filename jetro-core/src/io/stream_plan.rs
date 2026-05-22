@@ -6,8 +6,8 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, numeric_reducer, row_stream_op, row_stream_op_is_terminal,
-    BuiltinId,
+    by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op,
+    row_stream_op_is_terminal, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamOp,
@@ -87,16 +87,24 @@ pub(crate) enum RowStreamStage {
 }
 
 impl RowStreamStage {
+    fn builtin_method(&self) -> BuiltinMethod {
+        match self {
+            RowStreamStage::Filter(_) => BuiltinMethod::Filter,
+            RowStreamStage::DistinctBy(_) => BuiltinMethod::UniqueBy,
+            RowStreamStage::Take(_) => BuiltinMethod::Take,
+            RowStreamStage::Map(_) => BuiltinMethod::Map,
+            RowStreamStage::Last => BuiltinMethod::Last,
+            RowStreamStage::Count => BuiltinMethod::Count,
+            RowStreamStage::Numeric(reducer) => reducer.method(),
+            RowStreamStage::Any(_) => BuiltinMethod::Any,
+            RowStreamStage::All(_) => BuiltinMethod::All,
+            RowStreamStage::FindOne(_) => BuiltinMethod::FindOne,
+        }
+    }
+
     fn scalar_sink(&self) -> bool {
-        matches!(
-            self,
-            RowStreamStage::Last
-                | RowStreamStage::Count
-                | RowStreamStage::Numeric(_)
-                | RowStreamStage::Any(_)
-                | RowStreamStage::All(_)
-                | RowStreamStage::FindOne(_)
-        )
+        row_stream_op(BuiltinId::from_method(self.builtin_method()))
+            .is_some_and(row_stream_op_is_terminal)
     }
 
     fn retained_limit(&self) -> Option<usize> {
@@ -115,10 +123,11 @@ impl RowStreamStage {
     }
 
     pub(super) fn predicate_sink(&self) -> Option<(BuiltinPredicateSink, &Expr)> {
+        let sink = predicate_sink(BuiltinId::from_method(self.builtin_method()))?;
         match self {
-            RowStreamStage::Any(expr) => Some((BuiltinPredicateSink::Any, expr)),
-            RowStreamStage::All(expr) => Some((BuiltinPredicateSink::All, expr)),
-            RowStreamStage::FindOne(expr) => Some((BuiltinPredicateSink::FindOne, expr)),
+            RowStreamStage::Any(expr)
+            | RowStreamStage::All(expr)
+            | RowStreamStage::FindOne(expr) => Some((sink, expr)),
             _ => None,
         }
     }
