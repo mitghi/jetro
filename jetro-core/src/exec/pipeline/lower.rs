@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     builtin_sink, by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator,
-    pipeline_lowering, pipeline_stage_caps_input_prefix, view_stage, BuiltinId,
+    pipeline_lowering, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
@@ -21,8 +21,8 @@ use crate::data::value::Val;
 use crate::parse::ast::Expr;
 
 use super::{
-    expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, BodyKernel, Pipeline,
-    PipelineBody, Plan, Sink, SortSpec, Source, Stage,
+    expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, Pipeline, PipelineBody,
+    Plan, Sink, SortSpec, Source, Stage,
 };
 
 impl Pipeline {
@@ -98,15 +98,7 @@ impl Pipeline {
         trailing: &[crate::parse::ast::Step],
     ) -> Option<PipelineBody> {
         let (stages, stage_exprs, sink) = decode_method_chain(trailing)?;
-        let mut p = PipelineBody {
-            stages,
-            stage_exprs,
-            sink,
-            stage_kernels: Vec::new(),
-            sink_kernels: Vec::new(),
-        };
-        rewrite(&mut p);
-        Some(PipelineBody::planned(p.stages, p.stage_exprs, p.sink))
+        Some(PipelineBody::planned(stages, stage_exprs, sink))
     }
 
     /// Returns `true` when `step` is a method call that can open a receiver-based pipeline without a field-chain prefix.
@@ -284,133 +276,6 @@ fn push_path_slice_stages(
     Some(())
 }
 
-// Repeatedly applies `rewrite_step` until fixpoint (at most 16 iterations).
-fn rewrite(p: &mut PipelineBody) {
-    let mut fuel = 16usize;
-    while fuel > 0 {
-        fuel -= 1;
-        if rewrite_step(p) {
-            continue;
-        }
-        break;
-    }
-}
-
-// Applies one rewrite pass: const-false short-circuit, adjacent map/filter fusion, map/take commutation.
-fn rewrite_step(p: &mut PipelineBody) -> bool {
-    use crate::vm::Opcode;
-
-    let mut const_false_at: Option<usize> = None;
-    for (i, s) in p.stages.iter().enumerate() {
-        if let Stage::Filter(prog, _) = s {
-            if let Some(false) = prog_const_bool(prog) {
-                const_false_at = Some(i);
-                break;
-            }
-        }
-    }
-    if const_false_at.is_some() {
-        p.stages.clear();
-        p.stage_exprs.clear();
-        return true;
-    }
-
-    for i in 0..p.stages.len().saturating_sub(1) {
-        match (&p.stages[i], &p.stages[i + 1]) {
-            (Stage::Map(a_prog, _), Stage::Map(b_prog, _)) => {
-                let ka = BodyKernel::classify(a_prog);
-                let kb = BodyKernel::classify(b_prog);
-                let chain: Option<Vec<Arc<str>>> = match (&ka, &kb) {
-                    (BodyKernel::FieldRead(a), BodyKernel::FieldRead(b)) => {
-                        Some(vec![a.clone(), b.clone()])
-                    }
-                    (BodyKernel::FieldRead(a), BodyKernel::FieldChain(bs)) => {
-                        let mut v = vec![a.clone()];
-                        v.extend(bs.iter().cloned());
-                        Some(v)
-                    }
-                    (BodyKernel::FieldChain(as_), BodyKernel::FieldRead(b)) => {
-                        let mut v: Vec<Arc<str>> = as_.iter().cloned().collect();
-                        v.push(b.clone());
-                        Some(v)
-                    }
-                    (BodyKernel::FieldChain(as_), BodyKernel::FieldChain(bs)) => {
-                        let mut v: Vec<Arc<str>> = as_.iter().cloned().collect();
-                        v.extend(bs.iter().cloned());
-                        Some(v)
-                    }
-                    _ => None,
-                };
-                if let Some(keys) = chain {
-                    let fcd = Arc::new(crate::vm::FieldChainData {
-                        keys: keys.into(),
-                        ics: (0..0)
-                            .map(|_| std::sync::atomic::AtomicU64::new(0))
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
-                    });
-                    let new_ops = vec![Opcode::PushCurrent, Opcode::FieldChain(fcd)];
-                    let merged = Arc::new(crate::vm::Program::new(new_ops, "<map-fused>"));
-                    p.stages[i] = Stage::expr_stage_builtin(BuiltinMethod::Map, merged)
-                        .expect("map stage must be registry-backed");
-                    p.stage_exprs[i] = None;
-                    p.stages.remove(i + 1);
-                    p.stage_exprs.remove(i + 1);
-                    return true;
-                }
-            }
-            (Stage::Filter(p_prog, _), Stage::Filter(q_prog, _)) => {
-                let mut ops: Vec<Opcode> = p_prog.ops.as_ref().to_vec();
-                ops.push(Opcode::AndOp(Arc::clone(q_prog)));
-                let merged = Arc::new(crate::vm::Program {
-                    ops: ops.into(),
-                    source: p_prog.source.clone(),
-                    id: 0,
-                    is_structural: false,
-                    ics: p_prog.ics.clone(),
-                });
-                p.stages[i] = Stage::expr_stage_builtin(BuiltinMethod::Filter, merged)
-                    .expect("filter stage must be registry-backed");
-                p.stage_exprs[i] = None;
-                p.stages.remove(i + 1);
-                p.stage_exprs.remove(i + 1);
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    for i in 0..p.stages.len().saturating_sub(1) {
-        if matches!(&p.stages[i], Stage::Map(_, _)) && is_take_stage(&p.stages[i + 1]) {
-            p.stages.swap(i, i + 1);
-            p.stage_exprs.swap(i, i + 1);
-            return true;
-        }
-    }
-
-    false
-}
-
-fn is_take_stage(stage: &Stage) -> bool {
-    stage
-        .descriptor()
-        .and_then(|desc| desc.method)
-        .is_some_and(|method| pipeline_stage_caps_input_prefix(BuiltinId::from_method(method)))
-}
-
-// Returns `Some(b)` when `prog` is a single `PushBool(b)` opcode; detects constant filter stages.
-fn prog_const_bool(prog: &crate::vm::Program) -> Option<bool> {
-    use crate::vm::Opcode;
-    let ops = prog.ops.as_ref();
-    if ops.len() != 1 {
-        return None;
-    }
-    match &ops[0] {
-        Opcode::PushBool(b) => Some(*b),
-        _ => None,
-    }
-}
-
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
 pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
     use crate::parse::ast::{Arg, Step};
@@ -479,11 +344,28 @@ pub(crate) fn compile_sort_spec(
     ))
 }
 
-/// Wraps the inner `Expr` of a positional argument as `Arc<Expr>`, returning `None` for named arguments.
+/// Returns the symbolic row-local expression for a positional pipeline argument.
+///
+/// This mirrors `compile_subexpr`'s current-row binding so the demand and
+/// symbolic planners see the same expression shape that the VM program executes.
 pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
+    use crate::parse::ast::{Arg, Step};
     match arg {
-        crate::parse::ast::Arg::Pos(e) => Some(Arc::new(e.clone())),
-        _ => None,
+        Arg::Named(_, _) => None,
+        Arg::Pos(Expr::Lambda { params, body }) if params.len() == 1 => {
+            Some(Arc::new(crate::compile::lambda_lower::substitute_current(
+                (**body).clone(),
+                params[0].as_str(),
+            )))
+        }
+        Arg::Pos(Expr::Ident(name)) => Some(Arc::new(Expr::Chain(
+            Box::new(Expr::Current),
+            vec![Step::Field(name.clone())],
+        ))),
+        Arg::Pos(e @ Expr::Chain(base, _)) if matches!(base.as_ref(), Expr::Current) => {
+            Some(Arc::new(e.clone()))
+        }
+        Arg::Pos(e) => Some(Arc::new(e.clone())),
     }
 }
 

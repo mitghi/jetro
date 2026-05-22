@@ -1713,7 +1713,7 @@ mod tests {
         let p = lower_query("$.books.map(user).filter(@.active).map(name).last()").unwrap();
         let demand = p.payload_demand();
         assert_eq!(demand_paths(&demand.scan_need), vec!["user.active"]);
-        assert_eq!(demand_paths(&demand.result_need), vec!["name"]);
+        assert_eq!(demand_paths(&demand.result_need), vec!["user.name"]);
         assert!(p.source_payload_lanes_supported);
         assert!(p.source_selected_materialization_supported);
         assert!(matches!(

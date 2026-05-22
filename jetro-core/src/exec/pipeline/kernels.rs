@@ -602,9 +602,15 @@ impl BodyKernel {
                 if matches!(lhs, Self::Generic) || matches!(rhs, Self::Generic) {
                     Self::Generic
                 } else if matches!(op, crate::parse::ast::BinOp::And) {
-                    Self::And(vec![lhs, rhs].into())
+                    let mut predicates = Vec::new();
+                    flatten_and_kernel(lhs, &mut predicates);
+                    flatten_and_kernel(rhs, &mut predicates);
+                    Self::And(predicates.into())
                 } else if matches!(op, crate::parse::ast::BinOp::Or) {
-                    Self::Or(vec![lhs, rhs].into())
+                    let mut predicates = Vec::new();
+                    flatten_or_kernel(lhs, &mut predicates);
+                    flatten_or_kernel(rhs, &mut predicates);
+                    Self::Or(predicates.into())
                 } else if is_comparison_op(*op) {
                     match literal_kernel_value(&rhs) {
                         Some(lit) => Self::CmpLit {
