@@ -1743,15 +1743,11 @@ impl VM {
         call: &CompiledCall,
         env: &Env,
     ) -> Result<Option<crate::builtins::BuiltinCall>, EvalError> {
-        crate::builtins::BuiltinCall::from_static_args(
+        crate::builtins::BuiltinCall::from_static_ast_args(
             call.method,
             call.name.as_ref(),
-            call.orig_args.len(),
+            &call.orig_args,
             |idx| self.static_arg_val(call, env, idx),
-            |idx| match call.orig_args.get(idx) {
-                Some(Arg::Pos(Expr::Ident(s))) => Some(Arc::from(s.as_str())),
-                _ => None,
-            },
         )
     }
 

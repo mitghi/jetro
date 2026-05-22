@@ -1417,31 +1417,19 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             } else {
                 classify_structural_view_kernel(receiver)?
             };
-            let builtin_call = if view_object_projection(BuiltinId::from_method(call.method))
-                == Some(BuiltinViewObjectProjection::Pick)
-            {
-                static_positional_pick_call(call)?
-            } else {
-                BuiltinCall::from_static_args(
-                    call.method,
-                    call.name.as_ref(),
-                    call.orig_args.len(),
-                    |idx| {
-                        Ok(call
-                            .sub_progs
-                            .get(idx)
-                            .and_then(|prog| static_prog_val(prog)))
-                    },
-                    |idx| match call.orig_args.get(idx) {
-                        Some(crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(
-                            value,
-                        ))) => Some(Arc::from(value.as_str())),
-                        _ => None,
-                    },
-                )
-                .ok()
-                .flatten()?
-            };
+            let builtin_call = BuiltinCall::from_static_ast_args(
+                call.method,
+                call.name.as_ref(),
+                &call.orig_args,
+                |idx| {
+                    Ok(call
+                        .sub_progs
+                        .get(idx)
+                        .and_then(|prog| static_prog_val(prog)))
+                },
+            )
+            .ok()
+            .flatten()?;
             if !view_projection(BuiltinId::from_method(builtin_call.method)) {
                 return None;
             }
@@ -1459,31 +1447,6 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
         [op] => trivial_lit(op),
         _ => None,
     }
-}
-
-fn static_positional_pick_call(call: &crate::vm::CompiledCall) -> Option<BuiltinCall> {
-    let mut keys = Vec::with_capacity(call.orig_args.len());
-    for (idx, arg) in call.orig_args.iter().enumerate() {
-        let key = match arg {
-            crate::parse::ast::Arg::Pos(crate::parse::ast::Expr::Ident(value)) => {
-                Arc::from(value.as_str())
-            }
-            crate::parse::ast::Arg::Pos(_) => match call
-                .sub_progs
-                .get(idx)
-                .and_then(|prog| static_prog_val(prog))
-            {
-                Some(Val::Str(value)) => value,
-                _ => return None,
-            },
-            crate::parse::ast::Arg::Named(_, _) => return None,
-        };
-        keys.push(key);
-    }
-    Some(BuiltinCall::new(
-        crate::builtins::BuiltinMethod::Pick,
-        crate::builtins::BuiltinArgs::StrVec(keys),
-    ))
 }
 
 fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> {

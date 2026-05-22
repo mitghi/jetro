@@ -2401,7 +2401,7 @@ impl BuiltinCall {
             BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
                 Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
             }
-            BuiltinMethod::Omit => {
+            BuiltinMethod::Pick | BuiltinMethod::Omit => {
                 let mut keys = Vec::with_capacity(arg_len);
                 for idx in 0..arg_len {
                     keys.push(args.str(idx)?);
@@ -2431,6 +2431,33 @@ impl BuiltinCall {
             _ => return Ok(None),
         };
         Ok(Some(call))
+    }
+
+    /// Decodes static arguments from parser argument forms. Named arguments
+    /// stay on the semantic fallback path for builtins such as `pick` where
+    /// names mean output aliases rather than field-list keys.
+    pub fn from_static_ast_args<E>(
+        method: BuiltinMethod,
+        name: &str,
+        args: &[crate::parse::ast::Arg],
+        eval_arg: E,
+    ) -> Result<Option<Self>, EvalError>
+    where
+        E: FnMut(usize) -> Result<Option<Val>, EvalError>,
+    {
+        use crate::parse::ast::{Arg, Expr};
+
+        let has_named_arg = args.iter().any(|arg| matches!(arg, Arg::Named(_, _)));
+        if method == BuiltinMethod::Pick && has_named_arg {
+            return Ok(None);
+        }
+
+        Self::from_static_args(method, name, args.len(), eval_arg, |idx| {
+            match args.get(idx) {
+                Some(Arg::Pos(Expr::Ident(value))) => Some(Arc::from(value.as_str())),
+                _ => None,
+            }
+        })
     }
 
     /// Attempts to construct a `BuiltinCall` from AST arguments that are all compile-time
