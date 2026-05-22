@@ -3106,6 +3106,42 @@ mod tests {
     }
 
     #[test]
+    fn registry_row_stream_op_terminal_flags_are_exhaustive() {
+        for op in [
+            BuiltinRowStreamOp::Reverse,
+            BuiltinRowStreamOp::Filter,
+            BuiltinRowStreamOp::FindFirst,
+            BuiltinRowStreamOp::FindOne,
+            BuiltinRowStreamOp::DistinctBy,
+            BuiltinRowStreamOp::Take,
+            BuiltinRowStreamOp::First,
+            BuiltinRowStreamOp::Last,
+            BuiltinRowStreamOp::Count,
+            BuiltinRowStreamOp::Sum,
+            BuiltinRowStreamOp::Avg,
+            BuiltinRowStreamOp::Min,
+            BuiltinRowStreamOp::Max,
+            BuiltinRowStreamOp::Any,
+            BuiltinRowStreamOp::All,
+            BuiltinRowStreamOp::Map,
+        ] {
+            let expected_terminal = matches!(
+                op,
+                BuiltinRowStreamOp::Last
+                    | BuiltinRowStreamOp::Count
+                    | BuiltinRowStreamOp::Sum
+                    | BuiltinRowStreamOp::Avg
+                    | BuiltinRowStreamOp::Min
+                    | BuiltinRowStreamOp::Max
+                    | BuiltinRowStreamOp::Any
+                    | BuiltinRowStreamOp::All
+                    | BuiltinRowStreamOp::FindOne
+            );
+            assert_eq!(row_stream_op_is_terminal(op), expected_terminal, "{op:?}");
+        }
+    }
+
+    #[test]
     fn registry_classifies_pipeline_arity_without_method_special_cases() {
         assert_eq!(
             pipeline_arity(BuiltinId::from_method(BuiltinMethod::Filter), false),
