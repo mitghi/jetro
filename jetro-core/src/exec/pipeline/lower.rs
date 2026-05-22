@@ -10,8 +10,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_sink, by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator,
-    pipeline_lowering, view_stage, BuiltinId,
+    by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
+    sink_accumulator as builtin_sink_accumulator, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
@@ -590,8 +590,7 @@ fn terminal_sink_for_method(
     if let Some(sink) = arg_extreme_sink_for_method(method, args) {
         return Some(sink);
     }
-    let spec = builtin_sink(BuiltinId::from_method(method))?;
-    match spec.accumulator {
+    match builtin_sink_accumulator(BuiltinId::from_method(method))? {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
             Sink::approx_distinct_builtin(method)
         }
