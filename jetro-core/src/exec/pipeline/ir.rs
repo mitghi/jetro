@@ -667,9 +667,14 @@ pub(crate) struct StageDescriptor<'a> {
 impl<'a> StageDescriptor<'a> {
     #[inline]
     pub(crate) fn new(method: BuiltinMethod) -> Self {
+        Self::new_id(BuiltinId::from_method(method))
+    }
+
+    #[inline]
+    pub(crate) fn new_id(id: BuiltinId) -> Self {
         Self {
-            method: Some(method),
-            id: Some(BuiltinId::from_method(method)),
+            method: id.method(),
+            id: Some(id),
             body: None,
             usize_arg: None,
             view_stage_override: None,
@@ -1105,7 +1110,7 @@ impl Stage {
             Stage::IntRangeBuiltin { method, .. } => Some(StageDescriptor::new(*method)),
             Stage::ExprBuiltin { method, body } => Some(StageDescriptor::new(*method).body(body)),
             Stage::Builtin(call) => {
-                Some(StageDescriptor::new(call.method).allow_one_to_one_order_fallback())
+                Some(StageDescriptor::new_id(call.id()).allow_one_to_one_order_fallback())
             }
             Stage::SortedDedup(prog) => {
                 let desc = StageDescriptor::special();
