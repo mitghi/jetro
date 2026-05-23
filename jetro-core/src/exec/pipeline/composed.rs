@@ -29,8 +29,8 @@ use crate::vm::{Program, VM};
 
 use super::ir::program_match_only;
 use super::{
-    compute_strategies_with_kernels, eval_kernel_with_vm, ordered_by_key_cmp, row_source,
-    BodyKernel, Pipeline, Position, Sink, Source, Stage, StageStrategy,
+    compute_strategies_with_kernels, eval_kernel_view_first_with_vm, ordered_by_key_cmp,
+    row_source, BodyKernel, Pipeline, Position, Sink, Source, Stage, StageStrategy,
 };
 
 // ---------------------------------------------------------------------------
@@ -802,7 +802,7 @@ fn eval_late_projection(
     item: &Val,
     vm: &mut VM,
 ) -> Result<Val, EvalError> {
-    eval_kernel_with_vm(projection, item, vm, |_, _| {
+    eval_kernel_view_first_with_vm(projection, item, vm, |_, _| {
         Err(EvalError(
             "late projection requires a native body kernel".to_string(),
         ))

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use crate::{
     data::context::{Env, EvalError},
     data::value::Val,
-    data::view::{scalar_view_to_owned_val, ValView, ValueView},
     vm::VM,
 };
 
@@ -19,9 +18,10 @@ use super::nested::PreparedPlan;
 use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
-    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
-    eval_view_kernel_with_vm, is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source,
-    SourceAccessMode, Stage, StageFlow, StageStrategy, TerminalMapCollector, ViewKernelValue,
+    apply_item_in_env, cmp_val_total, compute_strategies_with_kernels,
+    eval_kernel_view_first_with_vm, eval_kernel_with_vm, is_truthy, BodyKernel, Pipeline,
+    PipelineBody, Sink, Source, SourceAccessMode, Stage, StageFlow, StageStrategy,
+    TerminalMapCollector,
 };
 
 use crate::builtins::registry::{
@@ -440,15 +440,7 @@ fn eval_late_projection(
     item: &Val,
     vm: &mut crate::vm::VM,
 ) -> Result<Val, EvalError> {
-    if let Some(value) = eval_view_kernel_with_vm(projection, &ValView::new(item), vm) {
-        return Ok(match value {
-            ViewKernelValue::View(view) => {
-                scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
-            }
-            ViewKernelValue::Owned(value) => value,
-        });
-    }
-    eval_kernel_with_vm(projection, item, vm, |_, _| {
+    eval_kernel_view_first_with_vm(projection, item, vm, |_, _| {
         Err(EvalError(
             "late projection requires a native body kernel".to_string(),
         ))

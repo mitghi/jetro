@@ -15,7 +15,7 @@ use crate::builtins::registry::{
 use crate::builtins::{BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
-use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::data::view::{scalar_view_to_owned_val, ValView, ValueView};
 use crate::parse::ast::{Expr, ObjField, Step};
 use crate::plan::demand::{FieldDemand, FieldSet};
 use crate::util::JsonView;
@@ -1567,6 +1567,21 @@ where
         return fallback(item, vm);
     }
     eval_native_kernel_with_vm(kernel, item, vm)
+}
+
+pub(crate) fn eval_kernel_view_first_with_vm<F>(
+    kernel: &BodyKernel,
+    item: &Val,
+    vm: &mut crate::vm::VM,
+    fallback: F,
+) -> Result<Val, EvalError>
+where
+    F: FnOnce(&Val, &mut crate::vm::VM) -> Result<Val, EvalError>,
+{
+    if let Some(value) = eval_view_kernel_with_vm(kernel, &ValView::new(item), vm) {
+        return Ok(view_kernel_value_to_owned(value));
+    }
+    eval_kernel_with_vm(kernel, item, vm, fallback)
 }
 
 // panics on Generic — callers must route Generic through eval_kernel's fallback instead
