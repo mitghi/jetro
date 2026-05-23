@@ -763,78 +763,10 @@ fn terminal_projection_run(
     body: &pipeline::PipelineBody,
     start: usize,
 ) -> Option<(usize, pipeline::BodyKernel)> {
-    let suffix_stages = body.stages.get(start..)?;
-    let mut idx = suffix_stages.len();
-    let mut kernel = pipeline::BodyKernel::Current;
-    let mut found = false;
-
-    while idx > 0 {
-        let abs_idx = start + idx - 1;
-        let Some(stage_kernel) = terminal_projection_stage_kernel(
-            &body.stages[abs_idx],
-            abs_idx,
-            body.stage_kernels.get(abs_idx),
-        ) else {
-            break;
-        };
-        kernel = compose_projection_kernels(stage_kernel, kernel);
-        found = true;
-        idx -= 1;
-    }
-
-    found.then_some((idx, kernel))
-}
-
-/// Returns the view-native `BodyKernel` for a single trailing stage if it can
-/// be fused into the terminal collect kernel. Returns `None` for stages that
-/// are not projections or do not have a view-native kernel.
-fn terminal_projection_stage_kernel(
-    stage: &pipeline::Stage,
-    idx: usize,
-    kernel: Option<&pipeline::BodyKernel>,
-) -> Option<pipeline::BodyKernel> {
-    if let pipeline::Stage::CompiledMap(plan) = stage {
-        return Some(pipeline::BodyKernel::NestedPlan(std::sync::Arc::new(
-            pipeline::NestedPlanKernel::new(std::sync::Arc::clone(plan)),
-        )));
-    }
-
-    if matches!(
-        stage.view_capability(idx, kernel),
-        Some(pipeline::ViewStageCapability::Map { .. })
-    ) {
-        let kernel = kernel?;
-        return kernel.is_view_native().then(|| kernel.clone());
-    }
-
-    match stage {
-        pipeline::Stage::Builtin(call)
-            if crate::builtins::registry::view_projection(
-                crate::builtins::registry::BuiltinId::from_method(call.method),
-            ) =>
-        {
-            Some(pipeline::BodyKernel::BuiltinCall {
-                receiver: Box::new(pipeline::BodyKernel::Current),
-                call: call.clone(),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Composes two `BodyKernel` projection steps into a single `Compose` kernel,
-/// or returns `first` directly when `then` is the identity `Current` kernel.
-fn compose_projection_kernels(
-    first: pipeline::BodyKernel,
-    then: pipeline::BodyKernel,
-) -> pipeline::BodyKernel {
-    if matches!(then, pipeline::BodyKernel::Current) {
-        return first;
-    }
-    pipeline::BodyKernel::Compose {
-        first: Box::new(first),
-        then: Box::new(then),
-    }
+    let stages = body.stages.get(start..)?;
+    let kernels = body.stage_kernels.get(start..)?;
+    let projection = pipeline::Pipeline::late_projection_for(stages, kernels)?;
+    Some((projection.prefix_len, projection.kernel))
 }
 
 /// Converts the given `stages` slice into a vec of `ViewStageCapability` for use
