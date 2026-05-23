@@ -864,14 +864,7 @@ pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectP
 /// a view-native path.
 #[inline]
 pub(crate) fn view_object_items_projection(id: BuiltinId) -> bool {
-    matches!(
-        view_object_projection(id),
-        Some(
-            BuiltinViewObjectProjection::Keys
-                | BuiltinViewObjectProjection::Values
-                | BuiltinViewObjectProjection::Entries
-        )
-    )
+    view_object_projection(id).is_some_and(BuiltinViewObjectProjection::is_item_projection)
 }
 
 /// Return the object item projection for no-argument builtin calls such as
@@ -885,12 +878,8 @@ pub(crate) fn view_object_items_projection_call(
         return None;
     }
     let projection = view_object_projection(id)?;
-    matches!(
-        projection,
-        BuiltinViewObjectProjection::Keys
-            | BuiltinViewObjectProjection::Values
-            | BuiltinViewObjectProjection::Entries
-    )
+    projection
+        .is_item_projection()
     .then_some(projection)
 }
 
@@ -971,28 +960,11 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
 /// Return true when applying builtin `id` with `args` to a borrowed view
 /// necessarily produces an owned `Val` rather than another borrowed child view.
 #[inline]
-pub(crate) fn view_projection_returns_owned(id: BuiltinId, args: &BuiltinArgs) -> bool {
+pub(crate) fn view_projection_returns_owned(id: BuiltinId, _args: &BuiltinArgs) -> bool {
     if view_scalar_projection(id) {
         return true;
     }
-    matches!(
-        (view_object_projection(id), args),
-        (
-            Some(
-                BuiltinViewObjectProjection::Has
-                    | BuiltinViewObjectProjection::HasAll
-                    | BuiltinViewObjectProjection::HasKey
-                    | BuiltinViewObjectProjection::Missing
-                    | BuiltinViewObjectProjection::HasPath
-                    | BuiltinViewObjectProjection::Keys
-                    | BuiltinViewObjectProjection::Values
-                    | BuiltinViewObjectProjection::Entries
-                    | BuiltinViewObjectProjection::Pick
-                    | BuiltinViewObjectProjection::Omit
-            ),
-            _
-        )
-    )
+    view_object_projection(id).is_some_and(BuiltinViewObjectProjection::returns_owned)
 }
 
 /// Result of a view-native builtin application. Some object/path operations
@@ -2864,20 +2836,7 @@ mod tests {
             let Some(projection) = view_object_projection(id) else {
                 continue;
             };
-            let expected = match projection {
-                BuiltinViewObjectProjection::Has
-                | BuiltinViewObjectProjection::HasAll
-                | BuiltinViewObjectProjection::HasKey
-                | BuiltinViewObjectProjection::Missing
-                | BuiltinViewObjectProjection::HasPath => BuiltinDemandLaw::PredicateMapLike,
-                BuiltinViewObjectProjection::GetPath
-                | BuiltinViewObjectProjection::Keys
-                | BuiltinViewObjectProjection::Values
-                | BuiltinViewObjectProjection::Entries
-                | BuiltinViewObjectProjection::Pick
-                | BuiltinViewObjectProjection::Omit => BuiltinDemandLaw::MapLike,
-            };
-            assert_eq!(demand_law(id), expected, "{method:?}");
+            assert_eq!(demand_law(id), projection.demand_law(), "{method:?}");
         }
     }
 
@@ -2918,31 +2877,56 @@ mod tests {
             );
             assert_eq!(view_object_projection(id), Some(projection), "{method:?}");
             assert!(view_projection(id), "{method:?}");
+            assert_eq!(
+                view_object_items_projection(id),
+                projection.is_item_projection(),
+                "{method:?}"
+            );
 
             match projection {
                 BuiltinViewObjectProjection::GetPath => {
                     let args = BuiltinArgs::Str(Arc::from("nested.x"));
-                    assert!(!view_projection_returns_owned(id, &args), "{method:?}");
+                    assert_eq!(
+                        view_projection_returns_owned(id, &args),
+                        projection.returns_owned(),
+                        "{method:?}"
+                    );
                     assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
                 }
                 BuiltinViewObjectProjection::HasPath => {
                     let args = BuiltinArgs::Str(Arc::from("nested.x"));
-                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert_eq!(
+                        view_projection_returns_owned(id, &args),
+                        projection.returns_owned(),
+                        "{method:?}"
+                    );
                     assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
                 }
                 BuiltinViewObjectProjection::HasKey => {
                     let args = BuiltinArgs::Str(Arc::from("isbn"));
-                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert_eq!(
+                        view_projection_returns_owned(id, &args),
+                        projection.returns_owned(),
+                        "{method:?}"
+                    );
                     assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
                 }
                 BuiltinViewObjectProjection::Missing => {
                     let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
-                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert_eq!(
+                        view_projection_returns_owned(id, &args),
+                        projection.returns_owned(),
+                        "{method:?}"
+                    );
                     assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
                 }
                 BuiltinViewObjectProjection::Pick => {
                     let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
-                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert_eq!(
+                        view_projection_returns_owned(id, &args),
+                        projection.returns_owned(),
+                        "{method:?}"
+                    );
                     assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
                 }
                 BuiltinViewObjectProjection::Has
@@ -2951,8 +2935,9 @@ mod tests {
                 | BuiltinViewObjectProjection::Values
                 | BuiltinViewObjectProjection::Entries
                 | BuiltinViewObjectProjection::Omit => {
-                    assert!(
+                    assert_eq!(
                         view_projection_returns_owned(id, &BuiltinArgs::None),
+                        projection.returns_owned(),
                         "{method:?}"
                     );
                 }

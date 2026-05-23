@@ -1944,10 +1944,11 @@ impl Builtin for Pick {
     const METHOD: BuiltinMethod = BuiltinMethod::Pick;
     const NAME: &'static str = "pick";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::Pick;
         object_simple_spec()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::Pick)
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }
@@ -1966,10 +1967,11 @@ impl Builtin for Omit {
     const METHOD: BuiltinMethod = BuiltinMethod::Omit;
     const NAME: &'static str = "omit";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::Omit;
         object_simple_spec()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::Omit)
-            .demand_law(BuiltinDemandLaw::MapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }
@@ -2280,9 +2282,10 @@ impl Builtin for HasPath {
     const METHOD: BuiltinMethod = BuiltinMethod::HasPath;
     const NAME: &'static str = "has_path";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::HasPath;
         path_element_spec()
-            .view_object_projection(BuiltinViewObjectProjection::HasPath)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -3097,9 +3100,10 @@ impl Builtin for Missing {
     const METHOD: BuiltinMethod = BuiltinMethod::Missing;
     const NAME: &'static str = "missing";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::Missing;
         default_scalar_spec(BuiltinMethod::Missing)
-            .view_object_projection(BuiltinViewObjectProjection::Missing)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
@@ -3326,11 +3330,12 @@ impl Builtin for Has {
     const METHOD: BuiltinMethod = BuiltinMethod::Has;
     const NAME: &'static str = "has";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::Has;
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::Has)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
@@ -3355,11 +3360,12 @@ impl Builtin for HasAll {
     const METHOD: BuiltinMethod = BuiltinMethod::HasAll;
     const NAME: &'static str = "has_all";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::HasAll;
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::HasAll)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }
@@ -3382,11 +3388,12 @@ impl Builtin for HasKey {
     const METHOD: BuiltinMethod = BuiltinMethod::HasKey;
     const NAME: &'static str = "has_key";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewObjectProjection::HasKey;
         BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
             .indexed()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::HasKey)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .view_object_projection(projection)
+            .demand_law(projection.demand_law())
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .element()
     }

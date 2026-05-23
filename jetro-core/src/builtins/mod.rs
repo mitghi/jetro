@@ -754,6 +754,33 @@ pub enum BuiltinViewObjectProjection {
     Omit,
 }
 
+impl BuiltinViewObjectProjection {
+    /// Demand law implied by this view-native object/path operation.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        match self {
+            Self::Has | Self::HasAll | Self::HasKey | Self::Missing | Self::HasPath => {
+                BuiltinDemandLaw::PredicateMapLike
+            }
+            Self::GetPath | Self::Keys | Self::Values | Self::Entries | Self::Pick | Self::Omit => {
+                BuiltinDemandLaw::MapLike
+            }
+        }
+    }
+
+    /// Whether the projection enumerates object keys, values, or entries.
+    #[inline]
+    pub(crate) const fn is_item_projection(self) -> bool {
+        matches!(self, Self::Keys | Self::Values | Self::Entries)
+    }
+
+    /// Whether applying this projection yields an owned value instead of a borrowed child view.
+    #[inline]
+    pub(crate) const fn returns_owned(self) -> bool {
+        !matches!(self, Self::GetPath)
+    }
+}
+
 /// Raw-byte JSON scalar operation that can be executed before building a
 /// `JsonView` or materialising a `Val`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
