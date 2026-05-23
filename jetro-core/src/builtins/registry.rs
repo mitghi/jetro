@@ -1408,6 +1408,14 @@ pub(crate) fn apply_barrier_hook(
 }
 
 impl BuiltinId {
+    pub(crate) const FILTER: Self = Self(BuiltinMethod::Filter as u16);
+    pub(crate) const FLAT_MAP: Self = Self(BuiltinMethod::FlatMap as u16);
+    pub(crate) const MAP: Self = Self(BuiltinMethod::Map as u16);
+    pub(crate) const REVERSE: Self = Self(BuiltinMethod::Reverse as u16);
+    pub(crate) const SORT: Self = Self(BuiltinMethod::Sort as u16);
+    pub(crate) const UNIQUE: Self = Self(BuiltinMethod::Unique as u16);
+    pub(crate) const UNIQUE_BY: Self = Self(BuiltinMethod::UniqueBy as u16);
+
     /// Construct a `BuiltinId` from a `BuiltinMethod` by casting its discriminant to `u16`.
     #[inline]
     pub(crate) fn from_method(method: BuiltinMethod) -> Self {

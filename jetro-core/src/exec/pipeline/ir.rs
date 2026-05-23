@@ -792,11 +792,11 @@ impl<'a> StageDescriptor<'a> {
 }
 
 macro_rules! view_body_stage_descriptor {
-    ($stage:expr, { $($variant:ident => $method:ident),+ $(,)? }) => {
+    ($stage:expr, { $($variant:ident => $id:expr),+ $(,)? }) => {
         match $stage {
             $(
                 Stage::$variant(prog, view_stage) => {
-                    Some(StageDescriptor::new(BuiltinMethod::$method).body(prog).with_view_stage(*view_stage))
+                    Some(StageDescriptor::new_id($id).body(prog).with_view_stage(*view_stage))
                 },
             )+
             _ => None,
@@ -805,10 +805,10 @@ macro_rules! view_body_stage_descriptor {
 }
 
 macro_rules! method_stage_descriptor {
-    ($stage:expr, { $($pattern:pat => $method:ident),+ $(,)? }) => {
+    ($stage:expr, { $($pattern:pat => $id:expr),+ $(,)? }) => {
         match $stage {
             $(
-                $pattern => Some(StageDescriptor::new(BuiltinMethod::$method)),
+                $pattern => Some(StageDescriptor::new_id($id)),
             )+
             _ => None,
         }
@@ -1076,25 +1076,25 @@ impl Stage {
     /// executor metadata used throughout the planner; returns `None` for unrecognised variants.
     pub(crate) fn descriptor(&self) -> Option<StageDescriptor<'_>> {
         if let Some(desc) = view_body_stage_descriptor!(self, {
-            Filter => Filter,
-            Map => Map,
-            FlatMap => FlatMap,
+            Filter => BuiltinId::FILTER,
+            Map => BuiltinId::MAP,
+            FlatMap => BuiltinId::FLAT_MAP,
         }) {
             return Some(desc);
         }
         if let Some(desc) = method_stage_descriptor!(self, {
-            Stage::Reverse(_) => Reverse,
-            Stage::UniqueBy(None) => Unique,
+            Stage::Reverse(_) => BuiltinId::REVERSE,
+            Stage::UniqueBy(None) => BuiltinId::UNIQUE,
         }) {
             return Some(desc);
         }
 
         match self {
             Stage::UniqueBy(Some(prog)) => {
-                Some(StageDescriptor::new(BuiltinMethod::UniqueBy).body(prog))
+                Some(StageDescriptor::new_id(BuiltinId::UNIQUE_BY).body(prog))
             }
             Stage::Sort(super::SortSpec { key, .. }) => {
-                let desc = StageDescriptor::new(BuiltinMethod::Sort);
+                let desc = StageDescriptor::new_id(BuiltinId::SORT);
                 Some(if let Some(prog) = key {
                     desc.body(prog)
                 } else {
@@ -1121,7 +1121,7 @@ impl Stage {
                 })
             }
             Stage::CompiledMap(_) => Some(
-                StageDescriptor::new(BuiltinMethod::Map)
+                StageDescriptor::new_id(BuiltinId::MAP)
                     .receiver_unsafe_without_body()
                     .disable_columnar(),
             ),
@@ -1373,7 +1373,7 @@ impl Stage {
             {
                 Some(Stage::SortedDedup(Some(a.clone())))
             }
-            (Stage::Builtin(a), Stage::Builtin(b)) if a.method == b.method && a.is_idempotent() => {
+            (Stage::Builtin(a), Stage::Builtin(b)) if a.id() == b.id() && a.is_idempotent() => {
                 Some(Stage::Builtin(a.clone()))
             }
             _ => None,
