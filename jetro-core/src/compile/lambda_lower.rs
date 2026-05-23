@@ -28,6 +28,28 @@ pub(crate) fn unwrap_single_lambda(expr: &Expr) -> Expr {
     }
 }
 
+/// Normalise a pipeline/HOF argument into the row-local expression shape used
+/// by both VM compilation and symbolic demand analysis.
+///
+/// Bare identifiers are field reads from the current row (`name` -> `@.name`)
+/// and single-parameter lambdas are lowered to their `@`-equivalent body. The
+/// caller should still use `compile_lambda_arg` for direct lambda compilation,
+/// because it adds the `BindLamCurrent` wrapper needed by nested lambdas that
+/// retain references to the outer parameter.
+pub(crate) fn normalize_pipeline_arg_expr(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Lambda { params, body } if params.len() == 1 => {
+            substitute_current((**body).clone(), params[0].as_str())
+        }
+        Expr::Ident(name) => Expr::Chain(
+            Box::new(Expr::Current),
+            vec![Step::Field(name.clone())],
+        ),
+        Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => expr.clone(),
+        other => other.clone(),
+    }
+}
+
 /// Inline let-bound lambda values into method-arg references. Implements
 /// first-class lambdas as a static macro expansion: `let f = (x => x*2) in
 /// $.xs.map(f)` desugars to `$.xs.map(x => x*2)` before any compile pass

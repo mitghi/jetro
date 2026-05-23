@@ -276,7 +276,7 @@ fn push_path_slice_stages(
 
 /// Compiles a positional argument into a VM `Program`, rewriting bare `Ident` nodes into `@.<ident>` field accesses.
 pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate::vm::Program>> {
-    use crate::parse::ast::{Arg, Step};
+    use crate::parse::ast::Arg;
     let inner = match arg {
         Arg::Pos(e) => e,
         _ => return None,
@@ -287,11 +287,7 @@ pub(super) fn compile_subexpr(arg: &crate::parse::ast::Arg) -> Option<Arc<crate:
     if matches!(inner, Expr::Lambda { params, .. } if params.len() == 1) {
         return Some(crate::compile::lambda_lower::compile_lambda_arg(inner, ""));
     }
-    let rooted: Expr = match inner {
-        Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
-        Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => inner.clone(),
-        other => other.clone(),
-    };
+    let rooted = crate::compile::lambda_lower::normalize_pipeline_arg_expr(inner);
     Some(Arc::new(crate::compile::compiler::Compiler::compile(
         &rooted, "",
     )))
@@ -347,20 +343,12 @@ pub(crate) fn compile_sort_spec(
 /// This mirrors `compile_subexpr`'s current-row binding so the demand and
 /// symbolic planners see the same expression shape that the VM program executes.
 pub(super) fn arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
-    use crate::parse::ast::{Arg, Step};
+    use crate::parse::ast::Arg;
     match arg {
         Arg::Named(_, _) => None,
-        Arg::Pos(Expr::Lambda { params, body }) if params.len() == 1 => Some(Arc::new(
-            crate::compile::lambda_lower::substitute_current((**body).clone(), params[0].as_str()),
+        Arg::Pos(e) => Some(Arc::new(
+            crate::compile::lambda_lower::normalize_pipeline_arg_expr(e),
         )),
-        Arg::Pos(Expr::Ident(name)) => Some(Arc::new(Expr::Chain(
-            Box::new(Expr::Current),
-            vec![Step::Field(name.clone())],
-        ))),
-        Arg::Pos(e @ Expr::Chain(base, _)) if matches!(base.as_ref(), Expr::Current) => {
-            Some(Arc::new(e.clone()))
-        }
-        Arg::Pos(e) => Some(Arc::new(e.clone())),
     }
 }
 
@@ -662,4 +650,37 @@ fn arg_extreme_sink_for_method(
         compile_subexpr(arg)?,
         raw_arg_expr(arg),
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arg_expr;
+    use crate::parse::ast::{Arg, Expr};
+    use crate::parse::parser::parse;
+
+    fn normalized_arg(src: &str) -> Expr {
+        let expr = parse(src).expect("parse expression");
+        arg_expr(&Arg::Pos(expr))
+            .expect("positional arg")
+            .as_ref()
+            .clone()
+    }
+
+    fn assert_current_field(expr: Expr, field: &str) {
+        let Expr::Chain(base, steps) = expr else {
+            panic!("expected current field chain");
+        };
+        assert!(matches!(base.as_ref(), Expr::Current));
+        assert!(matches!(
+            steps.as_slice(),
+            [crate::parse::ast::Step::Field(name)] if name.as_str() == field
+        ));
+    }
+
+    #[test]
+    fn pipeline_arg_normalization_is_shared_for_symbolic_exprs() {
+        assert_current_field(normalized_arg("isbn"), "isbn");
+        assert_current_field(normalized_arg("@.isbn"), "isbn");
+        assert_current_field(normalized_arg("x => x.isbn"), "isbn");
+    }
 }
