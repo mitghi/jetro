@@ -2069,6 +2069,56 @@ mod tests {
     }
 
     #[test]
+    fn registry_predicate_sinks_have_complete_terminal_contracts() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(sink) = predicate_sink(id) else {
+                continue;
+            };
+
+            assert_eq!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalSink),
+                "{method:?}"
+            );
+            assert_eq!(
+                demand_law(id),
+                BuiltinDemandLaw::PredicateMapLike,
+                "{method:?}"
+            );
+            assert_eq!(
+                sink_accumulator(id),
+                None,
+                "{method:?} predicate sink must not also expose accumulator metadata"
+            );
+            assert!(
+                accepts_lambda_arg(id),
+                "{method:?} predicate sink must accept a predicate expression"
+            );
+            match sink {
+                BuiltinPredicateSink::FindOne => {
+                    assert_eq!(predicate_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
+                    assert_eq!(
+                        predicate_sink_result_demand(sink),
+                        SinkResultDemand::None,
+                        "{method:?}"
+                    );
+                }
+                BuiltinPredicateSink::Any
+                | BuiltinPredicateSink::All
+                | BuiltinPredicateSink::FindIndex
+                | BuiltinPredicateSink::IndicesWhere => {
+                    assert_eq!(
+                        predicate_sink_value_need(sink),
+                        ValueNeed::Predicate,
+                        "{method:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn registry_drives_direct_scalar_sink_projection() {
         let count = direct_scalar_for_plain_sink(BuiltinId::from_method(BuiltinMethod::Count))
             .expect("count should project as len");
