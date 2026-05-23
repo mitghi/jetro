@@ -906,6 +906,9 @@ pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirect
     if let Some(predicate) = direct_array_any_predicate_expr(expr) {
         return Some(predicate);
     }
+    if let Some(steps) = direct_tape_row_path_for_expr(expr) {
+        return Some(NdjsonDirectPredicate::Path(steps));
+    }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_predicate_from_plan(&plan)
 }
@@ -1607,6 +1610,24 @@ mod tests {
             assert!(matches!(
                 steps.as_slice(),
                 [PhysicalPathStep::Field(sku)] if sku.as_ref() == "sku"
+            ));
+        }
+    }
+
+    #[test]
+    fn direct_tape_predicate_accepts_row_local_truthy_path() {
+        let bare = crate::parse::parser::parse("active").expect("parse bare field");
+        let current = crate::parse::parser::parse("@.active").expect("parse current field");
+
+        for expr in [&bare, &current] {
+            let predicate = direct_tape_predicate_for_expr(expr).expect("direct predicate");
+            assert!(matches!(
+                predicate,
+                NdjsonDirectPredicate::Path(ref steps)
+                    if matches!(
+                        steps.as_slice(),
+                        [PhysicalPathStep::Field(active)] if active.as_ref() == "active"
+                    )
             ));
         }
     }

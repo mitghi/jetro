@@ -1568,6 +1568,46 @@ fn rows_stream_distinct_by_canonicalizes_direct_string_keys() {
 }
 
 #[test]
+fn rows_stream_top_level_distinct_key_is_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"v":"a"}
+{"id":1,"v":"b"}
+{"id":2,"v":"c"}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(Cursor::new(input), "$.rows().distinct_by(id).map(v)", &mut out)
+        .expect("rows stream top-level distinct key should use row-local direct paths");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "\"a\"\n\"c\"\n");
+    assert_eq!(report.stats.direct_key_rows, 3);
+    assert_eq!(report.stats.fallback_key_rows, 0);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
+fn rows_stream_top_level_filter_arg_is_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"active":true}
+{"id":2,"active":false}
+{"id":3,"active":true}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(Cursor::new(input), "$.rows().filter(active).map(id)", &mut out)
+        .expect("rows stream top-level filter arg should use row-local direct predicates");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+    assert_eq!(report.stats.direct_filter_rows, 3);
+    assert_eq!(report.stats.fallback_filter_rows, 0);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn rows_stream_filter_distinct_take_projects_retained_rows() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"a","active":false,"v":1}
