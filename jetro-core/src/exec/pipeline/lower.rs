@@ -14,8 +14,7 @@ use crate::builtins::registry::{
     sink_accumulator as builtin_sink_accumulator, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering,
-    BuiltinSinkAccumulator,
+    BuiltinCardinality, BuiltinExprStage, BuiltinPipelineLowering, BuiltinSinkAccumulator,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -258,16 +257,13 @@ fn push_path_slice_stages(
     };
 
     if start > 0 {
-        stages.push(Stage::usize_builtin_id(
-            BuiltinId::from_method(BuiltinMethod::Skip),
-            start,
-        )?);
+        stages.push(Stage::usize_builtin_id(BuiltinId::SKIP, start)?);
         stage_exprs.push(None);
     }
 
     if let Some(end) = end {
         stages.push(Stage::usize_builtin_id(
-            BuiltinId::from_method(BuiltinMethod::Take),
+            BuiltinId::TAKE,
             end.saturating_sub(start),
         )?);
         stage_exprs.push(None);

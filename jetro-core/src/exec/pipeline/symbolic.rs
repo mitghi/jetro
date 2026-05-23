@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::{registry::BuiltinId, BuiltinMethod};
+use crate::builtins::registry::BuiltinId;
 use crate::parse::ast::{
     Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
@@ -150,7 +150,7 @@ impl SymbolicEmitter {
     fn flush_predicate(&mut self) {
         if let Some(pred) = self.predicate.take() {
             if !matches!(pred, Expr::Bool(true)) {
-                self.push_expr_stage(pred, BuiltinId::from_method(BuiltinMethod::Filter));
+                self.push_expr_stage(pred, BuiltinId::FILTER);
             }
         }
     }
@@ -158,7 +158,7 @@ impl SymbolicEmitter {
     fn flush_item(&mut self) {
         if !matches!(self.item, Expr::Current) {
             let item = std::mem::replace(&mut self.item, Expr::Current);
-            self.push_expr_stage(item, BuiltinId::from_method(BuiltinMethod::Map));
+            self.push_expr_stage(item, BuiltinId::MAP);
         }
     }
 
@@ -180,7 +180,7 @@ impl SymbolicEmitter {
                 return;
             }
             if self.demand.chain.value.requires_payload() {
-                self.push_expr_stage(item, BuiltinId::from_method(BuiltinMethod::Map));
+                self.push_expr_stage(item, BuiltinId::MAP);
             }
         }
     }

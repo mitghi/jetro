@@ -818,7 +818,7 @@ macro_rules! method_stage_descriptor {
 impl Stage {
     /// Build the reverse stage from its registry cancellation metadata.
     pub(crate) fn reverse() -> Option<Self> {
-        builtin_cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).map(Stage::Reverse)
+        builtin_cancellation(BuiltinId::REVERSE).map(Stage::Reverse)
     }
 
     /// Build a nullary stage from its registry-declared stage shape.
@@ -1166,10 +1166,7 @@ impl Stage {
                 true
             }
             Stage::CompiledMap(_) => {
-                if let Some(stage) = Stage::expr_stage_builtin_id(
-                    BuiltinId::from_method(BuiltinMethod::Map),
-                    program,
-                ) {
+                if let Some(stage) = Stage::expr_stage_builtin_id(BuiltinId::MAP, program) {
                     *self = stage;
                     true
                 } else {
@@ -1668,7 +1665,7 @@ impl Pipeline {
     /// can be consumed as a one-row `first` pipeline.
     pub(crate) fn for_selected_single_row(&self) -> Option<Self> {
         let mut selected = self.clone();
-        selected.sink = Sink::terminal_builtin_id(BuiltinId::from_method(BuiltinMethod::First))?;
+        selected.sink = Sink::terminal_builtin_id(BuiltinId::FIRST)?;
         selected.refresh_planned_facts();
         Some(selected)
     }
@@ -1681,7 +1678,7 @@ impl Pipeline {
             return None;
         }
         let mut reversed = self.clone();
-        reversed.sink = Sink::terminal_builtin_id(BuiltinId::from_method(BuiltinMethod::First))?;
+        reversed.sink = Sink::terminal_builtin_id(BuiltinId::FIRST)?;
         reversed.refresh_planned_facts();
         Some(reversed)
     }
