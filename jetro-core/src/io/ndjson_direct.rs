@@ -138,6 +138,47 @@ pub(super) enum NdjsonDirectStreamMap {
     Object(Vec<NdjsonDirectObjectField>),
 }
 
+impl NdjsonDirectStreamMap {
+    pub(super) fn value_path(self) -> Option<NdjsonPhysicalPath> {
+        match self {
+            Self::Value(value) => value.into_path(),
+            Self::Array(_) | Self::Object(_) => None,
+        }
+    }
+
+    pub(super) fn values(&self) -> NdjsonDirectStreamMapValues<'_> {
+        NdjsonDirectStreamMapValues {
+            inner: match self {
+                Self::Value(value) => NdjsonDirectStreamMapValuesInner::One(Some(value)),
+                Self::Array(items) => NdjsonDirectStreamMapValuesInner::Array(items.iter()),
+                Self::Object(fields) => NdjsonDirectStreamMapValuesInner::Object(fields.iter()),
+            },
+        }
+    }
+}
+
+pub(super) struct NdjsonDirectStreamMapValues<'a> {
+    inner: NdjsonDirectStreamMapValuesInner<'a>,
+}
+
+enum NdjsonDirectStreamMapValuesInner<'a> {
+    One(Option<&'a NdjsonDirectProjectionValue>),
+    Array(std::slice::Iter<'a, NdjsonDirectProjectionValue>),
+    Object(std::slice::Iter<'a, NdjsonDirectObjectField>),
+}
+
+impl<'a> Iterator for NdjsonDirectStreamMapValues<'a> {
+    type Item = &'a NdjsonDirectProjectionValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.inner {
+            NdjsonDirectStreamMapValuesInner::One(value) => value.take(),
+            NdjsonDirectStreamMapValuesInner::Array(items) => items.next(),
+            NdjsonDirectStreamMapValuesInner::Object(fields) => fields.next().map(|field| &field.value),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum NdjsonDirectStreamSink {
     Collect(NdjsonDirectStreamMap),
@@ -350,6 +391,15 @@ pub(super) enum NdjsonDirectProjectionValue {
     },
     Nested(Box<NdjsonDirectTapePlan>),
     Literal(Val),
+}
+
+impl NdjsonDirectProjectionValue {
+    pub(super) fn into_path(self) -> Option<NdjsonPhysicalPath> {
+        match self {
+            Self::Path(steps) => Some(steps),
+            Self::ViewScalarCall { .. } | Self::Nested(_) | Self::Literal(_) => None,
+        }
+    }
 }
 
 impl NdjsonDirectTapePlan {
@@ -1141,10 +1191,7 @@ fn direct_stream_map_from_kernel(
 }
 
 fn direct_stream_map_path(map: NdjsonDirectStreamMap) -> Option<NdjsonPhysicalPath> {
-    match map {
-        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(steps)) => Some(steps),
-        _ => None,
-    }
+    map.value_path()
 }
 
 fn direct_item_predicate_from_kernel(
@@ -1513,5 +1560,33 @@ mod tests {
             direct_writer_plan_kind(&engine, "$.attributes.filter(@.active).count()"),
             Some((None, NdjsonDirectPlanKind::TapeStreamCount))
         );
+    }
+
+    #[test]
+    fn stream_map_values_iterates_projection_values() {
+        let map = NdjsonDirectStreamMap::Object(vec![
+            NdjsonDirectObjectField {
+                key: Arc::from("id"),
+                value: NdjsonDirectProjectionValue::Path(vec![PhysicalPathStep::Field(
+                    Arc::from("id"),
+                )]),
+                optional: false,
+            },
+            NdjsonDirectObjectField {
+                key: Arc::from("active"),
+                value: NdjsonDirectProjectionValue::Literal(Val::Bool(true)),
+                optional: false,
+            },
+        ]);
+        assert_eq!(map.values().count(), 2);
+
+        let path = NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(vec![
+            PhysicalPathStep::Field(Arc::from("name")),
+        ]))
+        .value_path();
+        assert!(matches!(
+            path.as_deref(),
+            Some([PhysicalPathStep::Field(name)]) if name.as_ref() == "name"
+        ));
     }
 }

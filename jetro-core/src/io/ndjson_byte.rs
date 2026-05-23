@@ -493,13 +493,7 @@ fn byte_path_supported(steps: &[PhysicalPathStep]) -> bool {
 }
 
 fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
-    match map {
-        NdjsonDirectStreamMap::Value(value) => byte_projection_value_supported(value),
-        NdjsonDirectStreamMap::Array(items) => items.iter().all(byte_projection_value_supported),
-        NdjsonDirectStreamMap::Object(fields) => fields
-            .iter()
-            .all(|field| byte_projection_value_supported(&field.value)),
-    }
+    map.values().all(byte_projection_value_supported)
 }
 
 fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool {
