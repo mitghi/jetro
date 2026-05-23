@@ -846,7 +846,7 @@ fn direct_tape_sort_extreme_plan_for_node(
             return None;
         }
         let want_last =
-            crate::exec::pipeline::Sink::terminal_builtin(call.method)?.select_one_wants_last()?;
+            crate::exec::pipeline::Sink::terminal_builtin_id(call.id())?.select_one_wants_last()?;
         let PlanNode::Pipeline { source, body } = plan.node(*receiver) else {
             return None;
         };
