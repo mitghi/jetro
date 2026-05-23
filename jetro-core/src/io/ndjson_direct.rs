@@ -570,26 +570,6 @@ fn direct_tape_plan_for_node(
     }
     match plan.node(id) {
         PlanNode::RootPath(steps) => Some(NdjsonDirectTapePlan::RootPath(steps.clone())),
-        PlanNode::Pipeline {
-            source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
-            body,
-        } if body.stages.is_empty() && plain_sink_direct_scalar_call(body).is_some() => {
-            Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: keys_to_path(keys),
-                call: plain_sink_direct_scalar_call(body)?,
-                optional: false,
-            })
-        }
-        PlanNode::Pipeline {
-            source: crate::ir::physical::PipelinePlanSource::Expr(source),
-            body,
-        } if body.stages.is_empty() && plain_sink_direct_scalar_call(body).is_some() => {
-            Some(NdjsonDirectTapePlan::ViewScalarCall {
-                steps: node_path_steps(plan, *source)?,
-                call: plain_sink_direct_scalar_call(body)?,
-                optional: false,
-            })
-        }
         PlanNode::Call {
             receiver,
             call,
@@ -626,6 +606,9 @@ fn direct_tape_plan_for_node(
             })
         }
         PlanNode::Pipeline { source, body } => {
+            if let Some(plan) = direct_tape_plain_sink_pipeline_plan(plan, source, body) {
+                return Some(plan);
+            }
             if let Some(plan) = direct_tape_sort_extreme_plan(plan, source, body, Vec::new()) {
                 return Some(plan);
             }
@@ -653,6 +636,19 @@ fn direct_tape_plan_for_node(
         PlanNode::Array(elems) => direct_tape_array_plan(plan, elems),
         _ => None,
     }
+}
+
+fn direct_tape_plain_sink_pipeline_plan(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectTapePlan> {
+    let call = plain_sink_direct_scalar_call(body)?;
+    Some(NdjsonDirectTapePlan::ViewScalarCall {
+        steps: pipeline_source_to_steps(plan, source)?,
+        call,
+        optional: false,
+    })
 }
 
 fn direct_object_value_from_node(
