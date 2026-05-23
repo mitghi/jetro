@@ -1180,20 +1180,16 @@ struct DirectStreamShape {
 fn direct_stream_shape(
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<DirectStreamShape> {
-    use crate::exec::pipeline::Stage;
-
     let mut predicate = None;
     let mut map = None;
     for (idx, stage) in body.stages.iter().enumerate() {
-        match stage {
-            Stage::Filter(_, _) if map.is_none() => {
-                let next = direct_item_predicate_from_kernel(body.stage_kernels.get(idx)?)?;
-                predicate = Some(combine_direct_item_predicate(predicate, next));
-            }
-            Stage::Map(_, _) if map.is_none() && idx + 1 == body.stages.len() => {
-                map = Some(direct_stream_map_from_kernel(body.stage_kernels.get(idx)?)?);
-            }
-            _ => return None,
+        if stage.is_symbolic_filter_stage() && map.is_none() {
+            let next = direct_item_predicate_from_kernel(body.stage_kernels.get(idx)?)?;
+            predicate = Some(combine_direct_item_predicate(predicate, next));
+        } else if stage.is_symbolic_map_stage() && map.is_none() && idx + 1 == body.stages.len() {
+            map = Some(direct_stream_map_from_kernel(body.stage_kernels.get(idx)?)?);
+        } else {
+            return None;
         }
     }
     Some(DirectStreamShape { predicate, map })
