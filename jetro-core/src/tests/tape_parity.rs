@@ -351,6 +351,31 @@ fn tape_matches_vm_for_scalar_terminal_sinks() {
 }
 
 #[test]
+fn tape_matches_vm_for_extreme_and_distinct_terminal_sinks() {
+    let doc = json!({
+        "books": [
+            {"id": 1, "title": "Dune", "price": 12, "score": 91, "tag": "sf", "author": {"name": "Herbert"}},
+            {"id": 2, "title": "Foundation", "price": 9, "score": 88, "tag": "sf", "author": {"name": "Asimov"}},
+            {"id": 3, "title": "Hyperion", "price": 14, "score": 95, "tag": "hugo", "author": {"name": "Simmons"}},
+            {"id": 4, "title": "Snow Crash", "price": 11, "score": 90, "tag": "cyber", "author": {"name": "Stephenson"}},
+            {"id": 5, "title": "Neuromancer", "price": 10, "score": 93, "tag": "cyber", "author": {"name": "Gibson"}}
+        ]
+    });
+    for query in [
+        "$.books.map({title, value: score + price})",
+        "$.books.map({title, value: score + price}).max_by(value)",
+        "$.books.max_by(score).title",
+        "$.books.min_by(price).author.name",
+        "$.books.filter(tag == \"cyber\").max_by(score).title",
+        "$.books.map({title, value: score + price}).max_by(value).title",
+        "$.books.map(tag).approx_count_distinct()",
+        "$.books.filter(score > 90).map(author.name).approx_count_distinct()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_window_and_series_stages() {
     let doc = json!({
         "samples": [

@@ -807,7 +807,7 @@ impl VM {
                     let v = pop!(stack);
                     let out = match &v {
                         Val::Obj(m) => ic_get_field(m, k.as_ref(), &program.ics[op_idx]),
-                        _ => Val::Null,
+                        _ => v.get_field(k.as_ref()),
                     };
                     stack.push(out);
                 }
@@ -1932,6 +1932,42 @@ impl VM {
                 } else {
                     Ok(Val::Int(0))
                 }
+            }
+            BuiltinMethod::MaxBy | BuiltinMethod::MinBy => {
+                let key_prog =
+                    sub.ok_or_else(|| EvalError(format!("{}: requires key selector", call.name)))?;
+                let items = recv
+                    .into_vec()
+                    .ok_or_else(|| EvalError(format!("{}: expected array", call.name)))?;
+                let mut iter = items.into_iter();
+                let mut best = match iter.next() {
+                    Some(item) => item,
+                    None => return Ok(Val::Null),
+                };
+                let mut best_key =
+                    self.exec_lam_body_kernel(key_prog, kernel0, &best, lam_param, &mut scratch)?;
+                let wants_max = call.method == BuiltinMethod::MaxBy;
+
+                for item in iter {
+                    let key = self.exec_lam_body_kernel(
+                        key_prog,
+                        kernel0,
+                        &item,
+                        lam_param,
+                        &mut scratch,
+                    )?;
+                    let cmp = crate::exec::pipeline::cmp_val_total(&key, &best_key);
+                    let replace = if wants_max {
+                        cmp == std::cmp::Ordering::Greater
+                    } else {
+                        cmp == std::cmp::Ordering::Less
+                    };
+                    if replace {
+                        best = item;
+                        best_key = key;
+                    }
+                }
+                Ok(best)
             }
             BuiltinMethod::GroupBy => {
                 let key_prog = sub.ok_or_else(|| EvalError("groupBy: requires key".into()))?;
