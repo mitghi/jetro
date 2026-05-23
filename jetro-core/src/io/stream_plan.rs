@@ -6,11 +6,7 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, numeric_reducer, row_stream_op, row_stream_op_arg,
-    row_stream_op_blocks_parallel_partitioning, row_stream_op_is_filter_like,
-    row_stream_op_is_projector, row_stream_op_is_row_selection, row_stream_op_is_terminal,
-    row_stream_op_numeric_reducer, row_stream_op_predicate_sink,
-    row_stream_op_preserves_order_before_limit, BuiltinId,
+    by_name as builtin_by_name, numeric_reducer, row_stream_op, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamArg,
@@ -91,27 +87,23 @@ pub(crate) enum RowStreamStage {
 }
 
 impl RowStreamStage {
-    fn builtin_method(&self) -> BuiltinMethod {
+    fn op(&self) -> BuiltinRowStreamOp {
         match self {
-            RowStreamStage::Filter(_) => BuiltinMethod::Filter,
-            RowStreamStage::DistinctBy(_) => BuiltinMethod::UniqueBy,
-            RowStreamStage::Take(_) => BuiltinMethod::Take,
-            RowStreamStage::Map(_) => BuiltinMethod::Map,
-            RowStreamStage::Last => BuiltinMethod::Last,
-            RowStreamStage::Count => BuiltinMethod::Count,
-            RowStreamStage::Numeric(reducer) => reducer.method(),
-            RowStreamStage::Any(_) => BuiltinMethod::Any,
-            RowStreamStage::All(_) => BuiltinMethod::All,
-            RowStreamStage::FindOne(_) => BuiltinMethod::FindOne,
+            RowStreamStage::Filter(_) => BuiltinRowStreamOp::Filter,
+            RowStreamStage::DistinctBy(_) => BuiltinRowStreamOp::DistinctBy,
+            RowStreamStage::Take(_) => BuiltinRowStreamOp::Take,
+            RowStreamStage::Map(_) => BuiltinRowStreamOp::Map,
+            RowStreamStage::Last => BuiltinRowStreamOp::Last,
+            RowStreamStage::Count => BuiltinRowStreamOp::Count,
+            RowStreamStage::Numeric(reducer) => reducer.row_stream_op(),
+            RowStreamStage::Any(_) => BuiltinRowStreamOp::Any,
+            RowStreamStage::All(_) => BuiltinRowStreamOp::All,
+            RowStreamStage::FindOne(_) => BuiltinRowStreamOp::FindOne,
         }
     }
 
-    fn row_stream_op(&self) -> Option<BuiltinRowStreamOp> {
-        row_stream_op(BuiltinId::from_method(self.builtin_method()))
-    }
-
     fn scalar_sink(&self) -> bool {
-        self.row_stream_op().is_some_and(row_stream_op_is_terminal)
+        self.op().is_terminal()
     }
 
     fn retained_limit(&self) -> Option<usize> {
@@ -123,11 +115,11 @@ impl RowStreamStage {
     }
 
     pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
-        row_stream_op_numeric_reducer(self.row_stream_op()?)
+        self.op().numeric_reducer()
     }
 
     pub(super) fn predicate_sink(&self) -> Option<(BuiltinPredicateSink, &Expr)> {
-        let sink = row_stream_op_predicate_sink(self.row_stream_op()?)?;
+        let sink = self.op().predicate_sink()?;
         match self {
             RowStreamStage::Any(expr)
             | RowStreamStage::All(expr)
@@ -137,27 +129,23 @@ impl RowStreamStage {
     }
 
     fn blocks_parallel_partitioning(&self) -> bool {
-        self.row_stream_op()
-            .is_some_and(row_stream_op_blocks_parallel_partitioning)
+        self.op().blocks_parallel_partitioning()
     }
 
     fn is_filter_like(&self) -> bool {
-        self.row_stream_op()
-            .is_some_and(row_stream_op_is_filter_like)
+        self.op().is_filter_like()
     }
 
     fn is_projector(&self) -> bool {
-        self.row_stream_op().is_some_and(row_stream_op_is_projector)
+        self.op().is_projector()
     }
 
     fn is_row_selection(&self) -> bool {
-        self.row_stream_op()
-            .is_some_and(row_stream_op_is_row_selection)
+        self.op().is_row_selection()
     }
 
     fn preserves_order_before_limit(&self) -> bool {
-        self.row_stream_op()
-            .is_some_and(row_stream_op_preserves_order_before_limit)
+        self.op().preserves_order_before_limit()
     }
 }
 
@@ -275,7 +263,7 @@ pub(super) fn lower_root_rows_expr(
                 "unsupported rows() stream method {name}()"
             )));
         };
-        let arg = row_stream_op_arg(op);
+        let arg = op.arg();
         let expr_arg = match arg {
             BuiltinRowStreamArg::Expr => Some(single_expr_arg(name, args)?.clone()),
             BuiltinRowStreamArg::Usize | BuiltinRowStreamArg::None => None,
@@ -342,7 +330,7 @@ pub(super) fn lower_root_rows_expr(
                 plan.stages.push(RowStreamStage::Map(expr_arg.unwrap()));
             }
         }
-        if row_stream_op_is_terminal(op) {
+        if op.is_terminal() {
             terminal = Some(name.as_str());
         }
     }

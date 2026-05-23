@@ -17,10 +17,10 @@ use crate::{
         BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
         BuiltinObjectLambda, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
-        BuiltinRawJsonScalar, BuiltinRowStreamArg, BuiltinRowStreamOp, BuiltinRuntimeHook,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
-        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
-        BuiltinViewObjectProjection, BuiltinViewStage,
+        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
+        BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection,
+        BuiltinViewStage,
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
@@ -79,67 +79,6 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
 #[inline]
 pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
     id.method().and_then(|method| method.spec().row_stream_op)
-}
-
-/// Return the argument kind required by a row-stream operation.
-#[inline]
-pub(crate) fn row_stream_op_arg(op: BuiltinRowStreamOp) -> BuiltinRowStreamArg {
-    op.arg()
-}
-
-/// Return true when a row-stream method finalises the stream result and no
-/// later row-stream stage may follow it.
-#[inline]
-pub(crate) fn row_stream_op_is_terminal(op: BuiltinRowStreamOp) -> bool {
-    op.is_terminal()
-}
-
-/// Return true when a row-stream op cannot be safely partitioned across file
-/// chunks while preserving stream semantics.
-#[inline]
-pub(crate) fn row_stream_op_blocks_parallel_partitioning(op: BuiltinRowStreamOp) -> bool {
-    op.blocks_parallel_partitioning()
-}
-
-/// Return true when a row-stream op behaves as a predicate filter.
-#[inline]
-pub(crate) fn row_stream_op_is_filter_like(op: BuiltinRowStreamOp) -> bool {
-    op.is_filter_like()
-}
-
-/// Return true when a row-stream op projects rows one-to-one.
-#[inline]
-pub(crate) fn row_stream_op_is_projector(op: BuiltinRowStreamOp) -> bool {
-    op.is_projector()
-}
-
-/// Return true when a row-stream op selects rows without reordering them.
-#[inline]
-pub(crate) fn row_stream_op_is_row_selection(op: BuiltinRowStreamOp) -> bool {
-    op.is_row_selection()
-}
-
-/// Return true when a row-stream op can precede a retained limit while
-/// preserving conservative source-order early-stop semantics.
-#[inline]
-pub(crate) fn row_stream_op_preserves_order_before_limit(op: BuiltinRowStreamOp) -> bool {
-    op.preserves_order_before_limit()
-}
-
-/// Return the numeric reducer represented by a terminal row-stream op.
-#[inline]
-pub(crate) fn row_stream_op_numeric_reducer(
-    op: BuiltinRowStreamOp,
-) -> Option<BuiltinNumericReducer> {
-    op.numeric_reducer()
-}
-
-/// Return the predicate sink represented by a terminal row-stream op.
-#[inline]
-pub(crate) fn row_stream_op_predicate_sink(
-    op: BuiltinRowStreamOp,
-) -> Option<BuiltinPredicateSink> {
-    op.predicate_sink()
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
@@ -1548,7 +1487,7 @@ mod tests {
     use super::*;
     use crate::builtins::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator,
+        BuiltinRowStreamArg, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     };
 
     #[test]
@@ -2061,7 +2000,7 @@ mod tests {
             );
             assert_eq!(row_stream_op(id), Some(reducer.row_stream_op()), "{method:?}");
             assert_eq!(
-                row_stream_op(id).map(row_stream_op_arg),
+                row_stream_op(id).map(BuiltinRowStreamOp::arg),
                 Some(BuiltinRowStreamArg::None),
                 "{method:?}"
             );
@@ -3985,10 +3924,10 @@ mod tests {
             row_stream_op(BuiltinId::from_method(BuiltinMethod::Sort)),
             None
         );
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Last));
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Count));
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Any));
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::FindOne));
+        assert!(BuiltinRowStreamOp::Last.is_terminal());
+        assert!(BuiltinRowStreamOp::Count.is_terminal());
+        assert!(BuiltinRowStreamOp::Any.is_terminal());
+        assert!(BuiltinRowStreamOp::FindOne.is_terminal());
         assert_eq!(
             numeric_reducer(BuiltinId::from_method(BuiltinMethod::Sum)),
             Some(BuiltinNumericReducer::Sum)
@@ -4005,55 +3944,47 @@ mod tests {
             numeric_reducer(BuiltinId::from_method(BuiltinMethod::Max)),
             Some(BuiltinNumericReducer::Max)
         );
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Sum));
-        assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Max));
+        assert!(BuiltinRowStreamOp::Sum.is_terminal());
+        assert!(BuiltinRowStreamOp::Max.is_terminal());
         assert_eq!(
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Sum),
+            BuiltinRowStreamOp::Sum.numeric_reducer(),
             Some(BuiltinNumericReducer::Sum)
         );
         assert_eq!(
-            BuiltinRowStreamOp::Sum.numeric_reducer(),
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Sum)
-        );
-        assert_eq!(
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Avg),
+            BuiltinRowStreamOp::Avg.numeric_reducer(),
             Some(BuiltinNumericReducer::Avg)
         );
         assert_eq!(
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Min),
+            BuiltinRowStreamOp::Min.numeric_reducer(),
             Some(BuiltinNumericReducer::Min)
         );
         assert_eq!(
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Max),
+            BuiltinRowStreamOp::Max.numeric_reducer(),
             Some(BuiltinNumericReducer::Max)
         );
         assert_eq!(
-            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Count),
+            BuiltinRowStreamOp::Count.numeric_reducer(),
             None
-        );
-        assert_eq!(
-            row_stream_op_predicate_sink(BuiltinRowStreamOp::Any),
-            Some(BuiltinPredicateSink::Any)
         );
         assert_eq!(
             BuiltinRowStreamOp::Any.predicate_sink(),
-            row_stream_op_predicate_sink(BuiltinRowStreamOp::Any)
+            Some(BuiltinPredicateSink::Any)
         );
         assert_eq!(
-            row_stream_op_predicate_sink(BuiltinRowStreamOp::All),
+            BuiltinRowStreamOp::All.predicate_sink(),
             Some(BuiltinPredicateSink::All)
         );
         assert_eq!(
-            row_stream_op_predicate_sink(BuiltinRowStreamOp::FindOne),
+            BuiltinRowStreamOp::FindOne.predicate_sink(),
             Some(BuiltinPredicateSink::FindOne)
         );
         assert_eq!(
-            row_stream_op_predicate_sink(BuiltinRowStreamOp::Filter),
+            BuiltinRowStreamOp::Filter.predicate_sink(),
             None
         );
         assert_eq!(numeric_reducer(BuiltinId::from_method(BuiltinMethod::Map)), None);
-        assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::FindFirst));
-        assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::Map));
+        assert!(!BuiltinRowStreamOp::FindFirst.is_terminal());
+        assert!(!BuiltinRowStreamOp::Map.is_terminal());
     }
 
     #[test]
@@ -4077,7 +4008,7 @@ mod tests {
                 );
             }
 
-            if row_stream_op_is_terminal(op) {
+            if op.is_terminal() {
                 let spec = method.spec();
                 assert!(
                     spec.sink.is_some()
@@ -4127,7 +4058,7 @@ mod tests {
             let Some(op) = row_stream_op(id) else {
                 continue;
             };
-            let arity = match row_stream_op_arg(op) {
+            let arity = match op.arg() {
                 BuiltinRowStreamArg::None => 0,
                 BuiltinRowStreamArg::Expr | BuiltinRowStreamArg::Usize => 1,
             };
@@ -4136,7 +4067,7 @@ mod tests {
                 pipeline_accepts_arity(id, arity, true),
                 "{method:?} row-stream op {op:?} arity {arity} is not accepted by pipeline metadata"
             );
-            if row_stream_op_arg(op) == BuiltinRowStreamArg::Expr {
+            if op.arg() == BuiltinRowStreamArg::Expr {
                 assert!(
                     accepts_lambda_arg(id),
                     "{method:?} row-stream op {op:?} requires an expression but is not lambda-capable"
@@ -4183,7 +4114,7 @@ mod tests {
                 | BuiltinRowStreamOp::Map => BuiltinRowStreamArg::Expr,
                 BuiltinRowStreamOp::Take => BuiltinRowStreamArg::Usize,
             };
-            assert_eq!(row_stream_op_arg(op), expected_arg, "{op:?}");
+            assert_eq!(op.arg(), expected_arg, "{op:?}");
             let expected_terminal = matches!(
                 op,
                 BuiltinRowStreamOp::Last
@@ -4196,28 +4127,28 @@ mod tests {
                     | BuiltinRowStreamOp::All
                     | BuiltinRowStreamOp::FindOne
             );
-            assert_eq!(row_stream_op_is_terminal(op), expected_terminal, "{op:?}");
+            assert_eq!(op.is_terminal(), expected_terminal, "{op:?}");
             let expected_blocks_parallel = matches!(
                 op,
                 BuiltinRowStreamOp::DistinctBy | BuiltinRowStreamOp::Last
             );
             assert_eq!(
-                row_stream_op_blocks_parallel_partitioning(op),
+                op.blocks_parallel_partitioning(),
                 expected_blocks_parallel,
                 "{op:?}"
             );
             assert_eq!(
-                row_stream_op_is_filter_like(op),
+                op.is_filter_like(),
                 matches!(op, BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst),
                 "{op:?}"
             );
             assert_eq!(
-                row_stream_op_is_projector(op),
+                op.is_projector(),
                 matches!(op, BuiltinRowStreamOp::Map),
                 "{op:?}"
             );
             assert_eq!(
-                row_stream_op_is_row_selection(op),
+                op.is_row_selection(),
                 matches!(
                     op,
                     BuiltinRowStreamOp::Filter
@@ -4227,7 +4158,7 @@ mod tests {
                 "{op:?}"
             );
             assert_eq!(
-                row_stream_op_preserves_order_before_limit(op),
+                op.preserves_order_before_limit(),
                 matches!(
                     op,
                     BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst | BuiltinRowStreamOp::Map
