@@ -754,13 +754,9 @@ impl Builtin for Count {
 
 /// HyperLogLog-style approximate distinct count.
 ///
-/// Backed by a register-array HyperLogLog estimator with 14-bit precision
-/// (≈16 KiB state). Hashes each element via `val_to_key` + 64-bit FNV; the
-/// algorithm is the canonical small-range corrected HLL, matching the
-/// classic Flajolet et al. error bound (~1.04 / sqrt(2^14) ≈ 0.81% RSE).
-/// Returns `Val::Int(estimate)`. For small arrays (< 16 distinct values)
-/// the linear-counting correction makes the estimate exact, so simple
-/// inputs converge to the same answer as `.unique().count()`.
+/// Backed by the shared small-range-corrected HyperLogLog estimator used by
+/// buffered, pipeline, and view/tape execution. Tiny inputs remain exact while
+/// large streams keep a fixed-size register array.
 pub(crate) struct ApproxCountDistinct;
 impl Builtin for ApproxCountDistinct {
     const METHOD: BuiltinMethod = BuiltinMethod::ApproxCountDistinct;

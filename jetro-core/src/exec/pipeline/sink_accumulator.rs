@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use crate::{
     builtins::{
-        BuiltinMembershipSink, BuiltinPredicateSink, BuiltinSelectionPosition,
+        ops::approx_distinct::Hll, BuiltinMembershipSink, BuiltinPredicateSink, BuiltinSelectionPosition,
         BuiltinSinkAccumulator,
     },
     data::{context::EvalError, value::Val},
@@ -42,7 +42,7 @@ pub(crate) struct SinkAccumulator<'a> {
     arg_extreme_key: Option<Val>,
     arg_extreme_value: Option<Val>,
     // HyperLogLog register array for approximate-distinct-count sinks
-    hll: [u8; HLL_M],
+    hll: Hll,
 }
 
 impl<'a> SinkAccumulator<'a> {
@@ -67,7 +67,7 @@ impl<'a> SinkAccumulator<'a> {
             membership_indices: Vec::new(),
             arg_extreme_key: None,
             arg_extreme_value: None,
-            hll: [0; HLL_M],
+            hll: Hll::new(),
         }
     }
 
@@ -401,12 +401,12 @@ impl<'a> SinkAccumulator<'a> {
 
     /// Hashes `item` into the HyperLogLog registers for cardinality estimation.
     pub(crate) fn observe_approx_distinct(&mut self, item: &Val) {
-        hll_observe(&mut self.hll, item);
+        self.hll.observe_val(item);
     }
 
     /// Hashes a pre-serialised string key into the HyperLogLog registers.
     pub(crate) fn observe_approx_distinct_key(&mut self, key: &str) {
-        hll_observe_key(&mut self.hll, key);
+        self.hll.observe_key(key);
     }
 
     /// Feeds an already-projected numeric value directly into the reducer, skipping re-evaluation.
@@ -434,7 +434,7 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
-            Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            Sink::ApproxCountDistinct => Val::Int(self.hll.estimate() as i64),
             Sink::Predicate(spec) => match spec.op {
                 BuiltinPredicateSink::Any => Val::Bool(self.predicate_matched.is_some()),
                 BuiltinPredicateSink::All => Val::Bool(self.predicate_all),
@@ -483,7 +483,7 @@ impl<'a> SinkAccumulator<'a> {
                 .reducer
                 .expect("reducer sinks construct reducer")
                 .finish(),
-            BuiltinSinkAccumulator::ApproxDistinct => Val::Int(hll_estimate(&self.hll) as i64),
+            BuiltinSinkAccumulator::ApproxDistinct => Val::Int(self.hll.estimate() as i64),
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
                 self.first.unwrap_or(Val::Null)
             }
@@ -492,57 +492,6 @@ impl<'a> SinkAccumulator<'a> {
             }
         }
     }
-}
-
-// HyperLogLog precision: 2^12 = 4096 registers
-const HLL_P: u32 = 12;
-const HLL_M: usize = 1 << HLL_P;
-
-// process-stable random state seeded once at startup
-#[inline]
-fn hll_hash_key(key: &str) -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    static STATE: std::sync::OnceLock<RandomState> = std::sync::OnceLock::new();
-    let bs = STATE.get_or_init(RandomState::new);
-    let mut h = bs.build_hasher();
-    h.write(key.as_bytes());
-    h.finish()
-}
-
-fn hll_observe(reg: &mut [u8; HLL_M], v: &Val) {
-    use crate::util::val_to_key;
-    hll_observe_key(reg, &val_to_key(v));
-}
-
-fn hll_observe_key(reg: &mut [u8; HLL_M], key: &str) {
-    let h = hll_hash_key(key);
-    let idx = (h >> (64 - HLL_P)) as usize;
-    let w = (h << HLL_P) | (1u64 << (HLL_P - 1));
-    let lz = w.leading_zeros() as u8 + 1;
-    if lz > reg[idx] {
-        reg[idx] = lz;
-    }
-}
-
-// applies small-range linear counting correction when many registers are zero
-fn hll_estimate(reg: &[u8; HLL_M]) -> f64 {
-    let mut z: f64 = 0.0;
-    let mut zeros: usize = 0;
-    for &r in reg.iter() {
-        z += 1.0 / (1u64 << r) as f64;
-        if r == 0 {
-            zeros += 1;
-        }
-    }
-    let m = HLL_M as f64;
-    let alpha_m = 0.7213 / (1.0 + 1.079 / m);
-    let raw = alpha_m * m * m / z;
-    if raw <= 2.5 * m && zeros > 0 {
-        return m * (m / zeros as f64).ln();
-    }
-    raw
 }
 
 #[cfg(test)]

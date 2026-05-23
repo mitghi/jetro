@@ -5,6 +5,7 @@
 //! misc). The trait-based dispatch tables in `defs.rs` call into these helpers
 //! via static dispatch.
 
+pub(crate) mod approx_distinct;
 pub mod array;
 pub mod collection;
 pub mod misc;
