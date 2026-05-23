@@ -512,7 +512,7 @@ pub(super) fn direct_cmp_literal_predicate(
     let NdjsonDirectPredicate::Binary { lhs, op, rhs } = predicate else {
         return None;
     };
-    if !is_direct_cmp_op(*op) {
+    if !op.is_scalar_comparison() {
         return None;
     }
     match (lhs.as_ref(), rhs.as_ref()) {
@@ -520,7 +520,7 @@ pub(super) fn direct_cmp_literal_predicate(
             Some((steps.clone(), *op, lit.clone()))
         }
         (NdjsonDirectPredicate::Literal(lit), NdjsonDirectPredicate::Path(steps)) => {
-            Some((steps.clone(), flip_cmp_op(*op)?, lit.clone()))
+            Some((steps.clone(), op.flipped_comparison()?, lit.clone()))
         }
         _ => None,
     }
@@ -959,14 +959,14 @@ fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredic
                 rhs: Box::new(direct_item_predicate_from_expr(rhs)?),
             })
         }
-        Expr::BinOp(lhs, op, rhs) if is_direct_cmp_op(*op) => {
+        Expr::BinOp(lhs, op, rhs) if op.is_scalar_comparison() => {
             if let (Some(lhs), Some(lit)) = (direct_item_path_expr(lhs), literal_val_expr(rhs)) {
                 return Some(NdjsonDirectItemPredicate::CmpLit { lhs, op: *op, lit });
             }
             if let (Some(lit), Some(lhs)) = (literal_val_expr(lhs), direct_item_path_expr(rhs)) {
                 return Some(NdjsonDirectItemPredicate::CmpLit {
                     lhs,
-                    op: flip_cmp_op(*op)?,
+                    op: op.flipped_comparison()?,
                     lit,
                 });
             }
@@ -1015,25 +1015,6 @@ fn literal_val_expr(expr: &Expr) -> Option<Val> {
         Expr::Str(value) => Some(Val::Str(Arc::from(value.as_str()))),
         _ => None,
     }
-}
-
-fn is_direct_cmp_op(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte
-    )
-}
-
-fn flip_cmp_op(op: BinOp) -> Option<BinOp> {
-    Some(match op {
-        BinOp::Eq => BinOp::Eq,
-        BinOp::Neq => BinOp::Neq,
-        BinOp::Lt => BinOp::Gt,
-        BinOp::Lte => BinOp::Gte,
-        BinOp::Gt => BinOp::Lt,
-        BinOp::Gte => BinOp::Lte,
-        _ => return None,
-    })
 }
 
 fn item_predicate_guarantees_object_match(predicate: &NdjsonDirectItemPredicate) -> bool {

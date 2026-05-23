@@ -585,7 +585,7 @@ impl BodyKernel {
                     flatten_or_kernel(lhs, &mut predicates);
                     flatten_or_kernel(rhs, &mut predicates);
                     Self::Or(predicates.into())
-                } else if is_comparison_op(*op) {
+                } else if op.is_predicate_comparison() {
                     match literal_kernel_value(&rhs) {
                         Some(lit) => Self::CmpLit {
                             lhs: Box::new(lhs),
@@ -1087,20 +1087,6 @@ impl BodyKernel {
         }
         Self::Generic
     }
-}
-
-#[inline]
-fn is_comparison_op(op: crate::parse::ast::BinOp) -> bool {
-    matches!(
-        op,
-        crate::parse::ast::BinOp::Eq
-            | crate::parse::ast::BinOp::Neq
-            | crate::parse::ast::BinOp::Lt
-            | crate::parse::ast::BinOp::Lte
-            | crate::parse::ast::BinOp::Gt
-            | crate::parse::ast::BinOp::Gte
-            | crate::parse::ast::BinOp::Fuzzy
-    )
 }
 
 fn literal_kernel_value(kernel: &BodyKernel) -> Option<Val> {
@@ -2656,6 +2642,7 @@ mod tests {
     use crate::compile::compiler::Compiler;
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
+    use crate::parse::ast::BinOp;
     use crate::parse::parser::parse;
 
     use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
@@ -2696,6 +2683,17 @@ mod tests {
             ViewKernelValue::Owned(value) => Some(value),
             ViewKernelValue::View(view) => Some(view.materialize()),
         }
+    }
+
+    #[test]
+    fn binop_reports_shared_comparison_metadata() {
+        assert!(BinOp::Eq.is_scalar_comparison());
+        assert!(BinOp::Gte.is_scalar_comparison());
+        assert!(!BinOp::Fuzzy.is_scalar_comparison());
+        assert!(BinOp::Fuzzy.is_predicate_comparison());
+        assert_eq!(BinOp::Lt.flipped_comparison(), Some(BinOp::Gt));
+        assert_eq!(BinOp::Lte.flipped_comparison(), Some(BinOp::Gte));
+        assert_eq!(BinOp::Add.flipped_comparison(), None);
     }
 
     fn field_paths(kernel: &BodyKernel) -> Vec<String> {

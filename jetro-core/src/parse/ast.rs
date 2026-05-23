@@ -497,6 +497,37 @@ pub enum BinOp {
     Or,
 }
 
+impl BinOp {
+    /// JSON scalar comparisons supported by direct byte/tape predicate paths.
+    #[inline]
+    pub(crate) const fn is_scalar_comparison(self) -> bool {
+        matches!(
+            self,
+            Self::Eq | Self::Neq | Self::Lt | Self::Lte | Self::Gt | Self::Gte
+        )
+    }
+
+    /// Predicate comparisons accepted by row-local kernels.
+    #[inline]
+    pub(crate) const fn is_predicate_comparison(self) -> bool {
+        self.is_scalar_comparison() || matches!(self, Self::Fuzzy)
+    }
+
+    /// Return the equivalent comparison when the left and right operands are swapped.
+    #[inline]
+    pub(crate) const fn flipped_comparison(self) -> Option<Self> {
+        Some(match self {
+            Self::Eq => Self::Eq,
+            Self::Neq => Self::Neq,
+            Self::Lt => Self::Gt,
+            Self::Lte => Self::Gte,
+            Self::Gt => Self::Lt,
+            Self::Gte => Self::Lte,
+            _ => return None,
+        })
+    }
+}
+
 /// Runtime type tag used with `is` / `is not` kind-check expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KindType {
