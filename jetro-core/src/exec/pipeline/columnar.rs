@@ -77,28 +77,6 @@ fn stage_program<'a>(
     stage.body_program()
 }
 
-fn is_count_sink(sink: &Sink) -> bool {
-    matches!(sink, Sink::Reducer(spec) if spec.is_plain_count())
-}
-
-fn identity_numeric_sink(sink: &Sink) -> Option<NumOp> {
-    match sink {
-        Sink::Reducer(spec) if spec.predicate.is_none() && spec.projection.is_none() => {
-            spec.numeric_op()
-        }
-        _ => None,
-    }
-}
-
-fn projected_numeric_sink(sink: &Sink) -> Option<(&crate::vm::Program, NumOp)> {
-    match sink {
-        Sink::Reducer(spec) if spec.predicate.is_none() => {
-            Some((spec.projection.as_ref()?.as_ref(), spec.numeric_op()?))
-        }
-        _ => None,
-    }
-}
-
 fn single_stage_program<'a>(
     stages: &'a [Stage],
     kind: BuiltinColumnarStage,
@@ -288,7 +266,7 @@ impl Pipeline {
                     }
                     return Some(Ok(Val::int_vec(out)));
                 }
-                (Val::IntVec(a), sink) if is_count_sink(sink) => {
+                (Val::IntVec(a), sink) if sink.is_plain_count_reducer() => {
                     let mut c = 0i64;
                     for n in a.iter() {
                         let v = Val::Int(*n);
@@ -308,7 +286,7 @@ impl Pipeline {
                     }
                     return Some(Ok(Val::float_vec(out)));
                 }
-                (Val::FloatVec(a), sink) if is_count_sink(sink) => {
+                (Val::FloatVec(a), sink) if sink.is_plain_count_reducer() => {
                     let mut c = 0i64;
                     for f in a.iter() {
                         let v = Val::Float(*f);
@@ -532,10 +510,10 @@ impl Pipeline {
 
         if self.stages.is_empty() {
             match (&recv, &self.sink) {
-                (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
+                (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Sum) => {
                     return Some(Ok(Val::Int(a.iter().sum())))
                 }
-                (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Min) => {
+                (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Min) => {
                     return Some(Ok(a
                         .iter()
                         .copied()
@@ -543,7 +521,7 @@ impl Pipeline {
                         .map(Val::Int)
                         .unwrap_or(Val::Null)))
                 }
-                (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Max) => {
+                (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Max) => {
                     return Some(Ok(a
                         .iter()
                         .copied()
@@ -551,19 +529,19 @@ impl Pipeline {
                         .map(Val::Int)
                         .unwrap_or(Val::Null)))
                 }
-                (Val::IntVec(a), sink) if is_count_sink(sink) => {
+                (Val::IntVec(a), sink) if sink.is_plain_count_reducer() => {
                     return Some(Ok(Val::Int(a.len() as i64)))
                 }
-                (Val::FloatVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
+                (Val::FloatVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Sum) => {
                     return Some(Ok(Val::Float(a.iter().sum())))
                 }
-                (Val::FloatVec(a), sink) if is_count_sink(sink) => {
+                (Val::FloatVec(a), sink) if sink.is_plain_count_reducer() => {
                     return Some(Ok(Val::Int(a.len() as i64)))
                 }
-                (Val::StrVec(a), sink) if is_count_sink(sink) => {
+                (Val::StrVec(a), sink) if sink.is_plain_count_reducer() => {
                     return Some(Ok(Val::Int(a.len() as i64)))
                 }
-                (Val::StrSliceVec(a), sink) if is_count_sink(sink) => {
+                (Val::StrSliceVec(a), sink) if sink.is_plain_count_reducer() => {
                     return Some(Ok(Val::Int(a.len() as i64)))
                 }
                 _ => {}
@@ -573,7 +551,7 @@ impl Pipeline {
         if let Val::ObjVec(d) = &recv {
             let (cs, _ck, csink) = self.canonical();
 
-            if is_count_sink(&csink) {
+            if csink.is_plain_count_reducer() {
                 if let Some(prog) = single_stage_program(&cs, BuiltinColumnarStage::FlatMap) {
                     if let Some(field) = single_field_prog(prog) {
                         if let Some(slot) = d.slot_of(field) {
@@ -583,7 +561,7 @@ impl Pipeline {
                 }
             }
 
-            if let Some((project, op)) = projected_numeric_sink(&csink) {
+            if let Some((project, op)) = csink.projected_numeric_reducer() {
                 let mf = single_field_prog(project)?;
                 let sm = d.slot_of(mf)?;
                 if cs.is_empty() {
@@ -595,7 +573,7 @@ impl Pipeline {
                     return Some(Ok(objvec_filter_num_slots(d, sp, cop, &lit, sm, op)));
                 }
             }
-            if let Some(op) = identity_numeric_sink(&csink) {
+            if let Some(op) = csink.identity_numeric_reducer() {
                 if let Some(prog) = single_stage_program(&cs, BuiltinColumnarStage::Map) {
                     let field = single_field_prog(prog)?;
                     let slot = d.slot_of(field)?;
@@ -612,7 +590,7 @@ impl Pipeline {
                 }
             }
 
-            if is_count_sink(&csink) {
+            if csink.is_plain_count_reducer() {
                 if let Some(pred) = single_stage_program(&cs, BuiltinColumnarStage::Filter) {
                     if let Some((pf, op, lit)) = single_cmp_prog(pred) {
                         let sp = d.slot_of(pf)?;
@@ -648,10 +626,10 @@ impl Pipeline {
         };
 
         match (&recv, &self.sink) {
-            (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
+            (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Sum) => {
                 return Some(Ok(Val::Int(a.iter().sum())))
             }
-            (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Min) => {
+            (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Min) => {
                 return Some(Ok(a
                     .iter()
                     .copied()
@@ -659,7 +637,7 @@ impl Pipeline {
                     .map(Val::Int)
                     .unwrap_or(Val::Null)))
             }
-            (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Max) => {
+            (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Max) => {
                 return Some(Ok(a
                     .iter()
                     .copied()
@@ -667,47 +645,47 @@ impl Pipeline {
                     .map(Val::Int)
                     .unwrap_or(Val::Null)))
             }
-            (Val::IntVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Avg) => {
+            (Val::IntVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Avg) => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let s: i64 = a.iter().sum();
                 return Some(Ok(Val::Float(s as f64 / a.len() as f64)));
             }
-            (Val::IntVec(a), sink) if is_count_sink(sink) => {
+            (Val::IntVec(a), sink) if sink.is_plain_count_reducer() => {
                 return Some(Ok(Val::Int(a.len() as i64)))
             }
-            (Val::FloatVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Sum) => {
+            (Val::FloatVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Sum) => {
                 return Some(Ok(Val::Float(a.iter().sum())))
             }
-            (Val::FloatVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Min) => {
+            (Val::FloatVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Min) => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let m = a.iter().copied().fold(f64::INFINITY, f64::min);
                 return Some(Ok(Val::Float(m)));
             }
-            (Val::FloatVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Max) => {
+            (Val::FloatVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Max) => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let m = a.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 return Some(Ok(Val::Float(m)));
             }
-            (Val::FloatVec(a), sink) if identity_numeric_sink(sink) == Some(NumOp::Avg) => {
+            (Val::FloatVec(a), sink) if sink.identity_numeric_reducer() == Some(NumOp::Avg) => {
                 if a.is_empty() {
                     return Some(Ok(Val::Null));
                 }
                 let s: f64 = a.iter().sum();
                 return Some(Ok(Val::Float(s / a.len() as f64)));
             }
-            (Val::FloatVec(a), sink) if is_count_sink(sink) => {
+            (Val::FloatVec(a), sink) if sink.is_plain_count_reducer() => {
                 return Some(Ok(Val::Int(a.len() as i64)))
             }
-            (Val::StrVec(a), sink) if is_count_sink(sink) => {
+            (Val::StrVec(a), sink) if sink.is_plain_count_reducer() => {
                 return Some(Ok(Val::Int(a.len() as i64)))
             }
-            (Val::StrSliceVec(a), sink) if is_count_sink(sink) => {
+            (Val::StrSliceVec(a), sink) if sink.is_plain_count_reducer() => {
                 return Some(Ok(Val::Int(a.len() as i64)))
             }
             _ => {}

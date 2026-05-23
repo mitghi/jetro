@@ -207,6 +207,34 @@ impl Sink {
         .then_some(Sink::ApproxCountDistinct)
     }
 
+    /// Returns true when this sink is a plain count reducer with no predicate or projection.
+    #[inline]
+    pub(crate) fn is_plain_count_reducer(&self) -> bool {
+        matches!(self, Sink::Reducer(spec) if spec.is_plain_count())
+    }
+
+    /// Returns a no-predicate/no-projection numeric reducer operation.
+    #[inline]
+    pub(crate) fn identity_numeric_reducer(&self) -> Option<super::NumOp> {
+        match self {
+            Sink::Reducer(spec) if spec.predicate.is_none() && spec.projection.is_none() => {
+                spec.numeric_op()
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns a projection-only numeric reducer operation.
+    #[inline]
+    pub(crate) fn projected_numeric_reducer(&self) -> Option<(&Program, super::NumOp)> {
+        match self {
+            Sink::Reducer(spec) if spec.predicate.is_none() => {
+                Some((spec.projection.as_ref()?.as_ref(), spec.numeric_op()?))
+            }
+            _ => None,
+        }
+    }
+
     /// Build a numeric reducer from builtin metadata and an optional projection program.
     pub(crate) fn numeric_builtin(
         method: BuiltinMethod,
@@ -2009,6 +2037,34 @@ mod tests {
             Some(Sink::ApproxCountDistinct)
         ));
         assert!(Sink::approx_distinct_builtin(BuiltinMethod::Count).is_none());
+    }
+
+    #[test]
+    fn sink_reducer_accessors_are_shared_execution_metadata() {
+        let count = Sink::count_builtin(BuiltinMethod::Count).unwrap();
+        assert!(count.is_plain_count_reducer());
+        assert_eq!(count.identity_numeric_reducer(), None);
+        assert!(count.projected_numeric_reducer().is_none());
+
+        let sum = Sink::numeric_builtin(BuiltinMethod::Sum, None, None).unwrap();
+        assert!(!sum.is_plain_count_reducer());
+        assert_eq!(
+            sum.identity_numeric_reducer(),
+            Some(crate::exec::pipeline::NumOp::Sum)
+        );
+        assert!(sum.projected_numeric_reducer().is_none());
+
+        let projection = empty_program();
+        let projected =
+            Sink::numeric_builtin(BuiltinMethod::Max, Some(projection.clone()), None).unwrap();
+        assert_eq!(projected.identity_numeric_reducer(), None);
+        let (reported_projection, op) = projected.projected_numeric_reducer().unwrap();
+        assert!(std::ptr::eq(reported_projection, projection.as_ref()));
+        assert_eq!(op, crate::exec::pipeline::NumOp::Max);
+
+        let predicate_count =
+            Sink::count_predicate_builtin(BuiltinMethod::Count, empty_program(), None).unwrap();
+        assert!(!predicate_count.is_plain_count_reducer());
     }
 
     #[test]
