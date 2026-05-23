@@ -296,33 +296,9 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             ))
         }
         PlanNode::Pipeline {
-            source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
+            source,
             body,
-        } if plain_sink_direct_raw_json_scalar_call(body).is_some() && keys.len() == 1 => {
-            Some(NdjsonDirectBytePlan::Expr(
-                NdjsonDirectByteExpr::ScalarCall {
-                    value: Box::new(NdjsonDirectByteExpr::Path(vec![PhysicalPathStep::Field(
-                        keys[0].clone(),
-                    )])),
-                    call: plain_sink_direct_raw_json_scalar_call(body)?,
-                },
-            ))
-        }
-        PlanNode::Pipeline {
-            source: crate::ir::physical::PipelinePlanSource::Expr(source),
-            body,
-        } if plain_sink_direct_raw_json_scalar_call(body).is_some() => {
-            let steps = root_path_steps(&plan, *source)?;
-            if !byte_path_has_root_field(&steps) {
-                return None;
-            }
-            Some(NdjsonDirectBytePlan::Expr(
-                NdjsonDirectByteExpr::ScalarCall {
-                    value: Box::new(NdjsonDirectByteExpr::Path(steps)),
-                    call: plain_sink_direct_raw_json_scalar_call(body)?,
-                },
-            ))
-        }
+        } => direct_byte_plain_sink_pipeline_plan(plan, source, body),
         _ => {
             if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
                 if !byte_path_has_root_field(&source_steps) {
@@ -339,6 +315,24 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             None
         }
     }
+}
+
+fn direct_byte_plain_sink_pipeline_plan(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectBytePlan> {
+    let call = plain_sink_direct_raw_json_scalar_call(body)?;
+    let steps = pipeline_source_to_steps(plan, source)?;
+    if !byte_path_has_root_field(&steps) {
+        return None;
+    }
+    Some(NdjsonDirectBytePlan::Expr(
+        NdjsonDirectByteExpr::ScalarCall {
+            value: Box::new(NdjsonDirectByteExpr::Path(steps)),
+            call,
+        },
+    ))
 }
 
 fn byte_path_has_root_field(steps: &[PhysicalPathStep]) -> bool {
@@ -1586,6 +1580,13 @@ mod tests {
         let engine = JetroEngine::new();
         assert_eq!(
             direct_writer_plan_kind(&engine, "$.attributes.count()"),
+            Some((
+                Some(NdjsonDirectPlanKind::ByteExpr),
+                NdjsonDirectPlanKind::TapeScalarCall,
+            ))
+        );
+        assert_eq!(
+            direct_writer_plan_kind(&engine, "$.meta.attributes.count()"),
             Some((
                 Some(NdjsonDirectPlanKind::ByteExpr),
                 NdjsonDirectPlanKind::TapeScalarCall,
