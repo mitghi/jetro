@@ -2073,4 +2073,39 @@ mod tests {
         assert!(!body.can_run_with_materialized_receiver());
         assert!(!body.suffix_can_run_with_materialized_receiver(0));
     }
+
+    #[test]
+    fn materialized_receiver_accepts_receiver_local_match_bodies() {
+        let expr = crate::parse::parser::parse(
+            r#"match @ with {
+                {kind: "click", x: x} -> {kind: "click", x: x},
+                {tags: [first, ...rest]} -> rest.last(),
+                _ -> null
+            }"#,
+        )
+        .unwrap();
+        let program = crate::exec::pipeline::compile_pipeline_expr_body(&expr);
+        let map = Stage::expr_stage_builtin(BuiltinMethod::Map, program).unwrap();
+        let body = PipelineBody::planned(vec![map], vec![Some(Arc::new(expr))], Sink::Collect);
+
+        assert!(body.can_run_with_materialized_receiver());
+        assert!(body.suffix_can_run_with_materialized_receiver(0));
+    }
+
+    #[test]
+    fn materialized_receiver_rejects_root_dependent_match_bodies() {
+        let expr = crate::parse::parser::parse(
+            r#"match $ with {
+                {meta: {mode: "test"}} -> @.id,
+                _ -> null
+            }"#,
+        )
+        .unwrap();
+        let program = crate::exec::pipeline::compile_pipeline_expr_body(&expr);
+        let map = Stage::expr_stage_builtin(BuiltinMethod::Map, program).unwrap();
+        let body = PipelineBody::planned(vec![map], vec![Some(Arc::new(expr))], Sink::Collect);
+
+        assert!(!body.can_run_with_materialized_receiver());
+        assert!(!body.suffix_can_run_with_materialized_receiver(0));
+    }
 }
