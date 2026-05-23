@@ -2976,6 +2976,75 @@ mod tests {
     }
 
     #[test]
+    fn registry_direct_view_call_contracts_are_safe() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+
+            for args in [
+                BuiltinArgs::None,
+                BuiltinArgs::Str(Arc::from("x")),
+                BuiltinArgs::StrVec(vec![Arc::from("x"), Arc::from("y")]),
+            ] {
+                let Some(call) = direct_view_call(id, &args) else {
+                    continue;
+                };
+
+                assert!(spec.pure, "{method:?} direct view calls must be pure");
+                assert!(
+                    spec.view_native,
+                    "{method:?} direct view calls must be view-native"
+                );
+                assert_eq!(
+                    pipeline_materialization(id),
+                    BuiltinPipelineMaterialization::Streaming,
+                    "{method:?} direct view calls must not force materialization"
+                );
+
+                match call {
+                    BuiltinDirectViewCall::ScalarValue => {
+                        assert!(
+                            view_scalar_value_projection(id),
+                            "{method:?} scalar direct view call must be a scalar value projection"
+                        );
+                        assert!(
+                            view_projection_returns_owned(id, &args),
+                            "{method:?} scalar direct view calls must return owned values"
+                        );
+                        assert!(
+                            !view_object_items_projection(id),
+                            "{method:?} scalar direct view calls must not enumerate object items"
+                        );
+                    }
+                    BuiltinDirectViewCall::ObjectItems(projection) => {
+                        assert!(
+                            matches!(args, BuiltinArgs::None),
+                            "{method:?} object item direct view calls must be nullary"
+                        );
+                        assert_eq!(
+                            view_object_projection(id),
+                            Some(projection),
+                            "{method:?} object item direct view call must match object projection metadata"
+                        );
+                        assert!(
+                            projection.is_item_projection(),
+                            "{method:?} direct object call must enumerate object items"
+                        );
+                        assert!(
+                            view_projection_returns_owned(id, &args),
+                            "{method:?} object item direct view calls must return owned values"
+                        );
+                        assert!(
+                            !view_scalar_value_projection(id),
+                            "{method:?} object item direct view calls must not be scalar value projections"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn registry_view_capabilities_are_consistent() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
