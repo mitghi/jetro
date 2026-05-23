@@ -4265,9 +4265,11 @@ not-json
             ("$.name", ByteExpr),
             ("$.a.b.c", ByteExpr),
             ("$.name.trim()", Tape),
+            (r#"{name: $.name.trim()}"#, Tape),
             (r#"{test: $.a.b.c, b: $.a.b}"#, ByteWritableTape),
             (r#"[$.id, $.name]"#, ByteWritableTape),
             ("$.attributes.map(@.key)", ByteWritableTape),
+            ("$.attributes.map(@.key.trim())", Tape),
             (
                 "$.attributes.map({k: @.key, code: @.meta.code.upper()})",
                 ByteWritableTape,
@@ -4620,6 +4622,15 @@ not-json
             let expected: serde_json::Value =
                 serde_json::from_str(&engine_value.to_string()).unwrap();
             assert_eq!(direct, expected, "{query}");
+        }
+
+        for query in ["$.name.trim()", r#"{name: $.name.trim()}"#] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct tape plan"));
+            assert!(
+                !super::tape_plan_can_write_byte_row(&plan),
+                "{query} should stay on the tape writer because trim has no raw-byte scalar"
+            );
         }
 
         for query in ["$.meta.keys()", "$.meta.values()", "$.meta.entries()"] {
