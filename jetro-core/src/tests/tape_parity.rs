@@ -45,6 +45,49 @@ fn tape_matches_vm_for_borrowed_object_helpers() {
 }
 
 #[test]
+fn tape_matches_vm_for_object_lambda_helpers() {
+    let doc = json!({
+        "profiles": [
+            {
+                "id": 1,
+                "settings": {
+                    "theme": "dark",
+                    "score": 10,
+                    "_debug": true,
+                    "feature_a": "on"
+                }
+            },
+            {
+                "id": 2,
+                "settings": {
+                    "theme": "light",
+                    "score": 20,
+                    "_debug": null,
+                    "feature_b": "off"
+                }
+            },
+            {
+                "id": 3,
+                "settings": {
+                    "theme": "dark",
+                    "score": 30,
+                    "feature_c": "on"
+                }
+            }
+        ]
+    });
+    for query in [
+        "$.profiles.map(settings.transform_keys(k => k.upper())).last()",
+        "$.profiles.map(settings.transform_values(v => v.to_string())).first()",
+        "$.profiles.map(settings.filter_keys(k => not k.starts_with(\"_\"))).last()",
+        "$.profiles.map(settings.filter_values(v => v != null)).take(2)",
+        "$.profiles.filter(settings.filter_keys(k => k.starts_with(\"feature\")).len() > 0).map(id)",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_bounded_projection_and_reducers() {
     let doc = json!({
         "books": [
