@@ -2042,6 +2042,33 @@ mod tests {
     }
 
     #[test]
+    fn registry_numeric_reducers_have_complete_sink_contracts() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(reducer) = numeric_reducer(id) else {
+                continue;
+            };
+            let sink = builtin_sink(id).unwrap_or_else(|| {
+                panic!("{method:?} numeric reducer must expose sink metadata")
+            });
+
+            assert_eq!(reducer.method(), method, "{method:?}");
+            assert_eq!(sink.accumulator, BuiltinSinkAccumulator::Numeric, "{method:?}");
+            assert_eq!(demand_law(id), BuiltinDemandLaw::NumericReducer, "{method:?}");
+            assert_eq!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalSink),
+                "{method:?}"
+            );
+            assert_eq!(
+                row_stream_op(id).map(row_stream_op_arg),
+                Some(BuiltinRowStreamArg::None),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_drives_direct_scalar_sink_projection() {
         let count = direct_scalar_for_plain_sink(BuiltinId::from_method(BuiltinMethod::Count))
             .expect("count should project as len");
