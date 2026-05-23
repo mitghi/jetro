@@ -351,9 +351,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
 /// Tries the logical path (`logical_planner → optimizer → logical_lower`) first; falls back
 /// to the legacy `Pipeline::lower()` for shapes the logical planner cannot classify.
 fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
-    if expr_is_direct_view_projection_chain(expr)
-        || field_chain_pipeline_starts_with_direct_view_projection(expr)
-    {
+    if should_skip_field_chain_pipeline(expr) {
         return None;
     }
     let pipeline = lower_via_logical(expr).or_else(|| Pipeline::lower(expr))?;
@@ -366,6 +364,11 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     let (source, mut body) = pipeline.into_source_body();
     mask_active_local_stage_kernels(&mut body, builder);
     pipeline_parts_to_plan_node(source, body)
+}
+
+fn should_skip_field_chain_pipeline(expr: &Expr) -> bool {
+    expr_is_direct_view_projection_chain(expr)
+        || field_chain_pipeline_starts_with_direct_view_projection(expr)
 }
 
 fn field_chain_pipeline_starts_with_direct_view_projection(expr: &Expr) -> bool {
@@ -1110,9 +1113,7 @@ pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> Quer
         context,
         locals: Vec::new(),
     };
-    let top_level_pipeline = if expr_is_direct_view_projection_chain(&ast)
-        || field_chain_pipeline_starts_with_direct_view_projection(&ast)
-    {
+    let top_level_pipeline = if should_skip_field_chain_pipeline(&ast) {
         None
     } else {
         lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast))
