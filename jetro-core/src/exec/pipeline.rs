@@ -139,29 +139,17 @@ pub(crate) fn trace_enabled() -> bool {
 
 /// Returns a short human-readable label for `s`, used in pipeline trace output.
 fn sink_name(s: &Sink) -> &'static str {
-    fn method_name(method: BuiltinMethod) -> &'static str {
-        crate::builtins::registry::canonical_name(
-            crate::builtins::registry::BuiltinId::from_method(method),
-        )
-        .unwrap_or("builtin")
-    }
-
     match s {
         Sink::Collect => "collect",
-        Sink::Reducer(spec) => spec
-            .method()
-            .map(method_name)
-            .unwrap_or("reducer"),
-        Sink::Membership(spec) => method_name(spec.method()),
-        Sink::Predicate(spec) => method_name(spec.method()),
-        Sink::ArgExtreme(spec) => method_name(spec.method()),
-        Sink::Terminal(method) => method_name(*method),
         Sink::SelectMany {
             from_end: false, ..
         } => "first_n",
         Sink::SelectMany { from_end: true, .. } => "last_n",
         Sink::Nth(_) => "nth",
-        Sink::ApproxCountDistinct => "approx_count_distinct",
+        _ => s
+            .builtin_id()
+            .and_then(crate::builtins::registry::canonical_name)
+            .unwrap_or("builtin"),
     }
 }
 

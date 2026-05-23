@@ -233,15 +233,13 @@ impl Sink {
         match self {
             Sink::Terminal(method) => Some(BuiltinId::from_method(*method)),
             Sink::Reducer(spec) => Some(BuiltinId::from_method(spec.method()?)),
+            Sink::Predicate(spec) => Some(BuiltinId::from_method(spec.method())),
+            Sink::Membership(spec) => Some(BuiltinId::from_method(spec.method())),
+            Sink::ArgExtreme(spec) => Some(BuiltinId::from_method(spec.method())),
             Sink::ApproxCountDistinct => Some(BuiltinId::from_method(
                 BuiltinMethod::ApproxCountDistinct,
             )),
-            Sink::Collect
-            | Sink::Nth(_)
-            | Sink::SelectMany { .. }
-            | Sink::Predicate(_)
-            | Sink::Membership(_)
-            | Sink::ArgExtreme(_) => None,
+            Sink::Collect | Sink::Nth(_) | Sink::SelectMany { .. } => None,
         }
     }
 
