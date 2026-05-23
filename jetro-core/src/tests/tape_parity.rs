@@ -69,14 +69,26 @@ fn tape_matches_vm_for_bounded_projection_and_reducers() {
 fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
     let doc = json!({
         "users": [
-            {"name": "ada", "email": "ada@example.test", "score": 10},
-            {"name": "bob", "email": "bob@example.test", "score": 20}
+            {
+                "name": "ada",
+                "email": "ada@example.test",
+                "score": 10,
+                "profile": {"role": "admin", "tier": 2}
+            },
+            {
+                "name": "bob",
+                "email": "bob@example.test",
+                "score": 20,
+                "profile": {"role": "user", "tier": 1}
+            }
         ]
     });
     for query in [
         "$.users.map({name: name.upper(), domain: email.split(\"@\").last()})",
         "$.users.map({label: f\"{name}:{score}\", name_len: name.len()}).last()",
         "$.users.filter(name.starts_with(\"a\")).map(email.contains(\"@\"))",
+        "$.users.map(profile.entries().first())",
+        "$.users.map(profile.entries().map(e => e[0]).last())",
     ] {
         assert_tape_vm_eq(query, &doc);
     }

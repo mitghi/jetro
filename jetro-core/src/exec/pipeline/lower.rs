@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
-    sink_accumulator as builtin_sink_accumulator, view_stage, BuiltinId,
+    sink_accumulator as builtin_sink_accumulator, view_projection, view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
@@ -82,6 +82,9 @@ impl Pipeline {
             .into();
 
         let trailing = &steps[field_end..];
+        if starts_with_direct_view_projection(trailing) {
+            return None;
+        }
         Self::lower_from_source(Source::FieldChain { keys }, trailing)
     }
 
@@ -147,6 +150,9 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     if trailing.is_empty() {
         return None;
     }
+    if starts_with_direct_view_projection(trailing) {
+        return None;
+    }
     if !trailing_has_collection_operator(trailing) {
         return None;
     }
@@ -170,6 +176,21 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     let mut plan = plan_with_exprs(stages, more_exprs, &kernels, sink);
     plan.source = source;
     Some(plan)
+}
+
+/// Returns true when a method suffix begins with a direct view projection.
+/// Such calls produce a value, not a stream row transformation, so treating
+/// them as pipeline stages would make a following sink select the projected
+/// value as one row instead of operating on the produced value.
+pub(crate) fn starts_with_direct_view_projection(trailing: &[crate::parse::ast::Step]) -> bool {
+    use crate::parse::ast::Step;
+
+    let Some(Step::Method(name, args) | Step::OptMethod(name, args)) = trailing.first() else {
+        return false;
+    };
+    crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args).is_some_and(|call| {
+        view_projection(BuiltinId::from_method(call.method))
+    })
 }
 
 fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> bool {

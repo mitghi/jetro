@@ -384,7 +384,7 @@ fn field_chain_pipeline_starts_with_direct_view_projection(expr: &Expr) -> bool 
     else {
         return false;
     };
-    receiver_pipeline_step_is_direct_view_projection(first_method)
+    crate::exec::pipeline::starts_with_direct_view_projection(std::slice::from_ref(first_method))
 }
 
 /// Returns `true` for path-receiver pipelines whose every stage is a
@@ -769,12 +769,7 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
 }
 
 fn receiver_pipeline_step_is_direct_view_projection(step: &Step) -> bool {
-    let (Step::Method(name, args) | Step::OptMethod(name, args)) = step else {
-        return false;
-    };
-    BuiltinCall::from_literal_ast_args(name, args).is_some_and(|call| {
-        view_projection(BuiltinId::from_method(call.method))
-    })
+    crate::exec::pipeline::starts_with_direct_view_projection(std::slice::from_ref(step))
 }
 
 /// Lowers `$` or a pure `$.field[idx]...` chain into a `RootPath` node, enabling tape-native
