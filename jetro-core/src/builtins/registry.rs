@@ -3630,6 +3630,60 @@ mod tests {
     }
 
     #[test]
+    fn view_projection_metadata_is_pipeline_safe() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if !view_projection(id) {
+                continue;
+            }
+
+            assert!(is_pure(id), "{method:?} view projections must be pure");
+            assert_eq!(
+                pipeline_materialization(id),
+                BuiltinPipelineMaterialization::Streaming,
+                "{method:?} view projections must not force materialization"
+            );
+            if stage_delayable_view_projection(id) {
+                assert_eq!(
+                    builtin_cardinality(id),
+                    Some(BuiltinCardinality::OneToOne),
+                    "{method:?} delayable view projections must be one-to-one"
+                );
+                assert_eq!(
+                    effective_pipeline_order_effect(id, true),
+                    BuiltinPipelineOrderEffect::Preserves,
+                    "{method:?} delayable view projections must preserve row order"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_lowering_metadata_has_sink_semantics() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            match pipeline_lowering(id) {
+                Some(BuiltinPipelineLowering::TerminalSink) => assert!(
+                    builtin_sink(id).is_some()
+                        || predicate_sink(id).is_some()
+                        || membership_sink(id).is_some()
+                        || arg_extreme_sink(id).is_some(),
+                    "{method:?} terminal sink lowering must advertise sink behavior"
+                ),
+                Some(BuiltinPipelineLowering::TerminalUsizeSink { .. }) => assert!(
+                    array_selector(id).is_some() || builtin_sink(id).is_some(),
+                    "{method:?} terminal usize sink lowering must advertise selection/sink behavior"
+                ),
+                Some(BuiltinPipelineLowering::TerminalExprArg { .. }) => assert!(
+                    expr_stage(id).is_some(),
+                    "{method:?} terminal expression lowering must advertise expression stage behavior"
+                ),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
     fn registry_drives_object_lambda_classification() {
         for (method, lambda) in [
             (BuiltinMethod::TransformKeys, BuiltinObjectLambda::TransformKeys),
