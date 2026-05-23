@@ -379,6 +379,30 @@ fn tape_matches_vm_for_window_and_series_stages() {
 }
 
 #[test]
+fn tape_matches_vm_for_materialized_suffix_after_view_prefix() {
+    let doc = json!({
+        "samples": [
+            {"id": "a", "value": 10},
+            {"id": "b", "value": 13},
+            {"id": "c", "value": 18},
+            {"id": "d", "value": 12},
+            {"id": "e", "value": 20}
+        ]
+    });
+    for query in [
+        "$.samples.map(value).partition(@ > 12).last()",
+        "$.samples.map(value).accumulate((a, b) => a + b).last()",
+        "$.samples.map(value).append(99).last()",
+        "$.samples.map(value).prepend(5).first()",
+        "$.samples.map(value).diff([13, 20]).last()",
+        "$.samples.map(value).intersect([10, 18, 99]).last()",
+        "$.samples.map(value).union([10, 99]).last()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
     let doc = json!({
         "orders": [
