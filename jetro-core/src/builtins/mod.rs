@@ -1085,6 +1085,13 @@ impl BuiltinRowStreamOp {
         matches!(self, Self::Map)
     }
 
+    /// Whether this operation evaluates a key expression for retained-row
+    /// state such as stream deduplication.
+    #[inline]
+    pub(crate) const fn is_keyed_state(self) -> bool {
+        matches!(self, Self::DistinctBy)
+    }
+
     /// Whether this operation selects which rows continue downstream without
     /// changing their order.
     #[inline]

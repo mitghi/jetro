@@ -185,6 +185,10 @@ impl RowStreamStage {
         self.op().is_projector()
     }
 
+    fn is_keyed_state(&self) -> bool {
+        self.op().is_keyed_state()
+    }
+
     fn is_row_selection(&self) -> bool {
         self.op().is_row_selection()
     }
@@ -437,7 +441,7 @@ impl RowStreamDemand {
             if stage.is_filter_like() {
                 demand.predicate_count += 1;
             }
-            if matches!(stage, RowStreamStage::DistinctBy(_)) {
+            if stage.is_keyed_state() {
                 demand.key_count += 1;
             }
             if let Some(limit) = stage.retained_limit() {

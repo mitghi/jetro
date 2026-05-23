@@ -4511,6 +4511,11 @@ mod tests {
                 "{op:?}"
             );
             assert_eq!(
+                op.is_keyed_state(),
+                matches!(op, BuiltinRowStreamOp::DistinctBy),
+                "{op:?}"
+            );
+            assert_eq!(
                 op.is_row_selection(),
                 matches!(
                     op,
