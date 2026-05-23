@@ -2855,7 +2855,7 @@ pub(super) fn eval_tape_predicate(
     Ok(match predicate {
         NdjsonDirectPredicate::Path(steps) => cache
             .index(tape, 0, steps)
-            .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
+            .map(|idx| json_tape_scalar(tape, idx).truthy())
             .unwrap_or(false),
         NdjsonDirectPredicate::Literal(value) => crate::util::is_truthy(value),
         NdjsonDirectPredicate::Not(inner) => !eval_tape_predicate(tape, inner, env, vm, cache)?,
@@ -2947,17 +2947,6 @@ fn eval_tape_scalar<'a>(
             .map(|idx| json_tape_scalar(tape, idx)),
         NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
         _ => None,
-    }
-}
-fn json_view_truthy(value: crate::util::JsonView<'_>) -> bool {
-    match value {
-        crate::util::JsonView::Null => false,
-        crate::util::JsonView::Bool(value) => value,
-        crate::util::JsonView::Int(value) => value != 0,
-        crate::util::JsonView::UInt(value) => value != 0,
-        crate::util::JsonView::Float(value) => value != 0.0,
-        crate::util::JsonView::Str(value) => !value.is_empty(),
-        crate::util::JsonView::ArrayLen(len) | crate::util::JsonView::ObjectLen(len) => len > 0,
     }
 }
 fn json_tape_scalar<T: JsonTape>(tape: &T, idx: usize) -> crate::util::JsonView<'_> {
@@ -3801,7 +3790,7 @@ fn eval_json_tape_item_predicate_cached<T: JsonTape>(
     match predicate {
         NdjsonDirectItemPredicate::Path(steps) => cache
             .index(tape, item_idx, steps)
-            .map(|idx| json_view_truthy(json_tape_scalar(tape, idx)))
+            .map(|idx| json_tape_scalar(tape, idx).truthy())
             .unwrap_or(false),
         NdjsonDirectItemPredicate::Literal(value) => crate::util::is_truthy(value),
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {

@@ -1256,7 +1256,7 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
     use crate::parse::ast::BinOp;
 
     match predicate {
-        NdjsonDirectPredicate::Path(steps) => raw_json_path_view(row, steps).map(json_view_truthy),
+        NdjsonDirectPredicate::Path(steps) => raw_json_path_view(row, steps).map(JsonView::truthy),
         NdjsonDirectPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
         NdjsonDirectPredicate::Not(inner) => eval_raw_predicate(row, inner).map(|value| !value),
         NdjsonDirectPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
@@ -3190,7 +3190,7 @@ fn eval_raw_item_predicate_from_root_fields<'a>(
     match predicate {
         NdjsonDirectItemPredicate::Path(steps) => {
             raw_json_projection_view_from_root(item, root_fields, spans, steps)
-                .map(json_view_truthy)
+                .map(JsonView::truthy)
         }
         NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
@@ -3654,7 +3654,7 @@ fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) ->
 
     match predicate {
         NdjsonDirectItemPredicate::Path(steps) => {
-            raw_json_path_view(row, steps).map(json_view_truthy)
+            raw_json_path_view(row, steps).map(JsonView::truthy)
         }
         NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::is_truthy(value)),
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
@@ -3721,18 +3721,6 @@ pub(super) fn raw_json_path_view<'a>(
     steps: &[PhysicalPathStep],
 ) -> Option<JsonView<'a>> {
     raw_json_path_value(row, steps).and_then(raw_json_view)
-}
-
-fn json_view_truthy(value: JsonView<'_>) -> bool {
-    match value {
-        JsonView::Null => false,
-        JsonView::Bool(value) => value,
-        JsonView::Int(value) => value != 0,
-        JsonView::UInt(value) => value != 0,
-        JsonView::Float(value) => value != 0.0 && !value.is_nan(),
-        JsonView::Str(value) => !value.is_empty(),
-        JsonView::ArrayLen(value) | JsonView::ObjectLen(value) => value > 0,
-    }
 }
 
 fn skip_json_compound(row: &[u8], start: usize, open: u8, close: u8) -> Option<usize> {
