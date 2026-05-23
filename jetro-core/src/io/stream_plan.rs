@@ -6,7 +6,7 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, numeric_reducer, row_stream_op, BuiltinId,
+    by_name as builtin_by_name, row_stream_op, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamArg,
@@ -313,7 +313,7 @@ pub(super) fn lower_root_rows_expr(
             | BuiltinRowStreamOp::Avg
             | BuiltinRowStreamOp::Min
             | BuiltinRowStreamOp::Max => {
-                let reducer = numeric_reducer(id).ok_or_else(|| {
+                let reducer = op.numeric_reducer().ok_or_else(|| {
                     RowStreamPlanError::new(format!(
                         "rows() stream method {name}() is missing numeric reducer metadata"
                     ))
