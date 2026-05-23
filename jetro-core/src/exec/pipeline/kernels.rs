@@ -9,12 +9,10 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     apply_view_projection, array_selector as builtin_array_selector, by_name as builtin_by_name,
-    count_sink_accepts_predicate, expr_stage, numeric_reducer, view_object_projection,
-    view_projection, view_projection_returns_owned, BuiltinId, ViewProjectionResult,
+    count_sink_accepts_predicate, expr_stage, numeric_reducer, view_projection,
+    view_projection_field_demand, view_projection_returns_owned, BuiltinId, ViewProjectionResult,
 };
-use crate::builtins::{
-    BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinViewObjectProjection,
-};
+use crate::builtins::{BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValueView};
@@ -193,59 +191,8 @@ fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand 
 
 fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
     let prefix = receiver_field_prefix(receiver)?;
-    match (
-        view_object_projection(BuiltinId::from_method(call.method))?,
-        &call.args,
-    ) {
-        (
-            BuiltinViewObjectProjection::HasKey | BuiltinViewObjectProjection::Missing,
-            crate::builtins::BuiltinArgs::Str(key),
-        ) => {
-            Some(prefix_field_demand(
-                &prefix,
-                FieldDemand::Fields(FieldSet::single(Arc::clone(key))),
-            ))
-        }
-        (
-            BuiltinViewObjectProjection::Missing | BuiltinViewObjectProjection::Pick,
-            crate::builtins::BuiltinArgs::StrVec(keys),
-        ) => Some(prefix_field_demand(&prefix, field_demand_for_keys(keys))),
-        (
-            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
-            crate::builtins::BuiltinArgs::Str(path),
-        ) => {
-            path_field_demand(&crate::builtins::parse_path_segs(path.as_ref()))
-                .map(|demand| prefix_field_demand(&prefix, demand))
-        }
-        (
-            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
-            crate::builtins::BuiltinArgs::Path(path),
-        ) => path_field_demand(path).map(|demand| prefix_field_demand(&prefix, demand)),
-        _ => None,
-    }
-}
-
-fn field_demand_for_keys(keys: &[Arc<str>]) -> FieldDemand {
-    let mut fields = FieldSet::new();
-    for key in keys {
-        fields.insert(crate::plan::demand::FieldPath::single(Arc::clone(key)));
-    }
-    FieldDemand::Fields(fields)
-}
-
-fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
-    let mut keys: Vec<Arc<str>> = Vec::new();
-    for segment in path {
-        match segment {
-            crate::builtins::PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
-            crate::builtins::PathSeg::Index(_) => break,
-        }
-    }
-    match keys.len() {
-        0 => None,
-        1 => Some(FieldDemand::Fields(FieldSet::single(keys.remove(0)))),
-        _ => Some(FieldDemand::Fields(FieldSet::chain(keys.into()))),
-    }
+    view_projection_field_demand(BuiltinId::from_method(call.method), &call.args)
+        .map(|demand| prefix_field_demand(&prefix, demand))
 }
 
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.

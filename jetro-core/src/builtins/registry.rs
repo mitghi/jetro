@@ -5,6 +5,8 @@
 //! alias for the same set, stable across refactors, that new planner and
 //! analysis code carries without depending on the legacy enum directly.
 
+use std::sync::Arc;
+
 use crate::{
     builtins::{
         builtin::{BarrierCtx, Builtin, StreamCtx},
@@ -22,7 +24,9 @@ use crate::{
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
-    plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed},
+    plan::demand::{
+        Demand, FieldDemand, FieldPath, FieldSet, PullDemand, SinkResultDemand, ValueNeed,
+    },
     util::JsonView,
     vm::Program,
 };
@@ -844,6 +848,58 @@ pub(crate) fn view_object_items_projection_call(
             | BuiltinViewObjectProjection::Entries
     )
     .then_some(projection)
+}
+
+/// Return receiver-local field demand for a view-native object/path builtin
+/// call. Callers that apply the builtin to a nested receiver should prefix the
+/// returned demand with the receiver path.
+#[inline]
+pub(crate) fn view_projection_field_demand(
+    id: BuiltinId,
+    args: &BuiltinArgs,
+) -> Option<FieldDemand> {
+    match (view_object_projection(id)?, args) {
+        (
+            BuiltinViewObjectProjection::HasKey | BuiltinViewObjectProjection::Missing,
+            BuiltinArgs::Str(key),
+        ) => Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key)))),
+        (
+            BuiltinViewObjectProjection::Missing | BuiltinViewObjectProjection::Pick,
+            BuiltinArgs::StrVec(keys),
+        ) => Some(field_demand_for_keys(keys)),
+        (
+            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
+            BuiltinArgs::Str(path),
+        ) => path_field_demand(&super::parse_path_segs(path.as_ref())),
+        (
+            BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
+            BuiltinArgs::Path(path),
+        ) => path_field_demand(path),
+        _ => None,
+    }
+}
+
+fn field_demand_for_keys(keys: &[Arc<str>]) -> FieldDemand {
+    let mut fields = FieldSet::new();
+    for key in keys {
+        fields.insert(FieldPath::single(Arc::clone(key)));
+    }
+    FieldDemand::Fields(fields)
+}
+
+fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
+    let mut keys: Vec<Arc<str>> = Vec::new();
+    for segment in path {
+        match segment {
+            crate::builtins::PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
+            crate::builtins::PathSeg::Index(_) => break,
+        }
+    }
+    match keys.len() {
+        0 => None,
+        1 => Some(FieldDemand::Fields(FieldSet::single(keys.remove(0)))),
+        _ => Some(FieldDemand::Fields(FieldSet::chain(keys.into()))),
+    }
 }
 
 /// Return positional array selector behavior for builtin `id`, if any.
@@ -2252,6 +2308,70 @@ mod tests {
             };
             assert_eq!(demand_law(id), expected, "{method:?}");
         }
+    }
+
+    fn field_paths(demand: Option<FieldDemand>) -> Vec<String> {
+        match demand.expect("field demand") {
+            FieldDemand::None => Vec::new(),
+            FieldDemand::Whole => vec!["*".to_string()],
+            FieldDemand::Fields(fields) => fields
+                .paths()
+                .iter()
+                .map(|path| {
+                    path.keys()
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn registry_drives_view_projection_field_demands() {
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::HasKey),
+                &BuiltinArgs::Str(Arc::from("isbn"))
+            )),
+            vec!["isbn"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::Missing),
+                &BuiltinArgs::StrVec(vec![Arc::from("title"), Arc::from("isbn")])
+            )),
+            vec!["title", "isbn"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::Pick),
+                &BuiltinArgs::StrVec(vec![Arc::from("title"), Arc::from("isbn")])
+            )),
+            vec!["title", "isbn"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::HasPath),
+                &BuiltinArgs::Str(Arc::from("user.name"))
+            )),
+            vec!["user.name"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::GetPath),
+                &BuiltinArgs::Str(Arc::from("items[0].price"))
+            )),
+            vec!["items"]
+        );
+        assert!(
+            view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::Has),
+                &BuiltinArgs::Str(Arc::from("isbn"))
+            )
+            .is_none()
+        );
     }
 
     #[test]
