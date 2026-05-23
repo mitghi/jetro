@@ -274,9 +274,7 @@ impl ObjectKernel {
         let start = cells.len();
         for entry in self.entries.iter() {
             let value = match eval_view_kernel_with_vm(&entry.value, item, vm)? {
-                ViewKernelValue::View(view) => {
-                    scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
-                }
+                ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
                 ViewKernelValue::Owned(value) => value,
             };
             if (entry.optional || entry.omit_null) && value.is_null() {
