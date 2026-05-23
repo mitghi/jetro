@@ -1,8 +1,9 @@
 use super::ndjson::{write_i64, write_json_str, write_val_json};
 use super::ndjson_direct::{
     NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
-    NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+    NdjsonDirectPathProjection, NdjsonDirectPredicate, NdjsonDirectProjectionValue,
+    NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink,
+    NdjsonDirectTapePlan,
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
@@ -497,10 +498,17 @@ fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
 }
 
 fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool {
-    match value {
-        NdjsonDirectProjectionValue::Path(_) | NdjsonDirectProjectionValue::Literal(_) => true,
-        NdjsonDirectProjectionValue::ViewScalarCall { call, .. } => byte_scalar_call_supported(call),
-        NdjsonDirectProjectionValue::Nested(plan) => tape_plan_can_write_byte_row(plan),
+    match value.path_projection() {
+        Some(NdjsonDirectPathProjection::Raw(_)) => true,
+        Some(NdjsonDirectPathProjection::Scalar { call, .. }) => {
+            byte_scalar_call_supported(call)
+        }
+        None => match value {
+            NdjsonDirectProjectionValue::Literal(_) => true,
+            NdjsonDirectProjectionValue::Nested(plan) => tape_plan_can_write_byte_row(plan),
+            NdjsonDirectProjectionValue::Path(_)
+            | NdjsonDirectProjectionValue::ViewScalarCall { .. } => unreachable!(),
+        },
     }
 }
 
@@ -2247,17 +2255,19 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
     source: &[u8],
     map: &NdjsonDirectStreamMap,
 ) -> Result<Option<()>, JetroEngineError> {
-    let (steps, call) = match map {
-        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(steps)) => {
-            (steps.as_slice(), None)
-        }
-        NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::ViewScalarCall {
-            steps,
-            call,
-            ..
-        }) if byte_scalar_call_supported(call) => (steps.as_slice(), Some(call)),
+    let projection = match map {
+        NdjsonDirectStreamMap::Value(value) => match value.path_projection() {
+            Some(projection) => projection,
+            None => return Ok(None),
+        },
         _ => return Ok(None),
     };
+    if let Some(call) = projection.scalar_call() {
+        if !byte_scalar_call_supported(call) {
+            return Ok(None);
+        }
+    }
+    let steps = projection.steps();
     let [PhysicalPathStep::Field(field)] = steps else {
         return Ok(None);
     };
@@ -2282,7 +2292,7 @@ fn write_raw_json_stream_collect_single_field<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        if let Some(call) = call {
+        if let Some(call) = projection.scalar_call() {
             write_raw_scalar_call(writer, value, call)?;
         } else {
             writer.write_all(value)?;
@@ -2810,12 +2820,12 @@ fn direct_root_projection<'a>(
     value: &'a NdjsonDirectProjectionValue,
     root_fields: &[&str],
 ) -> Option<DirectRootProjection<'a>> {
-    match value {
-        NdjsonDirectProjectionValue::Path(steps) => {
+    match value.path_projection()? {
+        NdjsonDirectPathProjection::Raw(steps) => {
             let (slot, suffix) = direct_root_path_slot(steps, root_fields)?;
             Some(DirectRootProjection::Raw { slot, suffix })
         }
-        NdjsonDirectProjectionValue::ViewScalarCall {
+        NdjsonDirectPathProjection::Scalar {
             steps,
             call,
             optional,
@@ -2825,10 +2835,10 @@ fn direct_root_projection<'a>(
                 slot,
                 suffix,
                 call,
-                optional: *optional,
+                optional,
             })
         }
-        _ => None,
+        NdjsonDirectPathProjection::Scalar { .. } => None,
     }
 }
 
@@ -3104,19 +3114,27 @@ fn raw_json_projection_value_from_root_is_null_or_missing(
     spans: &[Option<std::ops::Range<usize>>],
     value: &NdjsonDirectProjectionValue,
 ) -> Option<bool> {
-    match value {
-        NdjsonDirectProjectionValue::Path(steps)
-        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-            match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
+    match value.path_projection() {
+        Some(projection) => {
+            match raw_json_projection_value_from_root(
+                item,
+                root_fields,
+                spans,
+                projection.steps(),
+            ) {
                 RawFieldValue::Found(value) => Some(is_json_null(value)),
                 RawFieldValue::Missing => Some(true),
                 RawFieldValue::Fallback => None,
             }
         }
-        NdjsonDirectProjectionValue::Literal(value) => {
-            Some(matches!(value, crate::data::value::Val::Null))
-        }
-        NdjsonDirectProjectionValue::Nested(_) => Some(false),
+        None => match value {
+            NdjsonDirectProjectionValue::Literal(value) => {
+                Some(matches!(value, crate::data::value::Val::Null))
+            }
+            NdjsonDirectProjectionValue::Nested(_) => Some(false),
+            NdjsonDirectProjectionValue::Path(_)
+            | NdjsonDirectProjectionValue::ViewScalarCall { .. } => unreachable!(),
+        },
     }
 }
 

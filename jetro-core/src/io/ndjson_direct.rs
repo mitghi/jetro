@@ -394,17 +394,54 @@ pub(super) enum NdjsonDirectProjectionValue {
 }
 
 impl NdjsonDirectProjectionValue {
-    pub(super) fn path_steps(&self) -> Option<&[PhysicalPathStep]> {
+    pub(super) fn path_projection(&self) -> Option<NdjsonDirectPathProjection<'_>> {
         match self {
-            Self::Path(steps) | Self::ViewScalarCall { steps, .. } => Some(steps),
+            Self::Path(steps) => Some(NdjsonDirectPathProjection::Raw(steps)),
+            Self::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => Some(NdjsonDirectPathProjection::Scalar {
+                steps,
+                call,
+                optional: *optional,
+            }),
             Self::Nested(_) | Self::Literal(_) => None,
         }
+    }
+
+    pub(super) fn path_steps(&self) -> Option<&[PhysicalPathStep]> {
+        self.path_projection().map(|projection| projection.steps())
     }
 
     pub(super) fn into_path(self) -> Option<NdjsonPhysicalPath> {
         match self {
             Self::Path(steps) => Some(steps),
             Self::ViewScalarCall { .. } | Self::Nested(_) | Self::Literal(_) => None,
+        }
+    }
+}
+
+pub(super) enum NdjsonDirectPathProjection<'a> {
+    Raw(&'a [PhysicalPathStep]),
+    Scalar {
+        steps: &'a [PhysicalPathStep],
+        call: &'a crate::builtins::BuiltinCall,
+        optional: bool,
+    },
+}
+
+impl<'a> NdjsonDirectPathProjection<'a> {
+    pub(super) fn steps(&self) -> &'a [PhysicalPathStep] {
+        match self {
+            Self::Raw(steps) | Self::Scalar { steps, .. } => steps,
+        }
+    }
+
+    pub(super) fn scalar_call(&self) -> Option<&'a crate::builtins::BuiltinCall> {
+        match self {
+            Self::Raw(_) => None,
+            Self::Scalar { call, .. } => Some(call),
         }
     }
 }
@@ -1608,5 +1645,8 @@ mod tests {
             value.path_steps(),
             Some([PhysicalPathStep::Field(name)]) if name.as_ref() == "email"
         ));
+        let projection = value.path_projection().expect("path projection");
+        assert_eq!(projection.steps().len(), 1);
+        assert!(projection.scalar_call().is_some());
     }
 }

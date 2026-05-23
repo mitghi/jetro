@@ -128,13 +128,14 @@ impl NdjsonHintAccessPlan {
     }
 
     fn collect_projection_value(&mut self, value: &NdjsonDirectProjectionValue) {
-        match value {
-            NdjsonDirectProjectionValue::Path(steps)
-            | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-                self.push_physical(steps)
-            }
-            NdjsonDirectProjectionValue::Nested(plan) => self.collect_tape_plan(plan),
-            NdjsonDirectProjectionValue::Literal(_) => {}
+        match value.path_projection() {
+            Some(projection) => self.push_physical(projection.steps()),
+            None => match value {
+                NdjsonDirectProjectionValue::Nested(plan) => self.collect_tape_plan(plan),
+                NdjsonDirectProjectionValue::Literal(_) => {}
+                NdjsonDirectProjectionValue::Path(_)
+                | NdjsonDirectProjectionValue::ViewScalarCall { .. } => unreachable!(),
+            },
         }
     }
 
