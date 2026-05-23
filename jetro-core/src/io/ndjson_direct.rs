@@ -7,7 +7,9 @@ use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
-use crate::plan::physical::{plan_ast_with_context, PlanningContext};
+use crate::plan::physical::{
+    physical_path_steps, physical_steps_to_path_steps, plan_ast_with_context, PlanningContext,
+};
 use crate::util::JsonView;
 use crate::JetroEngine;
 use std::sync::Arc;
@@ -263,7 +265,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
                 NdjsonDirectByteExpr::ArrayElementPath {
                     source_steps,
                     element,
-                    suffix_steps: physical_chain_to_path(steps)?,
+                    suffix_steps: physical_steps_to_path_steps(steps)?,
                 },
             ))
         }
@@ -369,7 +371,7 @@ fn direct_byte_expr_from_receiver(
     byte_path_has_root_field(&source_steps).then_some(NdjsonDirectByteExpr::ArrayElementPath {
         source_steps,
         element,
-        suffix_steps: physical_chain_to_path(steps)?,
+        suffix_steps: physical_steps_to_path_steps(steps)?,
     })
 }
 
@@ -614,16 +616,7 @@ fn direct_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
     if !matches!(base.as_ref(), Expr::Root) {
         return None;
     }
-    steps
-        .iter()
-        .map(|step| match step {
-            Step::Field(key) | Step::OptField(key) => {
-                Some(PhysicalPathStep::Field(Arc::from(key.as_str())))
-            }
-            Step::Index(index) => Some(PhysicalPathStep::Index(*index)),
-            _ => None,
-        })
-        .collect()
+    physical_path_steps(steps)
 }
 
 fn direct_tape_plan_inner(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
@@ -646,7 +639,7 @@ fn direct_tape_plan_for_node(
 ) -> Option<NdjsonDirectTapePlan> {
     if let PlanNode::Chain { base, steps } = plan.node(id) {
         if let Some(plan) =
-            direct_tape_sort_extreme_plan_for_node(plan, *base, physical_chain_to_path(steps)?)
+            direct_tape_sort_extreme_plan_for_node(plan, *base, physical_steps_to_path_steps(steps)?)
         {
             return Some(plan);
         }
@@ -654,7 +647,7 @@ fn direct_tape_plan_for_node(
         return Some(NdjsonDirectTapePlan::ArrayElementPath {
             source_steps,
             element,
-            suffix_steps: physical_chain_to_path(steps)?,
+            suffix_steps: physical_steps_to_path_steps(steps)?,
         });
     }
     if let Some((source_steps, element)) = direct_array_element_source(plan, id) {
@@ -686,7 +679,7 @@ fn direct_tape_plan_for_node(
             Some(NdjsonDirectTapePlan::ArrayElementViewScalarCall {
                 source_steps,
                 element,
-                suffix_steps: physical_chain_to_path(steps)?,
+                suffix_steps: physical_steps_to_path_steps(steps)?,
                 call: call.clone(),
             })
         }
@@ -994,7 +987,7 @@ fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate>
         return None;
     };
     let mut source_steps = direct_tape_row_path_for_expr(base)?;
-    source_steps.extend(physical_path_from_steps(prefix)?);
+    source_steps.extend(physical_path_steps(prefix)?);
     let predicate = direct_item_predicate_from_expr(predicate_expr)?;
     if !item_predicate_guarantees_object_match(&predicate) {
         return None;
@@ -1075,24 +1068,11 @@ fn direct_item_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
                 Expr::Ident(name) => vec![PhysicalPathStep::Field(Arc::from(name.as_str()))],
                 _ => return None,
             };
-            path.extend(physical_path_from_steps(steps)?);
+            path.extend(physical_path_steps(steps)?);
             Some(path)
         }
         _ => None,
     }
-}
-
-fn physical_path_from_steps(steps: &[Step]) -> Option<NdjsonPhysicalPath> {
-    steps
-        .iter()
-        .map(|step| match step {
-            Step::Field(name) | Step::OptField(name) => {
-                Some(PhysicalPathStep::Field(Arc::from(name.as_str())))
-            }
-            Step::Index(index) => Some(PhysicalPathStep::Index(*index)),
-            _ => None,
-        })
-        .collect()
 }
 
 fn literal_val_expr(expr: &Expr) -> Option<Val> {
@@ -1653,7 +1633,7 @@ fn direct_tape_predicate_scalar_call(
     Some(NdjsonDirectPredicate::ArrayElementViewScalarCall {
         source_steps,
         element,
-        suffix_steps: physical_chain_to_path(steps)?,
+        suffix_steps: physical_steps_to_path_steps(steps)?,
         call,
     })
 }
@@ -1707,28 +1687,11 @@ fn node_path_steps(
         PlanNode::RootPath(steps) => Some(steps.clone()),
         PlanNode::Chain { base, steps } => {
             let mut out = node_path_steps(plan, *base)?;
-            out.extend(physical_chain_to_path(steps)?);
+            out.extend(physical_steps_to_path_steps(steps)?);
             Some(out)
         }
         _ => None,
     }
-}
-
-fn physical_chain_to_path(
-    steps: &[crate::ir::physical::PhysicalChainStep],
-) -> Option<NdjsonPhysicalPath> {
-    steps
-        .iter()
-        .map(|step| match step {
-            crate::ir::physical::PhysicalChainStep::Field(key) => {
-                Some(PhysicalPathStep::Field(key.clone()))
-            }
-            crate::ir::physical::PhysicalChainStep::Index(idx) => {
-                Some(PhysicalPathStep::Index(*idx))
-            }
-            crate::ir::physical::PhysicalChainStep::DynIndex(_) => None,
-        })
-        .collect()
 }
 
 #[cfg(test)]

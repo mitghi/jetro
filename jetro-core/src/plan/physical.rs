@@ -795,7 +795,7 @@ fn try_lower_implicit_root_path(builder: &PlanBuilder, expr: &Expr) -> Option<Pl
     }
 }
 
-fn physical_path_steps(steps: &[Step]) -> Option<Vec<PhysicalPathStep>> {
+pub(crate) fn physical_path_steps(steps: &[Step]) -> Option<Vec<PhysicalPathStep>> {
     let mut out = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
@@ -887,7 +887,9 @@ fn flush_chain(
     })
 }
 
-fn physical_steps_to_path_steps(steps: &[PhysicalChainStep]) -> Option<Vec<PhysicalPathStep>> {
+pub(crate) fn physical_steps_to_path_steps(
+    steps: &[PhysicalChainStep],
+) -> Option<Vec<PhysicalPathStep>> {
     let mut out = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
