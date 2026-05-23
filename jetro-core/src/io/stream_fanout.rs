@@ -20,12 +20,14 @@ use super::stream_plan::{
     RowStreamSourceKind, RowStreamStage,
 };
 use super::stream_types::RowStreamStats;
+use crate::builtins::registry::predicate_sink_result_demand;
 use crate::builtins::BuiltinPredicateSink;
 use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::parse::ast::{Arg, ArrayElem, BinOp, Expr, ObjField, Step};
+use crate::plan::demand::SinkResultDemand;
 use crate::util::{json_cmp_binop, JsonView};
 use crate::{JetroEngine, JetroEngineError};
 use rayon::prelude::*;
@@ -622,13 +624,10 @@ struct DirectNumericReducer {
 struct DirectPredicateSink {
     predicates: Vec<NdjsonDirectPredicate>,
     test: NdjsonDirectPredicate,
-    mode: DirectPredicateSinkMode,
+    sink: BuiltinPredicateSink,
+    matched: bool,
+    failed: bool,
     decided: bool,
-}
-#[derive(Clone)]
-enum DirectPredicateSinkMode {
-    Any { matched: bool },
-    All { failed: bool },
 }
 impl DirectPredicateSink {
     fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
@@ -636,48 +635,40 @@ impl DirectPredicateSink {
             return Ok(());
         }
         let keep = eval_ndjson_byte_predicate_row(row, &self.test)?.unwrap_or(false);
-        match &mut self.mode {
-            DirectPredicateSinkMode::Any { matched } if keep => {
-                *matched = true;
+        match predicate_sink_result_demand(self.sink) {
+            SinkResultDemand::UntilMatch if keep => {
+                self.matched = true;
                 self.decided = true;
             }
-            DirectPredicateSinkMode::All { failed } if !keep => {
-                *failed = true;
+            SinkResultDemand::UntilFailure if !keep => {
+                self.failed = true;
                 self.decided = true;
             }
-            _ => {}
+            SinkResultDemand::UntilMatch
+            | SinkResultDemand::UntilFailure
+            | SinkResultDemand::None => {}
         }
         Ok(())
     }
 
     fn value(&self) -> Val {
-        match self.mode {
-            DirectPredicateSinkMode::Any { matched } => Val::Bool(matched),
-            DirectPredicateSinkMode::All { failed } => Val::Bool(!failed),
+        match self.sink {
+            BuiltinPredicateSink::Any => Val::Bool(self.matched),
+            BuiltinPredicateSink::All => Val::Bool(!self.failed),
+            BuiltinPredicateSink::FindIndex
+            | BuiltinPredicateSink::IndicesWhere
+            | BuiltinPredicateSink::FindOne => Val::Null,
         }
     }
 
     fn merge(&mut self, other: &Self) {
-        match (&mut self.mode, &other.mode) {
-            (
-                DirectPredicateSinkMode::Any { matched },
-                DirectPredicateSinkMode::Any {
-                    matched: other_matched,
-                },
-            ) => {
-                *matched |= *other_matched;
-                self.decided |= *matched;
-            }
-            (
-                DirectPredicateSinkMode::All { failed },
-                DirectPredicateSinkMode::All {
-                    failed: other_failed,
-                },
-            ) => {
-                *failed |= *other_failed;
-                self.decided |= *failed;
-            }
-            _ => {}
+        debug_assert_eq!(self.sink, other.sink);
+        self.matched |= other.matched;
+        self.failed |= other.failed;
+        match predicate_sink_result_demand(self.sink) {
+            SinkResultDemand::UntilMatch => self.decided |= self.matched,
+            SinkResultDemand::UntilFailure => self.decided |= self.failed,
+            SinkResultDemand::None => {}
         }
     }
 }
@@ -736,19 +727,20 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
         return None;
     };
     let (sink, expr) = terminal.predicate_sink()?;
-    let mode = match sink {
-        BuiltinPredicateSink::Any => DirectPredicateSinkMode::Any { matched: false },
-        BuiltinPredicateSink::All => DirectPredicateSinkMode::All { failed: false },
-        BuiltinPredicateSink::FindIndex
-        | BuiltinPredicateSink::IndicesWhere
-        | BuiltinPredicateSink::FindOne => return None,
-    };
+    if !matches!(
+        predicate_sink_result_demand(sink),
+        SinkResultDemand::UntilMatch | SinkResultDemand::UntilFailure
+    ) {
+        return None;
+    }
     let test = direct_tape_predicate_for_expr(expr)?;
     let predicates = direct_filter_prefix(prefix)?;
     Some(DirectPredicateSink {
         predicates,
         test,
-        mode,
+        sink,
+        matched: false,
+        failed: false,
         decided: false,
     })
 }
