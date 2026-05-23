@@ -617,6 +617,16 @@ impl BodyKernel {
         }
     }
 
+    /// Returns a constant value produced by this kernel, if the kernel is a
+    /// literal-only expression.
+    pub(crate) fn literal_value(&self) -> Option<Val> {
+        match self {
+            Self::Const(value) => Some(value.clone()),
+            Self::ConstBool(value) => Some(Val::Bool(*value)),
+            _ => None,
+        }
+    }
+
     /// Returns the field payload needed from the current row to evaluate this kernel.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
@@ -1064,11 +1074,7 @@ fn is_comparison_op(op: crate::parse::ast::BinOp) -> bool {
 }
 
 fn literal_kernel_value(kernel: &BodyKernel) -> Option<Val> {
-    match kernel {
-        BodyKernel::Const(value) => Some(value.clone()),
-        BodyKernel::ConstBool(value) => Some(Val::Bool(*value)),
-        _ => None,
-    }
+    kernel.literal_value()
 }
 
 // returns None rather than wrapping a Generic sub-kernel, which would defeat specialisation
@@ -2692,6 +2698,20 @@ mod tests {
                 crate::parse::ast::BinOp::Gt,
                 Val::Int(10)
             )),
+            None
+        );
+    }
+
+    #[test]
+    fn literal_value_reports_only_constant_kernels() {
+        assert_eq!(BodyKernel::Const(Val::Int(7)).literal_value(), Some(Val::Int(7)));
+        assert_eq!(
+            BodyKernel::ConstBool(true).literal_value(),
+            Some(Val::Bool(true))
+        );
+        assert_eq!(BodyKernel::Current.literal_value(), None);
+        assert_eq!(
+            BodyKernel::FieldRead(Arc::from("isbn")).literal_value(),
             None
         );
     }

@@ -1237,15 +1237,12 @@ fn direct_stream_map_path(map: NdjsonDirectStreamMap) -> Option<NdjsonPhysicalPa
 fn direct_item_predicate_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectItemPredicate> {
+    if let Some(value) = kernel.literal_value() {
+        return Some(NdjsonDirectItemPredicate::Literal(value));
+    }
     match kernel {
         crate::exec::pipeline::BodyKernel::Current => {
             Some(NdjsonDirectItemPredicate::Path(Vec::new()))
-        }
-        crate::exec::pipeline::BodyKernel::Const(value) => {
-            Some(NdjsonDirectItemPredicate::Literal(value.clone()))
-        }
-        crate::exec::pipeline::BodyKernel::ConstBool(value) => {
-            Some(NdjsonDirectItemPredicate::Literal(Val::Bool(*value)))
         }
         crate::exec::pipeline::BodyKernel::FieldRead(_)
         | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
@@ -1322,18 +1319,15 @@ fn kernel_to_physical_path(
 fn direct_projection_value_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectProjectionValue> {
+    if let Some(value) = kernel.literal_value() {
+        return Some(NdjsonDirectProjectionValue::Literal(value));
+    }
     match kernel {
         crate::exec::pipeline::BodyKernel::Current
         | crate::exec::pipeline::BodyKernel::FieldRead(_)
         | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
             NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?),
         ),
-        crate::exec::pipeline::BodyKernel::Const(value) => {
-            Some(NdjsonDirectProjectionValue::Literal(value.clone()))
-        }
-        crate::exec::pipeline::BodyKernel::ConstBool(value) => {
-            Some(NdjsonDirectProjectionValue::Literal(Val::Bool(*value)))
-        }
         crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
             if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
         {
