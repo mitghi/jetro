@@ -738,9 +738,7 @@ impl BodyKernel {
         let Self::BuiltinCall { receiver, call } = self else {
             return None;
         };
-        if !crate::builtins::registry::view_scalar_value_projection(BuiltinId::from_method(
-            call.method,
-        )) {
+        if !call.is_direct_view_scalar_call() {
             return None;
         }
         Some(PathScalarCall {
@@ -754,9 +752,7 @@ impl BodyKernel {
         let Self::BuiltinCall { receiver, call } = self else {
             return None;
         };
-        if !crate::builtins::registry::view_scalar_value_projection(BuiltinId::from_method(
-            call.method,
-        )) {
+        if !call.is_direct_view_scalar_call() {
             return None;
         }
         let (source_keys, selector, suffix_keys) = receiver.array_element_path()?;

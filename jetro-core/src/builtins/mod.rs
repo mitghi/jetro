@@ -2343,6 +2343,36 @@ impl BuiltinCall {
         Self { method, args }
     }
 
+    /// Returns this call's registry id.
+    #[inline]
+    pub(crate) fn id(&self) -> registry::BuiltinId {
+        registry::BuiltinId::from_method(self.method)
+    }
+
+    /// Returns the direct borrowed-view call family for this call, if any.
+    #[inline]
+    pub(crate) fn direct_view_call(&self) -> Option<registry::BuiltinDirectViewCall> {
+        registry::direct_view_call(self.id(), &self.args)
+    }
+
+    /// Returns true when this call can be evaluated as a scalar borrowed-view projection.
+    #[inline]
+    pub(crate) fn is_direct_view_scalar_call(&self) -> bool {
+        self.direct_view_call() == Some(registry::BuiltinDirectViewCall::ScalarValue)
+    }
+
+    /// Returns true when this call can be applied directly to raw JSON scalar bytes.
+    #[inline]
+    pub(crate) fn is_raw_json_scalar_call(&self) -> bool {
+        registry::raw_json_scalar_call(self.id(), &self.args)
+    }
+
+    /// Returns true when this call projects object items from a borrowed view.
+    #[inline]
+    pub(crate) fn is_direct_object_items_call(&self) -> bool {
+        registry::view_object_items_projection_call(self.id(), &self.args).is_some()
+    }
+
     /// Returns the capability descriptor for this call, potentially overriding the
     /// method-level spec with argument-specific cost or indexability adjustments.
     #[inline]

@@ -1,7 +1,5 @@
 use crate::builtins::registry::{
-    array_selector as builtin_array_selector, by_name as builtin_by_name,
-    direct_view_call, logical_shape, raw_json_scalar_call, view_object_items_projection_call,
-    BuiltinDirectViewCall, BuiltinId,
+    array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -933,18 +931,17 @@ fn plain_sink_direct_raw_json_scalar_call(
 
 #[inline]
 fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
-    direct_view_call(BuiltinId::from_method(call.method), &call.args)
-        == Some(BuiltinDirectViewCall::ScalarValue)
+    call.is_direct_view_scalar_call()
 }
 
 #[inline]
 fn is_direct_raw_json_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
-    raw_json_scalar_call(BuiltinId::from_method(call.method), &call.args)
+    call.is_raw_json_scalar_call()
 }
 
 #[inline]
 fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
-    view_object_items_projection_call(BuiltinId::from_method(call.method), &call.args).is_some()
+    call.is_direct_object_items_call()
 }
 
 fn root_path_steps(
@@ -1719,7 +1716,7 @@ fn direct_array_element_source(
             _ => None,
         };
         let selection = SingleElementSelection::from_array_selector(
-            builtin_array_selector(BuiltinId::from_method(call.method))?,
+            builtin_array_selector(call.id())?,
             arg,
         )?;
         return Some((node_path_steps(plan, *receiver)?, selection.into()));
