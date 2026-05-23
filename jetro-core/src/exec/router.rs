@@ -845,6 +845,34 @@ mod tests {
     }
 
     #[test]
+    fn view_nested_projection_reducers_keep_tape_input_borrowed() {
+        let data = br#"{"books":[{"meta":{"author":{"country":"uk"},"price":10}},{"meta":{"author":{"country":"us"},"price":20}},{"meta":{"author":{"country":"uk"},"price":30}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let from_tape = Jetro::from_bytes(data.clone()).unwrap();
+        let from_value = Jetro::from_bytes(data).unwrap();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let counts = from_tape
+            .collect(r#"$.books.count_by(@.meta.get_path("author.country").upper())"#)
+            .unwrap();
+        let expected_counts = from_value
+            .collect(r#"$.books.count_by(@.meta.get_path("author.country").upper())"#)
+            .unwrap();
+        assert_eq!(counts, expected_counts);
+        assert_eq!(counts, json!({"UK": 2, "US": 1}));
+
+        let total = from_tape
+            .collect(r#"$.books.map(@.meta.get_path("price")).sum()"#)
+            .unwrap();
+        let expected_total = from_value
+            .collect(r#"$.books.map(@.meta.get_path("price")).sum()"#)
+            .unwrap();
+        assert_eq!(total, expected_total);
+        assert_eq!(total, json!(60));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_has_preserves_array_and_string_membership_without_materialization() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"tags":["sf"],"title":"Dune"},{"tags":["sf","hugo"],"title":"Foundation"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
