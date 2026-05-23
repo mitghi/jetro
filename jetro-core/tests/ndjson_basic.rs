@@ -561,6 +561,23 @@ not-json
 }
 
 #[test]
+fn rows_stream_top_level_map_arg_is_row_local() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"Ada"}
+{"id":2,"name":"Bob"}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(Cursor::new(input), "$.rows().take(2).map(name)", &mut out)
+        .expect("rows stream top-level map arg should run against the row");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "\"Ada\"\n\"Bob\"\n");
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_emitted, 2);
+}
+
+#[test]
 fn run_ndjson_with_report_returns_rows_stream_stats() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"active":true}

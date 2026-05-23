@@ -317,7 +317,11 @@ pub(super) fn lower_root_rows_expr(
         };
         let arg = op.arg();
         let expr_arg = match arg {
-            BuiltinRowStreamArg::Expr => Some(single_expr_arg(name, args)?.clone()),
+            BuiltinRowStreamArg::Expr => Some(
+                crate::compile::lambda_lower::normalize_pipeline_arg_expr(single_expr_arg(
+                    name, args,
+                )?),
+            ),
             BuiltinRowStreamArg::Usize | BuiltinRowStreamArg::None => None,
         };
         let usize_arg = match arg {
@@ -837,6 +841,32 @@ mod tests {
         assert!(matches!(plan.stages[0], RowStreamStage::DistinctBy(_)));
         assert!(matches!(plan.stages[1], RowStreamStage::Take(10)));
         assert!(matches!(plan.stages[2], RowStreamStage::Map(_)));
+    }
+
+    #[test]
+    fn normalizes_top_level_rows_expr_args_as_row_local() {
+        let expr = parse("$.rows().distinct_by(id).map(name)").unwrap();
+        let plan = lower_root_rows_expr(&expr, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .unwrap();
+
+        fn assert_current_field(expr: &Expr, field: &str) {
+            let Expr::Chain(base, steps) = expr else {
+                panic!("expected current field chain");
+            };
+            assert!(matches!(base.as_ref(), Expr::Current));
+            assert!(matches!(
+                steps.as_slice(),
+                [Step::Field(name)] if name.as_str() == field
+            ));
+        }
+
+        let [RowStreamStage::DistinctBy(key), RowStreamStage::Map(map)] = plan.stages.as_slice()
+        else {
+            panic!("unexpected rows stages: {:?}", plan.stages);
+        };
+        assert_current_field(key, "id");
+        assert_current_field(map, "name");
     }
 
     #[test]
