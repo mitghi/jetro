@@ -993,13 +993,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_filter_pred_shape() {
-        let expr = crate::parse::parser::parse("@.total > 100").unwrap();
-        let prog = crate::compile::compiler::Compiler::compile(&expr, "");
-        eprintln!("PRED OPS = {:#?}", prog.ops);
-    }
-
-    #[test]
     fn method_chain_scalar_filter_lowers_from_builtin_view_metadata() {
         let p = lower_query("$.people.filter(name.len() == 3).take(1).map(name)").unwrap();
 
