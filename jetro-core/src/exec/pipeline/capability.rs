@@ -883,6 +883,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::builtins::{
+        registry::{cancellation, BuiltinId},
         BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };
@@ -984,10 +985,7 @@ mod tests {
             remove,
             ViewStageCapability::RemoveValue(Val::Int(2))
         ));
-        let cancel = crate::builtins::BuiltinMethod::Reverse
-            .spec()
-            .cancellation
-            .unwrap();
+        let cancel = cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).unwrap();
         assert!(Stage::Reverse(cancel).view_capability(9, None).is_none());
     }
 

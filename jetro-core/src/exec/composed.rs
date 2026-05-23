@@ -1227,7 +1227,10 @@ fn vals_eq(a: &Val, b: &Val) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
+    use crate::builtins::{
+        registry::{cancellation, BuiltinId},
+        BuiltinArgs, BuiltinCall, BuiltinMethod,
+    };
     use indexmap::IndexMap;
     use std::sync::Arc;
 
@@ -1744,10 +1747,7 @@ mod tests {
         ));
 
         // reverse().reverse() → empty
-        let cancel = crate::builtins::BuiltinMethod::Reverse
-            .spec()
-            .cancellation
-            .unwrap();
+        let cancel = cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).unwrap();
         let p = plan(
             vec![Stage::Reverse(cancel), Stage::Reverse(cancel)],
             Sink::Collect,
