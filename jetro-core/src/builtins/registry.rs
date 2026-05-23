@@ -17,10 +17,10 @@ use crate::{
         BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
         BuiltinObjectLambda, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
-        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
-        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
-        BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection,
-        BuiltinViewStage,
+        BuiltinRawJsonScalar, BuiltinRowStreamArg, BuiltinRowStreamOp, BuiltinRuntimeHook,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural,
+        BuiltinViewObjectProjection, BuiltinViewStage,
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
@@ -79,6 +79,12 @@ pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
 #[inline]
 pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
     id.method().and_then(|method| method.spec().row_stream_op)
+}
+
+/// Return the argument kind required by a row-stream operation.
+#[inline]
+pub(crate) fn row_stream_op_arg(op: BuiltinRowStreamOp) -> BuiltinRowStreamArg {
+    op.arg()
 }
 
 /// Return true when a row-stream method finalises the stream result and no
@@ -3373,6 +3379,25 @@ mod tests {
             BuiltinRowStreamOp::All,
             BuiltinRowStreamOp::Map,
         ] {
+            let expected_arg = match op {
+                BuiltinRowStreamOp::Reverse
+                | BuiltinRowStreamOp::First
+                | BuiltinRowStreamOp::Last
+                | BuiltinRowStreamOp::Count
+                | BuiltinRowStreamOp::Sum
+                | BuiltinRowStreamOp::Avg
+                | BuiltinRowStreamOp::Min
+                | BuiltinRowStreamOp::Max => BuiltinRowStreamArg::None,
+                BuiltinRowStreamOp::Filter
+                | BuiltinRowStreamOp::FindFirst
+                | BuiltinRowStreamOp::FindOne
+                | BuiltinRowStreamOp::DistinctBy
+                | BuiltinRowStreamOp::Any
+                | BuiltinRowStreamOp::All
+                | BuiltinRowStreamOp::Map => BuiltinRowStreamArg::Expr,
+                BuiltinRowStreamOp::Take => BuiltinRowStreamArg::Usize,
+            };
+            assert_eq!(row_stream_op_arg(op), expected_arg, "{op:?}");
             let expected_terminal = matches!(
                 op,
                 BuiltinRowStreamOp::Last

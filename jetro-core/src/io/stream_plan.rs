@@ -6,13 +6,14 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op,
+    by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op, row_stream_op_arg,
     row_stream_op_blocks_parallel_partitioning, row_stream_op_is_filter_like,
     row_stream_op_is_projector, row_stream_op_is_row_selection, row_stream_op_is_terminal,
     row_stream_op_preserves_order_before_limit, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamOp,
+    BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamArg,
+    BuiltinRowStreamOp,
 };
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
@@ -276,52 +277,56 @@ pub(super) fn lower_root_rows_expr(
                 "unsupported rows() stream method {name}()"
             )));
         };
+        let arg = row_stream_op_arg(op);
+        let expr_arg = match arg {
+            BuiltinRowStreamArg::Expr => Some(single_expr_arg(name, args)?.clone()),
+            BuiltinRowStreamArg::Usize | BuiltinRowStreamArg::None => None,
+        };
+        let usize_arg = match arg {
+            BuiltinRowStreamArg::Usize => Some(single_usize_arg(name, args)?),
+            BuiltinRowStreamArg::Expr => None,
+            BuiltinRowStreamArg::None => {
+                require_arity(name, args, 0)?;
+                None
+            }
+        };
+
         match op {
             BuiltinRowStreamOp::Reverse => {
-                require_arity(name, args, 0)?;
                 plan.direction = match plan.direction {
                     RowStreamDirection::Forward => RowStreamDirection::Reverse,
                     RowStreamDirection::Reverse => RowStreamDirection::Forward,
                 };
             }
             BuiltinRowStreamOp::Filter => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::Filter(expr));
+                plan.stages.push(RowStreamStage::Filter(expr_arg.unwrap()));
             }
             BuiltinRowStreamOp::FindFirst => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::Filter(expr));
+                plan.stages.push(RowStreamStage::Filter(expr_arg.unwrap()));
                 plan.stages.push(RowStreamStage::Take(1));
             }
             BuiltinRowStreamOp::FindOne => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::FindOne(expr));
+                plan.stages.push(RowStreamStage::FindOne(expr_arg.unwrap()));
             }
             BuiltinRowStreamOp::DistinctBy => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::DistinctBy(expr));
+                plan.stages.push(RowStreamStage::DistinctBy(expr_arg.unwrap()));
             }
             BuiltinRowStreamOp::Take => {
-                let n = single_usize_arg(name, args)?;
-                plan.stages.push(RowStreamStage::Take(n));
+                plan.stages.push(RowStreamStage::Take(usize_arg.unwrap()));
             }
             BuiltinRowStreamOp::First => {
-                require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Take(1));
             }
             BuiltinRowStreamOp::Last => {
-                require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Last);
             }
             BuiltinRowStreamOp::Count => {
-                require_arity(name, args, 0)?;
                 plan.stages.push(RowStreamStage::Count);
             }
             BuiltinRowStreamOp::Sum
             | BuiltinRowStreamOp::Avg
             | BuiltinRowStreamOp::Min
             | BuiltinRowStreamOp::Max => {
-                require_arity(name, args, 0)?;
                 let reducer = numeric_reducer(id).ok_or_else(|| {
                     RowStreamPlanError::new(format!(
                         "rows() stream method {name}() is missing numeric reducer metadata"
@@ -330,16 +335,13 @@ pub(super) fn lower_root_rows_expr(
                 plan.stages.push(RowStreamStage::Numeric(reducer));
             }
             BuiltinRowStreamOp::Any => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::Any(expr));
+                plan.stages.push(RowStreamStage::Any(expr_arg.unwrap()));
             }
             BuiltinRowStreamOp::All => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::All(expr));
+                plan.stages.push(RowStreamStage::All(expr_arg.unwrap()));
             }
             BuiltinRowStreamOp::Map => {
-                let expr = single_expr_arg(name, args)?.clone();
-                plan.stages.push(RowStreamStage::Map(expr));
+                plan.stages.push(RowStreamStage::Map(expr_arg.unwrap()));
             }
         }
         if row_stream_op_is_terminal(op) {
@@ -387,12 +389,12 @@ fn classify_parallelism(
 ) -> RowStreamParallelism {
     let mut saw_filter = false;
     for stage in &plan.stages {
-        if stage.is_filter_like() {
+        if stage.blocks_parallel_partitioning() {
+            return RowStreamParallelism::Sequential;
+        } else if stage.is_filter_like() {
             saw_filter = true;
         } else if stage.is_projector() || stage.retained_limit().is_some() || stage.scalar_sink() {
             // These stages do not prevent partition-filter execution.
-        } else if stage.blocks_parallel_partitioning() {
-            return RowStreamParallelism::Sequential;
         } else {
             return RowStreamParallelism::Sequential;
         }

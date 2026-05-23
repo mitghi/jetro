@@ -940,7 +940,41 @@ pub enum BuiltinRowStreamOp {
     Map,
 }
 
+/// Argument contract for a source-level `$.rows()` stream operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinRowStreamArg {
+    /// The operation accepts no argument.
+    None,
+    /// The operation accepts one expression/lambda argument.
+    Expr,
+    /// The operation accepts one non-negative integer argument.
+    Usize,
+}
+
 impl BuiltinRowStreamOp {
+    /// Argument kind required by this row-stream operation.
+    #[inline]
+    pub(crate) const fn arg(self) -> BuiltinRowStreamArg {
+        match self {
+            Self::Reverse
+            | Self::First
+            | Self::Last
+            | Self::Count
+            | Self::Sum
+            | Self::Avg
+            | Self::Min
+            | Self::Max => BuiltinRowStreamArg::None,
+            Self::Filter
+            | Self::FindFirst
+            | Self::FindOne
+            | Self::DistinctBy
+            | Self::Any
+            | Self::All
+            | Self::Map => BuiltinRowStreamArg::Expr,
+            Self::Take => BuiltinRowStreamArg::Usize,
+        }
+    }
+
     /// Whether this operation finalizes a `$.rows()` stream.
     #[inline]
     pub(crate) const fn is_terminal(self) -> bool {
