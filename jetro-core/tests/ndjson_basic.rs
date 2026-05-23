@@ -697,15 +697,15 @@ fn rows_stream_method_array_selectors_in_map_arg_are_direct() {
     let report = engine
         .run_ndjson_with_report(
             Cursor::new(input),
-            r#"$.rows().take(2).map({id: id, tag: tags.first().upper(), last: tags.last(), first_attr: attributes.first().value})"#,
+            r#"$.rows().take(2).map({id: id, tag: tags.first().upper(), last: tags.last(), first_attr: attributes.first().value.upper()})"#,
             &mut out,
         )
         .expect("method-form array selectors should use direct projections");
 
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "{\"id\":1,\"tag\":\"SF\",\"last\":\"classic\",\"first_attr\":\"dune\"}\n\
-{\"id\":2,\"tag\":\"TECH\",\"last\":\"new\",\"first_attr\":\"robot\"}\n"
+        "{\"id\":1,\"tag\":\"SF\",\"last\":\"classic\",\"first_attr\":\"DUNE\"}\n\
+{\"id\":2,\"tag\":\"TECH\",\"last\":\"new\",\"first_attr\":\"ROBOT\"}\n"
     );
     assert_eq!(report.route.kind.to_string(), "rows-stream");
     assert_eq!(report.stats.rows_emitted, 2);
