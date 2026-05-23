@@ -107,25 +107,21 @@ where
     Ok(out)
 }
 
-/// Per-row flat_map primitive: evaluates `eval`, then flattens one level if the result is an array.
+/// Per-row flat_map primitive: evaluates `eval`, then flattens one level if the result is array-like.
 /// Returns a `SmallVec` to avoid heap allocation for the common single-element case.
 #[inline]
 pub fn flat_map_one<F>(item: &Val, mut eval: F) -> Result<smallvec::SmallVec<[Val; 1]>, EvalError>
 where
     F: FnMut(&Val) -> Result<Val, EvalError>,
 {
-    use std::sync::Arc;
     let r = eval(item)?;
-    Ok(match r {
-        Val::Arr(a) => {
-            let v = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            v.into_iter().collect()
-        }
-        v => smallvec::smallvec![v],
+    Ok(match r.into_vals() {
+        Ok(items) => items.into_iter().collect(),
+        Err(value) => smallvec::smallvec![value],
     })
 }
 
-/// Buffered flat_map: maps and flattens every element into a single output vector.
+/// Buffered flat_map: maps and flattens every array-like element into a single output vector.
 #[inline]
 pub fn flat_map_apply<F>(items: Vec<Val>, mut eval: F) -> Result<Vec<Val>, EvalError>
 where
