@@ -1390,7 +1390,27 @@ fn direct_projection_value_from_kernel(
                 .map(Box::new)
                 .map(NdjsonDirectProjectionValue::Nested)
         }
+        crate::exec::pipeline::BodyKernel::ArraySelect { array, selector } => {
+            let source_steps = kernel_to_physical_path(array)?;
+            Some(NdjsonDirectProjectionValue::Nested(Box::new(
+                NdjsonDirectTapePlan::ArrayElementPath {
+                    source_steps,
+                    element: direct_element_from_kernel_selector(*selector),
+                    suffix_steps: Vec::new(),
+                },
+            )))
+        }
         _ => None,
+    }
+}
+
+fn direct_element_from_kernel_selector(
+    selector: crate::exec::pipeline::ArraySelector,
+) -> NdjsonDirectElement {
+    match selector {
+        crate::exec::pipeline::ArraySelector::First => NdjsonDirectElement::First,
+        crate::exec::pipeline::ArraySelector::Last => NdjsonDirectElement::Last,
+        crate::exec::pipeline::ArraySelector::Nth(n) => NdjsonDirectElement::Nth(n),
     }
 }
 

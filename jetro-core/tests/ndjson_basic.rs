@@ -633,6 +633,33 @@ fn rows_stream_nested_object_map_arg_is_direct() {
 }
 
 #[test]
+fn rows_stream_array_selectors_in_map_arg_are_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"tags":["sf","classic"]}
+{"id":2,"tags":["tech","new"]}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"$.rows().take(2).map({id: id, first: tags.first(), last: tags.last()})"#,
+            &mut out,
+        )
+        .expect("rows stream array selectors should use direct projections");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"first\":\"sf\",\"last\":\"classic\"}\n\
+{\"id\":2,\"first\":\"tech\",\"last\":\"new\"}\n"
+    );
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn run_ndjson_with_report_returns_rows_stream_stats() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"active":true}

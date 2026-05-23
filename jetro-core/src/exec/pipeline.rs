@@ -63,8 +63,8 @@ pub use kernels::{eval_cmp_op, BodyKernel};
 #[cfg(test)]
 pub(crate) use kernels::eval_kernel;
 pub(crate) use kernels::{
-    eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm, CollectLayout,
-    NestedPlanKernel, ObjectKernel, ViewKernelValue, view_kernel_view_to_owned,
+    eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm, ArraySelector,
+    CollectLayout, NestedPlanKernel, ObjectKernel, ViewKernelValue, view_kernel_view_to_owned,
 };
 #[cfg(test)]
 pub(crate) use kernels::eval_view_kernel;
