@@ -4480,6 +4480,17 @@ mod tests {
                     | BuiltinRowStreamOp::FindOne
             );
             assert_eq!(op.is_terminal(), expected_terminal, "{op:?}");
+            let expected_fixed_retained_limit = match op {
+                BuiltinRowStreamOp::First
+                | BuiltinRowStreamOp::FindFirst
+                | BuiltinRowStreamOp::Last => Some(1),
+                _ => None,
+            };
+            assert_eq!(
+                op.fixed_retained_limit(),
+                expected_fixed_retained_limit,
+                "{op:?}"
+            );
             let expected_blocks_parallel = matches!(
                 op,
                 BuiltinRowStreamOp::DistinctBy | BuiltinRowStreamOp::Last

@@ -108,8 +108,7 @@ impl RowStreamStage {
     fn retained_limit(&self) -> Option<usize> {
         match self {
             RowStreamStage::Take(n) => Some(*n),
-            RowStreamStage::Last => Some(1),
-            _ => None,
+            _ => self.op().fixed_retained_limit(),
         }
     }
 

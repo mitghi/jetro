@@ -1055,6 +1055,17 @@ impl BuiltinRowStreamOp {
         )
     }
 
+    /// Fixed number of rows retained by this operation, independent of user
+    /// arguments. Argument-bearing operations such as `take(n)` report their
+    /// dynamic limit from the lowered stage.
+    #[inline]
+    pub(crate) const fn fixed_retained_limit(self) -> Option<usize> {
+        match self {
+            Self::First | Self::FindFirst | Self::Last => Some(1),
+            _ => None,
+        }
+    }
+
     /// Whether this operation prevents partitioned file execution.
     #[inline]
     pub(crate) const fn blocks_parallel_partitioning(self) -> bool {
