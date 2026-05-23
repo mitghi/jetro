@@ -793,6 +793,17 @@ pub enum BuiltinRawJsonScalar {
     AsciiLower,
 }
 
+impl BuiltinRawJsonScalar {
+    /// Demand law implied by this raw-byte scalar operation.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        match self {
+            Self::Len => BuiltinDemandLaw::Count,
+            Self::AsciiUpper | Self::AsciiLower => BuiltinDemandLaw::MapLike,
+        }
+    }
+}
+
 /// Object-lambda operation behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinObjectLambda {

@@ -660,12 +660,13 @@ impl Builtin for Len {
     const NAME: &'static str = "len";
 
     fn spec() -> BuiltinSpec {
+        let raw = BuiltinRawJsonScalar::Len;
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .indexed()
             .view_scalar()
-            .raw_json_scalar(BuiltinRawJsonScalar::Len)
+            .raw_json_scalar(raw)
             .row_stream_op(BuiltinRowStreamOp::Count)
-            .demand_law(BuiltinDemandLaw::Count)
+            .demand_law(raw.demand_law())
             .count_sink()
     }
     #[inline]
@@ -2865,9 +2866,11 @@ impl Builtin for Upper {
     const METHOD: BuiltinMethod = BuiltinMethod::Upper;
     const NAME: &'static str = "upper";
     fn spec() -> BuiltinSpec {
+        let raw = BuiltinRawJsonScalar::AsciiUpper;
         scalar_view_scalar_element_spec()
             .idempotent()
-            .raw_json_scalar(BuiltinRawJsonScalar::AsciiUpper)
+            .raw_json_scalar(raw)
+            .demand_law(raw.demand_law())
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2881,9 +2884,11 @@ impl Builtin for Lower {
     const METHOD: BuiltinMethod = BuiltinMethod::Lower;
     const NAME: &'static str = "lower";
     fn spec() -> BuiltinSpec {
+        let raw = BuiltinRawJsonScalar::AsciiLower;
         scalar_view_scalar_element_spec()
             .idempotent()
-            .raw_json_scalar(BuiltinRawJsonScalar::AsciiLower)
+            .raw_json_scalar(raw)
+            .demand_law(raw.demand_law())
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

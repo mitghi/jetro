@@ -2756,6 +2756,7 @@ mod tests {
             let id = BuiltinId::from_method(method);
             let spec = method.spec();
             assert_eq!(spec.raw_json_scalar, Some(scalar), "{method:?}");
+            assert_eq!(demand_law(id), scalar.demand_law(), "{method:?}");
             assert!(view_scalar_projection(id), "{method:?}");
             assert!(spec.view_native, "{method:?}");
             assert_eq!(
