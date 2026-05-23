@@ -280,7 +280,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && is_direct_raw_json_scalar_call(call) =>
+        } if !*optional && call.is_raw_json_scalar_call() =>
         {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
@@ -294,7 +294,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && is_direct_object_items_call(call) =>
+        } if !*optional && call.is_direct_object_items_call() =>
         {
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
@@ -684,7 +684,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if is_direct_view_scalar_call(call) =>
+        } if call.is_direct_view_scalar_call() =>
         {
             if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
@@ -708,7 +708,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if !*optional && is_direct_object_items_call(call) =>
+        } if !*optional && call.is_direct_object_items_call() =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
                 steps: node_path_steps(plan, *receiver)?,
@@ -771,7 +771,7 @@ fn direct_object_value_from_node(
             receiver,
             call,
             optional,
-        } if is_direct_view_scalar_call(call) => {
+        } if call.is_direct_view_scalar_call() => {
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
                 steps: node_path_steps(plan, *receiver)?,
                 call: call.clone(),
@@ -926,22 +926,7 @@ fn plain_sink_direct_raw_json_scalar_call(
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<crate::builtins::BuiltinCall> {
     let call = plain_sink_direct_scalar_call(body)?;
-    is_direct_raw_json_scalar_call(&call).then_some(call)
-}
-
-#[inline]
-fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
-    call.is_direct_view_scalar_call()
-}
-
-#[inline]
-fn is_direct_raw_json_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
-    call.is_raw_json_scalar_call()
-}
-
-#[inline]
-fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
-    call.is_direct_object_items_call()
+    call.is_raw_json_scalar_call().then_some(call)
 }
 
 fn root_path_steps(
@@ -1188,7 +1173,7 @@ fn direct_tape_predicate_node(
             receiver,
             call,
             optional,
-        } if !*optional && is_direct_view_scalar_call(call) => {
+        } if !*optional && call.is_direct_view_scalar_call() => {
             direct_tape_predicate_scalar_call(plan, *receiver, call.clone())
         }
         PlanNode::Pipeline { source, body } => {
