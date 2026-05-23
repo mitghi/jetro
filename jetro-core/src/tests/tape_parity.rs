@@ -368,6 +368,9 @@ fn tape_matches_vm_for_extreme_and_distinct_terminal_sinks() {
         "$.books.min_by(price).author.name",
         "$.books.filter(tag == \"cyber\").max_by(score).title",
         "$.books.map({title, value: score + price}).max_by(value).title",
+        "$.books.sort_by(-score).first().title",
+        "$.books.sort_by(-score).last().title",
+        "$.books.sort_by(-score).take(2).map({title, score}).last().title",
         "$.books.map(tag).approx_count_distinct()",
         "$.books.filter(score > 90).map(author.name).approx_count_distinct()",
     ] {
