@@ -255,6 +255,18 @@ pub(crate) struct ArrayElementScalarCall {
     pub call: BuiltinCall,
 }
 
+/// Metadata for kernels shaped as `path.scalar_call()`.
+///
+/// The receiver is a direct current-row field path; callers can lower the keys
+/// to byte, tape, or owned-value access without re-matching the kernel shape.
+#[derive(Debug, Clone)]
+pub(crate) struct PathScalarCall {
+    /// Receiver path relative to the current row.
+    pub receiver_keys: Vec<Arc<str>>,
+    /// View-scalar builtin applied to the receiver value.
+    pub call: BuiltinCall,
+}
+
 impl ArraySelector {
     /// Build a pipeline selector from registry selector metadata plus an optional integer arg.
     pub(crate) fn from_builtin_selector(
@@ -719,6 +731,22 @@ impl BodyKernel {
             }
             _ => None,
         }
+    }
+
+    /// Returns metadata for `field_path.view_scalar_call()` kernels.
+    pub(crate) fn path_scalar_call(&self) -> Option<PathScalarCall> {
+        let Self::BuiltinCall { receiver, call } = self else {
+            return None;
+        };
+        if !crate::builtins::registry::view_scalar_value_projection(BuiltinId::from_method(
+            call.method,
+        )) {
+            return None;
+        }
+        Some(PathScalarCall {
+            receiver_keys: receiver.field_path_keys()?,
+            call: call.clone(),
+        })
     }
 
     /// Returns metadata for `array_selector[.suffix].view_scalar_call()` kernels.
@@ -3078,6 +3106,24 @@ mod tests {
         let kernel = BodyKernel::classify(&program);
         assert!(matches!(kernel, BodyKernel::CmpLit { .. }), "{kernel:#?}");
         assert!(kernel.is_view_native());
+    }
+
+    #[test]
+    fn scalar_call_path_metadata_is_shared() {
+        let expr = parse("user.name.len()").expect("parse scalar call");
+        let kernel = BodyKernel::classify_expr(&expr);
+        let call = kernel
+            .path_scalar_call()
+            .expect("path scalar call metadata");
+
+        assert_eq!(
+            call.receiver_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["user", "name"]
+        );
+        assert_eq!(call.call.method, crate::builtins::BuiltinMethod::Len);
     }
 
     #[test]

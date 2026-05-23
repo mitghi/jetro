@@ -1623,13 +1623,11 @@ fn direct_array_element_path_from_kernel(
 fn direct_scalar_call_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<(NdjsonPhysicalPath, crate::builtins::BuiltinCall)> {
-    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
-        return None;
-    };
-    if !is_direct_view_scalar_call(call) {
-        return None;
-    }
-    Some((kernel_to_physical_path(receiver)?, call.clone()))
+    let call = kernel.path_scalar_call()?;
+    Some((
+        physical_field_keys_to_path_steps(&call.receiver_keys),
+        call.call,
+    ))
 }
 
 fn direct_object_fields_from_kernel(
