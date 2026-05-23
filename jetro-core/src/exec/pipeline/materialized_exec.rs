@@ -164,10 +164,8 @@ pub(super) fn run(
         .stages
         .last()
         .and_then(Stage::descriptor)
-        .is_some_and(|desc| {
-            desc.method
-                .is_some_and(|method| keyed_reducer(BuiltinId::from_method(method)).is_some())
-        });
+        .and_then(|desc| desc.builtin_id())
+        .is_some_and(|id| keyed_reducer(id).is_some());
     sink_acc.finish_result(unwrap_single_collect_obj)
 }
 
@@ -703,10 +701,10 @@ pub(crate) fn apply_lambda_obj(
     };
     let mut out: indexmap::IndexMap<std::sync::Arc<str>, Val> =
         indexmap::IndexMap::with_capacity(m.len());
-    let operation = match stage {
-        Stage::ExprBuiltin { method, .. } => builtin_object_lambda(BuiltinId::from_method(*method)),
-        _ => None,
-    }
+    let operation = stage
+        .descriptor()
+        .and_then(|desc| desc.builtin_id())
+        .and_then(builtin_object_lambda)
     .expect("apply_lambda_obj called with non-Obj-lambda Stage");
 
     for (k, v) in m.iter() {
