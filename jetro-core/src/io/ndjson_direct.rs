@@ -1377,6 +1377,9 @@ fn direct_projection_value_from_kernel(
             NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?),
         ),
         crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
+            if let Some(value) = direct_array_element_scalar_projection_from_kernel(kernel) {
+                return Some(value);
+            }
             let (steps, call) = direct_scalar_call_from_kernel(kernel)?;
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
                 steps,
@@ -1391,17 +1394,82 @@ fn direct_projection_value_from_kernel(
                 .map(NdjsonDirectProjectionValue::Nested)
         }
         crate::exec::pipeline::BodyKernel::ArraySelect { array, selector } => {
-            let source_steps = kernel_to_physical_path(array)?;
+            let (source_steps, element) = direct_array_select_from_kernel(array, *selector)?;
             Some(NdjsonDirectProjectionValue::Nested(Box::new(
                 NdjsonDirectTapePlan::ArrayElementPath {
                     source_steps,
-                    element: direct_element_from_kernel_selector(*selector),
+                    element,
                     suffix_steps: Vec::new(),
                 },
             )))
         }
+        crate::exec::pipeline::BodyKernel::Compose { first, then } => {
+            direct_composed_projection_value_from_kernel(first, then)
+        }
         _ => None,
     }
+}
+
+fn direct_composed_projection_value_from_kernel(
+    first: &crate::exec::pipeline::BodyKernel,
+    then: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectProjectionValue> {
+    let crate::exec::pipeline::BodyKernel::ArraySelect { array, selector } = first else {
+        return None;
+    };
+    let (source_steps, element) = direct_array_select_from_kernel(array, *selector)?;
+    if let Some(suffix_steps) = kernel_to_physical_path(then) {
+        return Some(NdjsonDirectProjectionValue::Nested(Box::new(
+            NdjsonDirectTapePlan::ArrayElementPath {
+                source_steps,
+                element,
+                suffix_steps,
+            },
+        )));
+    }
+    let (suffix_steps, call) = direct_scalar_call_from_kernel(then)?;
+    Some(NdjsonDirectProjectionValue::Nested(Box::new(
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        },
+    )))
+}
+
+fn direct_array_element_scalar_projection_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectProjectionValue> {
+    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
+        return None;
+    };
+    if !is_direct_view_scalar_call(call) {
+        return None;
+    }
+    let crate::exec::pipeline::BodyKernel::ArraySelect { array, selector } = receiver.as_ref()
+    else {
+        return None;
+    };
+    let (source_steps, element) = direct_array_select_from_kernel(array, *selector)?;
+    Some(NdjsonDirectProjectionValue::Nested(Box::new(
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps: Vec::new(),
+            call: call.clone(),
+        },
+    )))
+}
+
+fn direct_array_select_from_kernel(
+    array: &crate::exec::pipeline::BodyKernel,
+    selector: crate::exec::pipeline::ArraySelector,
+) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
+    Some((
+        kernel_to_physical_path(array)?,
+        direct_element_from_kernel_selector(selector),
+    ))
 }
 
 fn direct_element_from_kernel_selector(

@@ -660,6 +660,33 @@ fn rows_stream_array_selectors_in_map_arg_are_direct() {
 }
 
 #[test]
+fn rows_stream_composed_array_index_selectors_in_map_arg_are_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"tags":["sf"],"attributes":[{"key":"genre","value":"dune"}]}
+{"id":2,"tags":["tech"],"attributes":[{"key":"kind","value":"robot"}]}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"$.rows().take(2).map({id: id, tag: tags[0].upper(), first_attr: attributes[0].value})"#,
+            &mut out,
+        )
+        .expect("composed rows stream array index selectors should use direct projections");
+
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"id\":1,\"tag\":\"SF\",\"first_attr\":\"dune\"}\n\
+{\"id\":2,\"tag\":\"TECH\",\"first_attr\":\"robot\"}\n"
+    );
+    assert_eq!(report.route.kind.to_string(), "rows-stream");
+    assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn run_ndjson_with_report_returns_rows_stream_stats() {
     let engine = JetroEngine::new();
     let input = br#"{"id":1,"active":true}
