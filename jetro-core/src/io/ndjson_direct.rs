@@ -1104,20 +1104,9 @@ fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredic
 }
 
 fn direct_item_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
-    match expr {
-        Expr::Current => Some(Vec::new()),
-        Expr::Ident(name) => Some(vec![PhysicalPathStep::Field(Arc::from(name.as_str()))]),
-        Expr::Chain(base, steps) => {
-            let mut path = match base.as_ref() {
-                Expr::Current => Vec::new(),
-                Expr::Ident(name) => vec![PhysicalPathStep::Field(Arc::from(name.as_str()))],
-                _ => return None,
-            };
-            path.extend(physical_path_steps(steps)?);
-            Some(path)
-        }
-        _ => None,
-    }
+    crate::exec::pipeline::BodyKernel::classify_expr(expr)
+        .field_path_keys()
+        .map(|keys| physical_field_keys_to_path_steps(&keys))
 }
 
 fn literal_val_expr(expr: &Expr) -> Option<Val> {
