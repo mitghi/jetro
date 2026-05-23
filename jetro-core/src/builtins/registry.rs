@@ -126,6 +126,33 @@ pub(crate) fn row_stream_op_preserves_order_before_limit(op: BuiltinRowStreamOp)
     op.preserves_order_before_limit()
 }
 
+/// Return the numeric reducer represented by a terminal row-stream op.
+#[inline]
+pub(crate) fn row_stream_op_numeric_reducer(
+    op: BuiltinRowStreamOp,
+) -> Option<BuiltinNumericReducer> {
+    match op {
+        BuiltinRowStreamOp::Sum => Some(BuiltinNumericReducer::Sum),
+        BuiltinRowStreamOp::Avg => Some(BuiltinNumericReducer::Avg),
+        BuiltinRowStreamOp::Min => Some(BuiltinNumericReducer::Min),
+        BuiltinRowStreamOp::Max => Some(BuiltinNumericReducer::Max),
+        _ => None,
+    }
+}
+
+/// Return the predicate sink represented by a terminal row-stream op.
+#[inline]
+pub(crate) fn row_stream_op_predicate_sink(
+    op: BuiltinRowStreamOp,
+) -> Option<BuiltinPredicateSink> {
+    match op {
+        BuiltinRowStreamOp::Any => Some(BuiltinPredicateSink::Any),
+        BuiltinRowStreamOp::All => Some(BuiltinPredicateSink::All),
+        BuiltinRowStreamOp::FindOne => Some(BuiltinPredicateSink::FindOne),
+        _ => None,
+    }
+}
+
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
@@ -3576,6 +3603,42 @@ mod tests {
         );
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Sum));
         assert!(row_stream_op_is_terminal(BuiltinRowStreamOp::Max));
+        assert_eq!(
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Sum),
+            Some(BuiltinNumericReducer::Sum)
+        );
+        assert_eq!(
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Avg),
+            Some(BuiltinNumericReducer::Avg)
+        );
+        assert_eq!(
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Min),
+            Some(BuiltinNumericReducer::Min)
+        );
+        assert_eq!(
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Max),
+            Some(BuiltinNumericReducer::Max)
+        );
+        assert_eq!(
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Count),
+            None
+        );
+        assert_eq!(
+            row_stream_op_predicate_sink(BuiltinRowStreamOp::Any),
+            Some(BuiltinPredicateSink::Any)
+        );
+        assert_eq!(
+            row_stream_op_predicate_sink(BuiltinRowStreamOp::All),
+            Some(BuiltinPredicateSink::All)
+        );
+        assert_eq!(
+            row_stream_op_predicate_sink(BuiltinRowStreamOp::FindOne),
+            Some(BuiltinPredicateSink::FindOne)
+        );
+        assert_eq!(
+            row_stream_op_predicate_sink(BuiltinRowStreamOp::Filter),
+            None
+        );
         assert_eq!(numeric_reducer(BuiltinId::from_method(BuiltinMethod::Map)), None);
         assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::FindFirst));
         assert!(!row_stream_op_is_terminal(BuiltinRowStreamOp::Map));

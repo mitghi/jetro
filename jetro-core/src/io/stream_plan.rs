@@ -6,9 +6,10 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op, row_stream_op_arg,
+    by_name as builtin_by_name, numeric_reducer, row_stream_op, row_stream_op_arg,
     row_stream_op_blocks_parallel_partitioning, row_stream_op_is_filter_like,
     row_stream_op_is_projector, row_stream_op_is_row_selection, row_stream_op_is_terminal,
+    row_stream_op_numeric_reducer, row_stream_op_predicate_sink,
     row_stream_op_preserves_order_before_limit, BuiltinId,
 };
 use crate::builtins::{
@@ -122,14 +123,11 @@ impl RowStreamStage {
     }
 
     pub(super) fn numeric_reducer(&self) -> Option<BuiltinNumericReducer> {
-        match self {
-            RowStreamStage::Numeric(reducer) => Some(*reducer),
-            _ => None,
-        }
+        row_stream_op_numeric_reducer(self.row_stream_op()?)
     }
 
     pub(super) fn predicate_sink(&self) -> Option<(BuiltinPredicateSink, &Expr)> {
-        let sink = predicate_sink(BuiltinId::from_method(self.builtin_method()))?;
+        let sink = row_stream_op_predicate_sink(self.row_stream_op()?)?;
         match self {
             RowStreamStage::Any(expr)
             | RowStreamStage::All(expr)
