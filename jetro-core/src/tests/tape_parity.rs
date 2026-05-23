@@ -70,6 +70,28 @@ fn tape_matches_vm_for_bounded_projection_and_reducers() {
 }
 
 #[test]
+fn tape_matches_vm_for_positional_demand_boundaries() {
+    let doc = json!({
+        "items": [
+            {"id": 1, "name": "ada", "active": true, "score": 30},
+            {"id": 2, "name": "bob", "active": false, "score": 20},
+            {"id": 3, "name": "cy", "active": true, "score": 10},
+            {"id": 4, "name": "dee", "active": true, "score": 40}
+        ]
+    });
+    for query in [
+        "$.items.map({id, label: name.upper()}).nth(2)",
+        "$.items.filter(active).map({id, score}).nth(1)",
+        "$.items.reverse().map(id).first()",
+        "$.items.reverse().filter(active).map(name).last()",
+        "$.items.skip(1).take(2).map(name.upper()).last()",
+        "$.items.sort_by(score).skip(1).take(2).map({id, score}).first()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
     let doc = json!({
         "users": [
