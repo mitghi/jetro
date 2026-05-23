@@ -13,12 +13,12 @@ use crate::builtins::registry::{
     columnar_stage as builtin_columnar_stage, count_sink_accepts_predicate,
     effective_pipeline_order_effect, effective_pipeline_shape, expr_payload,
     expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
-    keyed_reducer as builtin_keyed_reducer, nullary_stage as builtin_nullary_stage,
-    participates_in_demand, pipeline_composed_barrier, pipeline_element,
-    pipeline_legacy_materialized, pipeline_lowering, pipeline_stage_consumes_value,
-    pipeline_stage_is_order_only, pipeline_stage_is_positional, pipeline_streams,
-    sink_accumulator as builtin_sink_accumulator, sink_demand as builtin_sink_demand,
-    stage_delayable_view_projection,
+    keyed_reducer as builtin_keyed_reducer, direct_scalar_for_plain_sink,
+    nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
+    pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
+    pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
+    pipeline_streams, sink_accumulator as builtin_sink_accumulator,
+    sink_demand as builtin_sink_demand, stage_delayable_view_projection,
     stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
     stage_merge as builtin_stage_merge, view_projection, view_stage as builtin_view_stage,
     BuiltinId,
@@ -213,6 +213,16 @@ impl Sink {
         matches!(self, Sink::Reducer(spec) if spec.is_plain_count())
     }
 
+    /// Return the scalar builtin equivalent to applying this plain sink to one
+    /// already-selected JSON value.
+    pub(crate) fn scalar_call_for_plain_sink(&self) -> Option<BuiltinCall> {
+        let spec = self.reducer_spec()?;
+        if !spec.is_plain_count() {
+            return None;
+        }
+        direct_scalar_for_plain_sink(BuiltinId::from_method(spec.method()?))
+    }
+
     /// Returns a no-predicate/no-projection numeric reducer operation.
     #[inline]
     pub(crate) fn identity_numeric_reducer(&self) -> Option<super::NumOp> {
@@ -335,6 +345,12 @@ impl Sink {
             BuiltinSinkAccumulator::SelectOne(position) => Some(position.into()),
             _ => None,
         }
+    }
+
+    /// Returns true when this terminal select-one sink keeps the last retained row.
+    #[inline]
+    pub(crate) fn select_one_wants_last(&self) -> Option<bool> {
+        Some(matches!(self.select_one_position()?, Position::Last))
     }
 
     /// Returns the exact single-row selection represented by this sink, if the
@@ -1970,9 +1986,18 @@ mod tests {
             Some(SingleElementSelection::First)
         );
         assert_eq!(
+            Sink::Terminal(BuiltinMethod::First).select_one_wants_last(),
+            Some(false)
+        );
+        assert_eq!(
             Sink::Terminal(BuiltinMethod::Last).single_element_selection(),
             Some(SingleElementSelection::Last)
         );
+        assert_eq!(
+            Sink::Terminal(BuiltinMethod::Last).select_one_wants_last(),
+            Some(true)
+        );
+        assert_eq!(Sink::Collect.select_one_wants_last(), None);
         assert_eq!(
             Sink::SelectMany {
                 n: 1,
@@ -2059,6 +2084,11 @@ mod tests {
     fn sink_reducer_accessors_are_shared_execution_metadata() {
         let count = Sink::count_builtin(BuiltinMethod::Count).unwrap();
         assert!(count.is_plain_count_reducer());
+        assert_eq!(
+            count.scalar_call_for_plain_sink()
+                .map(|call| call.method),
+            Some(BuiltinMethod::Len)
+        );
         assert_eq!(count.identity_numeric_reducer(), None);
         assert!(count.projected_numeric_reducer().is_none());
 

@@ -1,7 +1,7 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    direct_scalar_for_plain_sink, logical_shape, terminal_selection_wants_last,
-    view_object_items_projection, view_scalar_value_projection, BuiltinId,
+    logical_shape, terminal_selection_wants_last, view_object_items_projection,
+    view_scalar_value_projection, BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -677,15 +677,12 @@ fn direct_tape_sort_extreme_plan(
     body: &crate::exec::pipeline::PipelineBody,
     suffix_steps: NdjsonPhysicalPath,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::{Sink, Stage};
+    use crate::exec::pipeline::Stage;
 
     let [Stage::Sort(_)] = body.stages.as_slice() else {
         return None;
     };
-    let want_last = match body.sink {
-        Sink::Terminal(method) => terminal_selection_wants_last(BuiltinId::from_method(method))?,
-        _ => return None,
-    };
+    let want_last = body.sink.select_one_wants_last()?;
     direct_tape_sort_extreme_plan_with_position(plan, source, body, suffix_steps, want_last)
 }
 
@@ -730,13 +727,7 @@ fn plain_sink_direct_scalar_call(
     if !body.stages.is_empty() {
         return None;
     }
-    let crate::exec::pipeline::Sink::Reducer(spec) = &body.sink else {
-        return None;
-    };
-    if !spec.is_plain_count() {
-        return None;
-    }
-    direct_scalar_for_plain_sink(BuiltinId::from_method(spec.method()?))
+    body.sink.scalar_call_for_plain_sink()
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
@@ -992,12 +983,7 @@ fn direct_tape_count_stream_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::Sink;
-
-    let Sink::Reducer(spec) = &body.sink else {
-        return None;
-    };
-    if !spec.is_plain_count() {
+    if !body.sink.is_plain_count_reducer() {
         return None;
     }
     let stream = direct_stream_shape(body)?;
@@ -1016,27 +1002,23 @@ fn direct_tape_numeric_stream_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::Sink;
-
-    let Sink::Reducer(spec) = &body.sink else {
-        return None;
-    };
-    if spec.predicate.is_some() {
-        return None;
-    }
-    let op = spec.numeric_op()?;
     let stream = direct_stream_shape(body)?;
-    let (predicate, suffix_steps) = if spec.projection.is_some() {
+    let (op, predicate, suffix_steps) = if let Some((_projection, op)) =
+        body.sink.projected_numeric_reducer()
+    {
         if stream.map.is_some() {
             return None;
         }
         (
+            op,
             stream.predicate,
             kernel_to_physical_path(body.sink_kernels.first()?)?,
         )
-    } else {
+    } else if let Some(op) = body.sink.identity_numeric_reducer() {
         let suffix_steps = direct_stream_map_path(stream.map?)?;
-        (stream.predicate, suffix_steps)
+        (op, stream.predicate, suffix_steps)
+    } else {
+        return None;
     };
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
@@ -1071,12 +1053,7 @@ fn direct_tape_positional_stream_plan(
     source: &crate::ir::physical::PipelinePlanSource,
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::exec::pipeline::Sink;
-
-    let want_last = match body.sink {
-        Sink::Terminal(method) => terminal_selection_wants_last(BuiltinId::from_method(method))?,
-        _ => return None,
-    };
+    let want_last = body.sink.select_one_wants_last()?;
     let stream = direct_stream_shape(body)?;
     let map = stream
         .map
