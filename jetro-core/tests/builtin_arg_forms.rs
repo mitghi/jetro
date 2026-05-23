@@ -487,7 +487,8 @@ fn avg_lambda_forms() {
 #[test]
 fn min_lambda_forms() {
     let d = users();
-    // Projected aggregate widens to f64 — see `max_lambda_forms`.
+    // Projected aggregate returns the selected numeric value; use `min_by`
+    // for the originating element.
     assert_all(
         "min(proj)",
         &[
@@ -496,15 +497,15 @@ fn min_lambda_forms() {
             "$.users.min(u => u.score)",
         ],
         &d,
-        "40.0",
+        "40",
     );
 }
 
 #[test]
 fn max_lambda_forms() {
     let d = users();
-    // `max(proj)` returns the projected value as a float; use `max_by` for
-    // the originating element preserved in its source numeric type.
+    // `max(proj)` returns the projected numeric value; use `max_by` for the
+    // originating element.
     assert_all(
         "max(proj)",
         &[
@@ -513,7 +514,7 @@ fn max_lambda_forms() {
             "$.users.max(u => u.score)",
         ],
         &d,
-        "95.0",
+        "95",
     );
 }
 

@@ -140,10 +140,12 @@ impl<'a> SinkAccumulator<'a> {
                 Some(false)
             }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
-                Some(self.observe_first(materialize_item()))
+                let selected = materialize_numeric().unwrap_or_else(materialize_item);
+                Some(self.observe_first(selected))
             }
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
-                self.observe_last(materialize_item());
+                let selected = materialize_numeric().unwrap_or_else(materialize_item);
+                self.observe_last(selected);
                 Some(false)
             }
         }

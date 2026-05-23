@@ -19,7 +19,7 @@ use crate::builtins::{
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
-use crate::plan::analysis::starts_with_direct_view_projection;
+use crate::plan::analysis;
 
 use super::{
     expr_label, plan_with_exprs, sink_name, source_name, trace_enabled, Pipeline, PipelineBody,
@@ -82,11 +82,7 @@ impl Pipeline {
             .collect::<Vec<_>>()
             .into();
 
-        let trailing = &steps[field_end..];
-        if starts_with_direct_view_projection(trailing) {
-            return None;
-        }
-        Self::lower_from_source(Source::FieldChain { keys }, trailing)
+        Self::lower_from_source(Source::FieldChain { keys }, &steps[field_end..])
     }
 
     /// Lowers `trailing` steps into a `PipelineBody` and attaches `source`, returning `None` when any step is unclassifiable.
@@ -151,7 +147,7 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     if trailing.is_empty() {
         return None;
     }
-    if starts_with_direct_view_projection(trailing) {
+    if analysis::starts_with_direct_view_projection(trailing) {
         return None;
     }
     if !trailing_has_collection_operator(trailing) {

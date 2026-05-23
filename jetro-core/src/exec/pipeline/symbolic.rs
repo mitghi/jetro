@@ -51,6 +51,10 @@ pub(super) fn normalize_symbolic(
                 _ => e,
             });
         match stage {
+            Stage::CompiledMap(_) => {
+                out.flush_all();
+                out.push_stage(stage, expr);
+            }
             _ if stage.is_symbolic_map_stage() => {
                 if let Some(expr) = expr.as_ref().filter(|e| is_pure_expr(e)) {
                     out.item = simplify_expr(substitute_current(expr, &out.item));

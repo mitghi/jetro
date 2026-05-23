@@ -793,6 +793,12 @@ fn terminal_projection_stage_kernel(
     idx: usize,
     kernel: Option<&pipeline::BodyKernel>,
 ) -> Option<pipeline::BodyKernel> {
+    if let pipeline::Stage::CompiledMap(plan) = stage {
+        return Some(pipeline::BodyKernel::NestedPlan(std::sync::Arc::new(
+            pipeline::NestedPlanKernel::new(std::sync::Arc::clone(plan)),
+        )));
+    }
+
     if matches!(
         stage.view_capability(idx, kernel),
         Some(pipeline::ViewStageCapability::Map { .. })
@@ -911,9 +917,12 @@ where
     if matches!(strategy, pipeline::StageStrategy::SortUntilOutput(_)) {
         return run_sort_prefix_then_view_suffix(source, body, &plan, base_env, vm);
     }
-    let collect_suffix = terminal_collect_plan_from(body, plan.sort_stage + 1);
+    let suffix_start = plan.sort_stage + 1;
+    let collect_suffix = terminal_collect_plan_from(body, suffix_start);
+    let select_projection_suffix = terminal_projection_run(body, suffix_start).is_some();
     if collect_suffix.is_none()
-        && !body.suffix_can_run_with_materialized_receiver(plan.sort_stage + 1)
+        && !select_projection_suffix
+        && !body.suffix_can_run_with_materialized_receiver(suffix_start)
     {
         return None;
     }
@@ -948,14 +957,14 @@ where
     if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
         winners.as_slice(),
         body,
-        plan.sort_stage + 1,
+        suffix_start,
         false,
         vm,
     ) {
         return Some(out);
     }
     if let Some(out) =
-        run_sorted_rows_view_suffix(winners.as_slice(), body, plan.sort_stage + 1, base_env, vm)
+        run_sorted_rows_view_suffix(winners.as_slice(), body, suffix_start, base_env, vm)
     {
         return Some(out);
     }
@@ -963,7 +972,7 @@ where
 
     Some(run_materialized_suffix(
         body,
-        plan.sort_stage + 1,
+        suffix_start,
         boundary_rows,
         cache,
         base_env,
