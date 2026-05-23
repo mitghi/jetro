@@ -2873,6 +2873,21 @@ mod tests {
     }
 
     #[test]
+    fn registry_barrier_lowerings_declare_materialization_boundary() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            if pipeline_lowering(id).is_some() && spec.cardinality == BuiltinCardinality::Barrier {
+                assert_ne!(
+                    pipeline_materialization(id),
+                    BuiltinPipelineMaterialization::Streaming,
+                    "{method:?} lowers as a barrier but inherits streaming materialization"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_execution_surfaces_have_explicit_demand_laws() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
