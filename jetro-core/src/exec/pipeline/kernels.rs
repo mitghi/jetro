@@ -239,6 +239,22 @@ pub enum ArraySelector {
     Nth(usize),
 }
 
+/// Metadata for kernels shaped as `array-selector.suffix.scalar_call()`.
+///
+/// This is intentionally path/key based rather than backend-specific; byte,
+/// tape, and view executors can lower it to their own path representation.
+#[derive(Debug, Clone)]
+pub(crate) struct ArrayElementScalarCall {
+    /// Path to the source array, relative to the current row.
+    pub source_keys: Vec<Arc<str>>,
+    /// Array element selected from `source_keys`.
+    pub selector: ArraySelector,
+    /// Field suffix read from the selected element before applying `call`.
+    pub suffix_keys: Vec<Arc<str>>,
+    /// View-scalar builtin applied to the selected value.
+    pub call: BuiltinCall,
+}
+
 impl ArraySelector {
     /// Build a pipeline selector from registry selector metadata plus an optional integer arg.
     pub(crate) fn from_builtin_selector(
@@ -700,6 +716,42 @@ impl BodyKernel {
             Self::CurrentCmpLit(op, lit) => Some((Vec::new(), *op, lit.clone())),
             Self::CmpLit { lhs, op, lit } => {
                 Some((lhs.field_path_keys()?, *op, lit.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns metadata for `array_selector[.suffix].view_scalar_call()` kernels.
+    pub(crate) fn array_element_scalar_call(&self) -> Option<ArrayElementScalarCall> {
+        let Self::BuiltinCall { receiver, call } = self else {
+            return None;
+        };
+        if !crate::builtins::registry::view_scalar_value_projection(BuiltinId::from_method(
+            call.method,
+        )) {
+            return None;
+        }
+        let (source_keys, selector, suffix_keys) = receiver.array_element_path()?;
+        Some(ArrayElementScalarCall {
+            source_keys,
+            selector,
+            suffix_keys,
+            call: call.clone(),
+        })
+    }
+
+    /// Returns metadata for direct array element path kernels.
+    pub(crate) fn array_element_path(
+        &self,
+    ) -> Option<(Vec<Arc<str>>, ArraySelector, Vec<Arc<str>>)> {
+        match self {
+            Self::ArraySelect { array, selector } => {
+                Some((array.field_path_keys()?, *selector, Vec::new()))
+            }
+            Self::Compose { first, then } => {
+                let (source_keys, selector, mut suffix_keys) = first.array_element_path()?;
+                suffix_keys.extend(then.field_path_keys()?);
+                Some((source_keys, selector, suffix_keys))
             }
             _ => None,
         }

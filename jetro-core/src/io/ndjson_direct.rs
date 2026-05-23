@@ -1600,39 +1600,24 @@ fn direct_array_element_scalar_call_from_kernel(
     NdjsonPhysicalPath,
     crate::builtins::BuiltinCall,
 )> {
-    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
-        return None;
-    };
-    if !is_direct_view_scalar_call(call) {
-        return None;
-    }
-    let (source_steps, element, suffix_steps) = direct_array_element_path_from_kernel(receiver)?;
-    Some((source_steps, element, suffix_steps, call.clone()))
+    let call = kernel.array_element_scalar_call()?;
+    Some((
+        physical_field_keys_to_path_steps(&call.source_keys),
+        call.selector.into(),
+        physical_field_keys_to_path_steps(&call.suffix_keys),
+        call.call,
+    ))
 }
 
 fn direct_array_element_path_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement, NdjsonPhysicalPath)> {
-    match kernel {
-        crate::exec::pipeline::BodyKernel::ArraySelect { array, selector } => {
-            let (source_steps, element) = direct_array_select_from_kernel(array, *selector)?;
-            Some((source_steps, element, Vec::new()))
-        }
-        crate::exec::pipeline::BodyKernel::Compose { first, then } => {
-            let (source_steps, element, mut suffix_steps) =
-                direct_array_element_path_from_kernel(first)?;
-            suffix_steps.extend(kernel_to_physical_path(then)?);
-            Some((source_steps, element, suffix_steps))
-        }
-        _ => None,
-    }
-}
-
-fn direct_array_select_from_kernel(
-    array: &crate::exec::pipeline::BodyKernel,
-    selector: crate::exec::pipeline::ArraySelector,
-) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
-    Some((kernel_to_physical_path(array)?, selector.into()))
+    let (source_keys, selector, suffix_keys) = kernel.array_element_path()?;
+    Some((
+        physical_field_keys_to_path_steps(&source_keys),
+        selector.into(),
+        physical_field_keys_to_path_steps(&suffix_keys),
+    ))
 }
 
 fn direct_scalar_call_from_kernel(
