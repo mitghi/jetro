@@ -2083,6 +2083,34 @@ mod tests {
         assert!(!from_tape.root_val_is_materialized());
         assert_eq!(from_tape.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn view_sort_topk_scalar_helper_reducer_chain_stays_borrowed() {
+        let doc = json!({
+            "data": [
+                {"meta": {"author": {"name": " Ada "}}, "score": 40},
+                {"meta": {"author": {"name": "Bea"}}, "score": 30},
+                {"meta": {"author": {"name": "Cyd"}}, "score": 20},
+                {"meta": {"author": {"name": "Dee"}}, "score": 10}
+            ],
+            "unused": {"large": [1, 2, 3, 4]}
+        });
+        let data = serde_json::to_vec(&doc).unwrap();
+        let from_tape = Jetro::from_bytes(data).unwrap();
+        let engine = JetroEngine::new();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let query =
+            r#"$.data.sort_by(-score).take(3).map(@.meta.get_path("author.name").trim().upper().byte_len()).sum()"#;
+        let tape_out = from_tape.collect(query).unwrap();
+        let value_out = engine.collect_value(doc, query).unwrap();
+
+        assert_eq!(tape_out, value_out);
+        assert_eq!(tape_out, json!(9));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn view_prefix_and_full_execution_share_stage_semantics() {
         let data = br#"{"people":[{"name":"low","score":1},{"name":"ada","score":901},{"name":"bob","score":902},{"name":"cat","score":903},{"name":"dan","score":904}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
