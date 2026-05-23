@@ -283,12 +283,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional
-            && view_object_items_projection_call(
-                BuiltinId::from_method(call.method),
-                &call.args,
-            )
-            .is_some() =>
+        } if !*optional && is_direct_object_items_call(call) =>
         {
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
@@ -630,12 +625,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if view_object_items_projection_call(
-            BuiltinId::from_method(call.method),
-            &call.args,
-        )
-        .is_some()
-            && !*optional =>
+        } if !*optional && is_direct_object_items_call(call) =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {
                 steps: node_path_steps(plan, *receiver)?,
@@ -838,6 +828,11 @@ fn plain_sink_direct_scalar_call(
 #[inline]
 fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
     view_scalar_value_projection(BuiltinId::from_method(call.method))
+}
+
+#[inline]
+fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
+    view_object_items_projection_call(BuiltinId::from_method(call.method), &call.args).is_some()
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
