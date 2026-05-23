@@ -1796,6 +1796,73 @@ mod tests {
     }
 
     #[test]
+    fn registry_scalar_direct_dispatch_contracts_are_safe() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            if !dispatches_scalar_direct(id) {
+                continue;
+            }
+
+            assert!(
+                matches!(
+                    spec.category,
+                    BuiltinCategory::Scalar | BuiltinCategory::Object
+                ),
+                "{method:?} scalar-direct dispatch must stay row-local"
+            );
+            assert_eq!(
+                spec.cardinality,
+                BuiltinCardinality::OneToOne,
+                "{method:?} scalar-direct dispatch must preserve one receiver value"
+            );
+            assert!(
+                spec.pure,
+                "{method:?} scalar-direct dispatch must not bypass an impure stream stage"
+            );
+            assert!(
+                !spec.never_unwrap,
+                "{method:?} scalar-direct dispatch must honor never_unwrap"
+            );
+            assert!(
+                !spec.stream_source,
+                "{method:?} scalar-direct dispatch must not consume row-stream source syntax"
+            );
+            assert_eq!(spec.sink, None, "{method:?} must not also be a sink");
+            assert_eq!(
+                spec.keyed_reducer, None,
+                "{method:?} must not also be a keyed reducer"
+            );
+            assert_eq!(
+                spec.numeric_reducer, None,
+                "{method:?} must not also be a numeric reducer"
+            );
+            assert_eq!(
+                spec.arg_extreme_sink, None,
+                "{method:?} must not also be an arg-extreme sink"
+            );
+            assert_eq!(
+                spec.predicate_sink, None,
+                "{method:?} must not also be a predicate sink"
+            );
+            if spec.membership_sink.is_some() {
+                assert!(
+                    matches!(spec.category, BuiltinCategory::Scalar | BuiltinCategory::Object),
+                    "{method:?} membership sink overlap is only safe for receiver-local scalar/object dispatch"
+                );
+            }
+            assert_eq!(
+                spec.array_selector, None,
+                "{method:?} must not also be an array selector"
+            );
+            assert_eq!(
+                spec.row_stream_op, None,
+                "{method:?} must not also be a row-stream operation"
+            );
+        }
+    }
+
+    #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
         let map = BuiltinId::from_method(BuiltinMethod::Map);
