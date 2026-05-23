@@ -1081,6 +1081,29 @@ impl BuiltinRowStreamOp {
     pub(crate) const fn preserves_order_before_limit(self) -> bool {
         matches!(self, Self::Filter | Self::FindFirst | Self::Map)
     }
+
+    /// Numeric reducer represented by this terminal stream operation, if any.
+    #[inline]
+    pub(crate) const fn numeric_reducer(self) -> Option<BuiltinNumericReducer> {
+        match self {
+            Self::Sum => Some(BuiltinNumericReducer::Sum),
+            Self::Avg => Some(BuiltinNumericReducer::Avg),
+            Self::Min => Some(BuiltinNumericReducer::Min),
+            Self::Max => Some(BuiltinNumericReducer::Max),
+            _ => None,
+        }
+    }
+
+    /// Predicate sink represented by this terminal stream operation, if any.
+    #[inline]
+    pub(crate) const fn predicate_sink(self) -> Option<BuiltinPredicateSink> {
+        match self {
+            Self::Any => Some(BuiltinPredicateSink::Any),
+            Self::All => Some(BuiltinPredicateSink::All),
+            Self::FindOne => Some(BuiltinPredicateSink::FindOne),
+            _ => None,
+        }
+    }
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.

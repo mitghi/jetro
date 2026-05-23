@@ -131,13 +131,7 @@ pub(crate) fn row_stream_op_preserves_order_before_limit(op: BuiltinRowStreamOp)
 pub(crate) fn row_stream_op_numeric_reducer(
     op: BuiltinRowStreamOp,
 ) -> Option<BuiltinNumericReducer> {
-    match op {
-        BuiltinRowStreamOp::Sum => Some(BuiltinNumericReducer::Sum),
-        BuiltinRowStreamOp::Avg => Some(BuiltinNumericReducer::Avg),
-        BuiltinRowStreamOp::Min => Some(BuiltinNumericReducer::Min),
-        BuiltinRowStreamOp::Max => Some(BuiltinNumericReducer::Max),
-        _ => None,
-    }
+    op.numeric_reducer()
 }
 
 /// Return the predicate sink represented by a terminal row-stream op.
@@ -145,12 +139,7 @@ pub(crate) fn row_stream_op_numeric_reducer(
 pub(crate) fn row_stream_op_predicate_sink(
     op: BuiltinRowStreamOp,
 ) -> Option<BuiltinPredicateSink> {
-    match op {
-        BuiltinRowStreamOp::Any => Some(BuiltinPredicateSink::Any),
-        BuiltinRowStreamOp::All => Some(BuiltinPredicateSink::All),
-        BuiltinRowStreamOp::FindOne => Some(BuiltinPredicateSink::FindOne),
-        _ => None,
-    }
+    op.predicate_sink()
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
@@ -3969,6 +3958,10 @@ mod tests {
             Some(BuiltinNumericReducer::Sum)
         );
         assert_eq!(
+            BuiltinRowStreamOp::Sum.numeric_reducer(),
+            row_stream_op_numeric_reducer(BuiltinRowStreamOp::Sum)
+        );
+        assert_eq!(
             row_stream_op_numeric_reducer(BuiltinRowStreamOp::Avg),
             Some(BuiltinNumericReducer::Avg)
         );
@@ -3987,6 +3980,10 @@ mod tests {
         assert_eq!(
             row_stream_op_predicate_sink(BuiltinRowStreamOp::Any),
             Some(BuiltinPredicateSink::Any)
+        );
+        assert_eq!(
+            BuiltinRowStreamOp::Any.predicate_sink(),
+            row_stream_op_predicate_sink(BuiltinRowStreamOp::Any)
         );
         assert_eq!(
             row_stream_op_predicate_sink(BuiltinRowStreamOp::All),
