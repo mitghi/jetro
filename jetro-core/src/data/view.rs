@@ -1402,6 +1402,10 @@ mod tests {
             val_book.object_entries().map(serde_json::Value::from)
         );
         assert_eq!(
+            tape_book.object_pairs().map(serde_json::Value::from),
+            val_book.object_pairs().map(serde_json::Value::from)
+        );
+        assert_eq!(
             tape_book
                 .pick_keys(&[Arc::from("score")])
                 .map(serde_json::Value::from),

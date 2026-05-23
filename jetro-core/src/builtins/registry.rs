@@ -4602,6 +4602,15 @@ mod tests {
             serde_json::json!([["a", 1], ["b", null], ["nested", {"x": 7}]]),
         );
         assert_view_eq(
+            BuiltinMethod::ToPairs,
+            BuiltinArgs::None,
+            serde_json::json!([
+                {"key": "a", "val": 1},
+                {"key": "b", "val": null},
+                {"key": "nested", "val": {"x": 7}},
+            ]),
+        );
+        assert_view_eq(
             BuiltinMethod::Pick,
             BuiltinArgs::StrVec(vec![
                 std::sync::Arc::from("nested"),
