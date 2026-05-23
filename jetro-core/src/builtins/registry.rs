@@ -3360,6 +3360,37 @@ mod tests {
     }
 
     #[test]
+    fn registry_row_stream_ops_match_demand_laws() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(op) = row_stream_op(id) else {
+                continue;
+            };
+            let law = demand_law(id);
+            let expected = match op {
+                BuiltinRowStreamOp::Reverse => BuiltinDemandLaw::Reverse,
+                BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst => {
+                    BuiltinDemandLaw::FilterLike
+                }
+                BuiltinRowStreamOp::FindOne
+                | BuiltinRowStreamOp::Any
+                | BuiltinRowStreamOp::All => BuiltinDemandLaw::PredicateMapLike,
+                BuiltinRowStreamOp::DistinctBy => BuiltinDemandLaw::UniqueLike,
+                BuiltinRowStreamOp::Take => BuiltinDemandLaw::Take,
+                BuiltinRowStreamOp::First => BuiltinDemandLaw::First,
+                BuiltinRowStreamOp::Last => BuiltinDemandLaw::Last,
+                BuiltinRowStreamOp::Count => BuiltinDemandLaw::Count,
+                BuiltinRowStreamOp::Sum
+                | BuiltinRowStreamOp::Avg
+                | BuiltinRowStreamOp::Min
+                | BuiltinRowStreamOp::Max => BuiltinDemandLaw::NumericReducer,
+                BuiltinRowStreamOp::Map => BuiltinDemandLaw::MapLike,
+            };
+            assert_eq!(law, expected, "{method:?} row-stream op {op:?}");
+        }
+    }
+
+    #[test]
     fn registry_row_stream_op_terminal_flags_are_exhaustive() {
         for op in [
             BuiltinRowStreamOp::Reverse,
