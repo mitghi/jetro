@@ -1104,13 +1104,6 @@ pub(crate) fn view_scalar_value_projection(id: BuiltinId) -> bool {
     view_scalar_projection(id) && !view_object_items_projection(id)
 }
 
-/// Return true when builtin `id` is a no-argument view scalar call that can be
-/// applied directly to one JSON value.
-#[inline]
-pub(crate) fn view_scalar_value_projection_call(id: BuiltinId, args: &BuiltinArgs) -> bool {
-    matches!(args, BuiltinArgs::None) && view_scalar_value_projection(id)
-}
-
 /// Return raw-byte scalar execution support for builtin `id`, if the operation
 /// can be served directly from a JSON value slice with the given static args.
 #[inline]
@@ -1122,6 +1115,15 @@ pub(crate) fn raw_json_scalar(
         return None;
     }
     id.method().and_then(|method| method.spec().raw_json_scalar)
+}
+
+/// Return true when a concrete builtin call has a raw-byte scalar
+/// implementation. This is narrower than view-scalar support: view scalars can
+/// run against borrowed tape values, while raw-byte scalars can write directly
+/// from a JSON value slice without parsing/materialising that value.
+#[inline]
+pub(crate) fn raw_json_scalar_call(id: BuiltinId, args: &BuiltinArgs) -> bool {
+    raw_json_scalar(id, args).is_some()
 }
 
 /// Return the effective pipeline order behaviour for builtin `id`. Explicit
@@ -2759,6 +2761,7 @@ mod tests {
             let id = BuiltinId::from_method(method);
             let spec = method.spec();
             assert_eq!(spec.raw_json_scalar, Some(scalar), "{method:?}");
+            assert!(raw_json_scalar_call(id, &BuiltinArgs::None), "{method:?}");
             assert_eq!(demand_law(id), scalar.demand_law(), "{method:?}");
             assert!(view_scalar_projection(id), "{method:?}");
             assert!(spec.view_native, "{method:?}");
@@ -2767,7 +2770,16 @@ mod tests {
                 None,
                 "{method:?}"
             );
+            assert!(
+                !raw_json_scalar_call(id, &BuiltinArgs::Str(Arc::from("x"))),
+                "{method:?}"
+            );
         }
+
+        assert!(!raw_json_scalar_call(
+            BuiltinId::from_method(BuiltinMethod::Trim),
+            &BuiltinArgs::None
+        ));
     }
 
     #[test]
@@ -2784,21 +2796,9 @@ mod tests {
         assert!(view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Len
         )));
-        assert!(view_scalar_value_projection_call(
-            BuiltinId::from_method(BuiltinMethod::Len),
-            &BuiltinArgs::None
-        ));
-        assert!(!view_scalar_value_projection_call(
-            BuiltinId::from_method(BuiltinMethod::Len),
-            &BuiltinArgs::Str(std::sync::Arc::from("x"))
-        ));
         assert!(!view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Keys
         )));
-        assert!(!view_scalar_value_projection_call(
-            BuiltinId::from_method(BuiltinMethod::Keys),
-            &BuiltinArgs::None
-        ));
         assert!(!view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Entries
         )));

@@ -7,8 +7,7 @@ use super::ndjson_direct::{
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
-    raw_json_scalar, view_object_items_projection_call, view_scalar_value_projection_call,
-    BuiltinId,
+    raw_json_scalar, raw_json_scalar_call, view_object_items_projection_call, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinMethod, BuiltinRawJsonScalar,
@@ -229,7 +228,7 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
 }
 
 fn byte_scalar_call_supported(call: &BuiltinCall) -> bool {
-    view_scalar_value_projection_call(BuiltinId::from_method(call.method), &call.args)
+    raw_json_scalar_call(BuiltinId::from_method(call.method), &call.args)
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(

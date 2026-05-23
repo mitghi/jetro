@@ -1,6 +1,6 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    direct_view_call, logical_shape, BuiltinDirectViewCall, BuiltinId,
+    direct_view_call, logical_shape, raw_json_scalar_call, BuiltinDirectViewCall, BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -268,7 +268,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && is_direct_view_scalar_call(call) =>
+        } if !*optional && is_direct_raw_json_scalar_call(call) =>
         {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
@@ -298,20 +298,20 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::FieldChain { keys },
             body,
-        } if plain_sink_direct_scalar_call(body).is_some() && keys.len() == 1 => {
+        } if plain_sink_direct_raw_json_scalar_call(body).is_some() && keys.len() == 1 => {
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ScalarCall {
                     value: Box::new(NdjsonDirectByteExpr::Path(vec![PhysicalPathStep::Field(
                         keys[0].clone(),
                     )])),
-                    call: plain_sink_direct_scalar_call(body)?,
+                    call: plain_sink_direct_raw_json_scalar_call(body)?,
                 },
             ))
         }
         PlanNode::Pipeline {
             source: crate::ir::physical::PipelinePlanSource::Expr(source),
             body,
-        } if plain_sink_direct_scalar_call(body).is_some() => {
+        } if plain_sink_direct_raw_json_scalar_call(body).is_some() => {
             let steps = root_path_steps(&plan, *source)?;
             if !byte_path_has_root_field(&steps) {
                 return None;
@@ -319,7 +319,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ScalarCall {
                     value: Box::new(NdjsonDirectByteExpr::Path(steps)),
-                    call: plain_sink_direct_scalar_call(body)?,
+                    call: plain_sink_direct_raw_json_scalar_call(body)?,
                 },
             ))
         }
@@ -824,10 +824,22 @@ fn plain_sink_direct_scalar_call(
     body.sink.scalar_call_for_plain_sink()
 }
 
+fn plain_sink_direct_raw_json_scalar_call(
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<crate::builtins::BuiltinCall> {
+    let call = plain_sink_direct_scalar_call(body)?;
+    is_direct_raw_json_scalar_call(&call).then_some(call)
+}
+
 #[inline]
 fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
     direct_view_call(BuiltinId::from_method(call.method), &call.args)
         == Some(BuiltinDirectViewCall::ScalarValue)
+}
+
+#[inline]
+fn is_direct_raw_json_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
+    raw_json_scalar_call(BuiltinId::from_method(call.method), &call.args)
 }
 
 #[inline]

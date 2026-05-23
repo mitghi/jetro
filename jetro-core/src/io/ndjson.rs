@@ -4259,11 +4259,12 @@ not-json
     #[test]
     fn direct_writer_path_kind_matches_runtime_writer_family() {
         let engine = crate::JetroEngine::new();
-        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape};
+        use super::NdjsonWriterPathKind::{ByteExpr, ByteWritableTape, Tape};
 
         for (query, expected) in [
             ("$.name", ByteExpr),
             ("$.a.b.c", ByteExpr),
+            ("$.name.trim()", Tape),
             (r#"{test: $.a.b.c, b: $.a.b}"#, ByteWritableTape),
             (r#"[$.id, $.name]"#, ByteWritableTape),
             ("$.attributes.map(@.key)", ByteWritableTape),
@@ -4359,6 +4360,8 @@ not-json
             super::direct_byte_plan(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have a direct NDJSON byte plan"));
         }
+
+        assert!(super::direct_byte_plan(&engine, "$.name.trim()").is_none());
     }
 
     #[test]
