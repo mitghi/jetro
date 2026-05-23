@@ -683,7 +683,7 @@ fn observe_arg_extreme_sink_item(
     let key = eval_kernel_with_vm(kernel, &item, vm, |item, vm| {
         apply_item_in_env(vm, loop_env, item, &spec.key)
     })?;
-    sink_acc.observe_arg_extreme(spec.want_max, item, key);
+    sink_acc.observe_arg_extreme(spec.wants_max(), item, key);
     Ok(false)
 }
 

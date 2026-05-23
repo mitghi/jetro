@@ -2265,7 +2265,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
-                want_max: true,
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 key_expr: None,
             }),
@@ -2283,7 +2283,7 @@ mod tests {
         let min_source = CountingView::root(&[3, 4, 1, 2]);
         let min_body = PipelineBody {
             sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
-                want_max: false,
+                op: crate::builtins::BuiltinArgExtremeSink::MinBy,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 key_expr: None,
             }),

@@ -449,7 +449,7 @@ impl Sink {
         }
         if let Sink::ArgExtreme(spec) = self {
             return Some(ViewSinkCapability::ArgExtreme {
-                want_max: spec.want_max,
+                want_max: spec.wants_max(),
                 key_kernel: view_native_sink_kernel(sink_kernels, spec.key_kernel_index())?,
             });
         }

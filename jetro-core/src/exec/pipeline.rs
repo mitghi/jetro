@@ -154,8 +154,7 @@ fn sink_name(s: &Sink) -> &'static str {
             .unwrap_or("reducer"),
         Sink::Membership(spec) => method_name(spec.method()),
         Sink::Predicate(spec) => method_name(spec.method()),
-        Sink::ArgExtreme(spec) if spec.want_max => "max_by",
-        Sink::ArgExtreme(_) => "min_by",
+        Sink::ArgExtreme(spec) => method_name(spec.method()),
         Sink::Terminal(method) => method_name(*method),
         Sink::SelectMany {
             from_end: false, ..
@@ -3084,7 +3083,7 @@ mod tests {
     #[test]
     fn arg_extreme_terminal_sinks_keep_conservative_source_demand() {
         let max_by = lower_query("$.xs.max_by(score)").unwrap();
-        assert!(matches!(max_by.sink, Sink::ArgExtreme(ref spec) if spec.want_max));
+        assert!(matches!(max_by.sink, Sink::ArgExtreme(ref spec) if spec.wants_max()));
         assert_eq!(
             max_by.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
@@ -3096,6 +3095,6 @@ mod tests {
         assert!(max_by.source_demand().chain.order);
 
         let min_by = lower_query("$.xs.min_by(score)").unwrap();
-        assert!(matches!(min_by.sink, Sink::ArgExtreme(ref spec) if !spec.want_max));
+        assert!(matches!(min_by.sink, Sink::ArgExtreme(ref spec) if !spec.wants_max()));
     }
 }

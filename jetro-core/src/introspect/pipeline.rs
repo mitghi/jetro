@@ -91,13 +91,10 @@ pub(crate) fn sink_label(sink: &Sink) -> &'static str {
             crate::builtins::BuiltinPredicateSink::FindOne => "find-one",
         },
         Sink::Membership(_) => "membership",
-        Sink::ArgExtreme(spec) => {
-            if spec.want_max {
-                "max-by"
-            } else {
-                "min-by"
-            }
-        }
+        Sink::ArgExtreme(spec) => match spec.op {
+            crate::builtins::BuiltinArgExtremeSink::MaxBy => "max-by",
+            crate::builtins::BuiltinArgExtremeSink::MinBy => "min-by",
+        },
         Sink::Terminal(_) => "terminal",
         Sink::SelectMany { from_end: true, .. } => "take-last",
         Sink::SelectMany {

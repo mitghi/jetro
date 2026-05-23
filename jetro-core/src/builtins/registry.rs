@@ -215,12 +215,6 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
     Some(id.method()?.spec().arg_extreme_sink?)
 }
 
-/// Return whether an arg-extreme sink keeps the largest projected key.
-#[inline]
-pub(crate) fn arg_extreme_wants_max(id: BuiltinId) -> Option<bool> {
-    Some(arg_extreme_sink(id)?.wants_max())
-}
-
 /// Return row-stream demand for an arg-extreme terminal sink.
 #[inline]
 pub(crate) fn arg_extreme_sink_demand(_sink: BuiltinArgExtremeSink) -> Demand {
@@ -2155,6 +2149,7 @@ mod tests {
                 "{method:?}"
             );
             assert_eq!(demand_law(id), sink.demand_law(), "{method:?}");
+            assert_eq!(sink.method(), method, "{method:?}");
             assert_eq!(
                 sink_accumulator(id),
                 None,
@@ -2217,11 +2212,6 @@ mod tests {
             assert!(
                 accepts_lambda_arg(id),
                 "{method:?} arg-extreme sink must accept a key expression"
-            );
-            assert_eq!(
-                arg_extreme_wants_max(id),
-                Some(sink.wants_max()),
-                "{method:?}"
             );
             match sink {
                 BuiltinArgExtremeSink::MaxBy => assert!(sink.wants_max(), "{method:?}"),
@@ -3808,16 +3798,8 @@ mod tests {
             Some(BuiltinArgExtremeSink::MaxBy)
         );
         assert_eq!(
-            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::MaxBy)),
-            Some(true)
-        );
-        assert_eq!(
             arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::MinBy)),
             Some(BuiltinArgExtremeSink::MinBy)
-        );
-        assert_eq!(
-            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::MinBy)),
-            Some(false)
         );
         assert_eq!(
             arg_extreme_sink_demand(BuiltinArgExtremeSink::MaxBy),
@@ -3829,10 +3811,6 @@ mod tests {
         );
         assert_eq!(
             arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::Max)),
-            None
-        );
-        assert_eq!(
-            arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::Max)),
             None
         );
     }

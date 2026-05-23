@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    arg_extreme_sink_demand as builtin_arg_extreme_sink_demand, arg_extreme_wants_max,
+    arg_extreme_sink as builtin_arg_extreme_sink,
+    arg_extreme_sink_demand as builtin_arg_extreme_sink_demand,
     membership_sink as builtin_membership_sink,
     membership_sink_demand as builtin_membership_sink_demand,
     membership_sink_result_demand as builtin_membership_sink_result_demand,
@@ -69,8 +70,8 @@ pub enum MembershipSinkTarget {
 /// Specification for arg-extreme terminal sinks (`max_by`, `min_by`).
 #[derive(Debug, Clone)]
 pub struct ArgExtremeSinkSpec {
-    /// When true, keeps the row with the largest key; otherwise keeps the smallest key.
-    pub want_max: bool,
+    /// Terminal arg-extreme operation.
+    pub op: BuiltinArgExtremeSink,
     /// Key expression evaluated for each row.
     pub key: Arc<Program>,
     /// Source AST for `key`, used during lexical-env analysis.
@@ -169,7 +170,7 @@ impl ArgExtremeSinkSpec {
         key_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
         Some(Self {
-            want_max: arg_extreme_wants_max(BuiltinId::from_method(method))?,
+            op: builtin_arg_extreme_sink(BuiltinId::from_method(method))?,
             key,
             key_expr,
         })
@@ -177,11 +178,17 @@ impl ArgExtremeSinkSpec {
 
     /// Demand placed on the row stream by this terminal arg-extreme sink.
     pub(crate) fn demand(&self) -> Demand {
-        builtin_arg_extreme_sink_demand(if self.want_max {
-            BuiltinArgExtremeSink::MaxBy
-        } else {
-            BuiltinArgExtremeSink::MinBy
-        })
+        builtin_arg_extreme_sink_demand(self.op)
+    }
+
+    /// Returns true when this sink keeps the row with the largest projected key.
+    pub(crate) fn wants_max(&self) -> bool {
+        self.op.wants_max()
+    }
+
+    /// Returns the builtin method represented by this arg-extreme sink.
+    pub(crate) fn method(&self) -> BuiltinMethod {
+        self.op.method()
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -323,10 +330,14 @@ mod tests {
 
         let max_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MaxBy, empty_program(), None)
             .expect("max_by arg-extreme sink");
-        assert!(max_by.want_max);
+        assert_eq!(max_by.op, BuiltinArgExtremeSink::MaxBy);
+        assert_eq!(max_by.method(), BuiltinMethod::MaxBy);
+        assert!(max_by.wants_max());
         let min_by = ArgExtremeSinkSpec::from_method(BuiltinMethod::MinBy, empty_program(), None)
             .expect("min_by arg-extreme sink");
-        assert!(!min_by.want_max);
+        assert_eq!(min_by.op, BuiltinArgExtremeSink::MinBy);
+        assert_eq!(min_by.method(), BuiltinMethod::MinBy);
+        assert!(!min_by.wants_max());
         assert!(
             ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
         );
@@ -402,7 +413,7 @@ mod tests {
         );
 
         let arg_extreme = ArgExtremeSinkSpec {
-            want_max: true,
+            op: BuiltinArgExtremeSink::MaxBy,
             key: empty_program(),
             key_expr: None,
         }

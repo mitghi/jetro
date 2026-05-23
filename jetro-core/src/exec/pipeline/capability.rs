@@ -1178,7 +1178,7 @@ mod tests {
         ));
         assert!(matches!(
             Sink::ArgExtreme(ArgExtremeSinkSpec {
-                want_max: true,
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
                 key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 key_expr: None,
             })
@@ -1189,7 +1189,7 @@ mod tests {
             })
         ));
         assert!(Sink::ArgExtreme(ArgExtremeSinkSpec {
-            want_max: false,
+            op: crate::builtins::BuiltinArgExtremeSink::MinBy,
             key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
             key_expr: None,
         })

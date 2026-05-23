@@ -1217,6 +1217,15 @@ pub enum BuiltinArgExtremeSink {
 }
 
 impl BuiltinArgExtremeSink {
+    /// Builtin method represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn method(self) -> BuiltinMethod {
+        match self {
+            Self::MaxBy => BuiltinMethod::MaxBy,
+            Self::MinBy => BuiltinMethod::MinBy,
+        }
+    }
+
     /// Demand law implied by arg-extreme selection.
     #[inline]
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
