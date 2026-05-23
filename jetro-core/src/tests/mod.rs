@@ -46,3 +46,5 @@ mod builtin_migrations;
 mod v0_5_5_quickfixes;
 #[cfg(test)]
 mod tape_parity;
+#[cfg(test)]
+mod has_probe;
