@@ -1316,14 +1316,7 @@ fn combine_direct_item_predicate_kernels(
 fn kernel_to_physical_path(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonPhysicalPath> {
-    match kernel {
-        crate::exec::pipeline::BodyKernel::FieldRead(key) => {
-            Some(vec![PhysicalPathStep::Field(key.clone())])
-        }
-        crate::exec::pipeline::BodyKernel::FieldChain(keys) => Some(keys_to_path(keys)),
-        crate::exec::pipeline::BodyKernel::Current => Some(Vec::new()),
-        _ => None,
-    }
+    kernel.field_path_keys().map(|keys| keys_to_path(&keys))
 }
 
 fn direct_projection_value_from_kernel(

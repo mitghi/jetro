@@ -171,12 +171,7 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
 }
 
 fn receiver_field_prefix(receiver: &BodyKernel) -> Option<Vec<Arc<str>>> {
-    match receiver {
-        BodyKernel::Current => Some(Vec::new()),
-        BodyKernel::FieldRead(key) => Some(vec![Arc::clone(key)]),
-        BodyKernel::FieldChain(keys) => Some(keys.iter().cloned().collect()),
-        _ => None,
-    }
+    receiver.field_path_keys()
 }
 
 fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand {
@@ -608,6 +603,17 @@ impl BodyKernel {
                 Self::classify(&program)
             }
             _ => Self::Generic,
+        }
+    }
+
+    /// Returns the field-only path read by this kernel, relative to the current
+    /// row. `Current` is represented as an empty path.
+    pub(crate) fn field_path_keys(&self) -> Option<Vec<Arc<str>>> {
+        match self {
+            Self::Current => Some(Vec::new()),
+            Self::FieldRead(key) => Some(vec![Arc::clone(key)]),
+            Self::FieldChain(keys) => Some(keys.iter().cloned().collect()),
+            _ => None,
         }
     }
 
@@ -2657,6 +2663,37 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn path_keys(kernel: &BodyKernel) -> Option<Vec<String>> {
+        kernel.field_path_keys().map(|keys| {
+            keys.iter()
+                .map(|key| key.as_ref().to_string())
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn field_path_keys_reports_only_direct_row_paths() {
+        assert_eq!(path_keys(&BodyKernel::Current), Some(Vec::new()));
+        assert_eq!(
+            path_keys(&BodyKernel::FieldRead(Arc::from("isbn"))),
+            Some(vec!["isbn".to_string()])
+        );
+        assert_eq!(
+            path_keys(&BodyKernel::FieldChain(
+                vec![Arc::from("user"), Arc::from("name")].into()
+            )),
+            Some(vec!["user".to_string(), "name".to_string()])
+        );
+        assert_eq!(
+            path_keys(&BodyKernel::FieldCmpLit(
+                Arc::from("score"),
+                crate::parse::ast::BinOp::Gt,
+                Val::Int(10)
+            )),
+            None
+        );
     }
 
     #[test]
