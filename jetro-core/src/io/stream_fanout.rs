@@ -679,17 +679,13 @@ fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
         .all(|consumer| consumer.done || consumer.stream.is_exhausted())
 }
 fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPredicate> {
-    let [RowStreamStage::Filter(expr), rest @ ..] = plan.stages.as_slice() else {
+    let [first, rest @ ..] = plan.stages.as_slice() else {
         return None;
     };
-    if rest
-        .iter()
-        .all(|stage| matches!(stage, RowStreamStage::Take(1)))
-    {
-        direct_tape_predicate_for_expr(expr)
-    } else {
-        None
-    }
+    let expr = first.filter_expr()?;
+    rest.iter()
+        .all(|stage| stage.take_limit() == Some(1))
+        .then(|| direct_tape_predicate_for_expr(expr))?
 }
 fn direct_first_match_cmp(plan: &RowStreamPlan) -> Option<DirectCmp> {
     let predicate = direct_first_match_predicate(plan)?;
@@ -747,10 +743,7 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
 fn direct_filter_prefix(stages: &[RowStreamStage]) -> Option<Vec<NdjsonDirectPredicate>> {
     let mut predicates = Vec::new();
     for stage in stages {
-        match stage {
-            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
-            _ => return None,
-        }
+        predicates.push(direct_tape_predicate_for_expr(stage.filter_expr()?)?);
     }
     Some(predicates)
 }
@@ -760,12 +753,12 @@ fn direct_filter_take_prefix(
     let mut predicates = Vec::new();
     let mut limit = None;
     for stage in stages {
-        match stage {
-            RowStreamStage::Filter(expr) => predicates.push(direct_tape_predicate_for_expr(expr)?),
-            RowStreamStage::Take(n) => {
-                limit = Some(limit.map_or(*n, |prev: usize| prev.min(*n)));
-            }
-            _ => return None,
+        if let Some(expr) = stage.filter_expr() {
+            predicates.push(direct_tape_predicate_for_expr(expr)?);
+        } else if let Some(n) = stage.take_limit() {
+            limit = Some(limit.map_or(n, |prev: usize| prev.min(n)));
+        } else {
+            return None;
         }
     }
     Some((predicates, limit))

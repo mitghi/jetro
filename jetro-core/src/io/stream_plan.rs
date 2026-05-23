@@ -127,6 +127,20 @@ impl RowStreamStage {
         }
     }
 
+    pub(super) fn filter_expr(&self) -> Option<&Expr> {
+        match self {
+            RowStreamStage::Filter(expr) => Some(expr),
+            _ => None,
+        }
+    }
+
+    pub(super) fn take_limit(&self) -> Option<usize> {
+        match self {
+            RowStreamStage::Take(n) => Some(*n),
+            _ => None,
+        }
+    }
+
     fn blocks_parallel_partitioning(&self) -> bool {
         self.op().blocks_parallel_partitioning()
     }
@@ -1011,6 +1025,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!take_many.returns_scalar_value());
+    }
+
+    #[test]
+    fn row_stream_stages_report_filter_and_limit_metadata() {
+        let plan = lower_root_rows_query(
+            "$.rows().filter($.active).take(7).map($.id)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(plan.stages[0].filter_expr().is_some());
+        assert_eq!(plan.stages[1].take_limit(), Some(7));
+        assert!(plan.stages[2].filter_expr().is_none());
+        assert_eq!(plan.stages[2].take_limit(), None);
     }
 
     #[test]
