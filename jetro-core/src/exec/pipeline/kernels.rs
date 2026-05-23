@@ -627,6 +627,24 @@ impl BodyKernel {
         }
     }
 
+    /// Returns a direct field-path-to-literal comparison when this kernel is
+    /// exactly that shape.
+    pub(crate) fn field_path_literal_cmp(
+        &self,
+    ) -> Option<(Vec<Arc<str>>, crate::parse::ast::BinOp, Val)> {
+        match self {
+            Self::FieldCmpLit(field, op, lit) => Some((vec![Arc::clone(field)], *op, lit.clone())),
+            Self::FieldChainCmpLit(keys, op, lit) => {
+                Some((keys.iter().cloned().collect(), *op, lit.clone()))
+            }
+            Self::CurrentCmpLit(op, lit) => Some((Vec::new(), *op, lit.clone())),
+            Self::CmpLit { lhs, op, lit } => {
+                Some((lhs.field_path_keys()?, *op, lit.clone()))
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the field payload needed from the current row to evaluate this kernel.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
@@ -2714,6 +2732,35 @@ mod tests {
             BodyKernel::FieldRead(Arc::from("isbn")).literal_value(),
             None
         );
+    }
+
+    #[test]
+    fn field_path_literal_cmp_reports_direct_comparisons() {
+        let cmp = BodyKernel::CmpLit {
+            lhs: Box::new(BodyKernel::FieldChain(
+                vec![Arc::from("user"), Arc::from("score")].into(),
+            )),
+            op: crate::parse::ast::BinOp::Gte,
+            lit: Val::Int(90),
+        };
+        let (keys, op, lit) = cmp.field_path_literal_cmp().unwrap();
+        assert_eq!(
+            keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>(),
+            vec!["user", "score"]
+        );
+        assert_eq!(op, crate::parse::ast::BinOp::Gte);
+        assert_eq!(lit, Val::Int(90));
+
+        let computed = BodyKernel::CmpLit {
+            lhs: Box::new(BodyKernel::Binary {
+                lhs: Box::new(BodyKernel::FieldRead(Arc::from("a"))),
+                op: crate::parse::ast::BinOp::Add,
+                rhs: Box::new(BodyKernel::FieldRead(Arc::from("b"))),
+            }),
+            op: crate::parse::ast::BinOp::Eq,
+            lit: Val::Int(10),
+        };
+        assert!(computed.field_path_literal_cmp().is_none());
     }
 
     #[test]

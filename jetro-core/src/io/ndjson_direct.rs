@@ -1240,6 +1240,13 @@ fn direct_item_predicate_from_kernel(
     if let Some(value) = kernel.literal_value() {
         return Some(NdjsonDirectItemPredicate::Literal(value));
     }
+    if let Some((keys, op, lit)) = kernel.field_path_literal_cmp() {
+        return Some(NdjsonDirectItemPredicate::CmpLit {
+            lhs: keys_to_path(&keys),
+            op,
+            lit,
+        });
+    }
     match kernel {
         crate::exec::pipeline::BodyKernel::Current => {
             Some(NdjsonDirectItemPredicate::Path(Vec::new()))
@@ -1248,34 +1255,6 @@ fn direct_item_predicate_from_kernel(
         | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
             NdjsonDirectItemPredicate::Path(kernel_to_physical_path(kernel)?),
         ),
-        crate::exec::pipeline::BodyKernel::FieldCmpLit(field, op, lit) => {
-            Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: vec![PhysicalPathStep::Field(field.clone())],
-                op: *op,
-                lit: lit.clone(),
-            })
-        }
-        crate::exec::pipeline::BodyKernel::FieldChainCmpLit(keys, op, lit) => {
-            Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: keys_to_path(keys),
-                op: *op,
-                lit: lit.clone(),
-            })
-        }
-        crate::exec::pipeline::BodyKernel::CurrentCmpLit(op, lit) => {
-            Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: Vec::new(),
-                op: *op,
-                lit: lit.clone(),
-            })
-        }
-        crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit } => {
-            Some(NdjsonDirectItemPredicate::CmpLit {
-                lhs: kernel_to_physical_path(lhs)?,
-                op: *op,
-                lit: lit.clone(),
-            })
-        }
         crate::exec::pipeline::BodyKernel::And(items) => {
             combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::And)
         }
