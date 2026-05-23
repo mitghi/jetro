@@ -40,8 +40,8 @@ use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
 pub use super::ndjson_driver::NdjsonPerRowDriver;
 use crate::compile::compiler::Compiler;
-use crate::builtins::registry::{view_object_projection, BuiltinId};
-use crate::builtins::BuiltinViewObjectProjection;
+use crate::builtins::registry::{view_object_items_projection_call, BuiltinId};
+use crate::builtins::{BuiltinArgs, BuiltinViewObjectProjection};
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
@@ -3643,7 +3643,9 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
     obj_idx: Option<usize>,
     method: crate::builtins::BuiltinMethod,
 ) -> Result<(), JetroEngineError> {
-    let Some(projection) = view_object_projection(BuiltinId::from_method(method)) else {
+    let Some(projection) =
+        view_object_items_projection_call(BuiltinId::from_method(method), &BuiltinArgs::None)
+    else {
         writer.write_all(b"[]")?;
         return Ok(());
     };
@@ -3686,7 +3688,7 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
                 cur = write_json_tape_at(writer, tape, cur + 1)?;
                 writer.write_all(b"}")?;
             }
-            _ => unreachable!("non-object-items builtin"),
+            _ => unreachable!("object-items projection accessor returned non-item projection"),
         }
     }
     writer.write_all(b"]")?;
