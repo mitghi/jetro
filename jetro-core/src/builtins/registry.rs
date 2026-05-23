@@ -868,6 +868,33 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
     view_scalar_projection(id) || view_object_projection(id).is_some()
 }
 
+/// Return true when applying builtin `id` with `args` to a borrowed view
+/// necessarily produces an owned `Val` rather than another borrowed child view.
+#[inline]
+pub(crate) fn view_projection_returns_owned(id: BuiltinId, args: &BuiltinArgs) -> bool {
+    if view_scalar_projection(id) {
+        return true;
+    }
+    matches!(
+        (view_object_projection(id), args),
+        (
+            Some(
+                BuiltinViewObjectProjection::Has
+                    | BuiltinViewObjectProjection::HasAll
+                    | BuiltinViewObjectProjection::HasKey
+                    | BuiltinViewObjectProjection::Missing
+                    | BuiltinViewObjectProjection::HasPath
+                    | BuiltinViewObjectProjection::Keys
+                    | BuiltinViewObjectProjection::Values
+                    | BuiltinViewObjectProjection::Entries
+                    | BuiltinViewObjectProjection::Pick
+                    | BuiltinViewObjectProjection::Omit
+            ),
+            _
+        )
+    )
+}
+
 /// Result of a view-native builtin application. Some object/path operations
 /// return a borrowed child view, while scalar/object enumeration operations
 /// produce an owned `Val`.

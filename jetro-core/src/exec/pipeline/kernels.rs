@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     apply_view_projection, array_selector as builtin_array_selector, by_name as builtin_by_name,
     count_sink_accepts_predicate, expr_stage, numeric_reducer, view_object_projection,
-    view_projection, BuiltinId, ViewProjectionResult,
+    view_projection, view_projection_returns_owned, BuiltinId, ViewProjectionResult,
 };
 use crate::builtins::{
     BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinViewObjectProjection,
@@ -562,7 +562,8 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                         })
                         .unwrap_or(BodyKernel::Generic);
                 };
-                if !view_projection(BuiltinId::from_method(call.method)) {
+                let id = BuiltinId::from_method(call.method);
+                if !view_projection(id) && !receiver.view_result_owned() {
                     return super::lower::try_decode_map_body(&nested_arg)
                         .map(|plan| {
                             BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(plan))))
@@ -781,7 +782,9 @@ impl BodyKernel {
         match self {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
-                receiver.is_view_native() && view_projection(BuiltinId::from_method(call.method))
+                receiver.is_view_native()
+                    && (view_projection(BuiltinId::from_method(call.method))
+                        || receiver.view_result_owned())
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -816,6 +819,37 @@ impl BodyKernel {
             }
             Self::NestedPlan(_) => false,
             _ => true,
+        }
+    }
+
+    fn view_result_owned(&self) -> bool {
+        match self {
+            Self::BuiltinCall { receiver, call } => {
+                receiver.is_view_native()
+                    && view_projection_returns_owned(
+                        BuiltinId::from_method(call.method),
+                        &call.args,
+                    )
+            }
+            Self::Compose { first, then } => first.is_view_native() && then.view_result_owned(),
+            Self::ConstBool(_)
+            | Self::Const(_)
+            | Self::FString(_)
+            | Self::Object(_)
+            | Self::Array(_)
+            | Self::NestedArrayReducer { .. }
+            | Self::NestedArrayCount { .. }
+            | Self::NestedPlan(_)
+            | Self::CmpLit { .. }
+            | Self::Binary { .. }
+            | Self::ArraySelect { .. }
+            | Self::Match { .. }
+            | Self::And(_)
+            | Self::Or(_)
+            | Self::CurrentCmpLit(_, _)
+            | Self::FieldCmpLit(_, _, _)
+            | Self::FieldChainCmpLit(_, _, _) => true,
+            Self::Current | Self::FieldRead(_) | Self::FieldChain(_) | Self::Generic => false,
         }
     }
 
@@ -3201,5 +3235,32 @@ mod tests {
                 Some(ViewKernelValue::Owned(_))
             ));
         }
+    }
+
+    #[test]
+    fn owned_view_projection_receivers_keep_followup_calls_native() {
+        let expr = parse("profile.entries().first()").unwrap();
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [(
+                Arc::from("profile"),
+                Val::obj(
+                    [
+                        (Arc::from("role"), Val::Str(Arc::from("admin"))),
+                        (Arc::from("tier"), Val::Int(2)),
+                    ]
+                    .into(),
+                ),
+            )]
+            .into(),
+        );
+        let out = eval_view_kernel(&kernel, &ValView::new(&value)).and_then(|value| match value {
+            ViewKernelValue::Owned(value) => Some(value),
+            _ => None,
+        });
+        let out: serde_json::Value = out.expect("owned first entry").into();
+        assert_eq!(out, serde_json::json!(["role", "admin"]));
     }
 }
