@@ -299,3 +299,75 @@ fn tape_matches_vm_across_conservative_stage_boundaries() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_for_nested_reducers_inside_projection_bodies() {
+    let doc = json!({
+        "orders": [
+            {
+                "id": "a1",
+                "status": "open",
+                "items": [
+                    {"sku": "p1", "price": 12, "tags": ["hot", "fragile"]},
+                    {"sku": "p2", "price": 4, "tags": ["cold"]}
+                ]
+            },
+            {
+                "id": "a2",
+                "status": "open",
+                "items": [
+                    {"sku": "p3", "price": 9, "tags": ["hot"]},
+                    {"sku": "p4", "price": 16, "tags": ["bulk", "hot"]}
+                ]
+            },
+            {
+                "id": "a3",
+                "status": "closed",
+                "items": [
+                    {"sku": "p5", "price": 7, "tags": []}
+                ]
+            }
+        ]
+    });
+    for query in [
+        "$.orders.map(items.map(price).sum()).last()",
+        "$.orders.map({id, total: items.sum(price), max_price: items.max(price)}).last()",
+        "$.orders.filter(items.any(price > 10)).map(items.filter(tags.has(\"hot\")).map(price).max()).last()",
+        "$.orders.map(items.flat_map(tags).unique().last()).take(2)",
+        "$.orders.map({id, hot: items.count(tags.has(\"hot\")), first_sku: items.map(sku).first()})",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
+fn tape_matches_vm_for_object_helper_chains_inside_projection_bodies() {
+    let doc = json!({
+        "members": [
+            {
+                "email": "ada@example.test",
+                "role": "lead",
+                "addr": {"city": "Berlin", "zip": "10115"}
+            },
+            {
+                "email": "bob@example.test",
+                "role": "dev",
+                "addr": {"city": "Paris"}
+            },
+            {
+                "email": "cy@example.test",
+                "role": "ops",
+                "addr": {}
+            }
+        ]
+    });
+    for query in [
+        "$.members.map(addr.values().map(@.to_string()).last())",
+        "$.members.map(addr.entries().filter(@[0] != \"zip\").map(e => e[1]).last())",
+        "$.members.map(addr.pick(\"city\", \"zip\").entries().map(e => e[0]).last())",
+        "$.members.map({email, keys: addr.keys().take(2), has_zip: addr.has_key(\"zip\")}).last()",
+        "$.members.filter(addr.has_key(\"city\")).map(addr.get_path(\"city\").upper()).first()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
