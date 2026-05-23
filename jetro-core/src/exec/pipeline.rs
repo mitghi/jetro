@@ -67,9 +67,7 @@ pub(crate) use kernels::{
 };
 #[cfg(test)]
 pub(crate) use kernels::eval_view_kernel;
-pub(crate) use lower::{
-    compile_pipeline_expr_body, compile_sort_spec, starts_with_direct_view_projection,
-};
+pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerOp,
     ReducerSpec,

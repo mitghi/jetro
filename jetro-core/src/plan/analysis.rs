@@ -8,17 +8,41 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::builtins::{
+    registry::{view_projection, BuiltinId},
+    BuiltinCall,
+};
 #[cfg(test)]
 use crate::builtins::{
     registry::{
-        builtin_cardinality, effective_pipeline_order_effect, BuiltinId,
+        builtin_cardinality, effective_pipeline_order_effect,
     },
     BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect,
 };
-use crate::parse::ast::KindType;
+use crate::parse::ast::{KindType, Step};
 #[cfg(test)]
 use crate::vm::CompiledPipeStep;
 use crate::vm::{Opcode, Program};
+
+/// Returns true when a method suffix begins with a direct view projection.
+/// Such calls produce a value, not a stream row transformation, so treating
+/// them as pipeline stages would make a following sink select the projected
+/// value as one row instead of operating on the produced value.
+pub(crate) fn starts_with_direct_view_projection(trailing: &[Step]) -> bool {
+    let Some(first) = trailing.first() else {
+        return false;
+    };
+    step_is_direct_view_projection(first)
+}
+
+/// Returns true when a single AST step is a direct view projection method.
+pub(crate) fn step_is_direct_view_projection(step: &Step) -> bool {
+    let (Step::Method(name, args) | Step::OptMethod(name, args)) = step else {
+        return false;
+    };
+    BuiltinCall::from_literal_ast_args(name.as_str(), args)
+        .is_some_and(|call| view_projection(BuiltinId::from_method(call.method)))
+}
 
 /// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
