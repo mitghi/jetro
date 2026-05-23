@@ -141,6 +141,39 @@ impl RowStreamStage {
         }
     }
 
+    pub(super) fn filter_prefix(stages: &[Self]) -> Option<Vec<&Expr>> {
+        let mut filters = Vec::with_capacity(stages.len());
+        for stage in stages {
+            filters.push(stage.filter_expr()?);
+        }
+        Some(filters)
+    }
+
+    pub(super) fn filter_take_prefix(stages: &[Self]) -> Option<RowStreamFilterTakePrefix<'_>> {
+        let mut filters = Vec::new();
+        let mut limit = None;
+        for stage in stages {
+            if let Some(expr) = stage.filter_expr() {
+                filters.push(expr);
+            } else if let Some(n) = stage.take_limit() {
+                limit = Some(limit.map_or(n, |prev: usize| prev.min(n)));
+            } else {
+                return None;
+            }
+        }
+        Some(RowStreamFilterTakePrefix { filters, limit })
+    }
+
+    pub(super) fn first_filter_with_take_one_suffix(stages: &[Self]) -> Option<&Expr> {
+        let [first, rest @ ..] = stages else {
+            return None;
+        };
+        let expr = first.filter_expr()?;
+        rest.iter()
+            .all(|stage| stage.take_limit() == Some(1))
+            .then_some(expr)
+    }
+
     fn blocks_parallel_partitioning(&self) -> bool {
         self.op().blocks_parallel_partitioning()
     }
@@ -160,6 +193,12 @@ impl RowStreamStage {
     fn preserves_order_before_limit(&self) -> bool {
         self.op().preserves_order_before_limit()
     }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RowStreamFilterTakePrefix<'a> {
+    pub filters: Vec<&'a Expr>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1040,6 +1079,41 @@ mod tests {
         assert_eq!(plan.stages[1].take_limit(), Some(7));
         assert!(plan.stages[2].filter_expr().is_none());
         assert_eq!(plan.stages[2].take_limit(), None);
+    }
+
+    #[test]
+    fn row_stream_stages_classify_prefix_legality() {
+        let plan = lower_root_rows_query(
+            "$.rows().filter($.active).take(7).filter($.score > 10).count()",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+        let [prefix @ .., RowStreamStage::Count] = plan.stages.as_slice() else {
+            panic!("expected count terminal");
+        };
+        let prefix = RowStreamStage::filter_take_prefix(prefix).expect("filter/take prefix");
+        assert_eq!(prefix.filters.len(), 2);
+        assert_eq!(prefix.limit, Some(7));
+
+        let rejected = lower_root_rows_query(
+            "$.rows().filter($.active).map($.id).count()",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+        let [bad_prefix @ .., RowStreamStage::Count] = rejected.stages.as_slice() else {
+            panic!("expected count terminal");
+        };
+        assert!(RowStreamStage::filter_take_prefix(bad_prefix).is_none());
+
+        let first_match = lower_root_rows_query(
+            "$.rows().filter($.name == \"a\").take(1)",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(RowStreamStage::first_filter_with_take_one_suffix(&first_match.stages).is_some());
     }
 
     #[test]

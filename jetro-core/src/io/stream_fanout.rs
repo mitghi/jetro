@@ -681,13 +681,8 @@ fn all_consumers_done(consumers: &[RunningConsumer]) -> bool {
         .all(|consumer| consumer.done || consumer.stream.is_exhausted())
 }
 fn direct_first_match_predicate(plan: &RowStreamPlan) -> Option<NdjsonDirectPredicate> {
-    let [first, rest @ ..] = plan.stages.as_slice() else {
-        return None;
-    };
-    let expr = first.filter_expr()?;
-    rest.iter()
-        .all(|stage| stage.take_limit() == Some(1))
-        .then(|| direct_tape_predicate_for_expr(expr))?
+    let expr = RowStreamStage::first_filter_with_take_one_suffix(&plan.stages)?;
+    direct_tape_predicate_for_expr(expr)
 }
 fn direct_first_match_cmp(plan: &RowStreamPlan) -> Option<DirectCmp> {
     let predicate = direct_first_match_predicate(plan)?;
@@ -743,27 +738,21 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
     })
 }
 fn direct_filter_prefix(stages: &[RowStreamStage]) -> Option<Vec<NdjsonDirectPredicate>> {
-    let mut predicates = Vec::new();
-    for stage in stages {
-        predicates.push(direct_tape_predicate_for_expr(stage.filter_expr()?)?);
-    }
-    Some(predicates)
+    RowStreamStage::filter_prefix(stages)?
+        .into_iter()
+        .map(direct_tape_predicate_for_expr)
+        .collect()
 }
 fn direct_filter_take_prefix(
     stages: &[RowStreamStage],
 ) -> Option<(Vec<NdjsonDirectPredicate>, Option<usize>)> {
-    let mut predicates = Vec::new();
-    let mut limit = None;
-    for stage in stages {
-        if let Some(expr) = stage.filter_expr() {
-            predicates.push(direct_tape_predicate_for_expr(expr)?);
-        } else if let Some(n) = stage.take_limit() {
-            limit = Some(limit.map_or(n, |prev: usize| prev.min(n)));
-        } else {
-            return None;
-        }
-    }
-    Some((predicates, limit))
+    let prefix = RowStreamStage::filter_take_prefix(stages)?;
+    let predicates = prefix
+        .filters
+        .into_iter()
+        .map(direct_tape_predicate_for_expr)
+        .collect::<Option<Vec<_>>>()?;
+    Some((predicates, prefix.limit))
 }
 fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
     let (steps, op, lit) = direct_cmp_literal_predicate(predicate)?;
