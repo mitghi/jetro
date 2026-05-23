@@ -807,6 +807,43 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn view_nested_object_scalar_projection_chain_stays_borrowed() {
+        let data = br#"{"books":[{"meta":{"author":{"name":"ada"},"isbn":"x"}},{"meta":{"author":{"name":"bob"},"isbn":"y"}},{"meta":{"title":"missing"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let from_tape = Jetro::from_bytes(data.clone()).unwrap();
+        let from_value = Jetro::from_bytes(data).unwrap();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let query =
+            r#"$.books.filter(@.meta.has_path("author.name")).map(@.meta.get_path("author.name").upper()).last()"#;
+        let tape_out = from_tape.collect(query).unwrap();
+        let value_out = from_value.collect(query).unwrap();
+
+        assert_eq!(tape_out, value_out);
+        assert_eq!(tape_out, json!("BOB"));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_owned_object_projection_followup_chain_keeps_tape_input_borrowed() {
+        let data = br#"{"books":[{"meta":{"author":{"name":"ada"},"isbn":"x","debug":1}},{"meta":{"author":{"name":"bob"},"isbn":"y","debug":2}},{"meta":{"author":{"name":"cat"},"debug":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let from_tape = Jetro::from_bytes(data.clone()).unwrap();
+        let from_value = Jetro::from_bytes(data).unwrap();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let query =
+            r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "author").get_path("author.name")).take(2)"#;
+        let tape_out = from_tape.collect(query).unwrap();
+        let value_out = from_value.collect(query).unwrap();
+
+        assert_eq!(tape_out, value_out);
+        assert_eq!(tape_out, json!(["ada", "bob"]));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn view_has_preserves_array_and_string_membership_without_materialization() {
         let j = Jetro::from_bytes(
