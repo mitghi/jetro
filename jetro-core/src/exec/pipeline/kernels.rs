@@ -538,6 +538,20 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     call,
                 };
             }
+            Step::Index(index) => {
+                let selector = match *index {
+                    -1 => ArraySelector::Last,
+                    idx if idx >= 0 => ArraySelector::Nth(idx as usize),
+                    _ => return BodyKernel::Generic,
+                };
+                if !receiver.is_view_native() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::ArraySelect {
+                    array: Box::new(receiver),
+                    selector,
+                };
+            }
             _ => return BodyKernel::Generic,
         }
     }
