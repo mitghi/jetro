@@ -576,6 +576,29 @@ fn tape_matches_vm_for_object_helper_chains_inside_projection_bodies() {
 }
 
 #[test]
+fn tape_matches_vm_for_sparse_object_helpers_and_find_sinks() {
+    let doc = json!({
+        "rows": [
+            {"id": 1, "score": 30, "meta": {"isbn": "a", "price": 12, "author": {"name": "Ada"}}},
+            {"id": 2, "score": 10, "meta": null},
+            {"id": 3, "score": 20, "meta": {"price": 9, "author": {"name": "Bob"}}},
+            {"id": 4, "score": 40},
+            {"id": 5, "score": 50, "meta": {"isbn": "c", "price": 16, "author": {"name": "Cy"}}}
+        ]
+    });
+    for query in [
+        "$.rows.find(meta.has_key(\"isbn\")).meta.pick(\"isbn\", \"price\")",
+        "$.rows.find_all(meta.has_key(\"isbn\")).map(meta.get_path(\"isbn\")).last()",
+        "$.rows.filter(meta.has_path(\"author.name\")).map(meta.pick(\"author\").get_path(\"author.name\").upper()).first()",
+        "$.rows.filter(meta.missing(\"isbn\")).map({id, keys: meta.keys()}).take(2)",
+        "$.rows.sort_by(score).drop_while(meta.missing(\"isbn\")).map({id, isbn: meta.get_path(\"isbn\")}).first()",
+        "$.rows.filter(meta.has_key(\"isbn\")).map({id, value: meta.values().last(), entry: meta.entries().first()}).last()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_late_projection_after_mixed_boundaries() {
     let doc = json!({
         "orders": [
