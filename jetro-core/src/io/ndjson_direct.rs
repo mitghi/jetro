@@ -533,11 +533,15 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapePlan> {
-    if let Some(steps) = direct_root_path_expr(expr) {
+    if let Some(steps) = direct_tape_root_path_for_expr(expr) {
         return Some(NdjsonDirectTapePlan::RootPath(steps));
     }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_plan_from_plan(&plan)
+}
+
+pub(super) fn direct_tape_root_path_for_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
+    direct_root_path_expr(expr)
 }
 
 fn direct_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
@@ -1566,6 +1570,26 @@ mod tests {
         assert!(physical_paths_equal(&a, &b));
         assert!(!physical_paths_equal(&a, &c));
         assert!(!physical_paths_equal(&a, &a[..2]));
+    }
+
+    #[test]
+    fn direct_tape_root_path_extracts_only_rooted_paths() {
+        let path = crate::parse::parser::parse("$.items[0].sku").expect("parse rooted path");
+        let steps = direct_tape_root_path_for_expr(&path).expect("root path");
+        assert!(matches!(
+            steps.as_slice(),
+            [
+                PhysicalPathStep::Field(items),
+                PhysicalPathStep::Index(0),
+                PhysicalPathStep::Field(sku)
+            ] if items.as_ref() == "items" && sku.as_ref() == "sku"
+        ));
+
+        let current_path = crate::parse::parser::parse("@.items[0].sku").expect("parse current");
+        assert!(direct_tape_root_path_for_expr(&current_path).is_none());
+
+        let computed = crate::parse::parser::parse("$.items.map(sku)").expect("parse computed");
+        assert!(direct_tape_root_path_for_expr(&computed).is_none());
     }
 
     #[test]
