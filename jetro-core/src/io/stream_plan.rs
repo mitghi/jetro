@@ -276,59 +276,7 @@ pub(super) fn lower_root_rows_expr(
             }
         };
 
-        match op {
-            BuiltinRowStreamOp::Reverse => {
-                plan.direction = match plan.direction {
-                    RowStreamDirection::Forward => RowStreamDirection::Reverse,
-                    RowStreamDirection::Reverse => RowStreamDirection::Forward,
-                };
-            }
-            BuiltinRowStreamOp::Filter => {
-                plan.stages.push(RowStreamStage::Filter(expr_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::FindFirst => {
-                plan.stages.push(RowStreamStage::Filter(expr_arg.unwrap()));
-                plan.stages.push(RowStreamStage::Take(1));
-            }
-            BuiltinRowStreamOp::FindOne => {
-                plan.stages.push(RowStreamStage::FindOne(expr_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::DistinctBy => {
-                plan.stages.push(RowStreamStage::DistinctBy(expr_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::Take => {
-                plan.stages.push(RowStreamStage::Take(usize_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::First => {
-                plan.stages.push(RowStreamStage::Take(1));
-            }
-            BuiltinRowStreamOp::Last => {
-                plan.stages.push(RowStreamStage::Last);
-            }
-            BuiltinRowStreamOp::Count => {
-                plan.stages.push(RowStreamStage::Count);
-            }
-            BuiltinRowStreamOp::Sum
-            | BuiltinRowStreamOp::Avg
-            | BuiltinRowStreamOp::Min
-            | BuiltinRowStreamOp::Max => {
-                let reducer = op.numeric_reducer().ok_or_else(|| {
-                    RowStreamPlanError::new(format!(
-                        "rows() stream method {name}() is missing numeric reducer metadata"
-                    ))
-                })?;
-                plan.stages.push(RowStreamStage::Numeric(reducer));
-            }
-            BuiltinRowStreamOp::Any => {
-                plan.stages.push(RowStreamStage::Any(expr_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::All => {
-                plan.stages.push(RowStreamStage::All(expr_arg.unwrap()));
-            }
-            BuiltinRowStreamOp::Map => {
-                plan.stages.push(RowStreamStage::Map(expr_arg.unwrap()));
-            }
-        }
+        apply_row_stream_op(&mut plan, name, op, expr_arg, usize_arg)?;
         if op.is_terminal() {
             terminal = Some(name.as_str());
         }
@@ -336,6 +284,93 @@ pub(super) fn lower_root_rows_expr(
 
     plan.demand = RowStreamDemand::from_plan(&plan);
     Ok(Some(plan))
+}
+
+fn apply_row_stream_op(
+    plan: &mut RowStreamPlan,
+    name: &str,
+    op: BuiltinRowStreamOp,
+    expr_arg: Option<Expr>,
+    usize_arg: Option<usize>,
+) -> Result<(), RowStreamPlanError> {
+    match op {
+        BuiltinRowStreamOp::Reverse => {
+            plan.direction = match plan.direction {
+                RowStreamDirection::Forward => RowStreamDirection::Reverse,
+                RowStreamDirection::Reverse => RowStreamDirection::Forward,
+            };
+        }
+        BuiltinRowStreamOp::Filter => {
+            plan.stages
+                .push(RowStreamStage::Filter(expect_expr_arg(name, expr_arg)?));
+        }
+        BuiltinRowStreamOp::FindFirst => {
+            plan.stages
+                .push(RowStreamStage::Filter(expect_expr_arg(name, expr_arg)?));
+            plan.stages.push(RowStreamStage::Take(1));
+        }
+        BuiltinRowStreamOp::FindOne => {
+            plan.stages
+                .push(RowStreamStage::FindOne(expect_expr_arg(name, expr_arg)?));
+        }
+        BuiltinRowStreamOp::DistinctBy => {
+            plan.stages
+                .push(RowStreamStage::DistinctBy(expect_expr_arg(name, expr_arg)?));
+        }
+        BuiltinRowStreamOp::Take => {
+            plan.stages
+                .push(RowStreamStage::Take(expect_usize_arg(name, usize_arg)?));
+        }
+        BuiltinRowStreamOp::First => {
+            plan.stages.push(RowStreamStage::Take(1));
+        }
+        BuiltinRowStreamOp::Last => {
+            plan.stages.push(RowStreamStage::Last);
+        }
+        BuiltinRowStreamOp::Count => {
+            plan.stages.push(RowStreamStage::Count);
+        }
+        BuiltinRowStreamOp::Sum
+        | BuiltinRowStreamOp::Avg
+        | BuiltinRowStreamOp::Min
+        | BuiltinRowStreamOp::Max => {
+            let reducer = op.numeric_reducer().ok_or_else(|| {
+                RowStreamPlanError::new(format!(
+                    "rows() stream method {name}() is missing numeric reducer metadata"
+                ))
+            })?;
+            plan.stages.push(RowStreamStage::Numeric(reducer));
+        }
+        BuiltinRowStreamOp::Any => {
+            plan.stages
+                .push(RowStreamStage::Any(expect_expr_arg(name, expr_arg)?));
+        }
+        BuiltinRowStreamOp::All => {
+            plan.stages
+                .push(RowStreamStage::All(expect_expr_arg(name, expr_arg)?));
+        }
+        BuiltinRowStreamOp::Map => {
+            plan.stages
+                .push(RowStreamStage::Map(expect_expr_arg(name, expr_arg)?));
+        }
+    }
+    Ok(())
+}
+
+fn expect_expr_arg(name: &str, expr: Option<Expr>) -> Result<Expr, RowStreamPlanError> {
+    expr.ok_or_else(|| {
+        RowStreamPlanError::new(format!(
+            "rows() stream method {name}() is missing expression metadata"
+        ))
+    })
+}
+
+fn expect_usize_arg(name: &str, value: Option<usize>) -> Result<usize, RowStreamPlanError> {
+    value.ok_or_else(|| {
+        RowStreamPlanError::new(format!(
+            "rows() stream method {name}() is missing usize metadata"
+        ))
+    })
 }
 
 impl RowStreamDemand {
