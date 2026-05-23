@@ -15,6 +15,15 @@ use std::sync::Arc;
 /// only physical-plan recognition and compact metadata for the row runner.
 pub(super) type NdjsonPhysicalPath = Vec<PhysicalPathStep>;
 
+pub(super) fn physical_paths_equal(a: &[PhysicalPathStep], b: &[PhysicalPathStep]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| match (a, b) {
+            (PhysicalPathStep::Field(a), PhysicalPathStep::Field(b)) => a == b,
+            (PhysicalPathStep::Index(a), PhysicalPathStep::Index(b)) => a == b,
+            _ => false,
+        })
+}
+
 #[derive(Clone)]
 pub(super) enum NdjsonDirectBytePlan {
     Expr(NdjsonDirectByteExpr),
@@ -1544,6 +1553,29 @@ mod tests {
             direct_element_from_selection(SingleElementSelection::Nth(2)),
             NdjsonDirectElement::Nth(2)
         ));
+    }
+
+    #[test]
+    fn physical_path_equality_compares_field_and_index_steps() {
+        let a = vec![
+            PhysicalPathStep::Field(Arc::from("items")),
+            PhysicalPathStep::Index(0),
+            PhysicalPathStep::Field(Arc::from("sku")),
+        ];
+        let b = vec![
+            PhysicalPathStep::Field(Arc::from("items")),
+            PhysicalPathStep::Index(0),
+            PhysicalPathStep::Field(Arc::from("sku")),
+        ];
+        let c = vec![
+            PhysicalPathStep::Field(Arc::from("items")),
+            PhysicalPathStep::Index(1),
+            PhysicalPathStep::Field(Arc::from("sku")),
+        ];
+
+        assert!(physical_paths_equal(&a, &b));
+        assert!(!physical_paths_equal(&a, &c));
+        assert!(!physical_paths_equal(&a, &a[..2]));
     }
 
     #[test]

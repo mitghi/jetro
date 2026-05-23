@@ -8,7 +8,7 @@ use super::ndjson_byte::{
 };
 use super::ndjson_direct::{
     direct_cmp_literal_predicate, direct_tape_plan_for_expr, direct_tape_predicate_for_expr,
-    NdjsonDirectPredicate, NdjsonDirectTapePlan, NdjsonPhysicalPath,
+    physical_paths_equal, NdjsonDirectPredicate, NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
 use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;
@@ -810,7 +810,7 @@ fn apply_fanout_row(
         if let (Some((steps, view)), Some(cmp)) =
             (shared_view.as_ref(), consumer.direct_cmp.as_ref())
         {
-            if same_path(steps, &cmp.steps) {
+            if physical_paths_equal(steps, &cmp.steps) {
                 if !json_cmp_binop(*view, cmp.op, JsonView::from_val(&cmp.lit)) {
                     continue;
                 }
@@ -869,19 +869,11 @@ fn shared_cmp_path(consumers: &[RunningConsumer]) -> Option<&[PhysicalPathStep]>
         count += 1;
         match shared {
             None => shared = Some(cmp.steps.as_slice()),
-            Some(path) if same_path(path, &cmp.steps) => {}
+            Some(path) if physical_paths_equal(path, &cmp.steps) => {}
             Some(_) => return None,
         }
     }
     (count > 1).then_some(shared?)
-}
-fn same_path(a: &[PhysicalPathStep], b: &[PhysicalPathStep]) -> bool {
-    a.len() == b.len()
-        && a.iter().zip(b).all(|(a, b)| match (a, b) {
-            (PhysicalPathStep::Field(a), PhysicalPathStep::Field(b)) => a == b,
-            (PhysicalPathStep::Index(a), PhysicalPathStep::Index(b)) => a == b,
-            _ => false,
-        })
 }
 
 fn row_to_val(engine: &JetroEngine, line_no: u64, row: Vec<u8>) -> Result<Val, JetroEngineError> {
