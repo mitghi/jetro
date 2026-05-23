@@ -452,6 +452,15 @@ fn run_ndjson_writes_object_item_methods_directly() {
         String::from_utf8(entries_out).unwrap(),
         "[[\"id\",7],[\"name\",\"Ada\"]]\n"
     );
+
+    let mut pairs_out = Vec::new();
+    engine
+        .run_ndjson(Cursor::new(input), "$.to_pairs()", &mut pairs_out)
+        .expect("to_pairs should write");
+    assert_eq!(
+        String::from_utf8(pairs_out).unwrap(),
+        "[{\"key\":\"id\",\"val\":7},{\"key\":\"name\",\"val\":\"Ada\"}]\n"
+    );
 }
 
 #[test]
