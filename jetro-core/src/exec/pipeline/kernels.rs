@@ -1860,7 +1860,7 @@ where
     Ok(())
 }
 
-fn view_kernel_value_to_owned<'a, V>(value: ViewKernelValue<V>) -> Val
+pub(crate) fn view_kernel_value_to_owned<'a, V>(value: ViewKernelValue<V>) -> Val
 where
     V: ValueView<'a>,
 {
@@ -1870,7 +1870,7 @@ where
     }
 }
 
-fn view_kernel_view_to_owned<'a, V>(view: V) -> Val
+pub(crate) fn view_kernel_view_to_owned<'a, V>(view: V) -> Val
 where
     V: ValueView<'a>,
 {

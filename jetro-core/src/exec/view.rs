@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{scalar_view_to_owned_val, ValueView};
+use crate::data::view::ValueView;
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -181,7 +181,7 @@ where
             }
             let sink_done = sink_acc.observe_builtin_lazy(
                 *accumulator,
-                || scalar_view_to_owned_val(item.scalar()).unwrap_or_else(|| item.materialize()),
+                || pipeline::view_kernel_view_to_owned(item.clone()),
                 || {
                     let kernel = (*project_kernel)?;
                     let kernel = sink_kernels.get(kernel)?;
@@ -196,7 +196,8 @@ where
             }))
         }
         pipeline::ViewSinkCapability::Nth { index } => {
-            let sink_done = sink_acc.observe_nth_lazy(*index, || item.materialize());
+            let sink_done = sink_acc
+                .observe_nth_lazy(*index, || pipeline::view_kernel_view_to_owned(item.clone()));
             Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else {
@@ -210,7 +211,9 @@ where
             let kernel = sink_kernels.get(*predicate_kernel)?;
             let matched = eval_filter_kernel_with_vm(item, kernel, vm)?;
             let sink_done =
-                match sink_acc.observe_predicate_lazy(*op, matched, || item.materialize()) {
+                match sink_acc.observe_predicate_lazy(*op, matched, || {
+                    pipeline::view_kernel_view_to_owned(item.clone())
+                }) {
                     Ok(done) => done,
                     Err(err) => return Some(Err(err)),
                 };
@@ -241,7 +244,9 @@ where
             key_kernel,
         } => {
             let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(*key_kernel)?, vm)?;
-            sink_acc.observe_arg_extreme_lazy(op.wants_max(), key, || item.materialize());
+            sink_acc.observe_arg_extreme_lazy(op.wants_max(), key, || {
+                pipeline::view_kernel_view_to_owned(item.clone())
+            });
             Some(Ok(ViewRowAction::Emit))
         }
         pipeline::ViewSinkCapability::SelectMany {
@@ -251,7 +256,7 @@ where
         } => {
             let sink_done =
                 sink_acc.observe_select_many_lazy(*n, *from_end, *source_reversed, || {
-                    item.materialize()
+                    pipeline::view_kernel_view_to_owned(item.clone())
                 });
             Some(Ok(if sink_done {
                 ViewRowAction::Stop
@@ -289,9 +294,7 @@ where
     V: ValueView<'a>,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
-        pipeline::ViewKernelValue::View(view) => {
-            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
-        }
+        pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
 }
@@ -1401,9 +1404,7 @@ where
     V: ValueView<'a>,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
-        pipeline::ViewKernelValue::View(view) => {
-            scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
-        }
+        pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
 }
@@ -1441,9 +1442,7 @@ where
 {
     match key {
         Some(program) => match program.eval_view_with_vm(item, vm)? {
-            pipeline::ViewKernelValue::View(view) => {
-                scalar_view_to_owned_val(view.scalar()).or_else(|| Some(view.materialize()))
-            }
+            pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
             pipeline::ViewKernelValue::Owned(value) => Some(value),
         },
         None => Some(item.materialize()),
@@ -1752,7 +1751,7 @@ mod tests {
     }
 
     #[test]
-    fn view_full_runner_find_one_materializes_only_match() {
+    fn view_full_runner_find_one_avoids_materializing_scalar_match() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let body = PipelineBody {
             stages: Vec::new(),
@@ -1769,8 +1768,8 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(3));
-        assert_eq!(source.scalar_reads(), 4);
-        assert_eq!(source.materialize_reads(), 1);
+        assert_eq!(source.scalar_reads(), 5);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
@@ -1805,7 +1804,7 @@ mod tests {
             err.0,
             "find_one: expected exactly one element, got multiple"
         );
-        assert_eq!(multi_source.materialize_reads(), 1);
+        assert_eq!(multi_source.materialize_reads(), 0);
     }
 
     #[test]
@@ -1869,7 +1868,7 @@ mod tests {
             .unwrap();
         let first_json: serde_json::Value = first.into();
         assert_eq!(first_json, serde_json::json!([1, 2]));
-        assert_eq!(first_source.materialize_reads(), 2);
+        assert_eq!(first_source.materialize_reads(), 0);
 
         let last_source = CountingView::root(&[1, 2, 3, 4]);
         let last_body = PipelineBody {
@@ -1885,7 +1884,7 @@ mod tests {
             .unwrap();
         let last_json: serde_json::Value = last.into();
         assert_eq!(last_json, serde_json::json!([3, 4]));
-        assert_eq!(last_source.materialize_reads(), 2);
+        assert_eq!(last_source.materialize_reads(), 0);
     }
 
     #[test]
@@ -1933,8 +1932,8 @@ mod tests {
             .unwrap();
         let nth_json: serde_json::Value = nth.into();
         assert_eq!(nth_json, serde_json::json!(3));
-        assert_eq!(nth_source.materialize_reads(), 1);
-        assert_eq!(nth_source.scalar_reads(), 1);
+        assert_eq!(nth_source.materialize_reads(), 0);
+        assert_eq!(nth_source.scalar_reads(), 2);
         assert_eq!(nth_source.array_iter_reads(), 0);
     }
 
@@ -2277,8 +2276,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(max, Val::Int(4));
-        assert_eq!(max_source.scalar_reads(), 4);
-        assert_eq!(max_source.materialize_reads(), 2);
+        assert_eq!(max_source.scalar_reads(), 6);
+        assert_eq!(max_source.materialize_reads(), 0);
 
         let min_source = CountingView::root(&[3, 4, 1, 2]);
         let min_body = PipelineBody {
@@ -2294,8 +2293,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(min, Val::Int(1));
-        assert_eq!(min_source.scalar_reads(), 4);
-        assert_eq!(min_source.materialize_reads(), 2);
+        assert_eq!(min_source.scalar_reads(), 6);
+        assert_eq!(min_source.materialize_reads(), 0);
     }
 
     #[test]
