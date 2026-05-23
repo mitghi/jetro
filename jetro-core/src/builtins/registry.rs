@@ -987,6 +987,9 @@ where
         (Some(BuiltinViewObjectProjection::Entries), BuiltinArgs::None) => {
             view.object_entries().map(ViewProjectionResult::Owned)
         }
+        (Some(BuiltinViewObjectProjection::ToPairs), BuiltinArgs::None) => {
+            view.object_pairs().map(ViewProjectionResult::Owned)
+        }
         (Some(BuiltinViewObjectProjection::Pick), BuiltinArgs::StrVec(keys)) => {
             view.pick_keys(keys).map(ViewProjectionResult::Owned)
         }
@@ -2802,7 +2805,7 @@ mod tests {
             (BuiltinMethod::Missing, BuiltinViewObjectProjection::Missing),
             (BuiltinMethod::Omit, BuiltinViewObjectProjection::Omit),
             (BuiltinMethod::Pick, BuiltinViewObjectProjection::Pick),
-            (BuiltinMethod::ToPairs, BuiltinViewObjectProjection::Entries),
+            (BuiltinMethod::ToPairs, BuiltinViewObjectProjection::ToPairs),
             (BuiltinMethod::Values, BuiltinViewObjectProjection::Values),
         ];
 
@@ -2883,6 +2886,7 @@ mod tests {
                 | BuiltinViewObjectProjection::Keys
                 | BuiltinViewObjectProjection::Values
                 | BuiltinViewObjectProjection::Entries
+                | BuiltinViewObjectProjection::ToPairs
                 | BuiltinViewObjectProjection::Omit => {
                     assert_eq!(
                         view_projection_returns_owned(id, &BuiltinArgs::None),
@@ -4452,7 +4456,7 @@ mod tests {
         )));
         assert_eq!(
             view_object_projection(BuiltinId::from_method(BuiltinMethod::ToPairs)),
-            Some(BuiltinViewObjectProjection::Entries)
+            Some(BuiltinViewObjectProjection::ToPairs)
         );
         assert!(view_object_items_projection(BuiltinId::from_method(
             BuiltinMethod::ToPairs

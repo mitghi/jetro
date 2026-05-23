@@ -1543,6 +1543,10 @@ mod tests {
             None
         }
 
+        fn object_pairs(&self) -> Option<Val> {
+            None
+        }
+
         fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
             None
         }

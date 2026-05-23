@@ -183,6 +183,30 @@ fn tape_object_entries<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     Some(Val::arr(out))
 }
 
+fn tape_object_pairs<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
+    use crate::data::tape::TapeNode;
+
+    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+        return None;
+    };
+
+    let mut out = Vec::with_capacity(len);
+    let mut cur = idx + 1;
+    for _ in 0..len {
+        let key = Arc::from(tape.str_at(cur));
+        cur += 1;
+        let mut value_idx = cur;
+        out.push(crate::util::obj2(
+            "key",
+            Val::Str(key),
+            "val",
+            tape.materialize_at(&mut value_idx),
+        ));
+        cur += tape.span(cur);
+    }
+    Some(Val::arr(out))
+}
+
 fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Option<Val> {
     use crate::data::tape::TapeNode;
 
@@ -291,6 +315,8 @@ pub(crate) trait ValueView<'a>: Clone {
     fn object_values(&self) -> Option<Val>;
     /// Return the current object's `[key, value]` entries.
     fn object_entries(&self) -> Option<Val>;
+    /// Return the current object's `{key, val}` entries.
+    fn object_pairs(&self) -> Option<Val>;
     /// Keep only `keys` from the current object, materialising selected values only.
     fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val>;
     /// Drop `keys` from the current object.
@@ -428,6 +454,28 @@ impl<'a> ValueView<'a> for ValView<'a> {
                 pairs
                     .iter()
                     .map(|(key, value)| Val::arr(vec![Val::Str(Arc::clone(key)), value.clone()]))
+                    .collect::<Vec<_>>(),
+            )),
+            _ => None,
+        }
+    }
+
+    #[inline]
+    fn object_pairs(&self) -> Option<Val> {
+        match self.value() {
+            Val::Obj(map) => Some(Val::arr(
+                map.iter()
+                    .map(|(key, value)| {
+                        crate::util::obj2("key", Val::Str(Arc::clone(key)), "val", value.clone())
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Val::ObjSmall(pairs) => Some(Val::arr(
+                pairs
+                    .iter()
+                    .map(|(key, value)| {
+                        crate::util::obj2("key", Val::Str(Arc::clone(key)), "val", value.clone())
+                    })
                     .collect::<Vec<_>>(),
             )),
             _ => None,
@@ -810,6 +858,14 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn object_pairs(&self) -> Option<Val> {
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        tape_object_pairs(*tape, *idx)
+    }
+
+    #[inline]
     fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
         let Self::Node { tape, idx } = self else {
             return None;
@@ -1066,6 +1122,14 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             return None;
         };
         tape_object_entries(*tape, *idx)
+    }
+
+    #[inline]
+    fn object_pairs(&self) -> Option<Val> {
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        tape_object_pairs(*tape, *idx)
     }
 
     #[inline]

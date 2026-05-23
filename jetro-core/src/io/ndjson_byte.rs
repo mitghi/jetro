@@ -801,6 +801,13 @@ fn write_json_object_items_raw<W: Write>(
                 writer.write_all(&row[value_start..value_end])?;
                 writer.write_all(b"]")?;
             }
+            BuiltinViewObjectProjection::ToPairs => {
+                writer.write_all(br#"{"key":"#)?;
+                write_json_escaped_ascii_slice(writer, key)?;
+                writer.write_all(br#","val":"#)?;
+                writer.write_all(&row[value_start..value_end])?;
+                writer.write_all(b"}")?;
+            }
             _ => return Ok(BytePlanWrite::Fallback),
         }
         wrote = true;

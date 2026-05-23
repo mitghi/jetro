@@ -3659,6 +3659,13 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
                 cur = write_json_tape_at(writer, tape, cur + 1)?;
                 writer.write_all(b"]")?;
             }
+            BuiltinViewObjectProjection::ToPairs => {
+                writer.write_all(br#"{"key":"#)?;
+                write_json_str(writer, tape.str_at(cur))?;
+                writer.write_all(br#","val":"#)?;
+                cur = write_json_tape_at(writer, tape, cur + 1)?;
+                writer.write_all(b"}")?;
+            }
             _ => unreachable!("non-object-items builtin"),
         }
     }

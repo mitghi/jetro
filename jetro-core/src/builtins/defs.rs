@@ -1907,7 +1907,7 @@ impl Builtin for ToPairs {
     fn spec() -> BuiltinSpec {
         object_simple_spec()
             .view_native()
-            .view_object_projection(BuiltinViewObjectProjection::Entries)
+            .view_object_projection(BuiltinViewObjectProjection::ToPairs)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]

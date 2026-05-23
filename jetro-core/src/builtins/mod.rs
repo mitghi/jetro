@@ -748,6 +748,8 @@ pub enum BuiltinViewObjectProjection {
     Values,
     /// Return object entries.
     Entries,
+    /// Return object entries as `{key, val}` objects.
+    ToPairs,
     /// Keep selected keys.
     Pick,
     /// Drop selected keys.
@@ -762,16 +764,20 @@ impl BuiltinViewObjectProjection {
             Self::Has | Self::HasAll | Self::HasKey | Self::Missing | Self::HasPath => {
                 BuiltinDemandLaw::PredicateMapLike
             }
-            Self::GetPath | Self::Keys | Self::Values | Self::Entries | Self::Pick | Self::Omit => {
-                BuiltinDemandLaw::MapLike
-            }
+            Self::GetPath
+            | Self::Keys
+            | Self::Values
+            | Self::Entries
+            | Self::ToPairs
+            | Self::Pick
+            | Self::Omit => BuiltinDemandLaw::MapLike,
         }
     }
 
     /// Whether the projection enumerates object keys, values, or entries.
     #[inline]
     pub(crate) const fn is_item_projection(self) -> bool {
-        matches!(self, Self::Keys | Self::Values | Self::Entries)
+        matches!(self, Self::Keys | Self::Values | Self::Entries | Self::ToPairs)
     }
 
     /// Whether applying this projection yields an owned value instead of a borrowed child view.

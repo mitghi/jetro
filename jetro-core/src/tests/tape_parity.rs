@@ -28,9 +28,12 @@ fn tape_matches_vm_for_borrowed_object_helpers() {
         "$.profile.keys()",
         "$.profile.values()",
         "$.profile.entries()",
+        "$.profile.to_pairs()",
         "$.profile.entries().first()",
+        "$.profile.to_pairs().last()",
         "$.profile.entries().last()",
         "$.profile.entries().map(e => e[0])",
+        "$.profile.to_pairs().map(e => e[1]).last()",
         "$.profile.entries().map(e => e[1]).last()",
         "$.profile.pick(\"id\", \"name\")",
         "$.profile.omit(\"active\")",
@@ -88,7 +91,9 @@ fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
         "$.users.map({label: f\"{name}:{score}\", name_len: name.len()}).last()",
         "$.users.filter(name.starts_with(\"a\")).map(email.contains(\"@\"))",
         "$.users.map(profile.entries().first())",
+        "$.users.map(profile.to_pairs().first())",
         "$.users.map(profile.entries().map(e => e[0]).last())",
+        "$.users.map(profile.to_pairs().map(e => e[0]).last())",
     ] {
         assert_tape_vm_eq(query, &doc);
     }
@@ -148,6 +153,7 @@ fn tape_matches_vm_across_view_projection_boundaries() {
         "$.users.map(profile.has_path(\"flags.staff\"))",
         "$.users.map(profile.missing(\"flags.beta\"))",
         "$.users.filter(profile.has_key(\"flags\")).map(profile.entries().last()[0])",
+        "$.users.filter(profile.has_key(\"flags\")).map(profile.to_pairs().last()[0])",
         "$.users.map({id, email: profile.get_path(\"contact.email\"), keys: profile.keys().take(2)})",
     ] {
         assert_tape_vm_eq(query, &doc);
