@@ -274,7 +274,7 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
         {
             let NdjsonDirectStreamSink::Extreme {
                 key_steps,
-                want_max,
+                op,
                 value,
             } = &stream.sink
             else {
@@ -288,7 +288,7 @@ pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
                 }
                 RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
             };
-            write_raw_json_stream_extreme_source(writer, source, key_steps, *want_max, value)
+            write_raw_json_stream_extreme_source(writer, source, key_steps, op.wants_max(), value)
         }
         NdjsonDirectTapePlan::Stream(stream) => {
             let map = match &stream.sink {
@@ -448,10 +448,10 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                     }
                     NdjsonDirectStreamSink::Extreme {
                         key_steps,
-                        want_max,
+                        op,
                         value,
                     } => write_raw_json_stream_extreme_source(
-                        writer, source, key_steps, *want_max, value,
+                        writer, source, key_steps, op.wants_max(), value,
                     ),
                 },
                 RawFieldValue::Missing => {
@@ -3408,7 +3408,7 @@ fn write_raw_json_tape_plan_value<W: Write>(
             }
             NdjsonDirectStreamSink::Extreme {
                 key_steps,
-                want_max,
+                op,
                 value,
             } => {
                 let source = match raw_json_byte_path_value(row, &stream.source_steps) {
@@ -3419,7 +3419,7 @@ fn write_raw_json_tape_plan_value<W: Write>(
                     }
                     RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
                 };
-                write_raw_json_stream_extreme_source(writer, source, key_steps, *want_max, value)
+                write_raw_json_stream_extreme_source(writer, source, key_steps, op.wants_max(), value)
             }
             _ => Ok(BytePlanWrite::Fallback),
         },

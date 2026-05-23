@@ -191,7 +191,7 @@ pub(super) enum NdjsonDirectStreamSink {
     },
     Extreme {
         key_steps: NdjsonPhysicalPath,
-        want_max: bool,
+        op: crate::builtins::BuiltinArgExtremeSink,
         value: NdjsonDirectProjectionValue,
     },
 }
@@ -800,13 +800,17 @@ fn direct_tape_sort_extreme_plan_with_position(
         return None;
     };
     let key_steps = kernel_to_physical_path(body.stage_kernels.first()?)?;
-    let want_max = want_last ^ sort.descending;
+    let op = if want_last ^ sort.descending {
+        crate::builtins::BuiltinArgExtremeSink::MaxBy
+    } else {
+        crate::builtins::BuiltinArgExtremeSink::MinBy
+    };
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate: None,
         sink: NdjsonDirectStreamSink::Extreme {
             key_steps,
-            want_max,
+            op,
             value: NdjsonDirectProjectionValue::Path(suffix_steps),
         },
     }))

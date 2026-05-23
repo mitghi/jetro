@@ -3236,7 +3236,7 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
         }
         NdjsonDirectStreamSink::Extreme {
             key_steps,
-            want_max,
+            op,
             value,
         } => {
             let mut best_idx = None;
@@ -3249,7 +3249,7 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
                     .and_then(|idx| suffix_cache.index(tape, idx, key_steps))
                     .map(|idx| {
                         let order = crate::util::json_cmp_vals(key, json_tape_scalar(tape, idx));
-                        (*want_max && order.is_gt()) || (!*want_max && order.is_lt())
+                        (op.wants_max() && order.is_gt()) || (!op.wants_max() && order.is_lt())
                     })
                     .unwrap_or(true);
                 if replace {
