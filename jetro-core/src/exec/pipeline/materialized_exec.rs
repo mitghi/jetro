@@ -26,7 +26,7 @@ use super::{
 
 use crate::builtins::registry::{
     keyed_reducer, object_lambda as builtin_object_lambda,
-    string_pair_stage as builtin_string_pair_stage, BuiltinId,
+    string_pair_stage as builtin_string_pair_stage,
 };
 use crate::builtins::{
     replace_apply, slice_apply, split_apply, BuiltinMembershipSink, BuiltinMethod,
@@ -534,10 +534,14 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
             end,
         } => slice_apply(v, *start, *end),
         Stage::StringPairBuiltin {
-            method,
             first,
             second,
-        } => match builtin_string_pair_stage(BuiltinId::from_method(*method)) {
+            ..
+        } => match stage
+            .descriptor()
+            .and_then(|desc| desc.builtin_id())
+            .and_then(builtin_string_pair_stage)
+        {
             Some(BuiltinStringPairStage::Replace { all }) => {
                 replace_apply(v.clone(), first, second, all).unwrap_or(v)
             }
