@@ -1434,7 +1434,7 @@ impl Builtin for GroupBy {
             .keyed_reducer(BuiltinKeyedReducer::Group)
             .columnar_stage(BuiltinColumnarStage::GroupBy)
             .cost(20.0)
-            .demand_law(BuiltinDemandLaw::RowKeyedReducer)
+            .demand_law(BuiltinKeyedReducer::Group.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .logical_shape(BuiltinLogicalShape::GroupBy)
             .lowering(BuiltinPipelineLowering::ExprArg)
@@ -1476,7 +1476,7 @@ impl Builtin for CountBy {
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Count)
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::KeyOnlyReducer)
+            .demand_law(BuiltinKeyedReducer::Count.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
@@ -1522,7 +1522,7 @@ impl Builtin for IndexBy {
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Index)
             .cost(10.0)
-            .demand_law(BuiltinDemandLaw::RowKeyedReducer)
+            .demand_law(BuiltinKeyedReducer::Index.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,

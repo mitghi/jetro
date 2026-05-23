@@ -261,6 +261,9 @@ pub(crate) fn expr_payload(id: BuiltinId) -> Option<BuiltinExprPayload> {
     if let Some(payload) = spec.expr_payload {
         return Some(payload);
     }
+    if let Some(reducer) = spec.keyed_reducer {
+        return Some(reducer.expr_payload());
+    }
     match spec.demand_law {
         BuiltinDemandLaw::KeyOnlyReducer => Some(BuiltinExprPayload::KeyOnlyReducer),
         BuiltinDemandLaw::RowKeyedReducer => Some(BuiltinExprPayload::RowKeyedReducer),
@@ -2307,32 +2310,22 @@ mod tests {
                 match reducer {
                     BuiltinKeyedReducer::Count => {
                         assert_eq!(method, BuiltinMethod::CountBy);
-                        assert_eq!(demand_law(id), BuiltinDemandLaw::KeyOnlyReducer);
-                        assert_eq!(
-                            expr_payload(id),
-                            Some(BuiltinExprPayload::KeyOnlyReducer)
-                        );
+                        assert!(!reducer.needs_row_payload());
                         assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::CountBy));
                     }
                     BuiltinKeyedReducer::Group => {
                         assert_eq!(method, BuiltinMethod::GroupBy);
-                        assert_eq!(demand_law(id), BuiltinDemandLaw::RowKeyedReducer);
-                        assert_eq!(
-                            expr_payload(id),
-                            Some(BuiltinExprPayload::RowKeyedReducer)
-                        );
+                        assert!(reducer.needs_row_payload());
                         assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::GroupBy));
                     }
                     BuiltinKeyedReducer::Index => {
                         assert_eq!(method, BuiltinMethod::IndexBy);
-                        assert_eq!(demand_law(id), BuiltinDemandLaw::RowKeyedReducer);
-                        assert_eq!(
-                            expr_payload(id),
-                            Some(BuiltinExprPayload::RowKeyedReducer)
-                        );
+                        assert!(reducer.needs_row_payload());
                         assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::IndexBy));
                     }
                 }
+                assert_eq!(demand_law(id), reducer.demand_law(), "{method:?}");
+                assert_eq!(expr_payload(id), Some(reducer.expr_payload()), "{method:?}");
             }
         }
 

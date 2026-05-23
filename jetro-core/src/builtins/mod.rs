@@ -1123,6 +1123,33 @@ pub enum BuiltinKeyedReducer {
     Group,
 }
 
+impl BuiltinKeyedReducer {
+    /// Demand law implied by the keyed reducer's accumulator semantics.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        if self.needs_row_payload() {
+            BuiltinDemandLaw::RowKeyedReducer
+        } else {
+            BuiltinDemandLaw::KeyOnlyReducer
+        }
+    }
+
+    /// Expression payload lane implied by the keyed reducer's accumulator semantics.
+    #[inline]
+    pub(crate) const fn expr_payload(self) -> BuiltinExprPayload {
+        match self {
+            Self::Count => BuiltinExprPayload::KeyOnlyReducer,
+            Self::Index | Self::Group => BuiltinExprPayload::RowKeyedReducer,
+        }
+    }
+
+    /// Whether the accumulator must retain/materialise source rows.
+    #[inline]
+    pub(crate) const fn needs_row_payload(self) -> bool {
+        matches!(self, Self::Index | Self::Group)
+    }
+}
+
 /// Arg-extreme terminal sink behavior for key-based row selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinArgExtremeSink {
