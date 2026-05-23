@@ -358,6 +358,7 @@ impl NumOp {
     }
 
     /// Returns the `BuiltinMethod` that corresponds to this numeric operation.
+    #[cfg(test)]
     pub(crate) fn method(self) -> BuiltinMethod {
         self.builtin_reducer().method()
     }

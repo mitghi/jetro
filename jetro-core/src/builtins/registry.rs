@@ -1420,6 +1420,8 @@ pub(crate) fn apply_barrier_hook(
 }
 
 impl BuiltinId {
+    pub(crate) const ALL: Self = Self(BuiltinMethod::All as u16);
+    pub(crate) const ANY: Self = Self(BuiltinMethod::Any as u16);
     pub(crate) const APPROX_COUNT_DISTINCT: Self =
         Self(BuiltinMethod::ApproxCountDistinct as u16);
     pub(crate) const AVG: Self = Self(BuiltinMethod::Avg as u16);
@@ -1427,14 +1429,22 @@ impl BuiltinId {
     pub(crate) const COUNT_BY: Self = Self(BuiltinMethod::CountBy as u16);
     pub(crate) const DROP_WHILE: Self = Self(BuiltinMethod::DropWhile as u16);
     pub(crate) const FILTER: Self = Self(BuiltinMethod::Filter as u16);
+    pub(crate) const FIND_INDEX: Self = Self(BuiltinMethod::FindIndex as u16);
+    pub(crate) const FIND_ONE: Self = Self(BuiltinMethod::FindOne as u16);
     pub(crate) const FLAT_MAP: Self = Self(BuiltinMethod::FlatMap as u16);
     pub(crate) const FIRST: Self = Self(BuiltinMethod::First as u16);
     pub(crate) const GROUP_BY: Self = Self(BuiltinMethod::GroupBy as u16);
+    pub(crate) const INCLUDES: Self = Self(BuiltinMethod::Includes as u16);
+    pub(crate) const INDEX: Self = Self(BuiltinMethod::Index as u16);
+    pub(crate) const INDICES_OF: Self = Self(BuiltinMethod::IndicesOf as u16);
+    pub(crate) const INDICES_WHERE: Self = Self(BuiltinMethod::IndicesWhere as u16);
     pub(crate) const INDEX_BY: Self = Self(BuiltinMethod::IndexBy as u16);
     pub(crate) const LAST: Self = Self(BuiltinMethod::Last as u16);
     pub(crate) const MAP: Self = Self(BuiltinMethod::Map as u16);
     pub(crate) const MAX: Self = Self(BuiltinMethod::Max as u16);
+    pub(crate) const MAX_BY: Self = Self(BuiltinMethod::MaxBy as u16);
     pub(crate) const MIN: Self = Self(BuiltinMethod::Min as u16);
+    pub(crate) const MIN_BY: Self = Self(BuiltinMethod::MinBy as u16);
     pub(crate) const REVERSE: Self = Self(BuiltinMethod::Reverse as u16);
     pub(crate) const SKIP: Self = Self(BuiltinMethod::Skip as u16);
     pub(crate) const SORT: Self = Self(BuiltinMethod::Sort as u16);

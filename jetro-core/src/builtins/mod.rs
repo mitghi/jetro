@@ -1299,8 +1299,18 @@ pub enum BuiltinArgExtremeSink {
 }
 
 impl BuiltinArgExtremeSink {
+    /// Registry id represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn id(self) -> registry::BuiltinId {
+        match self {
+            Self::MaxBy => registry::BuiltinId::MAX_BY,
+            Self::MinBy => registry::BuiltinId::MIN_BY,
+        }
+    }
+
     /// Builtin method represented by this terminal sink.
     #[inline]
+    #[cfg(test)]
     pub(crate) const fn method(self) -> BuiltinMethod {
         match self {
             Self::MaxBy => BuiltinMethod::MaxBy,
@@ -1337,8 +1347,21 @@ pub enum BuiltinPredicateSink {
 }
 
 impl BuiltinPredicateSink {
+    /// Registry id represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn id(self) -> registry::BuiltinId {
+        match self {
+            Self::Any => registry::BuiltinId::ANY,
+            Self::All => registry::BuiltinId::ALL,
+            Self::FindIndex => registry::BuiltinId::FIND_INDEX,
+            Self::IndicesWhere => registry::BuiltinId::INDICES_WHERE,
+            Self::FindOne => registry::BuiltinId::FIND_ONE,
+        }
+    }
+
     /// Builtin method represented by this terminal sink.
     #[inline]
+    #[cfg(test)]
     pub(crate) const fn method(self) -> BuiltinMethod {
         match self {
             Self::Any => BuiltinMethod::Any,
@@ -1389,6 +1412,16 @@ pub enum BuiltinMembershipSink {
 }
 
 impl BuiltinMembershipSink {
+    /// Registry id represented by this terminal sink.
+    #[inline]
+    pub(crate) const fn id(self) -> registry::BuiltinId {
+        match self {
+            Self::Includes => registry::BuiltinId::INCLUDES,
+            Self::Index => registry::BuiltinId::INDEX,
+            Self::IndicesOf => registry::BuiltinId::INDICES_OF,
+        }
+    }
+
     /// Builtin method represented by this terminal sink.
     #[inline]
     pub(crate) const fn method(self) -> BuiltinMethod {
@@ -1580,8 +1613,20 @@ pub enum BuiltinNumericReducer {
 }
 
 impl BuiltinNumericReducer {
+    /// Registry id represented by this reducer.
+    #[inline]
+    pub(crate) const fn id(self) -> registry::BuiltinId {
+        match self {
+            Self::Sum => registry::BuiltinId::SUM,
+            Self::Avg => registry::BuiltinId::AVG,
+            Self::Min => registry::BuiltinId::MIN,
+            Self::Max => registry::BuiltinId::MAX,
+        }
+    }
+
     /// Builtin method represented by this reducer.
     #[inline]
+    #[cfg(test)]
     pub(crate) const fn method(self) -> BuiltinMethod {
         match self {
             Self::Sum => BuiltinMethod::Sum,
