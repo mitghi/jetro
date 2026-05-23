@@ -86,13 +86,39 @@ fn bounded_sort_is_worthwhile(k: usize) -> bool {
 
 #[cfg(test)]
 mod cost_guard_tests {
-    use super::bounded_sort_is_worthwhile;
+    use std::sync::Arc;
+
+    use crate::data::value::Val;
+
+    use super::{bounded_sort_is_worthwhile, predicate_is_order_prefix, BodyKernel, BinOp, Program};
 
     #[test]
     fn bounded_sort_cost_guard_rejects_empty_limits() {
         assert!(!bounded_sort_is_worthwhile(0));
         assert!(bounded_sort_is_worthwhile(1));
         assert!(bounded_sort_is_worthwhile(16));
+    }
+
+    #[test]
+    fn order_prefix_analysis_uses_shared_kernel_metadata() {
+        let sort = crate::exec::pipeline::SortSpec {
+            key: Some(Arc::new(Program::new(Vec::new(), "<sort-key>"))),
+            descending: true,
+        };
+        let sort_key = BodyKernel::FieldRead(Arc::from("price"));
+        let predicate = BodyKernel::CmpLit {
+            lhs: Box::new(BodyKernel::FieldRead(Arc::from("price"))),
+            op: BinOp::Gt,
+            lit: Val::Int(20),
+        };
+        assert!(predicate_is_order_prefix(&sort, &sort_key, &predicate));
+
+        let other_key = BodyKernel::CmpLit {
+            lhs: Box::new(BodyKernel::FieldRead(Arc::from("score"))),
+            op: BinOp::Gt,
+            lit: Val::Int(20),
+        };
+        assert!(!predicate_is_order_prefix(&sort, &sort_key, &other_key));
     }
 }
 
@@ -133,54 +159,37 @@ pub(super) fn predicate_is_order_prefix(
     order_lhs_eq(lhs, order_key) && cmp_is_prefix_for_order(op, sort.descending)
 }
 
-fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey<'_>, BinOp)> {
-    match predicate {
-        BodyKernel::CurrentCmpLit(op, _) => Some((OrderKey::Current, *op)),
-        BodyKernel::FieldCmpLit(field, op, _) => Some((OrderKey::Field(field.as_ref()), *op)),
-        BodyKernel::FieldChainCmpLit(keys, op, _) => {
-            Some((OrderKey::FieldChain(keys.as_ref()), *op))
-        }
-        BodyKernel::CmpLit { lhs, op, .. } => lhs_order_key(lhs).map(|lhs| (lhs, *op)),
-        _ => None,
-    }
+fn predicate_order_lhs(predicate: &BodyKernel) -> Option<(OrderKey, BinOp)> {
+    let (keys, op, _) = predicate.field_path_literal_cmp()?;
+    Some((OrderKey::from_path(keys), op))
 }
 
-fn lhs_order_key(lhs: &BodyKernel) -> Option<OrderKey<'_>> {
-    match lhs {
-        BodyKernel::Current => Some(OrderKey::Current),
-        BodyKernel::FieldRead(field) => Some(OrderKey::Field(field.as_ref())),
-        BodyKernel::FieldChain(keys) => Some(OrderKey::FieldChain(keys.as_ref())),
-        _ => None,
-    }
-}
-
-fn sort_order_key<'a>(sort: &super::SortSpec, sort_kernel: &'a BodyKernel) -> Option<OrderKey<'a>> {
+fn sort_order_key(sort: &super::SortSpec, sort_kernel: &BodyKernel) -> Option<OrderKey> {
     if sort.key.is_none() {
         return Some(OrderKey::Current);
     }
-    match sort_kernel {
-        BodyKernel::FieldRead(field) => Some(OrderKey::Field(field.as_ref())),
-        BodyKernel::FieldChain(keys) => Some(OrderKey::FieldChain(keys)),
-        BodyKernel::Current => Some(OrderKey::Current),
-        _ => None,
+    sort_kernel.field_path_keys().map(OrderKey::from_path)
+}
+
+enum OrderKey {
+    Current,
+    FieldPath(Vec<Arc<str>>),
+}
+
+impl OrderKey {
+    fn from_path(keys: Vec<Arc<str>>) -> Self {
+        if keys.is_empty() {
+            Self::Current
+        } else {
+            Self::FieldPath(keys)
+        }
     }
 }
 
-// Lightweight key descriptor used during sort-strategy analysis; avoids allocation.
-enum OrderKey<'a> {
-    // The key is the element value itself (no field lookup).
-    Current,
-    // The key is a single named field of the element object.
-    Field(&'a str),
-    // The key is obtained by traversing a sequence of field names.
-    FieldChain(&'a [Arc<str>]),
-}
-
-fn order_lhs_eq(lhs: OrderKey<'_>, key: OrderKey<'_>) -> bool {
+fn order_lhs_eq(lhs: OrderKey, key: OrderKey) -> bool {
     match (lhs, key) {
         (OrderKey::Current, OrderKey::Current) => true,
-        (OrderKey::Field(field), OrderKey::Field(key)) => field == key,
-        (OrderKey::FieldChain(lhs), OrderKey::FieldChain(rhs)) => same_key_chain(lhs, rhs),
+        (OrderKey::FieldPath(lhs), OrderKey::FieldPath(rhs)) => same_key_chain(&lhs, &rhs),
         _ => false,
     }
 }
@@ -252,37 +261,24 @@ pub fn plan_with_exprs(
 // Uses heuristic selectivity estimates based on the comparison operator type.
 fn kernel_cost_selectivity(stage: &Stage, kernel: &BodyKernel) -> (f64, f64) {
     use crate::parse::ast::BinOp;
+    if matches!(stage, Stage::Filter(_, _)) {
+        if let Some((keys, op, _)) = kernel.field_path_literal_cmp() {
+            let selectivity = match op {
+                BinOp::Eq => 0.10,
+                BinOp::Neq => 0.90,
+                BinOp::Lt | BinOp::Gt => 0.40,
+                BinOp::Lte | BinOp::Gte => 0.50,
+                _ => 0.50,
+            };
+            let cost = match keys.len() {
+                0 => 0.8,
+                1 => 1.5,
+                len => 1.0 + len as f64,
+            };
+            return (cost, selectivity);
+        }
+    }
     match (stage, kernel) {
-        (Stage::Filter(_, _), BodyKernel::FieldCmpLit(_, op, _)) => {
-            let s = match op {
-                BinOp::Eq => 0.10,
-                BinOp::Neq => 0.90,
-                BinOp::Lt | BinOp::Gt => 0.40,
-                BinOp::Lte | BinOp::Gte => 0.50,
-                _ => 0.50,
-            };
-            (1.5, s)
-        }
-        (Stage::Filter(_, _), BodyKernel::FieldChainCmpLit(keys, op, _)) => {
-            let s = match op {
-                BinOp::Eq => 0.10,
-                BinOp::Neq => 0.90,
-                BinOp::Lt | BinOp::Gt => 0.40,
-                BinOp::Lte | BinOp::Gte => 0.50,
-                _ => 0.50,
-            };
-            (1.0 + keys.len() as f64, s)
-        }
-        (Stage::Filter(_, _), BodyKernel::CurrentCmpLit(op, _)) => {
-            let s = match op {
-                BinOp::Eq => 0.10,
-                BinOp::Neq => 0.90,
-                BinOp::Lt | BinOp::Gt => 0.40,
-                BinOp::Lte | BinOp::Gte => 0.50,
-                _ => 0.50,
-            };
-            (0.8, s)
-        }
         (Stage::Filter(_, _), BodyKernel::FieldRead(_)) => (1.0, 0.7),
         (Stage::Filter(_, _), BodyKernel::ConstBool(b)) => (0.1, if *b { 1.0 } else { 0.0 }),
         _ => {
