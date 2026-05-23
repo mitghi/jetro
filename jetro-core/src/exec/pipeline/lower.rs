@@ -11,11 +11,10 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
-    sink_accumulator as builtin_sink_accumulator, view_projection, view_stage, BuiltinId,
+    sink_accumulator as builtin_sink_accumulator, view_projection, BuiltinId,
 };
 use crate::builtins::{
     BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
-    BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -224,18 +223,6 @@ fn decode_method_chain(
                 }
                 let id = by_name(name.as_str())?;
                 let method = id.method()?;
-                if matches!(
-                    view_stage(id),
-                    Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
-                ) {
-                    if let Some(call) =
-                        crate::builtins::BuiltinCall::from_literal_ast_args(name.as_str(), args)
-                    {
-                        stages.push(Stage::builtin_call(call)?);
-                        stage_exprs.push(None);
-                        continue;
-                    }
-                }
                 lower_method_from_registry(
                     method,
                     args,

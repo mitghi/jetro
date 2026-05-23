@@ -2934,11 +2934,11 @@ impl BuiltinCall {
         .flatten()
     }
 
-    /// Like [`BuiltinCall::from_literal_ast_args`] but also requires the method to be a
-    /// registered pipeline element method, returning `None` otherwise.
+    /// Like [`BuiltinCall::from_literal_ast_args`] but also requires the method to be
+    /// accepted as a builtin-call pipeline stage, returning `None` otherwise.
     pub fn from_pipeline_literal_args(name: &str, args: &[crate::parse::ast::Arg]) -> Option<Self> {
         let call = Self::from_literal_ast_args(name, args)?;
-        crate::builtins::registry::pipeline_element(
+        crate::builtins::registry::pipeline_builtin_call_stage(
             crate::builtins::registry::BuiltinId::from_method(call.method),
         )
         .then_some(call)
