@@ -1,5 +1,6 @@
 use crate::builtins::BuiltinNumericReducer;
 use crate::data::value::Val;
+use crate::exec::pipeline::{num_finalise, num_fold, NumOp};
 use crate::util::JsonView;
 
 #[derive(Clone, Debug)]
@@ -9,8 +10,8 @@ pub(super) struct NumericAccumulator {
     float_acc: f64,
     floated: bool,
     count: usize,
-    best: Option<Val>,
-    best_f64: f64,
+    min_f: f64,
+    max_f: f64,
 }
 
 impl NumericAccumulator {
@@ -21,102 +22,54 @@ impl NumericAccumulator {
             float_acc: 0.0,
             floated: false,
             count: 0,
-            best: None,
-            best_f64: 0.0,
+            min_f: f64::INFINITY,
+            max_f: f64::NEG_INFINITY,
         }
     }
 
     pub(super) fn add_val(&mut self, value: &Val) {
-        let Some(number) = value.as_f64() else {
-            return;
-        };
-        if self.add_extreme(number, || value.clone()) {
-            return;
-        }
-        match value {
-            Val::Int(n) if !self.floated => {
-                self.int_acc = self.int_acc.wrapping_add(*n);
-            }
-            Val::Int(n) => self.float_acc += *n as f64,
-            Val::Float(f) if !self.floated => {
-                self.float_acc = self.int_acc as f64 + *f;
-                self.floated = true;
-            }
-            Val::Float(f) => self.float_acc += *f,
-            _ => {}
-        }
-        self.count += 1;
+        let op = self.op();
+        num_fold(
+            &mut self.int_acc,
+            &mut self.float_acc,
+            &mut self.floated,
+            &mut self.min_f,
+            &mut self.max_f,
+            &mut self.count,
+            op,
+            value,
+        );
     }
 
     pub(super) fn add_view(&mut self, value: JsonView<'_>) {
-        let number = match value {
-            JsonView::Int(n) => n as f64,
-            JsonView::UInt(n) => n as f64,
-            JsonView::Float(f) => f,
-            _ => return,
-        };
-        if self.add_extreme(number, || match value {
+        let value = match value {
             JsonView::Int(n) => Val::Int(n),
             JsonView::UInt(n) => i64::try_from(n)
                 .map(Val::Int)
                 .unwrap_or(Val::Float(n as f64)),
             JsonView::Float(f) => Val::Float(f),
-            _ => Val::Null,
-        }) {
-            return;
-        }
-        match value {
-            JsonView::Int(n) if !self.floated => {
-                self.int_acc = self.int_acc.wrapping_add(n);
-            }
-            JsonView::Int(n) => self.float_acc += n as f64,
-            JsonView::UInt(n) if !self.floated && i64::try_from(n).is_ok() => {
-                self.int_acc = self.int_acc.wrapping_add(n as i64);
-            }
-            JsonView::UInt(n) if !self.floated => {
-                self.float_acc = self.int_acc as f64 + n as f64;
-                self.floated = true;
-            }
-            JsonView::UInt(n) => self.float_acc += n as f64,
-            JsonView::Float(f) if !self.floated => {
-                self.float_acc = self.int_acc as f64 + f;
-                self.floated = true;
-            }
-            JsonView::Float(f) => self.float_acc += f,
-            _ => {}
-        }
-        self.count += 1;
+            _ => return,
+        };
+        self.add_val(&value);
     }
 
     pub(super) fn value(&self) -> Val {
-        match self.reducer {
-            BuiltinNumericReducer::Sum => {
-                if self.floated {
-                    Val::Float(self.float_acc)
-                } else {
-                    Val::Int(self.int_acc)
-                }
-            }
-            BuiltinNumericReducer::Avg => {
-                if self.count == 0 {
-                    Val::Null
-                } else {
-                    let sum = if self.floated {
-                        self.float_acc
-                    } else {
-                        self.int_acc as f64
-                    };
-                    Val::Float(sum / self.count as f64)
-                }
-            }
-            BuiltinNumericReducer::Min | BuiltinNumericReducer::Max => {
-                self.best.clone().unwrap_or(Val::Null)
-            }
-        }
+        num_finalise(
+            self.op(),
+            self.int_acc,
+            self.float_acc,
+            self.floated,
+            self.min_f,
+            self.max_f,
+            self.count,
+        )
     }
 
     pub(super) fn merge(&mut self, other: &Self) {
         debug_assert_eq!(self.reducer, other.reducer);
+        if other.count == 0 {
+            return;
+        }
         match self.reducer {
             BuiltinNumericReducer::Sum | BuiltinNumericReducer::Avg => {
                 if self.floated || other.floated {
@@ -135,43 +88,32 @@ impl NumericAccumulator {
                 self.count += other.count;
             }
             BuiltinNumericReducer::Min | BuiltinNumericReducer::Max => {
-                if let Some(best) = other.best.as_ref() {
-                    let replace = match self.reducer {
-                        BuiltinNumericReducer::Min => {
-                            self.best.is_none() || other.best_f64 < self.best_f64
-                        }
-                        BuiltinNumericReducer::Max => {
-                            self.best.is_none() || other.best_f64 > self.best_f64
-                        }
-                        _ => unreachable!("sum/avg handled above"),
-                    };
-                    if replace {
-                        self.best = Some(best.clone());
-                        self.best_f64 = other.best_f64;
+                if self.count == 0 {
+                    *self = other.clone();
+                    return;
+                }
+                if self.reducer == BuiltinNumericReducer::Min {
+                    if other.min_f < self.min_f {
+                        self.min_f = other.min_f;
+                    }
+                    if !self.floated && !other.floated && other.int_acc < self.int_acc {
+                        self.int_acc = other.int_acc;
+                    }
+                } else {
+                    if other.max_f > self.max_f {
+                        self.max_f = other.max_f;
+                    }
+                    if !self.floated && !other.floated && other.int_acc > self.int_acc {
+                        self.int_acc = other.int_acc;
                     }
                 }
+                self.floated |= other.floated;
                 self.count += other.count;
             }
         }
     }
 
-    fn add_extreme(&mut self, number: f64, value: impl FnOnce() -> Val) -> bool {
-        if !matches!(
-            self.reducer,
-            BuiltinNumericReducer::Min | BuiltinNumericReducer::Max
-        ) {
-            return false;
-        }
-        let replace = match self.reducer {
-            BuiltinNumericReducer::Min => self.best.is_none() || number < self.best_f64,
-            BuiltinNumericReducer::Max => self.best.is_none() || number > self.best_f64,
-            _ => unreachable!("non-extreme reducers returned above"),
-        };
-        if replace {
-            self.best = Some(value());
-            self.best_f64 = number;
-        }
-        self.count += 1;
-        true
+    fn op(&self) -> NumOp {
+        NumOp::from_builtin_reducer(self.reducer)
     }
 }

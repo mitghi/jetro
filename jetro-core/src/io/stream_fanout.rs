@@ -1498,6 +1498,41 @@ mod tests {
     }
 
     #[test]
+    fn direct_numeric_fanout_preserves_mixed_number_semantics() {
+        let path = temp_ndjson(
+            "numeric-mixed",
+            &[
+                r#"{"active":true,"price":10}"#,
+                r#"{"active":true,"price":2.5}"#,
+                r#"{"active":true,"price":3}"#,
+            ],
+        );
+        let query = r#"{min_price: $.rows().filter(active == true).map($.price).min(), max_price: $.rows().filter(active == true).map($.price).max()}"#;
+        let plan = lower_rows_fanout_query(query, RowStreamSourceKind::NdjsonRows)
+            .unwrap()
+            .expect("fanout plan");
+        assert!(plan
+            .consumers
+            .iter()
+            .all(|consumer| direct_numeric_consumer(&consumer.stream).is_some()));
+
+        let engine = JetroEngine::new();
+        let mut out = Vec::new();
+        super::super::ndjson::run_ndjson_file_with_options(
+            &engine,
+            &path,
+            query,
+            &mut out,
+            NdjsonOptions::default(),
+        )
+        .unwrap();
+        std::fs::remove_file(path).ok();
+
+        let got = String::from_utf8(out).unwrap();
+        assert_eq!(got.trim(), r#"{"min_price":2.5,"max_price":10.0}"#);
+    }
+
+    #[test]
     fn executes_predicate_sink_fanout() {
         let path = temp_ndjson(
             "predicate-sinks",
