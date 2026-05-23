@@ -4313,6 +4313,10 @@ not-json
                 "$.attributes.sort_by(@.value).last().key",
                 (None, TapeStreamExtreme),
             ),
+            (
+                "$.attributes.sort_by(-@.weight).first().key",
+                (None, TapeStreamExtreme),
+            ),
         ] {
             let actual = super::direct_writer_plan_kind(&engine, query)
                 .unwrap_or_else(|| panic!("{query} should have an observable direct plan"));
@@ -5172,6 +5176,33 @@ not-json
             .run_ndjson(rows, "$.attributes.sort_by(@.score).last().key", &mut out)
             .expect("numeric extrema keys should use direct stream extrema");
         assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"y\"\n");
+    }
+
+    #[test]
+    fn run_ndjson_stream_extreme_honors_descending_sort_direction() {
+        let engine = crate::JetroEngine::new();
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","score":1},{"key":"b","score":10},{"key":"c","score":2}]}
+{"attributes":[{"key":"x","score":-2},{"key":"y","score":-1.5}]}
+"#,
+        );
+
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(-@.score).first().key", &mut out)
+            .expect("descending first should select max score");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"b\"\n\"y\"\n");
+
+        let rows = std::io::Cursor::new(
+            br#"{"attributes":[{"key":"a","score":1},{"key":"b","score":10},{"key":"c","score":2}]}
+{"attributes":[{"key":"x","score":-2},{"key":"y","score":-1.5}]}
+"#,
+        );
+        let mut out = Vec::new();
+        engine
+            .run_ndjson(rows, "$.attributes.sort_by(-@.score).last().key", &mut out)
+            .expect("descending last should select min score");
+        assert_eq!(std::str::from_utf8(&out).unwrap(), "\"a\"\n\"x\"\n");
     }
 
     #[test]
