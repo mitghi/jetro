@@ -130,3 +130,29 @@ fn tape_matches_vm_across_view_projection_boundaries() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_for_scalar_terminal_sinks() {
+    let doc = json!({
+        "books": [
+            {"id": 1, "title": "Dune", "price": 12, "tags": ["sf", "classic"]},
+            {"id": 2, "title": "Foundation", "price": 9, "tags": ["sf"]},
+            {"id": 3, "title": "Hyperion", "price": 14, "tags": ["sf", "hugo"]},
+            {"id": 4, "title": "Snow Crash", "price": 11, "tags": ["sf", "cyberpunk"]}
+        ],
+        "needle": "Hyperion"
+    });
+    for query in [
+        "$.books.any(price > 13)",
+        "$.books.all(tags.has(\"sf\"))",
+        "$.books.find_index(title == $.needle)",
+        "$.books.indices_where(price > 10)",
+        "$.books.map(title).includes($.needle)",
+        "$.books.map(title).index($.needle)",
+        "$.books.map(tags.last()).indices_of(\"hugo\")",
+        "$.books.filter(price > 10).map(title).includes(\"Dune\")",
+        "$.books.filter(tags.includes(\"sf\")).map(price).any(@ > 13)",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}

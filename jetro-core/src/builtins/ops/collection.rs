@@ -342,30 +342,24 @@ pub fn zscore_apply(recv: &Val) -> Option<Val> {
 /// Returns the first `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
 pub fn first_apply(recv: &Val, n: i64) -> Option<Val> {
-    if let Val::Arr(a) = recv {
-        Some(if n == 1 {
-            a.first().cloned().unwrap_or(Val::Null)
-        } else {
-            Val::arr(a.iter().take(n.max(0) as usize).cloned().collect())
-        })
+    let items = recv.as_vals()?;
+    Some(if n == 1 {
+        items.first().cloned().unwrap_or(Val::Null)
     } else {
-        Some(Val::Null)
-    }
+        Val::arr(items.iter().take(n.max(0) as usize).cloned().collect())
+    })
 }
 
 /// Returns the last `n` elements of an array; when `n == 1` returns a scalar instead of a single-element array.
 #[inline]
 pub fn last_apply(recv: &Val, n: i64) -> Option<Val> {
-    if let Val::Arr(a) = recv {
-        Some(if n == 1 {
-            a.last().cloned().unwrap_or(Val::Null)
-        } else {
-            let s = a.len().saturating_sub(n.max(0) as usize);
-            Val::arr(a[s..].to_vec())
-        })
+    let items = recv.as_vals()?;
+    Some(if n == 1 {
+        items.last().cloned().unwrap_or(Val::Null)
     } else {
-        Some(Val::Null)
-    }
+        let s = items.len().saturating_sub(n.max(0) as usize);
+        Val::arr(items[s..].to_vec())
+    })
 }
 
 /// Returns the first `n` elements of any array-like value as an array.
@@ -755,4 +749,24 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
         }
     }
     Some(Val::Obj(Arc::new(out)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_last_apply_support_typed_vectors() {
+        let strings = Val::str_vec(vec![Arc::from("sf"), Arc::from("hugo")]);
+        assert_eq!(first_apply(&strings, 1), Some(Val::Str(Arc::from("sf"))));
+        assert_eq!(last_apply(&strings, 1), Some(Val::Str(Arc::from("hugo"))));
+        assert_eq!(
+            serde_json::Value::from(last_apply(&strings, 2).unwrap()),
+            serde_json::json!(["sf", "hugo"])
+        );
+
+        let ints = Val::int_vec(vec![1, 2, 3]);
+        assert_eq!(first_apply(&ints, 1), Some(Val::Int(1)));
+        assert_eq!(last_apply(&ints, 1), Some(Val::Int(3)));
+    }
 }
