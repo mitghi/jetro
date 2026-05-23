@@ -3461,6 +3461,10 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Pick)),
             Some(BuiltinViewObjectProjection::Pick)
         );
+        assert!(view_projection_returns_owned(
+            BuiltinId::from_method(BuiltinMethod::Pick),
+            &BuiltinArgs::StrVec(vec![std::sync::Arc::from("a")])
+        ));
         assert!(!view_object_items_projection(BuiltinId::from_method(
             BuiltinMethod::Pick
         )));
@@ -3475,6 +3479,14 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None
         );
+        assert!(view_projection_returns_owned(
+            BuiltinId::from_method(BuiltinMethod::Upper),
+            &BuiltinArgs::None
+        ));
+        assert!(!view_projection_returns_owned(
+            BuiltinId::from_method(BuiltinMethod::GetPath),
+            &BuiltinArgs::Str(std::sync::Arc::from("nested.x"))
+        ));
     }
 
     #[test]
