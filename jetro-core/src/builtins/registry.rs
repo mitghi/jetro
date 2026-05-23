@@ -2489,6 +2489,14 @@ mod tests {
             .expect("count should project as len");
         assert_eq!(count.method, BuiltinMethod::Len);
         assert!(matches!(count.args, BuiltinArgs::None));
+        assert_eq!(
+            direct_view_call(BuiltinId::from_method(count.method), &count.args),
+            Some(BuiltinDirectViewCall::ScalarValue)
+        );
+        assert!(
+            raw_json_scalar_call(BuiltinId::from_method(count.method), &count.args),
+            "direct scalar sink projection must be writable from raw NDJSON bytes"
+        );
 
         for method in [
             BuiltinMethod::First,
