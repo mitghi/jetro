@@ -1,7 +1,6 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    logical_shape, view_object_items_projection_call, view_scalar_value_projection,
-    BuiltinId,
+    direct_view_call, logical_shape, BuiltinDirectViewCall, BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -827,12 +826,16 @@ fn plain_sink_direct_scalar_call(
 
 #[inline]
 fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
-    view_scalar_value_projection(BuiltinId::from_method(call.method))
+    direct_view_call(BuiltinId::from_method(call.method), &call.args)
+        == Some(BuiltinDirectViewCall::ScalarValue)
 }
 
 #[inline]
 fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
-    view_object_items_projection_call(BuiltinId::from_method(call.method), &call.args).is_some()
+    matches!(
+        direct_view_call(BuiltinId::from_method(call.method), &call.args),
+        Some(BuiltinDirectViewCall::ObjectItems(_))
+    )
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {

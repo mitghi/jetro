@@ -75,6 +75,15 @@ pub(crate) enum BuiltinComposedStage {
     RemoveValue,
 }
 
+/// Direct borrowed-view call family for callers that can bypass full
+/// materialization but still need to distinguish scalar results from object
+/// item enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinDirectViewCall {
+    ScalarValue,
+    ObjectItems(BuiltinViewObjectProjection),
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -840,6 +849,15 @@ pub(crate) fn view_object_items_projection_call(
     projection
         .is_item_projection()
     .then_some(projection)
+}
+
+/// Return the direct borrowed-view call family for a concrete builtin call.
+#[inline]
+pub(crate) fn direct_view_call(id: BuiltinId, args: &BuiltinArgs) -> Option<BuiltinDirectViewCall> {
+    if view_scalar_value_projection(id) {
+        return Some(BuiltinDirectViewCall::ScalarValue);
+    }
+    view_object_items_projection_call(id, args).map(BuiltinDirectViewCall::ObjectItems)
 }
 
 /// Return receiver-local field demand for a view-native object/path builtin
@@ -2784,6 +2802,49 @@ mod tests {
         assert!(!view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Entries
         )));
+    }
+
+    #[test]
+    fn registry_classifies_direct_view_call_family() {
+        assert_eq!(
+            direct_view_call(
+                BuiltinId::from_method(BuiltinMethod::Len),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinDirectViewCall::ScalarValue)
+        );
+        assert_eq!(
+            direct_view_call(
+                BuiltinId::from_method(BuiltinMethod::Len),
+                &BuiltinArgs::Str(Arc::from("x"))
+            ),
+            Some(BuiltinDirectViewCall::ScalarValue)
+        );
+        assert_eq!(
+            direct_view_call(
+                BuiltinId::from_method(BuiltinMethod::Entries),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinDirectViewCall::ObjectItems(
+                BuiltinViewObjectProjection::Entries
+            ))
+        );
+        assert_eq!(
+            direct_view_call(
+                BuiltinId::from_method(BuiltinMethod::ToPairs),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinDirectViewCall::ObjectItems(
+                BuiltinViewObjectProjection::ToPairs
+            ))
+        );
+        assert_eq!(
+            direct_view_call(
+                BuiltinId::from_method(BuiltinMethod::Entries),
+                &BuiltinArgs::Str(Arc::from("x"))
+            ),
+            None
+        );
     }
 
     #[test]
