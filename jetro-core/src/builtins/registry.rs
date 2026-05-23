@@ -2517,6 +2517,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registry_view_object_projection_contracts_are_exhaustive() {
+        let expected = [
+            (BuiltinMethod::Entries, BuiltinViewObjectProjection::Entries),
+            (BuiltinMethod::GetPath, BuiltinViewObjectProjection::GetPath),
+            (BuiltinMethod::Has, BuiltinViewObjectProjection::Has),
+            (BuiltinMethod::HasAll, BuiltinViewObjectProjection::HasAll),
+            (BuiltinMethod::HasKey, BuiltinViewObjectProjection::HasKey),
+            (BuiltinMethod::HasPath, BuiltinViewObjectProjection::HasPath),
+            (BuiltinMethod::Keys, BuiltinViewObjectProjection::Keys),
+            (BuiltinMethod::Missing, BuiltinViewObjectProjection::Missing),
+            (BuiltinMethod::Omit, BuiltinViewObjectProjection::Omit),
+            (BuiltinMethod::Pick, BuiltinViewObjectProjection::Pick),
+            (BuiltinMethod::ToPairs, BuiltinViewObjectProjection::Entries),
+            (BuiltinMethod::Values, BuiltinViewObjectProjection::Values),
+        ];
+
+        let registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                view_object_projection(BuiltinId::from_method(method))
+                    .map(|projection| (method, projection))
+            })
+            .collect();
+        assert_eq!(registered, expected);
+
+        for (method, projection) in expected {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert!(spec.view_native, "{method:?}");
+            assert_eq!(
+                effective_pipeline_order_effect(id, true),
+                BuiltinPipelineOrderEffect::Preserves,
+                "{method:?}"
+            );
+            assert_eq!(view_object_projection(id), Some(projection), "{method:?}");
+            assert!(view_projection(id), "{method:?}");
+
+            match projection {
+                BuiltinViewObjectProjection::GetPath => {
+                    let args = BuiltinArgs::Str(Arc::from("nested.x"));
+                    assert!(!view_projection_returns_owned(id, &args), "{method:?}");
+                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                }
+                BuiltinViewObjectProjection::HasPath => {
+                    let args = BuiltinArgs::Str(Arc::from("nested.x"));
+                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                }
+                BuiltinViewObjectProjection::HasKey => {
+                    let args = BuiltinArgs::Str(Arc::from("isbn"));
+                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                }
+                BuiltinViewObjectProjection::Missing => {
+                    let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
+                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                }
+                BuiltinViewObjectProjection::Pick => {
+                    let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
+                    assert!(view_projection_returns_owned(id, &args), "{method:?}");
+                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                }
+                BuiltinViewObjectProjection::Has
+                | BuiltinViewObjectProjection::HasAll
+                | BuiltinViewObjectProjection::Keys
+                | BuiltinViewObjectProjection::Values
+                | BuiltinViewObjectProjection::Entries
+                | BuiltinViewObjectProjection::Omit => {
+                    assert!(
+                        view_projection_returns_owned(id, &BuiltinArgs::None),
+                        "{method:?}"
+                    );
+                }
+            }
+        }
+    }
+
     fn field_paths(demand: Option<FieldDemand>) -> Vec<String> {
         match demand.expect("field demand") {
             FieldDemand::None => Vec::new(),

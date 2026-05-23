@@ -684,7 +684,12 @@ fn object_path_helpers_match_value_backend_through_maps() {
         r#"$.items.map(meta.pick(isbn, score))"#,
         r#"$.items.map(meta.omit(extra))"#,
         r#"$.items.map(meta.keys())"#,
+        r#"$.items.map(meta.values().count())"#,
         r#"$.items.map(meta.entries().count())"#,
+        r#"$.items.map(meta.to_pairs().count())"#,
+        r#"$.items.map(meta.pick(isbn, user).has_key("user"))"#,
+        r#"$.items.map(meta.get_path("user.name").or("missing"))"#,
+        r#"$.items.filter(meta.has_path("user.name")).map(meta.pick(isbn, user))"#,
     ] {
         let from_tape = tape.collect(query).unwrap();
         let from_value = engine.collect_value(doc.clone(), query).unwrap();
