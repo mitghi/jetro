@@ -51,7 +51,7 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
         .view_native()
         .predicate_sink(sink)
         .cost(10.0)
-        .demand_law(BuiltinDemandLaw::PredicateMapLike)
+        .demand_law(sink.demand_law())
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -3032,7 +3032,7 @@ impl Builtin for Includes {
         default_scalar_spec(BuiltinMethod::Includes)
             .view_scalar()
             .membership_sink(BuiltinMembershipSink::Includes)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .demand_law(BuiltinMembershipSink::Includes.demand_law())
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -3052,7 +3052,7 @@ impl Builtin for Index {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Index)
             .membership_sink(BuiltinMembershipSink::Index)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .demand_law(BuiltinMembershipSink::Index.demand_law())
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
@@ -3072,7 +3072,7 @@ impl Builtin for IndicesOf {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::IndicesOf)
             .membership_sink(BuiltinMembershipSink::IndicesOf)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
+            .demand_law(BuiltinMembershipSink::IndicesOf.demand_law())
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]

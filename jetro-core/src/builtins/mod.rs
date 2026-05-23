@@ -1200,6 +1200,33 @@ impl BuiltinPredicateSink {
             Self::FindOne => BuiltinMethod::FindOne,
         }
     }
+
+    /// Demand law implied by predicate terminal sinks.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::PredicateMapLike
+    }
+
+    /// Value need implied by this sink's result shape.
+    #[inline]
+    pub(crate) const fn value_need(self) -> crate::plan::demand::ValueNeed {
+        match self {
+            Self::FindOne => crate::plan::demand::ValueNeed::Whole,
+            Self::Any | Self::All | Self::FindIndex | Self::IndicesWhere => {
+                crate::plan::demand::ValueNeed::Predicate
+            }
+        }
+    }
+
+    /// Whether this terminal result can short-circuit.
+    #[inline]
+    pub(crate) const fn result_demand(self) -> crate::plan::demand::SinkResultDemand {
+        match self {
+            Self::Any | Self::FindIndex => crate::plan::demand::SinkResultDemand::UntilMatch,
+            Self::All => crate::plan::demand::SinkResultDemand::UntilFailure,
+            Self::IndicesWhere | Self::FindOne => crate::plan::demand::SinkResultDemand::None,
+        }
+    }
 }
 
 /// Membership terminal sink behavior for builtins with a target value.
@@ -1221,6 +1248,27 @@ impl BuiltinMembershipSink {
             Self::Includes => BuiltinMethod::Includes,
             Self::Index => BuiltinMethod::Index,
             Self::IndicesOf => BuiltinMethod::IndicesOf,
+        }
+    }
+
+    /// Demand law implied by membership terminal sinks.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::PredicateMapLike
+    }
+
+    /// Value need implied by membership matching.
+    #[inline]
+    pub(crate) const fn value_need(self) -> crate::plan::demand::ValueNeed {
+        crate::plan::demand::ValueNeed::Whole
+    }
+
+    /// Whether this terminal result can short-circuit.
+    #[inline]
+    pub(crate) const fn result_demand(self) -> crate::plan::demand::SinkResultDemand {
+        match self {
+            Self::Includes | Self::Index => crate::plan::demand::SinkResultDemand::UntilMatch,
+            Self::IndicesOf => crate::plan::demand::SinkResultDemand::None,
         }
     }
 }

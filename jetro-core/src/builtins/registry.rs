@@ -162,25 +162,13 @@ pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
 /// Return the value need for a predicate terminal sink.
 #[inline]
 pub(crate) fn predicate_sink_value_need(sink: BuiltinPredicateSink) -> ValueNeed {
-    match sink {
-        BuiltinPredicateSink::FindOne => ValueNeed::Whole,
-        BuiltinPredicateSink::Any
-        | BuiltinPredicateSink::All
-        | BuiltinPredicateSink::FindIndex
-        | BuiltinPredicateSink::IndicesWhere => ValueNeed::Predicate,
-    }
+    sink.value_need()
 }
 
 /// Return scalar-result short-circuit demand for a predicate terminal sink.
 #[inline]
 pub(crate) fn predicate_sink_result_demand(sink: BuiltinPredicateSink) -> SinkResultDemand {
-    match sink {
-        BuiltinPredicateSink::Any | BuiltinPredicateSink::FindIndex => SinkResultDemand::UntilMatch,
-        BuiltinPredicateSink::All => SinkResultDemand::UntilFailure,
-        BuiltinPredicateSink::IndicesWhere | BuiltinPredicateSink::FindOne => {
-            SinkResultDemand::None
-        }
-    }
+    sink.result_demand()
 }
 
 /// Return membership terminal-sink behavior for builtin `id`, if it has one.
@@ -191,19 +179,14 @@ pub(crate) fn membership_sink(id: BuiltinId) -> Option<BuiltinMembershipSink> {
 
 /// Return the value need for a membership terminal sink.
 #[inline]
-pub(crate) fn membership_sink_value_need(_sink: BuiltinMembershipSink) -> ValueNeed {
-    ValueNeed::Whole
+pub(crate) fn membership_sink_value_need(sink: BuiltinMembershipSink) -> ValueNeed {
+    sink.value_need()
 }
 
 /// Return scalar-result short-circuit demand for a membership terminal sink.
 #[inline]
 pub(crate) fn membership_sink_result_demand(sink: BuiltinMembershipSink) -> SinkResultDemand {
-    match sink {
-        BuiltinMembershipSink::Includes | BuiltinMembershipSink::Index => {
-            SinkResultDemand::UntilMatch
-        }
-        BuiltinMembershipSink::IndicesOf => SinkResultDemand::None,
-    }
+    sink.result_demand()
 }
 
 /// Return arg-extreme terminal-sink behavior for builtin `id`, if it has one.
@@ -2115,7 +2098,7 @@ mod tests {
             );
             assert_eq!(
                 demand_law(id),
-                BuiltinDemandLaw::PredicateMapLike,
+                sink.demand_law(),
                 "{method:?}"
             );
             assert_eq!(
@@ -2169,7 +2152,7 @@ mod tests {
                 Some(BuiltinPipelineArity::Exact(1)),
                 "{method:?}"
             );
-            assert_eq!(demand_law(id), BuiltinDemandLaw::PredicateMapLike, "{method:?}");
+            assert_eq!(demand_law(id), sink.demand_law(), "{method:?}");
             assert_eq!(
                 sink_accumulator(id),
                 None,
