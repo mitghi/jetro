@@ -2415,6 +2415,126 @@ mod tests {
     }
 
     #[test]
+    fn registry_unsafe_streaming_stages_keep_conservative_demand_contracts() {
+        let prefix_downstream = Demand {
+            pull: PullDemand::FirstInput(3),
+            value: ValueNeed::CountOnly,
+            order: false,
+        };
+        let last_downstream = Demand {
+            pull: PullDemand::LastInput(1),
+            value: ValueNeed::CountOnly,
+            order: false,
+        };
+
+        let take_while = BuiltinId::from_method(BuiltinMethod::TakeWhile);
+        assert_eq!(demand_law(take_while), BuiltinDemandLaw::TakeWhile);
+        assert_eq!(view_stage(take_while), Some(BuiltinViewStage::TakeWhile));
+        assert_eq!(
+            pipeline_lowering(take_while),
+            Some(BuiltinPipelineLowering::ExprArg)
+        );
+        assert_eq!(
+            pipeline_order_effect(take_while),
+            Some(BuiltinPipelineOrderEffect::PredicatePrefix)
+        );
+        assert!(!demand_is_conservative_barrier(take_while));
+        assert_eq!(
+            propagate_demand(take_while, BuiltinDemandArg::None, prefix_downstream),
+            Demand {
+                pull: PullDemand::FirstInput(3),
+                value: ValueNeed::Predicate,
+                order: false,
+            }
+        );
+        assert_eq!(
+            propagate_demand(take_while, BuiltinDemandArg::None, last_downstream),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Predicate,
+                order: false,
+            }
+        );
+
+        let drop_while = BuiltinId::from_method(BuiltinMethod::DropWhile);
+        assert_eq!(demand_law(drop_while), BuiltinDemandLaw::DropWhile);
+        assert_eq!(view_stage(drop_while), Some(BuiltinViewStage::DropWhile));
+        assert_eq!(
+            pipeline_materialization(drop_while),
+            BuiltinPipelineMaterialization::LegacyMaterialized
+        );
+        assert_eq!(
+            pipeline_order_effect(drop_while),
+            Some(BuiltinPipelineOrderEffect::Blocks)
+        );
+        assert!(demand_is_conservative_barrier(drop_while));
+        assert_eq!(
+            propagate_demand(drop_while, BuiltinDemandArg::None, prefix_downstream),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Predicate,
+                order: true,
+            }
+        );
+
+        let flat_map = BuiltinId::from_method(BuiltinMethod::FlatMap);
+        assert_eq!(demand_law(flat_map), BuiltinDemandLaw::FlatMapLike);
+        assert_eq!(view_stage(flat_map), Some(BuiltinViewStage::FlatMap));
+        assert_eq!(
+            pipeline_materialization(flat_map),
+            BuiltinPipelineMaterialization::LegacyMaterialized
+        );
+        assert!(demand_is_conservative_barrier(flat_map));
+        assert_eq!(
+            propagate_demand(flat_map, BuiltinDemandArg::None, prefix_downstream),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Whole,
+                order: true,
+            }
+        );
+
+        for method in [BuiltinMethod::Unique, BuiltinMethod::UniqueBy] {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(demand_law(id), BuiltinDemandLaw::UniqueLike, "{method:?}");
+            assert_eq!(
+                view_stage(id),
+                Some(BuiltinViewStage::Distinct),
+                "{method:?}"
+            );
+            assert_eq!(
+                pipeline_materialization(id),
+                BuiltinPipelineMaterialization::LegacyMaterialized,
+                "{method:?}"
+            );
+            assert_eq!(
+                pipeline_order_effect(id),
+                Some(BuiltinPipelineOrderEffect::Preserves),
+                "{method:?}"
+            );
+            assert!(!demand_is_conservative_barrier(id), "{method:?}");
+            assert_eq!(
+                propagate_demand(id, BuiltinDemandArg::None, prefix_downstream),
+                Demand {
+                    pull: PullDemand::UntilOutput(3),
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                "{method:?}"
+            );
+            assert_eq!(
+                propagate_demand(id, BuiltinDemandArg::None, last_downstream),
+                Demand {
+                    pull: PullDemand::All,
+                    value: ValueNeed::Whole,
+                    order: true,
+                },
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_logical_shapes_participate_in_demand_model() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
