@@ -92,6 +92,31 @@ fn tape_matches_vm_for_positional_demand_boundaries() {
 }
 
 #[test]
+fn tape_matches_vm_for_nullary_and_literal_view_filters() {
+    let doc = json!({
+        "rows": [
+            null,
+            {"id": 1, "name": "ada", "tag": "keep"},
+            {"id": 2, "name": "bob", "tag": "drop"},
+            null,
+            {"id": 3, "name": "cy", "tag": "keep"},
+            {"id": 4, "name": "dee", "tag": "drop"}
+        ],
+        "tags": ["keep", "drop", null, "keep", "skip", null]
+    });
+    for query in [
+        "$.rows.compact().map(id).last()",
+        "$.rows.compact().filter(tag == \"keep\").map(name.upper()).take(2)",
+        "$.rows.compact().remove({\"id\": 2, \"name\": \"bob\", \"tag\": \"drop\"}).map(id)",
+        "$.tags.compact().remove(\"drop\").last()",
+        "$.tags.remove(null).take(3)",
+        "$.tags.remove(\"skip\").compact().count()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
     let doc = json!({
         "users": [
