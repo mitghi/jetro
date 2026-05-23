@@ -132,6 +132,46 @@ fn tape_matches_vm_across_view_projection_boundaries() {
 }
 
 #[test]
+fn tape_matches_vm_for_object_helpers_over_array_rows() {
+    let doc = json!({
+        "teams": [
+            {
+                "name": "core",
+                "members": [
+                    {
+                        "email": "ada@example.test",
+                        "role": "lead",
+                        "internal": true,
+                        "addr": {"city": "Berlin", "zip": "10115"}
+                    },
+                    {
+                        "email": "bob@example.test",
+                        "role": "dev",
+                        "internal": false,
+                        "addr": {"city": "Paris"}
+                    },
+                    {
+                        "email": "cy@example.test",
+                        "role": "ops",
+                        "internal": true,
+                        "addr": {}
+                    }
+                ]
+            }
+        ]
+    });
+    for query in [
+        "$.teams[0].members.pick(email, role).last()",
+        "$.teams[0].members.omit(internal, addr).first()",
+        "$.teams[0].members.filter(addr.has_path(\"city\")).map(addr.pick(\"city\", \"zip\")).first()",
+        "$.teams[0].members.map({email, has_city: addr.has_key(\"city\"), city: addr.get_path(\"city\")}).last()",
+        "$.teams[0].members.filter(addr.missing(\"zip\")).map(email).take(2)",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_scalar_terminal_sinks() {
     let doc = json!({
         "books": [
