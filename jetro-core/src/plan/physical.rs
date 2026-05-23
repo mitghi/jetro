@@ -667,8 +667,8 @@ fn lower_structural_prefix(
             Step::Index(index) => anchor.push(StructuralPathStep::Index(*index)),
             Step::Method(name, args) | Step::OptMethod(name, args) => {
                 let anchor = Arc::from(anchor);
-                let method = builtin_by_name(name.as_str())?.method()?;
-                let plan = StructuralPlan::lower_builtin(anchor, method, args)?;
+                let id = builtin_by_name(name.as_str())?;
+                let plan = StructuralPlan::lower_builtin(anchor, id, args)?;
                 let fallback_expr = base.clone().maybe_chain(steps[..=idx].to_vec());
                 let fallback = Arc::new(Compiler::compile(&fallback_expr, "<structural-fallback>"));
                 return Some((plan, fallback, idx + 1));

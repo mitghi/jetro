@@ -12,7 +12,7 @@ use std::sync::Arc;
 use jetro_experimental::{StructuralIndex, TokenId, TokenKind};
 
 use crate::builtins::registry::{self, BuiltinId};
-use crate::builtins::{BuiltinMethod, BuiltinStructural};
+use crate::builtins::BuiltinStructural;
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::parse::ast::{Arg, BinOp, Expr, KindType, ObjField, Step};
@@ -105,15 +105,15 @@ pub(crate) enum StructuralPredicate {
 }
 
 impl StructuralPlan {
-    /// Attempt to lower a `BuiltinMethod` + args combination into a
+    /// Attempt to lower a builtin id + args combination into a
     /// `StructuralPlan` starting at `anchor`. Returns `None` when the method is
     /// not structurally lowerable or the arguments are too complex for the index.
     pub(crate) fn lower_builtin(
         anchor: Arc<[StructuralPathStep]>,
-        method: BuiltinMethod,
+        id: BuiltinId,
         args: &[Arg],
     ) -> Option<Self> {
-        match registry::structural(BuiltinId::from_method(method))? {
+        match registry::structural(id)? {
             BuiltinStructural::DeepFind => lower_deep_find(anchor, args),
             BuiltinStructural::DeepShape => lower_deep_shape(anchor, args),
             BuiltinStructural::DeepLike => lower_deep_like(anchor, args),
