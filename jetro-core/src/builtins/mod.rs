@@ -2367,6 +2367,54 @@ impl BuiltinCall {
         registry::raw_json_scalar_call(self.id(), &self.args)
     }
 
+    /// Returns the direct raw JSON scalar operation for this call, if any.
+    #[inline]
+    pub(crate) fn raw_json_scalar(&self) -> Option<BuiltinRawJsonScalar> {
+        registry::raw_json_scalar(self.id(), &self.args)
+    }
+
+    /// Returns true when this call can run as a borrowed-view projection.
+    #[inline]
+    pub(crate) fn is_view_projection(&self) -> bool {
+        registry::view_projection(self.id())
+    }
+
+    /// Returns true when this view projection returns an owned value.
+    #[inline]
+    pub(crate) fn view_projection_returns_owned(&self) -> bool {
+        registry::view_projection_returns_owned(self.id(), &self.args)
+    }
+
+    /// Returns array-selector metadata for this call, if it is a selector.
+    #[inline]
+    pub(crate) fn array_selector(&self) -> Option<BuiltinArraySelector> {
+        registry::array_selector(self.id())
+    }
+
+    /// Returns composed-pipeline execution metadata for this call, if any.
+    #[inline]
+    pub(crate) fn composed_stage(&self) -> Option<registry::BuiltinComposedStage> {
+        registry::composed_builtin_stage(self.id())
+    }
+
+    /// Returns stage cancellation metadata for this call, if any.
+    #[inline]
+    pub(crate) fn cancellation(&self) -> Option<BuiltinCancellation> {
+        registry::cancellation(self.id())
+    }
+
+    /// Returns cardinality metadata for this call, if known.
+    #[inline]
+    pub(crate) fn cardinality(&self) -> Option<BuiltinCardinality> {
+        registry::builtin_cardinality(self.id())
+    }
+
+    /// Returns true when this view projection can be delayed by the planner.
+    #[inline]
+    pub(crate) fn is_stage_delayable_view_projection(&self) -> bool {
+        registry::stage_delayable_view_projection(self.id())
+    }
+
     /// Returns true when this call projects object items from a borrowed view.
     #[inline]
     pub(crate) fn is_direct_object_items_call(&self) -> bool {

@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{by_name as builtin_by_name, view_projection, BuiltinId};
+use crate::builtins::registry::by_name as builtin_by_name;
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
@@ -182,9 +182,7 @@ impl PlanBuilder {
             PlanNode::Local(_) => ExecutionFacts::constant(),
             PlanNode::Call { receiver, call, .. } => {
                 let receiver = self.node_facts(*receiver);
-                if receiver.is_byte_native()
-                    && view_projection(BuiltinId::from_method(call.method))
-                {
+                if receiver.is_byte_native() && call.is_view_projection() {
                     ExecutionFacts {
                         can_avoid_root_materialization: true,
                         can_use_tape: receiver.can_use_tape,

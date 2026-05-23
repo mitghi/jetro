@@ -9,19 +9,17 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    builtin_cardinality, builtin_sink, cancellation as builtin_cancellation,
-    columnar_stage as builtin_columnar_stage, count_sink_accepts_predicate,
-    effective_pipeline_order_effect, effective_pipeline_shape, expr_payload,
-    expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
-    keyed_reducer as builtin_keyed_reducer, direct_scalar_for_plain_sink,
+    builtin_sink, cancellation as builtin_cancellation, columnar_stage as builtin_columnar_stage,
+    count_sink_accepts_predicate, direct_scalar_for_plain_sink, effective_pipeline_order_effect,
+    effective_pipeline_shape, expr_payload, expr_stage as builtin_expr_stage,
+    expr_stage_elidable_when_value_unused, keyed_reducer as builtin_keyed_reducer,
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
     pipeline_builtin_call_stage, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
     pipeline_streams, sink_accumulator as builtin_sink_accumulator,
-    sink_demand as builtin_sink_demand, stage_delayable_view_projection,
+    sink_demand as builtin_sink_demand,
     stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
-    stage_merge as builtin_stage_merge, view_projection, view_stage as builtin_view_stage,
-    BuiltinId,
+    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinCardinality, BuiltinExprPayload,
@@ -769,7 +767,7 @@ impl Stage {
 
     /// Build a generic builtin-call stage only when registry metadata allows pipeline use.
     pub(crate) fn builtin_call(call: BuiltinCall) -> Option<Self> {
-        let id = BuiltinId::from_method(call.method);
+        let id = call.id();
         pipeline_builtin_call_stage(id).then_some(Stage::Builtin(call))
     }
 
@@ -853,7 +851,7 @@ impl Stage {
             ))));
         }
         if let Stage::Builtin(call) = self {
-            if view_projection(BuiltinId::from_method(call.method)) {
+            if call.is_view_projection() {
                 return BodyKernel::BuiltinCall {
                     receiver: Box::new(BodyKernel::Current),
                     call: call.clone(),
@@ -882,10 +880,7 @@ impl Stage {
     /// `entries()`/`keys()`/`pick()` rather than a row-stream transform.
     #[inline]
     pub(crate) fn is_direct_view_projection(&self) -> bool {
-        matches!(
-            self,
-            Stage::Builtin(call) if view_projection(BuiltinId::from_method(call.method))
-        )
+        matches!(self, Stage::Builtin(call) if call.is_view_projection())
     }
 
     /// Returns `true` when the stage cannot participate in the streaming pull loop and must be
@@ -1315,7 +1310,7 @@ impl Stage {
     fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
         match self {
             Stage::Reverse(cancel) => Some(*cancel),
-            Stage::Builtin(call) => builtin_cancellation(BuiltinId::from_method(call.method)),
+            Stage::Builtin(call) => call.cancellation(),
             _ => None,
         }
     }
@@ -1690,9 +1685,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
         Stage::CompiledMap(plan) => Some(BodyKernel::NestedPlan(Arc::new(
             super::NestedPlanKernel::new(Arc::clone(plan)),
         ))),
-        Stage::Builtin(call)
-            if stage_delayable_view_projection(BuiltinId::from_method(call.method)) =>
-        {
+        Stage::Builtin(call) if call.is_stage_delayable_view_projection() => {
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
                 call: call.clone(),
@@ -1794,9 +1787,7 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
         Stage::ExprBuiltin { method, .. } => {
             expr_builtin_payload_lanes(*method, kernel, downstream)
         }
-        Stage::Builtin(call)
-            if builtin_cardinality(BuiltinId::from_method(call.method))
-                == Some(BuiltinCardinality::OneToOne) =>
+        Stage::Builtin(call) if call.cardinality() == Some(BuiltinCardinality::OneToOne) =>
         {
             if downstream.scan_need.is_none() && downstream.result_need.is_none() {
                 downstream

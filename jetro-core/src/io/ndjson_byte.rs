@@ -6,9 +6,7 @@ use super::ndjson_direct::{
     NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
-use crate::builtins::registry::{
-    raw_json_scalar, raw_json_scalar_call, view_object_items_projection_call, BuiltinId,
-};
+use crate::builtins::registry::{view_object_items_projection_call, BuiltinId};
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinMethod, BuiltinRawJsonScalar,
     BuiltinViewObjectProjection,
@@ -228,7 +226,7 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
 }
 
 fn byte_scalar_call_supported(call: &BuiltinCall) -> bool {
-    raw_json_scalar_call(BuiltinId::from_method(call.method), &call.args)
+    call.is_raw_json_scalar_call()
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -884,9 +882,7 @@ fn write_raw_scalar_call<W: Write>(
             "unsupported raw scalar call".to_string(),
         )));
     };
-    if raw_json_scalar(BuiltinId::from_method(call.method), &call.args)
-        == Some(BuiltinRawJsonScalar::Len)
-    {
+    if call.raw_json_scalar() == Some(BuiltinRawJsonScalar::Len) {
         let Some(len) = raw_json_view_len(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw len call".to_string(),
@@ -1035,8 +1031,7 @@ fn write_raw_string_case_call<W: Write>(
     value: &[u8],
     call: &BuiltinCall,
 ) -> Result<bool, JetroEngineError> {
-    let method = call.method;
-    let Some(op) = raw_json_scalar(BuiltinId::from_method(method), &call.args) else {
+    let Some(op) = call.raw_json_scalar() else {
         return Ok(false);
     };
     let start = skip_json_ws(value, 0);

@@ -8,14 +8,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::builtins::{
-    registry::{view_projection, BuiltinId},
-    BuiltinCall,
-};
+use crate::builtins::BuiltinCall;
 #[cfg(test)]
 use crate::builtins::{
     registry::{
-        builtin_cardinality, effective_pipeline_order_effect,
+        builtin_cardinality, effective_pipeline_order_effect, BuiltinId,
     },
     BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect,
 };
@@ -41,7 +38,7 @@ pub(crate) fn step_is_direct_view_projection(step: &Step) -> bool {
         return false;
     };
     BuiltinCall::from_literal_ast_args(name.as_str(), args)
-        .is_some_and(|call| view_projection(BuiltinId::from_method(call.method)))
+        .is_some_and(|call| call.is_view_projection())
 }
 
 /// Type lattice element. Ordered: `Bottom` ⊑ concrete types ⊑ `Unknown`.

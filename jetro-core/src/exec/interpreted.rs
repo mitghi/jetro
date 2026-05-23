@@ -11,7 +11,7 @@ use crate::data::context::{Env, EvalError};
 use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::data::value::Val;
 use crate::data::view::{ValView, ValueView};
-use crate::builtins::registry::{apply_view_projection, BuiltinId, ViewProjectionResult};
+use crate::builtins::registry::{apply_view_projection, ViewProjectionResult};
 use crate::exec::pipeline;
 use crate::exec::view as view_pipeline;
 use crate::ir::physical::{
@@ -817,7 +817,7 @@ impl ExecCtx<'_, '_> {
             if optional && matches!(view.scalar(), crate::util::JsonView::Null) {
                 return Some(Ok(Val::Null));
             }
-            apply_view_projection(BuiltinId::from_method(call.method), &call.args, view)
+            apply_view_projection(call.id(), &call.args, view)
                 .map(|result| {
                     Ok(match result {
                         ViewProjectionResult::View(view) => view.materialize(),

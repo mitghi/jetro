@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::builtins::registry::{
     apply_view_projection, array_selector as builtin_array_selector, by_name as builtin_by_name,
     count_sink_accepts_predicate, expr_stage, numeric_reducer, view_projection,
-    view_projection_field_demand, view_projection_returns_owned, BuiltinId, ViewProjectionResult,
+    view_projection_field_demand, BuiltinId, ViewProjectionResult,
 };
 use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
@@ -186,7 +186,7 @@ fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand 
 
 fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
     let prefix = receiver_field_prefix(receiver)?;
-    view_projection_field_demand(BuiltinId::from_method(call.method), &call.args)
+    view_projection_field_demand(call.id(), &call.args)
         .map(|demand| prefix_field_demand(&prefix, demand))
 }
 
@@ -578,7 +578,7 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                         })
                         .unwrap_or(BodyKernel::Generic);
                 };
-                let id = BuiltinId::from_method(call.method);
+                let id = call.id();
                 if let Some(selector) = array_selector_builtin_call(&call) {
                     if !receiver.is_view_native() {
                         return BodyKernel::Generic;
@@ -628,7 +628,7 @@ fn array_selector_builtin_call(call: &BuiltinCall) -> Option<ArraySelector> {
         _ => None,
     };
     ArraySelector::from_builtin_selector(
-        builtin_array_selector(BuiltinId::from_method(call.method))?,
+        call.array_selector()?,
         index,
     )
 }
@@ -921,8 +921,7 @@ impl BodyKernel {
             Self::Generic => false,
             Self::BuiltinCall { receiver, call } => {
                 receiver.is_view_native()
-                    && (view_projection(BuiltinId::from_method(call.method))
-                        || receiver.view_result_owned())
+                    && (call.is_view_projection() || receiver.view_result_owned())
             }
             Self::Compose { first, then } => first.is_view_native() && then.is_view_native(),
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
@@ -963,11 +962,7 @@ impl BodyKernel {
     fn view_result_owned(&self) -> bool {
         match self {
             Self::BuiltinCall { receiver, call } => {
-                receiver.is_view_native()
-                    && view_projection_returns_owned(
-                        BuiltinId::from_method(call.method),
-                        &call.args,
-                    )
+                receiver.is_view_native() && call.view_projection_returns_owned()
             }
             Self::Compose { first, then } => first.is_view_native() && then.view_result_owned(),
             Self::ConstBool(_)
@@ -2604,7 +2599,7 @@ where
         }
         BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm)? {
             ViewKernelValue::View(view) => match apply_view_projection(
-                BuiltinId::from_method(call.method),
+                call.id(),
                 &call.args,
                 view,
             )? {
