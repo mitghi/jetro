@@ -865,6 +865,31 @@ mod tests {
     }
 
     #[test]
+    fn view_flat_map_object_helper_outputs_materialize_only_demanded_rows() {
+        let data = br#"{"books":[{"meta":{"isbn":"x","price":10,"debug":1}},{"meta":{"isbn":"y","price":20,"debug":2}},{"meta":{"isbn":"z","debug":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let from_tape = Jetro::from_bytes(data.clone()).unwrap();
+        let from_value = Jetro::from_bytes(data).unwrap();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let values_query =
+            r#"$.books.flat_map(@.meta.entries()).filter(@[0] != "debug").map(@[1]).take(4)"#;
+        let values = from_tape.collect(values_query).unwrap();
+        let expected_values = from_value.collect(values_query).unwrap();
+        assert_eq!(values, expected_values);
+        assert_eq!(values, json!(["x", 10, "y", 20]));
+
+        let sum_query =
+            r#"$.books.flat_map(@.meta.entries()).filter(@[0] == "price").map(@[1]).sum()"#;
+        let total = from_tape.collect(sum_query).unwrap();
+        let expected_total = from_value.collect(sum_query).unwrap();
+        assert_eq!(total, expected_total);
+        assert_eq!(total, json!(30));
+
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 2);
+    }
+
+    #[test]
     fn view_nested_projection_reducers_keep_tape_input_borrowed() {
         let data = br#"{"books":[{"meta":{"author":{"country":"uk"},"price":10}},{"meta":{"author":{"country":"us"},"price":20}},{"meta":{"author":{"country":"uk"},"price":30}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let from_tape = Jetro::from_bytes(data.clone()).unwrap();
