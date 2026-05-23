@@ -9,9 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{
-    by_name as builtin_by_name, dispatches_scalar_direct, view_projection, BuiltinId,
-};
+use crate::builtins::registry::{by_name as builtin_by_name, view_projection, BuiltinId};
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
@@ -393,33 +391,11 @@ fn field_chain_pipeline_starts_with_direct_view_projection(expr: &Expr) -> bool 
 /// `try_lower_chain`, which emits direct `apply_one` calls and returns a
 /// scalar — eliminating the legacy one-element array wrap on path receivers.
 fn is_scalar_unwrap_pipeline(pipeline: &Pipeline) -> bool {
-    if !matches!(pipeline.source, Source::FieldChain { .. }) {
-        return false;
-    }
-    is_scalar_unwrap_stages(&pipeline.stages, &pipeline.sink)
+    pipeline.is_field_chain_scalar_direct_collect()
 }
 
 fn is_scalar_unwrap_body(body: &crate::exec::pipeline::PipelineBody) -> bool {
-    is_scalar_unwrap_stages(&body.stages, &body.sink)
-}
-
-fn is_scalar_unwrap_stages(
-    stages: &[crate::exec::pipeline::Stage],
-    sink: &crate::exec::pipeline::Sink,
-) -> bool {
-    use crate::exec::pipeline::Sink;
-    if !matches!(sink, Sink::Collect) {
-        return false;
-    }
-    if stages.is_empty() {
-        return false;
-    }
-    stages.iter().all(|stage| {
-        let Some(method) = stage.method() else {
-            return false;
-        };
-        dispatches_scalar_direct(BuiltinId::from_method(method))
-    })
+    body.is_scalar_direct_collect()
 }
 
 /// Runs `expr` through the logical planner, optimizer, and logical lowerer. Returns `None` if

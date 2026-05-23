@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::builtins::registry::{dispatches_scalar_direct, BuiltinId};
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
@@ -505,6 +506,14 @@ impl PipelineBody {
         capability::view_capabilities(self).is_some()
     }
 
+    /// Returns true for collect-only scalar method chains such as
+    /// `upper().lower()`. These are value transformations, not row-stream
+    /// queries, so physical planning should keep them on the scalar-call path
+    /// to avoid wrapping the result in a one-element array.
+    pub(crate) fn is_scalar_direct_collect(&self) -> bool {
+        is_scalar_direct_collect(&self.stages, &self.sink)
+    }
+
     /// Attaches `source` to this body, producing a complete executable `Pipeline`.
     /// Computes the execution `Strategy` once here so `run_with_env` can dispatch
     /// directly without re-walking stages on every call.
@@ -577,6 +586,14 @@ impl Pipeline {
         (self.source, body)
     }
 
+    /// Returns true when a field-chain source is followed only by scalar
+    /// direct-dispatch stages and a collect sink. The physical planner uses
+    /// this to prefer scalar chain lowering over pipeline lowering.
+    pub(crate) fn is_field_chain_scalar_direct_collect(&self) -> bool {
+        matches!(self.source, Source::FieldChain { .. })
+            && is_scalar_direct_collect(&self.stages, &self.sink)
+    }
+
     /// Returns cloned copies of the pipeline's stages, body kernels, and terminal sink for testing and introspection.
     ///
     /// Canonical decomposition of a `Pipeline` into its parts for testing and
@@ -588,6 +605,16 @@ impl Pipeline {
             self.sink.clone(),
         )
     }
+}
+
+fn is_scalar_direct_collect(stages: &[Stage], sink: &Sink) -> bool {
+    matches!(sink, Sink::Collect)
+        && !stages.is_empty()
+        && stages.iter().all(|stage| {
+            stage
+                .method()
+                .is_some_and(|method| dispatches_scalar_direct(BuiltinId::from_method(method)))
+        })
 }
 
 #[cfg(test)]
