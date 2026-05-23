@@ -4128,6 +4128,28 @@ mod tests {
     }
 
     #[test]
+    fn registry_stream_sources_are_exhaustive() {
+        let registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                stream_source(BuiltinId::from_method(method)).then_some(method)
+            })
+            .collect();
+        assert_eq!(registered, vec![BuiltinMethod::Rows]);
+
+        for method in registered {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(row_stream_op(id), None, "{method:?}");
+            assert!(!accepts_lambda_arg(id), "{method:?}");
+            assert_eq!(
+                method.spec().cardinality,
+                BuiltinCardinality::OneToOne,
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_row_stream_terminal_ops_have_sink_metadata() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
