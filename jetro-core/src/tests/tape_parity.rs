@@ -250,3 +250,47 @@ fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_across_conservative_stage_boundaries() {
+    let doc = json!({
+        "orders": [
+            {
+                "id": "a1",
+                "status": "open",
+                "score": 30,
+                "items": [
+                    {"sku": "p1", "price": 12, "tags": ["hot", "fragile"]},
+                    {"sku": "p2", "price": 4, "tags": ["cold"]}
+                ]
+            },
+            {
+                "id": "a2",
+                "status": "open",
+                "score": 20,
+                "items": [
+                    {"sku": "p3", "price": 9, "tags": ["hot"]},
+                    {"sku": "p4", "price": 16, "tags": ["bulk", "hot"]}
+                ]
+            },
+            {
+                "id": "a3",
+                "status": "closed",
+                "score": 10,
+                "items": [
+                    {"sku": "p5", "price": 7, "tags": []}
+                ]
+            }
+        ]
+    });
+    for query in [
+        "$.orders.take_while(status == \"open\").map(id).last()",
+        "$.orders.drop_while(score > 15).map({id, score}).first()",
+        "$.orders.filter(status == \"open\").flat_map(items).filter(price > 10).map(sku).last()",
+        "$.orders.flat_map(items).map(tags.first()).unique().last()",
+        "$.orders.sort_by(score).take(2).map({id, score}).last()",
+        "$.orders.sort_by(score).drop(1).map(id).first()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
