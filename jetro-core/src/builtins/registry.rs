@@ -165,6 +165,16 @@ pub(crate) fn predicate_sink_value_need(sink: BuiltinPredicateSink) -> ValueNeed
     sink.value_need()
 }
 
+/// Return row-stream demand for a predicate terminal sink.
+#[inline]
+pub(crate) fn predicate_sink_demand(sink: BuiltinPredicateSink) -> Demand {
+    Demand {
+        pull: PullDemand::All,
+        value: predicate_sink_value_need(sink),
+        order: false,
+    }
+}
+
 /// Return scalar-result short-circuit demand for a predicate terminal sink.
 #[inline]
 pub(crate) fn predicate_sink_result_demand(sink: BuiltinPredicateSink) -> SinkResultDemand {
@@ -183,6 +193,16 @@ pub(crate) fn membership_sink_value_need(sink: BuiltinMembershipSink) -> ValueNe
     sink.value_need()
 }
 
+/// Return row-stream demand for a membership terminal sink.
+#[inline]
+pub(crate) fn membership_sink_demand(sink: BuiltinMembershipSink) -> Demand {
+    Demand {
+        pull: PullDemand::All,
+        value: membership_sink_value_need(sink),
+        order: false,
+    }
+}
+
 /// Return scalar-result short-circuit demand for a membership terminal sink.
 #[inline]
 pub(crate) fn membership_sink_result_demand(sink: BuiltinMembershipSink) -> SinkResultDemand {
@@ -199,6 +219,16 @@ pub(crate) fn arg_extreme_sink(id: BuiltinId) -> Option<BuiltinArgExtremeSink> {
 #[inline]
 pub(crate) fn arg_extreme_wants_max(id: BuiltinId) -> Option<bool> {
     Some(arg_extreme_sink(id)?.wants_max())
+}
+
+/// Return row-stream demand for an arg-extreme terminal sink.
+#[inline]
+pub(crate) fn arg_extreme_sink_demand(_sink: BuiltinArgExtremeSink) -> Demand {
+    Demand {
+        pull: PullDemand::All,
+        value: ValueNeed::Whole,
+        order: true,
+    }
 }
 
 /// Return the concrete pipeline stage shape for an expression-argument builtin.
@@ -3700,6 +3730,22 @@ mod tests {
             ValueNeed::Whole
         );
         assert_eq!(
+            predicate_sink_demand(BuiltinPredicateSink::Any),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Predicate,
+                order: false,
+            }
+        );
+        assert_eq!(
+            predicate_sink_demand(BuiltinPredicateSink::FindOne),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Whole,
+                order: false,
+            }
+        );
+        assert_eq!(
             predicate_sink_result_demand(BuiltinPredicateSink::Any),
             SinkResultDemand::UntilMatch
         );
@@ -3737,6 +3783,14 @@ mod tests {
             ValueNeed::Whole
         );
         assert_eq!(
+            membership_sink_demand(BuiltinMembershipSink::Includes),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Whole,
+                order: false,
+            }
+        );
+        assert_eq!(
             membership_sink_result_demand(BuiltinMembershipSink::Includes),
             SinkResultDemand::UntilMatch
         );
@@ -3764,6 +3818,14 @@ mod tests {
         assert_eq!(
             arg_extreme_wants_max(BuiltinId::from_method(BuiltinMethod::MinBy)),
             Some(false)
+        );
+        assert_eq!(
+            arg_extreme_sink_demand(BuiltinArgExtremeSink::MaxBy),
+            Demand {
+                pull: PullDemand::All,
+                value: ValueNeed::Whole,
+                order: true,
+            }
         );
         assert_eq!(
             arg_extreme_sink(BuiltinId::from_method(BuiltinMethod::Max)),

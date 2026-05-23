@@ -4,16 +4,20 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    arg_extreme_wants_max, membership_sink as builtin_membership_sink,
+    arg_extreme_sink_demand as builtin_arg_extreme_sink_demand, arg_extreme_wants_max,
+    membership_sink as builtin_membership_sink,
+    membership_sink_demand as builtin_membership_sink_demand,
     membership_sink_result_demand as builtin_membership_sink_result_demand,
-    membership_sink_value_need as builtin_membership_sink_value_need, numeric_reducer,
-    predicate_sink as builtin_predicate_sink,
+    numeric_reducer, predicate_sink as builtin_predicate_sink,
+    predicate_sink_demand as builtin_predicate_sink_demand,
     predicate_sink_result_demand as builtin_predicate_sink_result_demand,
-    predicate_sink_value_need as builtin_predicate_sink_value_need, BuiltinId,
+    BuiltinId,
 };
-use crate::builtins::{BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink};
+use crate::builtins::{
+    BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,
+};
 use crate::parse::ast::Expr;
-use crate::plan::demand::{Demand, PullDemand, SinkResultDemand, ValueNeed};
+use crate::plan::demand::{Demand, SinkResultDemand};
 use crate::vm::Program;
 
 use super::NumOp;
@@ -89,15 +93,7 @@ impl PredicateSinkSpec {
 
     /// Demand placed on the row stream by this terminal predicate sink.
     pub(crate) fn demand(&self) -> Demand {
-        // Predicate sinks can short-circuit inside their accumulator, but the shared
-        // pull model counts source rows emitted by the stage chain. Treating
-        // `any`/`find_index` as `UntilOutput(1)` would stop after one non-matching
-        // input row before the predicate sink has produced its scalar result.
-        Demand {
-            pull: PullDemand::All,
-            value: builtin_predicate_sink_value_need(self.op),
-            order: false,
-        }
+        builtin_predicate_sink_demand(self.op)
     }
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
@@ -137,15 +133,7 @@ impl MembershipSinkSpec {
 
     /// Demand placed on the row stream by this terminal membership sink.
     pub(crate) fn demand(&self) -> Demand {
-        // `includes` and `index` can stop once their accumulator observes a match,
-        // but the pull demand is still over input rows, not over the terminal
-        // scalar result. Keep the source conservative and let the sink stop the
-        // executor loop when it has enough information.
-        Demand {
-            pull: PullDemand::All,
-            value: builtin_membership_sink_value_need(self.op),
-            order: false,
-        }
+        builtin_membership_sink_demand(self.op)
     }
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
@@ -189,11 +177,11 @@ impl ArgExtremeSinkSpec {
 
     /// Demand placed on the row stream by this terminal arg-extreme sink.
     pub(crate) fn demand(&self) -> Demand {
-        Demand {
-            pull: PullDemand::All,
-            value: ValueNeed::Whole,
-            order: true,
-        }
+        builtin_arg_extreme_sink_demand(if self.want_max {
+            BuiltinArgExtremeSink::MaxBy
+        } else {
+            BuiltinArgExtremeSink::MinBy
+        })
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -306,6 +294,7 @@ impl ReducerSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::demand::{PullDemand, ValueNeed};
 
     fn empty_program() -> Arc<Program> {
         Arc::new(Program::new(Vec::new(), "<sink-demand-test>"))
