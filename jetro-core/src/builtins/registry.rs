@@ -68,6 +68,13 @@ impl BuiltinPipelineArity {
     }
 }
 
+/// Concrete composed-pipeline implementation selected by builtin metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinComposedStage {
+    Compact,
+    RemoveValue,
+}
+
 /// Return the logical planner shape for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn logical_shape(id: BuiltinId) -> Option<BuiltinLogicalShape> {
@@ -1200,10 +1207,18 @@ pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn pipeline_builtin_call_stage(id: BuiltinId) -> bool {
     pipeline_element(id)
-        || matches!(
-            view_stage(id),
-            Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
-        )
+        || composed_builtin_stage(id).is_some()
+}
+
+/// Return the composed-stage implementation for metadata-backed builtin calls
+/// that are not ordinary element-wise stages.
+#[inline]
+pub(crate) fn composed_builtin_stage(id: BuiltinId) -> Option<BuiltinComposedStage> {
+    match view_stage(id)? {
+        BuiltinViewStage::Compact => Some(BuiltinComposedStage::Compact),
+        BuiltinViewStage::RemoveValue => Some(BuiltinComposedStage::RemoveValue),
+        _ => None,
+    }
 }
 
 /// Return the structural traversal variant for builtin `id` (`DeepFind`,
@@ -4361,6 +4376,19 @@ mod tests {
                 "{method:?} should be accepted as a builtin-call stage"
             );
         }
+
+        assert_eq!(
+            composed_builtin_stage(BuiltinId::from_method(BuiltinMethod::Compact)),
+            Some(BuiltinComposedStage::Compact)
+        );
+        assert_eq!(
+            composed_builtin_stage(BuiltinId::from_method(BuiltinMethod::Remove)),
+            Some(BuiltinComposedStage::RemoveValue)
+        );
+        assert_eq!(
+            composed_builtin_stage(BuiltinId::from_method(BuiltinMethod::Upper)),
+            None
+        );
 
         for method in [
             BuiltinMethod::Has,

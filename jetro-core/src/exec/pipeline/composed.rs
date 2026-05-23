@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use crate::builtins::{
     registry::{
-        keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
-        pipeline_stage_caps_input_prefix, pipeline_stage_is_positional, view_stage, BuiltinId,
+        composed_builtin_stage, keyed_reducer as builtin_keyed_reducer,
+        numeric_reducer as builtin_numeric_reducer, pipeline_stage_caps_input_prefix,
+        pipeline_stage_is_positional, BuiltinComposedStage, BuiltinId,
     },
     BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
-    BuiltinViewStage,
 };
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
@@ -99,14 +99,14 @@ impl<'a> ComposedStageBuilder<'a> {
                 })
             }
             (Stage::Builtin(call), _)
-                if view_stage(BuiltinId::from_method(call.method))
-                    == Some(BuiltinViewStage::Compact) =>
+                if composed_builtin_stage(BuiltinId::from_method(call.method))
+                    == Some(BuiltinComposedStage::Compact) =>
             {
                 Box::new(cmp::CompactFilterStage)
             }
             (Stage::Builtin(call), _)
-                if view_stage(BuiltinId::from_method(call.method))
-                    == Some(BuiltinViewStage::RemoveValue) =>
+                if composed_builtin_stage(BuiltinId::from_method(call.method))
+                    == Some(BuiltinComposedStage::RemoveValue) =>
             {
                 match &call.args {
                     crate::builtins::BuiltinArgs::Val(target) => {
