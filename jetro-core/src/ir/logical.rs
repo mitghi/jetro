@@ -5,7 +5,9 @@
 //! `Arc<Program>` happens only in the lowering pass after optimizer rules have
 //! been applied.
 
-use crate::builtins::{registry::BuiltinId, BuiltinMethod};
+use crate::builtins::registry::BuiltinId;
+#[cfg(test)]
+use crate::builtins::BuiltinMethod;
 use crate::parse::ast::Expr;
 use crate::exec::pipeline::{SortSpec, Source};
 
@@ -294,32 +296,32 @@ impl LogicalPlan {
     /// Returns the canonical builtin id represented by this logical node,
     /// if the node maps to a pipeline stage or terminal sink.
     pub(crate) fn builtin_id(&self) -> Option<BuiltinId> {
-        let method = match self {
-            LogicalPlan::Filter { .. } => BuiltinMethod::Filter,
-            LogicalPlan::Map { .. } => BuiltinMethod::Map,
-            LogicalPlan::FlatMap { .. } => BuiltinMethod::FlatMap,
-            LogicalPlan::TakeWhile { .. } => BuiltinMethod::TakeWhile,
-            LogicalPlan::DropWhile { .. } => BuiltinMethod::DropWhile,
-            LogicalPlan::Take { .. } => BuiltinMethod::Take,
-            LogicalPlan::Skip { .. } => BuiltinMethod::Skip,
-            LogicalPlan::Sort { .. } => BuiltinMethod::Sort,
-            LogicalPlan::Unique { key: None, .. } => BuiltinMethod::Unique,
-            LogicalPlan::Unique { key: Some(_), .. } => BuiltinMethod::UniqueBy,
-            LogicalPlan::Reverse { .. } => BuiltinMethod::Reverse,
-            LogicalPlan::GroupBy { .. } => BuiltinMethod::GroupBy,
-            LogicalPlan::CountBy { .. } => BuiltinMethod::CountBy,
-            LogicalPlan::IndexBy { .. } => BuiltinMethod::IndexBy,
-            LogicalPlan::First(_) => BuiltinMethod::First,
-            LogicalPlan::Last(_) => BuiltinMethod::Last,
-            LogicalPlan::Sum(_) => BuiltinMethod::Sum,
-            LogicalPlan::Avg(_) => BuiltinMethod::Avg,
-            LogicalPlan::Min(_) => BuiltinMethod::Min,
-            LogicalPlan::Max(_) => BuiltinMethod::Max,
-            LogicalPlan::Count(_) => BuiltinMethod::Count,
-            LogicalPlan::ApproxCountDistinct(_) => BuiltinMethod::ApproxCountDistinct,
+        let id = match self {
+            LogicalPlan::Filter { .. } => BuiltinId::FILTER,
+            LogicalPlan::Map { .. } => BuiltinId::MAP,
+            LogicalPlan::FlatMap { .. } => BuiltinId::FLAT_MAP,
+            LogicalPlan::TakeWhile { .. } => BuiltinId::TAKE_WHILE,
+            LogicalPlan::DropWhile { .. } => BuiltinId::DROP_WHILE,
+            LogicalPlan::Take { .. } => BuiltinId::TAKE,
+            LogicalPlan::Skip { .. } => BuiltinId::SKIP,
+            LogicalPlan::Sort { .. } => BuiltinId::SORT,
+            LogicalPlan::Unique { key: None, .. } => BuiltinId::UNIQUE,
+            LogicalPlan::Unique { key: Some(_), .. } => BuiltinId::UNIQUE_BY,
+            LogicalPlan::Reverse { .. } => BuiltinId::REVERSE,
+            LogicalPlan::GroupBy { .. } => BuiltinId::GROUP_BY,
+            LogicalPlan::CountBy { .. } => BuiltinId::COUNT_BY,
+            LogicalPlan::IndexBy { .. } => BuiltinId::INDEX_BY,
+            LogicalPlan::First(_) => BuiltinId::FIRST,
+            LogicalPlan::Last(_) => BuiltinId::LAST,
+            LogicalPlan::Sum(_) => BuiltinId::SUM,
+            LogicalPlan::Avg(_) => BuiltinId::AVG,
+            LogicalPlan::Min(_) => BuiltinId::MIN,
+            LogicalPlan::Max(_) => BuiltinId::MAX,
+            LogicalPlan::Count(_) => BuiltinId::COUNT,
+            LogicalPlan::ApproxCountDistinct(_) => BuiltinId::APPROX_COUNT_DISTINCT,
             LogicalPlan::Source(_) | LogicalPlan::ScalarExpr => return None,
         };
-        Some(BuiltinId::from_method(method))
+        Some(id)
     }
 
     /// Consumes `self` and returns `(input, node_without_input)` for use in rewrites.
