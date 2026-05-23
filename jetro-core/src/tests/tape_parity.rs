@@ -93,3 +93,40 @@ fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_across_view_projection_boundaries() {
+    let doc = json!({
+        "users": [
+            {
+                "id": 1,
+                "name": "ada",
+                "profile": {
+                    "role": "admin",
+                    "contact": {"email": "ada@example.test"},
+                    "flags": {"staff": true, "beta": null}
+                }
+            },
+            {
+                "id": 2,
+                "name": "bob",
+                "profile": {
+                    "role": "user",
+                    "contact": {"email": "bob@example.test"},
+                    "flags": {"staff": false}
+                }
+            }
+        ]
+    });
+    for query in [
+        "$.users.map(profile.get_path(\"contact.email\").upper())",
+        "$.users.map(profile.pick(\"role\", \"contact\").keys().last())",
+        "$.users.map(profile.omit(\"flags\").values().first())",
+        "$.users.map(profile.has_path(\"flags.staff\"))",
+        "$.users.map(profile.missing(\"flags.beta\"))",
+        "$.users.filter(profile.has_key(\"flags\")).map(profile.entries().last()[0])",
+        "$.users.map({id, email: profile.get_path(\"contact.email\"), keys: profile.keys().take(2)})",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}

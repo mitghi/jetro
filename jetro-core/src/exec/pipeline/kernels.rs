@@ -172,10 +172,27 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
     }
 }
 
-fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
-    if !matches!(receiver, BodyKernel::Current) {
-        return None;
+fn receiver_field_prefix(receiver: &BodyKernel) -> Option<Vec<Arc<str>>> {
+    match receiver {
+        BodyKernel::Current => Some(Vec::new()),
+        BodyKernel::FieldRead(key) => Some(vec![Arc::clone(key)]),
+        BodyKernel::FieldChain(keys) => Some(keys.iter().cloned().collect()),
+        _ => None,
     }
+}
+
+fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand {
+    if prefix.is_empty() {
+        return demand;
+    }
+    match demand {
+        FieldDemand::Fields(fields) => FieldDemand::Fields(fields.prefixed(prefix)),
+        other => other,
+    }
+}
+
+fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
+    let prefix = receiver_field_prefix(receiver)?;
     match (
         view_object_projection(BuiltinId::from_method(call.method))?,
         &call.args,
@@ -184,22 +201,26 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
             BuiltinViewObjectProjection::HasKey | BuiltinViewObjectProjection::Missing,
             crate::builtins::BuiltinArgs::Str(key),
         ) => {
-            Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key))))
+            Some(prefix_field_demand(
+                &prefix,
+                FieldDemand::Fields(FieldSet::single(Arc::clone(key))),
+            ))
         }
         (
             BuiltinViewObjectProjection::Missing | BuiltinViewObjectProjection::Pick,
             crate::builtins::BuiltinArgs::StrVec(keys),
-        ) => Some(field_demand_for_keys(keys)),
+        ) => Some(prefix_field_demand(&prefix, field_demand_for_keys(keys))),
         (
             BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
             crate::builtins::BuiltinArgs::Str(path),
         ) => {
             path_field_demand(&crate::builtins::parse_path_segs(path.as_ref()))
+                .map(|demand| prefix_field_demand(&prefix, demand))
         }
         (
             BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
             crate::builtins::BuiltinArgs::Path(path),
-        ) => path_field_demand(path),
+        ) => path_field_demand(path).map(|demand| prefix_field_demand(&prefix, demand)),
         _ => None,
     }
 }
@@ -3262,5 +3283,76 @@ mod tests {
         });
         let out: serde_json::Value = out.expect("owned first entry").into();
         assert_eq!(out, serde_json::json!(["role", "admin"]));
+    }
+
+    #[test]
+    fn owned_view_projection_receivers_apply_followup_chain_to_owned_value() {
+        let expr = parse(r#"profile.pick("role", "contact").keys().last()"#).unwrap();
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(kernel.is_view_native());
+
+        let value = Val::obj(
+            [(
+                Arc::from("profile"),
+                Val::obj(
+                    [
+                        (Arc::from("role"), Val::Str(Arc::from("admin"))),
+                        (
+                            Arc::from("contact"),
+                            Val::obj(
+                                [(Arc::from("email"), Val::Str(Arc::from("a@example.test")))]
+                                    .into(),
+                            ),
+                        ),
+                        (Arc::from("flags"), Val::Bool(true)),
+                    ]
+                    .into(),
+                ),
+            )]
+            .into(),
+        );
+        let out = eval_view_kernel(&kernel, &ValView::new(&value)).and_then(|value| match value {
+            ViewKernelValue::Owned(value) => Some(value),
+            _ => None,
+        });
+        assert_eq!(out, Some(Val::Str(Arc::from("contact"))));
+
+        let program =
+            crate::compile::compiler::Compiler::compile(&expr, "<owned-view-projection-test>");
+        let compiled_kernel = BodyKernel::classify(&program);
+        assert!(compiled_kernel.is_view_native());
+        let out =
+            eval_view_kernel(&compiled_kernel, &ValView::new(&value)).and_then(|value| match value {
+                ViewKernelValue::Owned(value) => Some(value),
+                _ => None,
+            });
+        assert_eq!(out, Some(Val::Str(Arc::from("contact"))));
+
+        let method_arg_program = crate::exec::pipeline::lower::compile_subexpr(
+            &crate::parse::ast::Arg::Pos(expr),
+        )
+        .expect("method arg program");
+        let method_arg_kernel = BodyKernel::classify(&method_arg_program);
+        assert!(method_arg_kernel.is_view_native());
+        let mut expected_fields = crate::plan::demand::FieldSet::new();
+        expected_fields.insert(crate::plan::demand::FieldPath::chain(Arc::from([
+            Arc::<str>::from("profile"),
+            Arc::<str>::from("role"),
+        ])));
+        expected_fields.insert(crate::plan::demand::FieldPath::chain(Arc::from([
+            Arc::<str>::from("profile"),
+            Arc::<str>::from("contact"),
+        ])));
+        assert_eq!(
+            method_arg_kernel.field_demand(),
+            crate::plan::demand::FieldDemand::Fields(expected_fields)
+        );
+        let out = eval_view_kernel(&method_arg_kernel, &ValView::new(&value)).and_then(|value| {
+            match value {
+                ViewKernelValue::Owned(value) => Some(value),
+                _ => None,
+            }
+        });
+        assert_eq!(out, Some(Val::Str(Arc::from("contact"))));
     }
 }

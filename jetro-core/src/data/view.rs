@@ -192,42 +192,42 @@ fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
 
     if keys.len() <= 4 {
         let mut out = indexmap::IndexMap::with_capacity(keys.len());
-        let mut cur = idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
-            if key_slice_contains(keys, current_key) {
-                let mut value_idx = cur;
-                out.insert(
-                    crate::data::value::intern_key(current_key),
-                    tape.materialize_at(&mut value_idx),
-                );
-                if out.len() == keys.len() {
+        for key in keys {
+            let mut cur = idx + 1;
+            for _ in 0..len {
+                let current_key = tape.str_at(cur);
+                cur += 1;
+                if current_key == key.as_ref() {
+                    let mut value_idx = cur;
+                    out.insert(Arc::clone(key), tape.materialize_at(&mut value_idx));
                     break;
                 }
+                cur += tape.span(cur);
             }
-            cur += tape.span(cur);
         }
         return Some(Val::obj(out));
     }
 
-    let mut out = indexmap::IndexMap::with_capacity(keys.len());
-    let mut remaining: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
+    let mut found = std::collections::HashMap::with_capacity(keys.len());
+    let wanted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
     let mut cur = idx + 1;
     for _ in 0..len {
         let current_key = tape.str_at(cur);
         cur += 1;
-        if remaining.remove(current_key) {
+        if wanted.contains(current_key) {
             let mut value_idx = cur;
-            out.insert(
-                crate::data::value::intern_key(current_key),
-                tape.materialize_at(&mut value_idx),
-            );
-            if remaining.is_empty() {
+            found.insert(current_key, tape.materialize_at(&mut value_idx));
+            if found.len() == wanted.len() {
                 break;
             }
         }
         cur += tape.span(cur);
+    }
+    let mut out = indexmap::IndexMap::with_capacity(keys.len());
+    for key in keys {
+        if let Some(value) = found.remove(key.as_ref()) {
+            out.insert(Arc::clone(key), value);
+        }
     }
     Some(Val::obj(out))
 }
@@ -1368,6 +1368,47 @@ mod tests {
         assert_eq!(
             tape_book.omit_keys(&many_keys).map(serde_json::Value::from),
             val_book.omit_keys(&many_keys).map(serde_json::Value::from)
+        );
+    }
+
+    #[test]
+    fn tape_pick_keys_preserves_requested_order() {
+        use super::TapeView;
+
+        fn object_keys(value: Option<Val>) -> Vec<Arc<str>> {
+            match value.expect("object projection") {
+                Val::Obj(object) => object.keys().cloned().collect(),
+                other => panic!("expected object, got {other:?}"),
+            }
+        }
+
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"book":{"contact":{"email":"a@example.test"},"role":"admin","flags":true}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        let book = TapeView::root(&tape).field("book");
+        assert_eq!(
+            object_keys(book.pick_keys(&[Arc::from("role"), Arc::from("contact")])),
+            vec![Arc::from("role"), Arc::from("contact")]
+        );
+
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"book":{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6}}"#.to_vec(),
+        )
+        .unwrap();
+        let book = TapeView::root(&tape).field("book");
+        let keys = [
+            Arc::from("f"),
+            Arc::from("e"),
+            Arc::from("d"),
+            Arc::from("c"),
+            Arc::from("b"),
+            Arc::from("a"),
+        ];
+        assert_eq!(
+            object_keys(book.pick_keys(&keys)),
+            keys.iter().cloned().collect::<Vec<_>>()
         );
     }
 
