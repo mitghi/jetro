@@ -342,8 +342,7 @@ where
     }
 
     let mut boundary_rows = Vec::new();
-    let source_demand =
-        pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix.consumed_stages], &body.sink);
+    let source_demand = body.pull_demand();
 
     if let Err(err) = drive_view_frontier(
         source,

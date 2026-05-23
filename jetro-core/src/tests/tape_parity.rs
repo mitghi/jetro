@@ -351,6 +351,34 @@ fn tape_matches_vm_for_scalar_terminal_sinks() {
 }
 
 #[test]
+fn tape_matches_vm_for_window_and_series_stages() {
+    let doc = json!({
+        "samples": [
+            {"id": "a", "value": 10},
+            {"id": "b", "value": 13},
+            {"id": "c", "value": 18},
+            {"id": "d", "value": 12},
+            {"id": "e", "value": 20}
+        ]
+    });
+    for query in [
+        "$.samples.map(value).window(3).last()",
+        "$.samples.map(value).chunk(2).take(2)",
+        "$.samples.map(value).lag(1).last()",
+        "$.samples.map(value).lead(1).first()",
+        "$.samples.map(value).rolling_sum(2).last()",
+        "$.samples.map(value).rolling_avg(3).last()",
+        "$.samples.map(value).diff_window().take(3)",
+        "$.samples.map(value).pct_change().last()",
+        "$.samples.map(value).cummax().last()",
+        "$.samples.map(value).cummin().last()",
+        "$.samples.map(value).zscore().take(2)",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
     let doc = json!({
         "orders": [
