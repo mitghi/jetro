@@ -2458,6 +2458,100 @@ mod tests {
     }
 
     #[test]
+    fn registry_view_scalar_projection_contracts_are_exhaustive() {
+        let expected = [
+            BuiltinMethod::Abs,
+            BuiltinMethod::ByteLen,
+            BuiltinMethod::Ceil,
+            BuiltinMethod::EndsWith,
+            BuiltinMethod::Floor,
+            BuiltinMethod::Includes,
+            BuiltinMethod::IndexOf,
+            BuiltinMethod::IsAlpha,
+            BuiltinMethod::IsAscii,
+            BuiltinMethod::IsBlank,
+            BuiltinMethod::IsNumeric,
+            BuiltinMethod::LastIndexOf,
+            BuiltinMethod::Len,
+            BuiltinMethod::Lower,
+            BuiltinMethod::Matches,
+            BuiltinMethod::Round,
+            BuiltinMethod::StartsWith,
+            BuiltinMethod::ToBool,
+            BuiltinMethod::ToNumber,
+            BuiltinMethod::Trim,
+            BuiltinMethod::TrimLeft,
+            BuiltinMethod::TrimRight,
+            BuiltinMethod::Upper,
+        ];
+
+        let registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                view_scalar_projection(BuiltinId::from_method(method)).then_some(method)
+            })
+            .collect();
+        assert_eq!(registered, expected);
+
+        for method in expected {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert!(spec.view_native, "{method:?}");
+            if pipeline_element(id) {
+                assert_eq!(
+                    effective_pipeline_order_effect(id, true),
+                    BuiltinPipelineOrderEffect::Preserves,
+                    "{method:?}"
+                );
+            }
+            assert!(
+                matches!(
+                    demand_law(id),
+                    BuiltinDemandLaw::MapLike
+                        | BuiltinDemandLaw::PredicateMapLike
+                        | BuiltinDemandLaw::Count
+                ),
+                "{method:?}"
+            );
+            assert!(
+                pipeline_element(id) || matches!(method, BuiltinMethod::Len | BuiltinMethod::Includes),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_raw_json_scalar_contracts_are_exhaustive() {
+        let expected = [
+            (BuiltinMethod::Len, BuiltinRawJsonScalar::Len),
+            (BuiltinMethod::Lower, BuiltinRawJsonScalar::AsciiLower),
+            (BuiltinMethod::Upper, BuiltinRawJsonScalar::AsciiUpper),
+        ];
+
+        let registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                raw_json_scalar(BuiltinId::from_method(method), &BuiltinArgs::None)
+                    .map(|scalar| (method, scalar))
+            })
+            .collect();
+        assert_eq!(registered, expected);
+
+        for (method, scalar) in expected {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert_eq!(spec.raw_json_scalar, Some(scalar), "{method:?}");
+            assert!(view_scalar_projection(id), "{method:?}");
+            assert!(spec.view_native, "{method:?}");
+            assert_eq!(
+                raw_json_scalar(id, &BuiltinArgs::Str(Arc::from("x"))),
+                None,
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
     fn registry_classifies_direct_view_scalar_value_projection() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
