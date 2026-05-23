@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{dispatches_scalar_direct, BuiltinId};
 use crate::builtins::{
-    BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
+    BuiltinArgExtremeSink, BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer,
+    BuiltinViewStage,
 };
 #[cfg(test)]
 use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
@@ -240,6 +241,17 @@ impl SortSpec {
         Self {
             key: Some(key),
             descending,
+        }
+    }
+
+    /// Returns the arg-extreme reducer that is equivalent to selecting the
+    /// first/last row after this sort. This captures the ordering law once so
+    /// direct-byte/tape planners do not duplicate sort-direction reasoning.
+    pub(crate) fn arg_extreme_for_selection(&self, wants_last: bool) -> BuiltinArgExtremeSink {
+        if wants_last ^ self.descending {
+            BuiltinArgExtremeSink::MaxBy
+        } else {
+            BuiltinArgExtremeSink::MinBy
         }
     }
 }
@@ -939,6 +951,32 @@ mod tests {
                 BuiltinPipelineLowering::TerminalSink => {}
             }
         }
+    }
+
+    #[test]
+    fn sort_spec_reports_equivalent_arg_extreme_selection() {
+        let asc = SortSpec::identity();
+        assert_eq!(
+            asc.arg_extreme_for_selection(false),
+            BuiltinArgExtremeSink::MinBy
+        );
+        assert_eq!(
+            asc.arg_extreme_for_selection(true),
+            BuiltinArgExtremeSink::MaxBy
+        );
+
+        let desc = SortSpec {
+            key: None,
+            descending: true,
+        };
+        assert_eq!(
+            desc.arg_extreme_for_selection(false),
+            BuiltinArgExtremeSink::MaxBy
+        );
+        assert_eq!(
+            desc.arg_extreme_for_selection(true),
+            BuiltinArgExtremeSink::MinBy
+        );
     }
 
     #[test]

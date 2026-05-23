@@ -875,11 +875,7 @@ fn direct_tape_sort_extreme_plan_with_position(
         return None;
     };
     let key_steps = kernel_to_physical_path(body.stage_kernels.first()?)?;
-    let op = if want_last ^ sort.descending {
-        crate::builtins::BuiltinArgExtremeSink::MaxBy
-    } else {
-        crate::builtins::BuiltinArgExtremeSink::MinBy
-    };
+    let op = sort.arg_extreme_for_selection(want_last);
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate: None,
