@@ -122,6 +122,11 @@ impl PredicateSinkSpec {
         self.op.method()
     }
 
+    /// Returns the registry id represented by this predicate sink.
+    pub(crate) fn id(&self) -> BuiltinId {
+        BuiltinId::from_method(self.method())
+    }
+
     /// Iterates over embedded programs for kernel enumeration.
     pub(crate) fn sink_programs(&self) -> impl Iterator<Item = &Arc<Program>> {
         std::iter::once(&self.predicate)
@@ -166,6 +171,11 @@ impl MembershipSinkSpec {
     /// Returns the builtin method represented by this membership sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
         self.op.method()
+    }
+
+    /// Returns the registry id represented by this membership sink.
+    pub(crate) fn id(&self) -> BuiltinId {
+        BuiltinId::from_method(self.method())
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -215,6 +225,11 @@ impl ArgExtremeSinkSpec {
     /// Returns the builtin method represented by this arg-extreme sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
         self.op.method()
+    }
+
+    /// Returns the registry id represented by this arg-extreme sink.
+    pub(crate) fn id(&self) -> BuiltinId {
+        BuiltinId::from_method(self.method())
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -324,10 +339,19 @@ impl ReducerSpec {
     }
 
     /// Returns the `BuiltinMethod` corresponding to this reducer operation.
+    #[cfg(test)]
     pub fn method(&self) -> Option<BuiltinMethod> {
         match self.op {
             ReducerOp::Count => Some(BuiltinMethod::Count),
             ReducerOp::Numeric(op) => Some(op.method()),
+        }
+    }
+
+    /// Returns the registry id corresponding to this reducer operation.
+    pub(crate) fn id(&self) -> Option<BuiltinId> {
+        match self.op {
+            ReducerOp::Count => Some(BuiltinId::COUNT),
+            ReducerOp::Numeric(op) => Some(BuiltinId::from_method(op.method())),
         }
     }
 }

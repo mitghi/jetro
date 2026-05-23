@@ -1412,6 +1412,9 @@ impl BuiltinId {
     pub(crate) const FLAT_MAP: Self = Self(BuiltinMethod::FlatMap as u16);
     pub(crate) const FIRST: Self = Self(BuiltinMethod::First as u16);
     pub(crate) const MAP: Self = Self(BuiltinMethod::Map as u16);
+    pub(crate) const APPROX_COUNT_DISTINCT: Self =
+        Self(BuiltinMethod::ApproxCountDistinct as u16);
+    pub(crate) const COUNT: Self = Self(BuiltinMethod::Count as u16);
     pub(crate) const REVERSE: Self = Self(BuiltinMethod::Reverse as u16);
     pub(crate) const SKIP: Self = Self(BuiltinMethod::Skip as u16);
     pub(crate) const SORT: Self = Self(BuiltinMethod::Sort as u16);

@@ -259,7 +259,7 @@ impl Sink {
         if !spec.is_plain_count() {
             return None;
         }
-        direct_scalar_for_plain_sink(BuiltinId::from_method(spec.method()?))
+        direct_scalar_for_plain_sink(spec.id()?)
     }
 
     /// Returns the registry id for sinks backed by builtin terminal metadata.
@@ -267,13 +267,11 @@ impl Sink {
     pub(crate) fn builtin_id(&self) -> Option<BuiltinId> {
         match self {
             Sink::Terminal(method) => Some(BuiltinId::from_method(*method)),
-            Sink::Reducer(spec) => Some(BuiltinId::from_method(spec.method()?)),
-            Sink::Predicate(spec) => Some(BuiltinId::from_method(spec.method())),
-            Sink::Membership(spec) => Some(BuiltinId::from_method(spec.method())),
-            Sink::ArgExtreme(spec) => Some(BuiltinId::from_method(spec.method())),
-            Sink::ApproxCountDistinct => Some(BuiltinId::from_method(
-                BuiltinMethod::ApproxCountDistinct,
-            )),
+            Sink::Reducer(spec) => spec.id(),
+            Sink::Predicate(spec) => Some(spec.id()),
+            Sink::Membership(spec) => Some(spec.id()),
+            Sink::ArgExtreme(spec) => Some(spec.id()),
+            Sink::ApproxCountDistinct => Some(BuiltinId::APPROX_COUNT_DISTINCT),
             Sink::Collect | Sink::Nth(_) | Sink::SelectMany { .. } => None,
         }
     }
