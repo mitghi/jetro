@@ -671,13 +671,18 @@ impl<'a> StageDescriptor<'a> {
         self
     }
 
+    /// Returns the registry id for the builtin method described by this stage.
+    #[inline]
+    pub(crate) fn builtin_id(self) -> Option<BuiltinId> {
+        self.method.map(BuiltinId::from_method)
+    }
+
     /// Returns the effective `BuiltinViewStage` for this descriptor, using the override if set
     /// or falling back to the method's registered view stage.
     #[inline]
     pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
         self.view_stage_override.or_else(|| {
-            self.method
-                .and_then(|method| builtin_view_stage(BuiltinId::from_method(method)))
+            self.builtin_id().and_then(builtin_view_stage)
         })
     }
 
@@ -686,8 +691,8 @@ impl<'a> StageDescriptor<'a> {
     pub(crate) fn columnar_stage(self) -> Option<crate::builtins::BuiltinColumnarStage> {
         self.columnar_enabled
             .then_some(())
-            .and_then(|_| self.method)
-            .and_then(|method| builtin_columnar_stage(BuiltinId::from_method(method)))
+            .and_then(|_| self.builtin_id())
+            .and_then(builtin_columnar_stage)
     }
 
     /// Returns cost/cardinality shape from the builtin registry, falling back
@@ -872,8 +877,8 @@ impl Stage {
     /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {
         self.descriptor()
-            .and_then(|desc| desc.method)
-            .is_some_and(|method| pipeline_composed_barrier(BuiltinId::from_method(method)))
+            .and_then(StageDescriptor::builtin_id)
+            .is_some_and(pipeline_composed_barrier)
     }
 
     /// Returns `true` when this stage is a direct value projection such as
@@ -890,8 +895,8 @@ impl Stage {
             || (!matches!(self, Stage::CompiledMap(_))
                 && self
                     .descriptor()
-                    .and_then(|desc| desc.method)
-                    .is_some_and(|method| !pipeline_streams(BuiltinId::from_method(method))))
+                    .and_then(StageDescriptor::builtin_id)
+                    .is_some_and(|id| !pipeline_streams(id)))
     }
 
     /// Returns `true` when the stage cannot use a composed/view barrier and must fall back to the
@@ -900,8 +905,8 @@ impl Stage {
         matches!(self, Stage::SortedDedup(_))
             || self
                 .descriptor()
-                .and_then(|desc| desc.method)
-                .is_some_and(|method| pipeline_legacy_materialized(BuiltinId::from_method(method)))
+                .and_then(StageDescriptor::builtin_id)
+                .is_some_and(pipeline_legacy_materialized)
     }
 
     /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,
@@ -934,9 +939,9 @@ impl Stage {
             };
         }
         if stage == BuiltinViewStage::KeyedReduce {
-            return match (desc.method, desc.body) {
-                (Some(method), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
-                    let kind = builtin_keyed_reducer(BuiltinId::from_method(method))?;
+            return match (desc.builtin_id(), desc.body) {
+                (Some(id), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
+                    let kind = builtin_keyed_reducer(id)?;
                     Some(ViewStageCapability::KeyedReduce { kind, kernel: idx })
                 }
                 _ => None,
