@@ -6,11 +6,10 @@
 //! execution details live behind source/projector implementations.
 
 use crate::builtins::registry::{
-    by_name as builtin_by_name, row_stream_op, BuiltinId,
+    by_name as builtin_by_name, row_stream_op, stream_source as builtin_stream_source,
 };
 use crate::builtins::{
-    BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamArg,
-    BuiltinRowStreamOp,
+    BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamArg, BuiltinRowStreamOp,
 };
 use crate::parse::ast::{Arg, Expr, Step};
 use std::fmt;
@@ -666,7 +665,7 @@ pub(super) fn root_rows_stream_prefix_len(expr: &Expr) -> Option<usize> {
 }
 
 fn is_root_rows_method(name: &str, args: &[Arg]) -> bool {
-    builtin_by_name(name) == Some(BuiltinId::from_method(BuiltinMethod::Rows)) && args.is_empty()
+    args.is_empty() && builtin_by_name(name).is_some_and(builtin_stream_source)
 }
 
 pub(super) fn is_rows_stream_method(name: &str) -> bool {

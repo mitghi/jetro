@@ -97,6 +97,13 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
     id.method().and_then(|method| method.spec().row_stream_op)
 }
 
+/// Return whether builtin `id` lifts the current input into a source-level
+/// stream boundary such as `$.rows()`.
+#[inline]
+pub(crate) fn stream_source(id: BuiltinId) -> bool {
+    id.method().is_some_and(|method| method.spec().stream_source)
+}
+
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
@@ -4007,6 +4014,8 @@ mod tests {
 
     #[test]
     fn registry_drives_row_stream_ops() {
+        assert!(stream_source(BuiltinId::from_method(BuiltinMethod::Rows)));
+        assert!(!stream_source(BuiltinId::from_method(BuiltinMethod::Reverse)));
         assert_eq!(
             row_stream_op(BuiltinId::from_method(BuiltinMethod::Rows)),
             None
