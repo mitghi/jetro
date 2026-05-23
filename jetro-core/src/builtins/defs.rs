@@ -2077,7 +2077,6 @@ fn object_lambda_spec() -> BuiltinSpec {
             1.0,
             1.0,
         ))
-        .demand_law(BuiltinDemandLaw::MapLike)
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
@@ -2088,8 +2087,11 @@ impl Builtin for TransformKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformKeys;
     const NAME: &'static str = "transform_keys";
     fn spec() -> BuiltinSpec {
-        object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformKeys)
-            .expr_payload(BuiltinExprPayload::Projection)
+        let lambda = BuiltinObjectLambda::TransformKeys;
+        object_lambda_spec()
+            .object_lambda(lambda)
+            .demand_law(lambda.demand_law())
+            .expr_payload(lambda.expr_payload())
     }
 
     #[inline]
@@ -2156,8 +2158,11 @@ impl Builtin for TransformValues {
     const METHOD: BuiltinMethod = BuiltinMethod::TransformValues;
     const NAME: &'static str = "transform_values";
     fn spec() -> BuiltinSpec {
-        object_lambda_spec().object_lambda(BuiltinObjectLambda::TransformValues)
-            .expr_payload(BuiltinExprPayload::Projection)
+        let lambda = BuiltinObjectLambda::TransformValues;
+        object_lambda_spec()
+            .object_lambda(lambda)
+            .demand_law(lambda.demand_law())
+            .expr_payload(lambda.expr_payload())
     }
     #[inline]
     fn apply_stream(
@@ -2184,8 +2189,11 @@ impl Builtin for FilterKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterKeys;
     const NAME: &'static str = "filter_keys";
     fn spec() -> BuiltinSpec {
-        object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterKeys)
-            .expr_payload(BuiltinExprPayload::PredicateScan)
+        let lambda = BuiltinObjectLambda::FilterKeys;
+        object_lambda_spec()
+            .object_lambda(lambda)
+            .demand_law(lambda.demand_law())
+            .expr_payload(lambda.expr_payload())
     }
     #[inline]
     fn apply_stream(
@@ -2212,8 +2220,11 @@ impl Builtin for FilterValues {
     const METHOD: BuiltinMethod = BuiltinMethod::FilterValues;
     const NAME: &'static str = "filter_values";
     fn spec() -> BuiltinSpec {
-        object_lambda_spec().object_lambda(BuiltinObjectLambda::FilterValues)
-            .expr_payload(BuiltinExprPayload::Projection)
+        let lambda = BuiltinObjectLambda::FilterValues;
+        object_lambda_spec()
+            .object_lambda(lambda)
+            .demand_law(lambda.demand_law())
+            .expr_payload(lambda.expr_payload())
     }
     #[inline]
     fn apply_stream(

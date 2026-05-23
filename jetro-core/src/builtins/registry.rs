@@ -3622,22 +3622,20 @@ mod tests {
 
     #[test]
     fn registry_drives_object_lambda_classification() {
-        assert_eq!(
-            object_lambda(BuiltinId::from_method(BuiltinMethod::TransformKeys)),
-            Some(BuiltinObjectLambda::TransformKeys)
-        );
-        assert_eq!(
-            object_lambda(BuiltinId::from_method(BuiltinMethod::TransformValues)),
-            Some(BuiltinObjectLambda::TransformValues)
-        );
-        assert_eq!(
-            object_lambda(BuiltinId::from_method(BuiltinMethod::FilterKeys)),
-            Some(BuiltinObjectLambda::FilterKeys)
-        );
-        assert_eq!(
-            object_lambda(BuiltinId::from_method(BuiltinMethod::FilterValues)),
-            Some(BuiltinObjectLambda::FilterValues)
-        );
+        for (method, lambda) in [
+            (BuiltinMethod::TransformKeys, BuiltinObjectLambda::TransformKeys),
+            (
+                BuiltinMethod::TransformValues,
+                BuiltinObjectLambda::TransformValues,
+            ),
+            (BuiltinMethod::FilterKeys, BuiltinObjectLambda::FilterKeys),
+            (BuiltinMethod::FilterValues, BuiltinObjectLambda::FilterValues),
+        ] {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(object_lambda(id), Some(lambda), "{method:?}");
+            assert_eq!(demand_law(id), lambda.demand_law(), "{method:?}");
+            assert_eq!(expr_payload(id), Some(lambda.expr_payload()), "{method:?}");
+        }
         assert_eq!(
             object_lambda(BuiltinId::from_method(BuiltinMethod::Map)),
             None

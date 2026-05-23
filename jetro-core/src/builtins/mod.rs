@@ -817,6 +817,25 @@ pub enum BuiltinObjectLambda {
     FilterValues,
 }
 
+impl BuiltinObjectLambda {
+    /// Demand law implied by object-lambda stages.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::MapLike
+    }
+
+    /// Expression payload lane used by this object-lambda operation.
+    #[inline]
+    pub(crate) const fn expr_payload(self) -> BuiltinExprPayload {
+        match self {
+            Self::FilterKeys => BuiltinExprPayload::PredicateScan,
+            Self::TransformKeys | Self::TransformValues | Self::FilterValues => {
+                BuiltinExprPayload::Projection
+            }
+        }
+    }
+}
+
 /// Concrete pipeline stage behavior for builtins with two string arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinStringPairStage {
