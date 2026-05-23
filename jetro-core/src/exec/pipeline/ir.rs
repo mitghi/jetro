@@ -626,8 +626,8 @@ impl StageShape {
         }
     }
 
-    pub(crate) fn from_builtin(method: BuiltinMethod) -> Self {
-        let shape = effective_pipeline_shape(BuiltinId::from_method(method))
+    pub(crate) fn from_builtin_id(id: BuiltinId) -> Self {
+        let shape = effective_pipeline_shape(id)
             .expect("builtin methods must have registry shape metadata");
         Self {
             cardinality: shape.cardinality,
@@ -636,6 +636,7 @@ impl StageShape {
             selectivity: shape.selectivity,
         }
     }
+
 }
 
 /// A unified descriptor for a `Stage`, providing the canonical method, body program,
@@ -750,8 +751,8 @@ impl<'a> StageDescriptor<'a> {
     /// to view-stage metadata only for synthetic stages without a method.
     #[inline]
     pub(crate) fn shape(self) -> Option<StageShape> {
-        self.method
-            .map(StageShape::from_builtin)
+        self.builtin_id()
+            .map(StageShape::from_builtin_id)
             .or_else(|| self.view_stage().map(StageShape::from_view_stage))
     }
 
@@ -808,14 +809,20 @@ impl Stage {
     }
 
     /// Build a nullary stage from its registry-declared stage shape.
-    pub(crate) fn nullary_builtin(method: BuiltinMethod) -> Option<Self> {
-        match builtin_nullary_stage(BuiltinId::from_method(method)) {
+    pub(crate) fn nullary_builtin_id(id: BuiltinId) -> Option<Self> {
+        let method = id.method()?;
+        match builtin_nullary_stage(id) {
             Some(BuiltinNullaryStage::Reverse) => Stage::reverse(),
             Some(BuiltinNullaryStage::Unique) => Some(Stage::UniqueBy(None)),
             Some(BuiltinNullaryStage::Element) | None => {
                 Some(Stage::Builtin(BuiltinCall::new(method, BuiltinArgs::None)))
             }
         }
+    }
+
+    /// Build a nullary stage from its registry-declared stage shape.
+    pub(crate) fn nullary_builtin(method: BuiltinMethod) -> Option<Self> {
+        Self::nullary_builtin_id(BuiltinId::from_method(method))
     }
 
     /// Build a generic builtin-call stage only when registry metadata allows pipeline use.
@@ -825,18 +832,24 @@ impl Stage {
     }
 
     /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
-    pub(crate) fn usize_builtin(method: BuiltinMethod, value: usize) -> Option<Self> {
+    pub(crate) fn usize_builtin_id(id: BuiltinId, value: usize) -> Option<Self> {
+        let method = id.method()?;
         matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
+            pipeline_lowering(id),
             Some(BuiltinPipelineLowering::UsizeArg { .. })
                 | Some(BuiltinPipelineLowering::TerminalUsizeSink { .. })
         )
         .then_some(Stage::UsizeBuiltin { method, value })
     }
 
+    /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
+    pub(crate) fn usize_builtin(method: BuiltinMethod, value: usize) -> Option<Self> {
+        Self::usize_builtin_id(BuiltinId::from_method(method), value)
+    }
+
     /// Build an expression-bearing stage from registry expression-stage metadata.
-    pub(crate) fn expr_stage_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    pub(crate) fn expr_stage_builtin_id(id: BuiltinId, body: Arc<Program>) -> Option<Self> {
+        let method = id.method()?;
         let stage_kind = builtin_expr_stage(id)?;
         let view_stage = || builtin_view_stage(id).or_else(|| stage_kind.view_stage());
         match stage_kind {
@@ -848,23 +861,36 @@ impl Stage {
         }
     }
 
+    /// Build an expression-bearing stage from registry expression-stage metadata.
+    pub(crate) fn expr_stage_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
+        Self::expr_stage_builtin_id(BuiltinId::from_method(method), body)
+    }
+
     /// Build a string-argument stage only for builtins with registry-declared string lowering.
-    pub(crate) fn string_builtin(method: BuiltinMethod, value: Arc<str>) -> Option<Self> {
+    pub(crate) fn string_builtin_id(id: BuiltinId, value: Arc<str>) -> Option<Self> {
+        let method = id.method()?;
         matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
+            pipeline_lowering(id),
             Some(BuiltinPipelineLowering::StringArg)
         )
         .then_some(Stage::StringBuiltin { method, value })
     }
 
+    /// Build a string-argument stage only for builtins with registry-declared string lowering.
+    #[cfg(test)]
+    pub(crate) fn string_builtin(method: BuiltinMethod, value: Arc<str>) -> Option<Self> {
+        Self::string_builtin_id(BuiltinId::from_method(method), value)
+    }
+
     /// Build a string-pair stage only for builtins with registry-declared string-pair lowering.
-    pub(crate) fn string_pair_builtin(
-        method: BuiltinMethod,
+    pub(crate) fn string_pair_builtin_id(
+        id: BuiltinId,
         first: Arc<str>,
         second: Arc<str>,
     ) -> Option<Self> {
+        let method = id.method()?;
         matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
+            pipeline_lowering(id),
             Some(BuiltinPipelineLowering::StringPairArg)
         )
         .then_some(Stage::StringPairBuiltin {
@@ -874,26 +900,52 @@ impl Stage {
         })
     }
 
-    /// Build an integer-range stage only for builtins with registry-declared int-range lowering.
-    pub(crate) fn int_range_builtin(
+    /// Build a string-pair stage only for builtins with registry-declared string-pair lowering.
+    #[cfg(test)]
+    pub(crate) fn string_pair_builtin(
         method: BuiltinMethod,
+        first: Arc<str>,
+        second: Arc<str>,
+    ) -> Option<Self> {
+        Self::string_pair_builtin_id(BuiltinId::from_method(method), first, second)
+    }
+
+    /// Build an integer-range stage only for builtins with registry-declared int-range lowering.
+    pub(crate) fn int_range_builtin_id(
+        id: BuiltinId,
         start: i64,
         end: Option<i64>,
     ) -> Option<Self> {
+        let method = id.method()?;
         matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
+            pipeline_lowering(id),
             Some(BuiltinPipelineLowering::IntRangeArg)
         )
         .then_some(Stage::IntRangeBuiltin { method, start, end })
     }
 
+    /// Build an integer-range stage only for builtins with registry-declared int-range lowering.
+    #[cfg(test)]
+    pub(crate) fn int_range_builtin(
+        method: BuiltinMethod,
+        start: i64,
+        end: Option<i64>,
+    ) -> Option<Self> {
+        Self::int_range_builtin_id(BuiltinId::from_method(method), start, end)
+    }
+
     /// Build a sort stage only for builtins with registry-declared sort lowering.
-    pub(crate) fn sort_builtin(method: BuiltinMethod, spec: super::SortSpec) -> Option<Self> {
+    pub(crate) fn sort_builtin_id(id: BuiltinId, spec: super::SortSpec) -> Option<Self> {
         matches!(
-            pipeline_lowering(BuiltinId::from_method(method)),
+            pipeline_lowering(id),
             Some(BuiltinPipelineLowering::Sort)
         )
         .then_some(Stage::Sort(spec))
+    }
+
+    /// Build a sort stage only for builtins with registry-declared sort lowering.
+    pub(crate) fn sort_builtin(method: BuiltinMethod, spec: super::SortSpec) -> Option<Self> {
+        Self::sort_builtin_id(BuiltinId::from_method(method), spec)
     }
 
     /// Classifies the stage body program, returning `Generic` for stages without a body.

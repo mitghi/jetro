@@ -391,13 +391,13 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 1 {
                 return None;
             }
-            push_expr_stage(method, &args[0], stages, stage_exprs)
+            push_expr_stage(id, &args[0], stages, stage_exprs)
         }
         BuiltinPipelineLowering::TerminalExprArg { terminal } => {
             if args.len() != 1 || !is_last {
                 return None;
             }
-            push_expr_stage(method, &args[0], stages, stage_exprs)?;
+            push_expr_stage(id, &args[0], stages, stage_exprs)?;
             set_terminal_sink(BuiltinId::from_method(terminal), sink)?;
             Some(())
         }
@@ -405,7 +405,7 @@ pub(super) fn lower_method_from_registry(
             if !args.is_empty() {
                 return None;
             }
-            stages.push(Stage::nullary_builtin(method)?);
+            stages.push(Stage::nullary_builtin_id(id)?);
             stage_exprs.push(None);
             Some(())
         }
@@ -414,7 +414,7 @@ pub(super) fn lower_method_from_registry(
                 return None;
             }
             let n = usize_arg_at_least(&args[0], min)?;
-            stages.push(Stage::usize_builtin(method, n)?);
+            stages.push(Stage::usize_builtin_id(id, n)?);
             stage_exprs.push(None);
             Some(())
         }
@@ -422,7 +422,7 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 1 {
                 return None;
             }
-            stages.push(Stage::string_builtin(method, string_arg(&args[0])?)?);
+            stages.push(Stage::string_builtin_id(id, string_arg(&args[0])?)?);
             stage_exprs.push(None);
             Some(())
         }
@@ -430,8 +430,8 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 2 {
                 return None;
             }
-            stages.push(Stage::string_pair_builtin(
-                method,
+            stages.push(Stage::string_pair_builtin_id(
+                id,
                 string_arg(&args[0])?,
                 string_arg(&args[1])?,
             )?);
@@ -440,13 +440,13 @@ pub(super) fn lower_method_from_registry(
         }
         BuiltinPipelineLowering::Sort => match args {
             [] => {
-                stages.push(Stage::sort_builtin(method, super::SortSpec::identity())?);
+                stages.push(Stage::sort_builtin_id(id, super::SortSpec::identity())?);
                 stage_exprs.push(None);
                 Some(())
             }
             [arg] => {
                 let (spec, expr) = compile_sort_spec(arg)?;
-                stages.push(Stage::sort_builtin(method, spec)?);
+                stages.push(Stage::sort_builtin_id(id, spec)?);
                 stage_exprs.push(expr);
                 Some(())
             }
@@ -454,13 +454,13 @@ pub(super) fn lower_method_from_registry(
         },
         BuiltinPipelineLowering::IntRangeArg => match args {
             [arg] => {
-                stages.push(Stage::int_range_builtin(method, int_arg(arg)?, None)?);
+                stages.push(Stage::int_range_builtin_id(id, int_arg(arg)?, None)?);
                 stage_exprs.push(None);
                 Some(())
             }
             [start, end] => {
-                stages.push(Stage::int_range_builtin(
-                    method,
+                stages.push(Stage::int_range_builtin_id(
+                    id,
                     int_arg(start)?,
                     Some(int_arg(end)?),
                 )?);
@@ -487,35 +487,34 @@ pub(super) fn lower_method_from_registry(
 
 // Compiles `arg` into a sub-expression program and appends the corresponding `Stage` variant; `None` on compile failure.
 fn push_expr_stage(
-    method: BuiltinMethod,
+    id: BuiltinId,
     arg: &crate::parse::ast::Arg,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    let id = BuiltinId::from_method(method);
     match expr_stage(id)? {
         BuiltinExprStage::Map => match try_decode_map_body(arg) {
             Some(plan) => {
                 stages.push(Stage::CompiledMap(Arc::new(plan)));
                 stage_exprs.push(arg_expr(arg));
             }
-            None => push_expr_builtin(method, arg, stages, stage_exprs)?,
+            None => push_expr_builtin(id, arg, stages, stage_exprs)?,
         },
         BuiltinExprStage::Filter
         | BuiltinExprStage::FlatMap
         | BuiltinExprStage::UniqueBy
-        | BuiltinExprStage::ExprBuiltin => push_expr_builtin(method, arg, stages, stage_exprs)?,
+        | BuiltinExprStage::ExprBuiltin => push_expr_builtin(id, arg, stages, stage_exprs)?,
     }
     Some(())
 }
 
 fn push_expr_builtin(
-    method: BuiltinMethod,
+    id: BuiltinId,
     arg: &crate::parse::ast::Arg,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
 ) -> Option<()> {
-    stages.push(Stage::expr_stage_builtin(method, compile_subexpr(arg)?)?);
+    stages.push(Stage::expr_stage_builtin_id(id, compile_subexpr(arg)?)?);
     stage_exprs.push(arg_expr(arg));
     Some(())
 }
