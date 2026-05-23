@@ -85,8 +85,9 @@ impl PredicateSinkSpec {
         predicate: Arc<Program>,
         predicate_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
+        let id = BuiltinId::from_method(method);
         Some(Self {
-            op: builtin_predicate_sink(BuiltinId::from_method(method))?,
+            op: builtin_predicate_sink(id)?,
             predicate,
             predicate_expr,
         })
@@ -126,8 +127,9 @@ impl PredicateSinkSpec {
 impl MembershipSinkSpec {
     /// Constructs a membership terminal sink from the builtin method.
     pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
+        let id = BuiltinId::from_method(method);
         Some(Self {
-            op: builtin_membership_sink(BuiltinId::from_method(method))?,
+            op: builtin_membership_sink(id)?,
             target,
         })
     }
@@ -169,8 +171,9 @@ impl ArgExtremeSinkSpec {
         key: Arc<Program>,
         key_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
+        let id = BuiltinId::from_method(method);
         Some(Self {
-            op: builtin_arg_extreme_sink(BuiltinId::from_method(method))?,
+            op: builtin_arg_extreme_sink(id)?,
             key,
             key_expr,
         })
@@ -243,10 +246,9 @@ impl ReducerSpec {
         projection: Option<Arc<Program>>,
         projection_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
+        let id = BuiltinId::from_method(method);
         Some(Self {
-            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(numeric_reducer(
-                BuiltinId::from_method(method),
-            )?)),
+            op: ReducerOp::Numeric(NumOp::from_builtin_reducer(numeric_reducer(id)?)),
             predicate: None,
             projection,
             predicate_expr: None,
