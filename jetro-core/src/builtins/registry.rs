@@ -2266,6 +2266,155 @@ mod tests {
     }
 
     #[test]
+    fn registry_keyed_reducer_contracts_are_exhaustive() {
+        let mut actual = Vec::new();
+        for (method, name, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if let Some(reducer) = keyed_reducer(id) {
+                actual.push((name, reducer));
+
+                let spec = method.spec();
+                assert_eq!(spec.category, BuiltinCategory::Reducer, "{method:?}");
+                assert_eq!(spec.cardinality, BuiltinCardinality::Reducing, "{method:?}");
+                assert_eq!(
+                    view_stage(id),
+                    Some(BuiltinViewStage::KeyedReduce),
+                    "{method:?}"
+                );
+                assert_eq!(
+                    pipeline_materialization(id),
+                    BuiltinPipelineMaterialization::ComposedBarrier,
+                    "{method:?}"
+                );
+                assert_eq!(
+                    effective_pipeline_order_effect(id, true),
+                    BuiltinPipelineOrderEffect::Blocks,
+                    "{method:?}"
+                );
+                assert!(pipeline_composed_barrier(id), "{method:?}");
+                assert!(participates_in_demand(id), "{method:?}");
+                assert!(
+                    matches!(
+                        pipeline_lowering(id),
+                        Some(BuiltinPipelineLowering::ExprArg)
+                            | Some(BuiltinPipelineLowering::TerminalExprArg {
+                                terminal: BuiltinMethod::First
+                            })
+                    ),
+                    "{method:?}"
+                );
+
+                match reducer {
+                    BuiltinKeyedReducer::Count => {
+                        assert_eq!(method, BuiltinMethod::CountBy);
+                        assert_eq!(demand_law(id), BuiltinDemandLaw::KeyOnlyReducer);
+                        assert_eq!(
+                            expr_payload(id),
+                            Some(BuiltinExprPayload::KeyOnlyReducer)
+                        );
+                        assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::CountBy));
+                    }
+                    BuiltinKeyedReducer::Group => {
+                        assert_eq!(method, BuiltinMethod::GroupBy);
+                        assert_eq!(demand_law(id), BuiltinDemandLaw::RowKeyedReducer);
+                        assert_eq!(
+                            expr_payload(id),
+                            Some(BuiltinExprPayload::RowKeyedReducer)
+                        );
+                        assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::GroupBy));
+                    }
+                    BuiltinKeyedReducer::Index => {
+                        assert_eq!(method, BuiltinMethod::IndexBy);
+                        assert_eq!(demand_law(id), BuiltinDemandLaw::RowKeyedReducer);
+                        assert_eq!(
+                            expr_payload(id),
+                            Some(BuiltinExprPayload::RowKeyedReducer)
+                        );
+                        assert_eq!(logical_shape(id), Some(BuiltinLogicalShape::IndexBy));
+                    }
+                }
+            }
+        }
+
+        actual.sort_by_key(|(name, _)| *name);
+        assert_eq!(
+            actual,
+            vec![
+                ("count_by", BuiltinKeyedReducer::Count),
+                ("group_by", BuiltinKeyedReducer::Group),
+                ("index_by", BuiltinKeyedReducer::Index),
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_order_barrier_contracts_drive_bounded_selection() {
+        let sort = BuiltinId::from_method(BuiltinMethod::Sort);
+        assert_eq!(demand_law(sort), BuiltinDemandLaw::OrderBarrier);
+        assert_eq!(
+            pipeline_materialization(sort),
+            BuiltinPipelineMaterialization::ComposedBarrier
+        );
+        assert_eq!(pipeline_lowering(sort), Some(BuiltinPipelineLowering::Sort));
+        assert_eq!(logical_shape(sort), Some(BuiltinLogicalShape::Sort));
+        assert!(pipeline_stage_is_order_only(sort));
+        assert!(pipeline_composed_barrier(sort));
+        assert!(is_idempotent(sort));
+        assert_eq!(row_stream_op(sort), None);
+        assert_eq!(
+            terminal_selection_rewrite(sort, BuiltinSelectionPosition::First),
+            Some(BuiltinMethod::Min)
+        );
+        assert_eq!(
+            terminal_selection_rewrite(sort, BuiltinSelectionPosition::Last),
+            Some(BuiltinMethod::Max)
+        );
+        assert_eq!(index_selection_rewrite(sort, 0), Some(BuiltinMethod::Min));
+        assert_eq!(index_selection_rewrite(sort, -1), Some(BuiltinMethod::Max));
+        assert_eq!(index_selection_rewrite(sort, 1), None);
+        assert_eq!(
+            effective_pipeline_order_effect(sort, true),
+            BuiltinPipelineOrderEffect::Blocks
+        );
+        assert!(stage_elidable_before_sink(
+            sort,
+            BuiltinId::from_method(BuiltinMethod::Sum)
+        ));
+        assert!(!stage_elidable_before_sink(
+            sort,
+            BuiltinId::from_method(BuiltinMethod::First)
+        ));
+        assert!(!stage_elidable_before_sink(
+            sort,
+            BuiltinId::from_method(BuiltinMethod::Last)
+        ));
+
+        let reverse = BuiltinId::from_method(BuiltinMethod::Reverse);
+        assert_eq!(demand_law(reverse), BuiltinDemandLaw::Reverse);
+        assert_eq!(
+            pipeline_materialization(reverse),
+            BuiltinPipelineMaterialization::ComposedBarrier
+        );
+        assert_eq!(
+            pipeline_lowering(reverse),
+            Some(BuiltinPipelineLowering::Nullary)
+        );
+        assert_eq!(logical_shape(reverse), Some(BuiltinLogicalShape::Reverse));
+        assert!(pipeline_stage_is_order_only(reverse));
+        assert!(pipeline_composed_barrier(reverse));
+        assert_eq!(row_stream_op(reverse), Some(BuiltinRowStreamOp::Reverse));
+        assert_eq!(
+            terminal_selection_rewrite(reverse, BuiltinSelectionPosition::First),
+            Some(BuiltinMethod::Last)
+        );
+        assert_eq!(
+            terminal_selection_rewrite(reverse, BuiltinSelectionPosition::Last),
+            Some(BuiltinMethod::First)
+        );
+        assert_eq!(index_selection_rewrite(reverse, 0), None);
+    }
+
+    #[test]
     fn registry_logical_shapes_participate_in_demand_model() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
