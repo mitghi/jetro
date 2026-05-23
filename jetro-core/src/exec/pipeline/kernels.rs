@@ -1218,7 +1218,7 @@ fn opcode_uses_current(opcode: &crate::vm::Opcode) -> bool {
     }
 }
 
-fn program_is_receiver_local(program: &crate::vm::Program) -> bool {
+pub(super) fn program_is_receiver_local(program: &crate::vm::Program) -> bool {
     program.ops.iter().all(opcode_is_receiver_local)
 }
 

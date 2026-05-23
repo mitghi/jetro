@@ -123,6 +123,39 @@ fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
 }
 
 #[test]
+fn tape_matches_vm_for_match_inside_demanded_chains() {
+    let doc = json!({
+        "events": [
+            {"kind": "view", "name": "landing", "score": 5, "tags": ["web"]},
+            {"kind": "click", "name": "cta", "score": 12, "x": 7, "tags": ["web", "conversion"]},
+            {"kind": "click", "name": "nav", "score": 8, "x": 2, "tags": ["web", "nav"]},
+            {"kind": "error", "name": "timeout", "score": 20, "tags": ["ops", "critical"]}
+        ]
+    });
+    for query in [
+        r#"$.events.map(match @ with {
+            {kind: "click", x: x} -> {kind: "click", x: x},
+            {kind: k} -> {kind: k},
+            _ -> null
+        }).last()"#,
+        r#"$.events.filter(match @ with {
+            {kind: "click", x: x} when x > 5 -> true,
+            _ -> false
+        }).map(name).first()"#,
+        r#"$.events.map(match @ with {
+            {tags: [first, ...rest]} -> rest.last(),
+            _ -> null
+        }).take(2)"#,
+        r#"$.events.sort_by(score).take(2).map(match @ with {
+            {kind: k, score: s} -> f"{k}:{s}",
+            _ -> "?"
+        }).last()"#,
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_scalar_methods_over_array_rows() {
     let doc = json!({
         "items": [

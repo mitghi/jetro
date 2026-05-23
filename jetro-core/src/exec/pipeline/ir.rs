@@ -34,7 +34,7 @@ use crate::plan::chain_ir::{ChainOp, MatchRole};
 use crate::plan::demand::{
     Demand as ChainDemand, DemandLanes, FieldDemand, PullDemand, SinkResultDemand, ValueNeed,
 };
-use crate::vm::{CompiledObjEntry, Opcode, Program};
+use crate::vm::{Opcode, Program};
 
 use super::{
     BodyKernel, Pipeline, PipelineBody, ReducerSpec, Sink, Stage, ViewMembershipTarget,
@@ -1379,9 +1379,9 @@ pub struct Plan {
 }
 
 pub(super) fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
-    stages
-        .iter()
-        .all(|stage| stage.can_run_with_receiver_only(program_is_current_only))
+    stages.iter().all(|stage| {
+        stage.can_run_with_receiver_only(super::kernels::program_is_receiver_local)
+    })
 }
 
 /// Return the `CompiledMatch` payload when `program`'s op stream is a
@@ -1414,101 +1414,6 @@ fn program_is_match_only(program: &Program) -> bool {
     program_match_only(program).is_some()
 }
 
-pub(super) fn program_is_current_only(program: &Program) -> bool {
-    program.ops.iter().all(opcode_is_current_only)
-}
-
-pub(super) fn opcode_is_current_only(opcode: &Opcode) -> bool {
-    match opcode {
-        Opcode::PushRoot | Opcode::RootChain(_) => false,
-        Opcode::PipelineRun { .. }
-        | Opcode::LetExpr { .. }
-        | Opcode::ListComp(_)
-        | Opcode::DictComp(_)
-        | Opcode::SetComp(_)
-        | Opcode::PatchEval(_)
-        | Opcode::UpdateBatchEval(_)
-        | Opcode::Match(_)
-        | Opcode::DeepMatchAll(_)
-        | Opcode::DeepMatchFirst(_) => false,
-        Opcode::DynIndex(prog)
-        | Opcode::InlineFilter(prog)
-        | Opcode::AndOp(prog)
-        | Opcode::OrOp(prog)
-        | Opcode::CoalesceOp(prog) => program_is_current_only(prog),
-        Opcode::BindLamCurrent { body, .. } => program_is_current_only(body),
-        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
-            .sub_progs
-            .iter()
-            .all(|prog| program_is_current_only(prog)),
-        Opcode::IfElse { then_, else_ } => {
-            program_is_current_only(then_) && program_is_current_only(else_)
-        }
-        Opcode::TryExpr { body, default } => {
-            program_is_current_only(body) && program_is_current_only(default)
-        }
-        Opcode::MakeArr(items) => items
-            .iter()
-            .all(|(prog, _spread)| program_is_current_only(prog)),
-        Opcode::FString(parts) => parts.iter().all(|part| match part {
-            crate::vm::CompiledFSPart::Lit(_) => true,
-            crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_current_only(prog),
-        }),
-        Opcode::MakeObj(entries) => entries.iter().all(obj_entry_is_current_only),
-        Opcode::PushNull
-        | Opcode::PushBool(_)
-        | Opcode::PushInt(_)
-        | Opcode::PushFloat(_)
-        | Opcode::PushStr(_)
-        | Opcode::PushCurrent
-        | Opcode::LoadIdent(_)
-        | Opcode::GetField(_)
-        | Opcode::GetIndex(_)
-        | Opcode::GetSlice(_, _, _)
-        | Opcode::OptField(_)
-        | Opcode::Descendant(_)
-        | Opcode::DescendAll
-        | Opcode::Quantifier(_)
-        | Opcode::FieldChain(_)
-        | Opcode::Add
-        | Opcode::Sub
-        | Opcode::Mul
-        | Opcode::Div
-        | Opcode::Mod
-        | Opcode::Eq
-        | Opcode::Neq
-        | Opcode::Lt
-        | Opcode::Lte
-        | Opcode::Gt
-        | Opcode::Gte
-        | Opcode::Fuzzy
-        | Opcode::Not
-        | Opcode::Neg
-        | Opcode::CastOp(_)
-        | Opcode::KindCheck { .. }
-        | Opcode::SetCurrent
-        | Opcode::DeleteMarkErr => true,
-    }
-}
-
-pub(super) fn obj_entry_is_current_only(entry: &CompiledObjEntry) -> bool {
-    match entry {
-        CompiledObjEntry::Short { .. } | CompiledObjEntry::KvPath { .. } => true,
-        CompiledObjEntry::Kv { prog, cond, .. } => {
-            program_is_current_only(prog)
-                && cond
-                    .as_ref()
-                    .is_none_or(|cond| program_is_current_only(cond))
-        }
-        CompiledObjEntry::Dynamic { key, val } => {
-            program_is_current_only(key) && program_is_current_only(val)
-        }
-        CompiledObjEntry::Spread(prog) | CompiledObjEntry::SpreadDeep(prog) => {
-            program_is_current_only(prog)
-        }
-    }
-}
-
 impl PipelineBody {
     /// Returns `true` when all stages and the sink can execute using only the materialised
     /// receiver value, without needing a document-root (`$`) reference.
@@ -1517,7 +1422,7 @@ impl PipelineBody {
             && stages_can_run_with_materialized_receiver(&self.stages)
             && self
                 .sink
-                .can_run_with_receiver_only(program_is_current_only)
+                .can_run_with_receiver_only(super::kernels::program_is_receiver_local)
     }
 
     /// Like `can_run_with_materialized_receiver` but only checks stages starting at index
@@ -1528,7 +1433,7 @@ impl PipelineBody {
             && stages_can_run_with_materialized_receiver(&self.stages[consumed_stages..])
             && self
                 .sink
-                .can_run_with_receiver_only(program_is_current_only)
+                .can_run_with_receiver_only(super::kernels::program_is_receiver_local)
     }
 
     /// Returns `true` when the suffix begins with a value projection. That
