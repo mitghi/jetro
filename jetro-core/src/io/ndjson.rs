@@ -40,8 +40,7 @@ use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
 pub use super::ndjson_driver::NdjsonPerRowDriver;
 use crate::compile::compiler::Compiler;
-use crate::builtins::registry::{view_object_items_projection_call, BuiltinId};
-use crate::builtins::{BuiltinArgs, BuiltinViewObjectProjection};
+use crate::builtins::BuiltinViewObjectProjection;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
@@ -2258,9 +2257,9 @@ impl<'a, 'p> NdjsonTapeWriterRunner<'a, 'p> {
                     writer.write_all(b"null")?;
                 }
             }
-            NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+            NdjsonDirectTapePlan::ObjectItems { steps, projection } => {
                 let idx = self.root_path.index(scratch, 0, steps);
-                write_json_tape_object_items(writer, scratch, idx, *method)?;
+                write_json_tape_object_items(writer, scratch, idx, *projection)?;
             }
             NdjsonDirectTapePlan::ArrayElementPath {
                 source_steps,
@@ -3593,9 +3592,9 @@ fn write_json_tape_nested_plan_from<W: Write, T: JsonTape>(
                 &mut projection_caches,
             )?;
         }
-        NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+        NdjsonDirectTapePlan::ObjectItems { steps, projection } => {
             let idx = root_cache.index(tape, start, steps);
-            write_json_tape_object_items(writer, tape, idx, *method)?;
+            write_json_tape_object_items(writer, tape, idx, *projection)?;
         }
         NdjsonDirectTapePlan::ViewPipeline { .. } => {
             writer.write_all(b"null")?;
@@ -3655,14 +3654,8 @@ fn write_json_tape_object_items<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
     obj_idx: Option<usize>,
-    method: crate::builtins::BuiltinMethod,
+    projection: BuiltinViewObjectProjection,
 ) -> Result<(), JetroEngineError> {
-    let Some(projection) =
-        view_object_items_projection_call(BuiltinId::from_method(method), &BuiltinArgs::None)
-    else {
-        writer.write_all(b"[]")?;
-        return Ok(());
-    };
     let Some(obj_idx) = obj_idx else {
         writer.write_all(b"[]")?;
         return Ok(());

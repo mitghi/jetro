@@ -6,11 +6,7 @@ use super::ndjson_direct::{
     NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
-use crate::builtins::registry::{view_object_items_projection_call, BuiltinId};
-use crate::builtins::{
-    BuiltinArgs, BuiltinCall, BuiltinMethod, BuiltinRawJsonScalar,
-    BuiltinViewObjectProjection,
-};
+use crate::builtins::{BuiltinCall, BuiltinRawJsonScalar, BuiltinViewObjectProjection};
 use crate::data::value::Val;
 use crate::ir::physical::PhysicalPathStep;
 use crate::util::JsonView;
@@ -74,9 +70,11 @@ fn write_ndjson_byte_expr<W: Write>(
                 RawFieldValue::Fallback => Ok(BytePlanWrite::Fallback),
             }
         }
-        NdjsonDirectByteExpr::ObjectItems { path, method } => {
+        NdjsonDirectByteExpr::ObjectItems { path, projection } => {
             match raw_json_byte_path_value(row, path) {
-                RawFieldValue::Found(value) => write_json_object_items_raw(writer, value, *method),
+                RawFieldValue::Found(value) => {
+                    write_json_object_items_raw(writer, value, *projection)
+                }
                 RawFieldValue::Missing => {
                     writer.write_all(b"[]")?;
                     Ok(BytePlanWrite::Done)
@@ -749,14 +747,8 @@ fn root_field_raw_value_prefix<'a>(row: &'a [u8], key: &str) -> RawFieldValue<'a
 fn write_json_object_items_raw<W: Write>(
     writer: &mut W,
     row: &[u8],
-    method: BuiltinMethod,
+    projection: BuiltinViewObjectProjection,
 ) -> Result<BytePlanWrite, JetroEngineError> {
-    let Some(projection) = view_object_items_projection_call(
-        BuiltinId::from_method(method),
-        &BuiltinArgs::None,
-    ) else {
-        return Ok(BytePlanWrite::Fallback);
-    };
     let mut pos = skip_json_ws(row, 0);
     if row.get(pos) != Some(&b'{') {
         return Ok(BytePlanWrite::Fallback);
@@ -3551,11 +3543,11 @@ fn write_raw_json_tape_plan_value<W: Write>(
             write_raw_json_array_projection(writer, row, items)?;
             Ok(BytePlanWrite::Done)
         }
-        NdjsonDirectTapePlan::ObjectItems { steps, method } => {
+        NdjsonDirectTapePlan::ObjectItems { steps, projection } => {
             match raw_json_path_value_demand(row, steps, None) {
                 RawFieldValue::Found(value) => {
                     if !matches!(
-                        write_json_object_items_raw(writer, value, *method)?,
+                        write_json_object_items_raw(writer, value, *projection)?,
                         BytePlanWrite::Done
                     ) {
                         return Ok(BytePlanWrite::Fallback);
