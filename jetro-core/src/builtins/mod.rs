@@ -1466,6 +1466,17 @@ pub enum BuiltinArraySelector {
 }
 
 impl BuiltinArraySelector {
+    /// Canonical builtin id represented by this selector.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) const fn id(self) -> registry::BuiltinId {
+        match self {
+            Self::First => registry::BuiltinId::FIRST,
+            Self::Last => registry::BuiltinId::LAST,
+            Self::Nth => registry::BuiltinId::NTH,
+        }
+    }
+
     /// Demand law implied by this positional selector.
     #[inline]
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {

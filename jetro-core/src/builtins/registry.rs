@@ -1445,6 +1445,8 @@ impl BuiltinId {
     pub(crate) const MAX_BY: Self = Self(BuiltinMethod::MaxBy as u16);
     pub(crate) const MIN: Self = Self(BuiltinMethod::Min as u16);
     pub(crate) const MIN_BY: Self = Self(BuiltinMethod::MinBy as u16);
+    #[cfg(test)]
+    pub(crate) const NTH: Self = Self(BuiltinMethod::Nth as u16);
     pub(crate) const REVERSE: Self = Self(BuiltinMethod::Reverse as u16);
     pub(crate) const SKIP: Self = Self(BuiltinMethod::Skip as u16);
     pub(crate) const SORT: Self = Self(BuiltinMethod::Sort as u16);
@@ -5279,15 +5281,15 @@ mod tests {
     #[test]
     fn registry_drives_array_selector_classification() {
         assert_eq!(
-            array_selector(BuiltinId::from_method(BuiltinMethod::First)),
+            array_selector(BuiltinArraySelector::First.id()),
             Some(BuiltinArraySelector::First)
         );
         assert_eq!(
-            array_selector(BuiltinId::from_method(BuiltinMethod::Last)),
+            array_selector(BuiltinArraySelector::Last.id()),
             Some(BuiltinArraySelector::Last)
         );
         assert_eq!(
-            array_selector(BuiltinId::from_method(BuiltinMethod::Nth)),
+            array_selector(BuiltinArraySelector::Nth.id()),
             Some(BuiltinArraySelector::Nth)
         );
         assert_eq!(
@@ -5299,21 +5301,22 @@ mod tests {
     #[test]
     fn registry_array_selector_contracts_are_exhaustive() {
         let expected = [
-            (BuiltinMethod::First, BuiltinArraySelector::First),
-            (BuiltinMethod::Last, BuiltinArraySelector::Last),
-            (BuiltinMethod::Nth, BuiltinArraySelector::Nth),
+            (BuiltinArraySelector::First.id(), BuiltinArraySelector::First),
+            (BuiltinArraySelector::Last.id(), BuiltinArraySelector::Last),
+            (BuiltinArraySelector::Nth.id(), BuiltinArraySelector::Nth),
         ];
         let mut registered: Vec<_> = all_method_entries()
             .into_iter()
             .filter_map(|(method, _, _)| {
-                array_selector(BuiltinId::from_method(method)).map(|selector| (method, selector))
+                let id = BuiltinId::from_method(method);
+                array_selector(id).map(|selector| (id, selector))
             })
             .collect();
-        registered.sort_by_key(|(method, _)| *method as u8);
+        registered.sort_by_key(|(id, _)| id.0);
         assert_eq!(registered, expected);
 
-        let first = BuiltinId::from_method(BuiltinMethod::First);
         let first_selector = BuiltinArraySelector::First;
+        let first = first_selector.id();
         assert_eq!(demand_law(first), first_selector.demand_law());
         assert_eq!(
             propagate_demand(first, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
@@ -5329,8 +5332,8 @@ mod tests {
         );
         assert_eq!(row_stream_op(first), first_selector.row_stream_op());
 
-        let last = BuiltinId::from_method(BuiltinMethod::Last);
         let last_selector = BuiltinArraySelector::Last;
+        let last = last_selector.id();
         assert_eq!(demand_law(last), last_selector.demand_law());
         assert_eq!(
             propagate_demand(last, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
@@ -5346,8 +5349,8 @@ mod tests {
         );
         assert_eq!(row_stream_op(last), last_selector.row_stream_op());
 
-        let nth = BuiltinId::from_method(BuiltinMethod::Nth);
         let nth_selector = BuiltinArraySelector::Nth;
+        let nth = nth_selector.id();
         assert_eq!(demand_law(nth), nth_selector.demand_law());
         assert_eq!(
             propagate_demand(nth, BuiltinDemandArg::Usize(2), Demand::all(ValueNeed::Whole)).pull,
