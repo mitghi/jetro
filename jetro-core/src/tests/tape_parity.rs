@@ -225,3 +225,28 @@ fn tape_matches_vm_for_scalar_terminal_sinks() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
+    let doc = json!({
+        "orders": [
+            {"id": "a1", "region": "eu", "status": "open", "total": 12, "customer": {"tier": "gold"}},
+            {"id": "a2", "region": "us", "status": "open", "total": 9, "customer": {"tier": "silver"}},
+            {"id": "a3", "region": "eu", "status": "closed", "total": 15, "customer": {"tier": "gold"}},
+            {"id": "a4", "region": "apac", "status": "open", "total": 7, "customer": {"tier": "bronze"}},
+            {"id": "a5", "region": "us", "status": "closed", "total": 20, "customer": {"tier": "silver"}}
+        ]
+    });
+    for query in [
+        "$.orders.count_by(region)",
+        "$.orders.filter(total > 10).count_by(customer.tier)",
+        "$.orders.index_by(id)",
+        "$.orders.map({id, region, total}).index_by(id)",
+        "$.orders.group_by(status)",
+        "$.orders.group_by(region).entries().map({region: @[0], count: @[1].len()})",
+        "$.orders.unique_by(region).map(id)",
+        "$.orders.filter(status == \"open\").unique_by(customer.tier).map({id, tier: customer.tier})",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}

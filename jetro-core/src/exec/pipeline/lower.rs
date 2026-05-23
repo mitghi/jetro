@@ -14,7 +14,8 @@ use crate::builtins::registry::{
     sink_accumulator as builtin_sink_accumulator, view_projection, BuiltinId,
 };
 use crate::builtins::{
-    BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering, BuiltinSinkAccumulator,
+    BuiltinCardinality, BuiltinExprStage, BuiltinMethod, BuiltinPipelineLowering,
+    BuiltinSinkAccumulator,
 };
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -231,6 +232,9 @@ fn decode_method_chain(
                     &mut stage_exprs,
                     &mut sink,
                 )?;
+                if !is_last && stages.last().is_some_and(stage_is_value_reducer_boundary) {
+                    return None;
+                }
             }
             Step::Slice(start, end, step) => {
                 // Pipeline lowering only handles step-1 slices today. Step
@@ -249,6 +253,10 @@ fn decode_method_chain(
         }
     }
     Some((stages, stage_exprs, sink))
+}
+
+fn stage_is_value_reducer_boundary(stage: &Stage) -> bool {
+    stage.shape().cardinality == BuiltinCardinality::Reducing
 }
 
 fn push_path_slice_stages(

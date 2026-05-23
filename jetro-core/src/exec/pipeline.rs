@@ -990,6 +990,9 @@ mod tests {
         assert!(lower_query("$.books.find(price > 20).map(isbn)").is_none());
         assert!(lower_query("$.books.count_by(active)").is_some());
         assert!(lower_query("$.books.count_by(active).entries()").is_none());
+        assert!(lower_query("$.books.group_by(active)").is_some());
+        assert!(lower_query("$.books.group_by(active).entries()").is_none());
+        assert!(lower_query("$.books.group_by(active).entries().map(@[0])").is_none());
     }
 
     #[test]

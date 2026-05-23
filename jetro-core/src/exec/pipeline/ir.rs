@@ -878,6 +878,16 @@ impl Stage {
             .is_some_and(|method| pipeline_composed_barrier(BuiltinId::from_method(method)))
     }
 
+    /// Returns `true` when this stage is a direct value projection such as
+    /// `entries()`/`keys()`/`pick()` rather than a row-stream transform.
+    #[inline]
+    pub(crate) fn is_direct_view_projection(&self) -> bool {
+        matches!(
+            self,
+            Stage::Builtin(call) if view_projection(BuiltinId::from_method(call.method))
+        )
+    }
+
     /// Returns `true` when the stage cannot participate in the streaming pull loop and must be
     /// executed via the legacy materialisation path.
     pub(crate) fn requires_legacy_materialization(&self) -> bool {
@@ -1513,10 +1523,21 @@ impl PipelineBody {
     /// `consumed_stages`, used after a view-pipeline prefix has already been executed.
     pub(crate) fn suffix_can_run_with_materialized_receiver(&self, consumed_stages: usize) -> bool {
         consumed_stages <= self.stages.len()
+            && !self.suffix_starts_with_direct_view_projection(consumed_stages)
             && stages_can_run_with_materialized_receiver(&self.stages[consumed_stages..])
             && self
                 .sink
                 .can_run_with_receiver_only(program_is_current_only)
+    }
+
+    /// Returns `true` when the suffix begins with a value projection. That
+    /// suffix must remain in expression-chain semantics; executing it as a
+    /// row-stream stage would treat the projected value itself as one row.
+    #[inline]
+    pub(crate) fn suffix_starts_with_direct_view_projection(&self, consumed_stages: usize) -> bool {
+        self.stages
+            .get(consumed_stages)
+            .is_some_and(Stage::is_direct_view_projection)
     }
 
     /// Returns the source demand for this body after propagating the sink demand
