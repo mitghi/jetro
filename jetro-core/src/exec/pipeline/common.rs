@@ -51,12 +51,18 @@ pub(crate) fn num_fold_i64(
             }
         }
         NumOp::Min => {
+            if *n_obs == 1 || n < *acc_i {
+                *acc_i = n;
+            }
             let f = n as f64;
             if f < *min_f {
                 *min_f = f;
             }
         }
         NumOp::Max => {
+            if *n_obs == 1 || n > *acc_i {
+                *acc_i = n;
+            }
             let f = n as f64;
             if f > *max_f {
                 *max_f = f;
@@ -87,11 +93,13 @@ pub(crate) fn num_fold_f64(
             *acc_f += x;
         }
         NumOp::Min => {
+            *floated = true;
             if x < *min_f {
                 *min_f = x;
             }
         }
         NumOp::Max => {
+            *floated = true;
             if x > *max_f {
                 *max_f = x;
             }
@@ -125,8 +133,20 @@ pub(crate) fn num_finalise(
             let total = if floated { acc_f } else { acc_i as f64 };
             Val::Float(total / n_obs as f64)
         }
-        NumOp::Min => Val::Float(min_f),
-        NumOp::Max => Val::Float(max_f),
+        NumOp::Min => {
+            if floated {
+                Val::Float(min_f)
+            } else {
+                Val::Int(acc_i)
+            }
+        }
+        NumOp::Max => {
+            if floated {
+                Val::Float(max_f)
+            } else {
+                Val::Int(acc_i)
+            }
+        }
     }
 }
 

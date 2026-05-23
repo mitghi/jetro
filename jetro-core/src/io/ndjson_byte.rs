@@ -1739,35 +1739,36 @@ fn fold_raw_json_numeric(
     max_f: &mut f64,
     n_obs: &mut usize,
 ) {
-    let (as_f, as_i) = match value {
-        JsonView::Int(value) => (value as f64, Some(value)),
-        JsonView::UInt(value) => (value as f64, i64::try_from(value).ok()),
-        JsonView::Float(value) => (value, None),
+    match value {
+        JsonView::Int(value) => crate::exec::pipeline::num_fold_i64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
+        JsonView::UInt(value) if value <= i64::MAX as u64 => {
+            crate::exec::pipeline::num_fold_i64(
+                acc_i,
+                acc_f,
+                floated,
+                min_f,
+                max_f,
+                n_obs,
+                op,
+                value as i64,
+            )
+        }
+        JsonView::UInt(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as f64,
+        ),
+        JsonView::Float(value) => crate::exec::pipeline::num_fold_f64(
+            acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
+        ),
         _ => return,
-    };
-    *n_obs += 1;
-    match op {
-        crate::exec::pipeline::NumOp::Sum | crate::exec::pipeline::NumOp::Avg => {
-            if let Some(value) = as_i.filter(|_| !*floated) {
-                *acc_i += value;
-            } else {
-                if !*floated {
-                    *acc_f = *acc_i as f64;
-                    *floated = true;
-                }
-                *acc_f += as_f;
-            }
-        }
-        crate::exec::pipeline::NumOp::Min => {
-            if as_f < *min_f {
-                *min_f = as_f;
-            }
-        }
-        crate::exec::pipeline::NumOp::Max => {
-            if as_f > *max_f {
-                *max_f = as_f;
-            }
-        }
     }
 }
 

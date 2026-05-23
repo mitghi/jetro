@@ -95,6 +95,29 @@ fn tape_matches_vm_for_scalar_methods_inside_nested_projection() {
 }
 
 #[test]
+fn tape_matches_vm_for_scalar_methods_over_array_rows() {
+    let doc = json!({
+        "items": [
+            {"name": " Ada ", "email": "ada@example.test", "score": -10.4, "code": "41"},
+            {"name": "Bob", "email": "bob@example.org", "score": 20.5, "code": "x"},
+            {"name": "Cy", "email": "cy@example.test", "score": -3.2, "code": "1"}
+        ]
+    });
+    for query in [
+        "$.items.map(name.upper()).last()",
+        "$.items.map(name.trim().lower()).take(2)",
+        "$.items.filter(name.starts_with(\" A\")).map(name.trim()).first()",
+        "$.items.filter(email.ends_with(\".test\")).map(email.index_of(\"@\")).last()",
+        "$.items.map(score.abs()).sum()",
+        "$.items.map(score.round()).max()",
+        "$.items.filter(code.is_numeric()).map(code.parse_int()).sum()",
+        "$.items.map(name.byte_len()).sum()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_across_view_projection_boundaries() {
     let doc = json!({
         "users": [
