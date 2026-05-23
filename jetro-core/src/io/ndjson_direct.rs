@@ -902,6 +902,15 @@ pub(super) fn direct_tape_predicate_for_expr(expr: &Expr) -> Option<NdjsonDirect
     direct_tape_predicate_from_plan(&plan)
 }
 
+pub(super) fn direct_tape_predicates_for_exprs<'a>(
+    exprs: impl IntoIterator<Item = &'a Expr>,
+) -> Option<Vec<NdjsonDirectPredicate>> {
+    exprs
+        .into_iter()
+        .map(direct_tape_predicate_for_expr)
+        .collect()
+}
+
 fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate> {
     let Expr::Chain(base, steps) = expr else {
         return None;
@@ -1596,6 +1605,18 @@ mod tests {
             direct_array_any_predicate_expr(&expr),
             Some(NdjsonDirectPredicate::ArrayAny { .. })
         ));
+    }
+
+    #[test]
+    fn direct_tape_predicates_collects_all_or_rejects_whole_prefix() {
+        let active = crate::parse::parser::parse("$.active == true").expect("parse active");
+        let score = crate::parse::parser::parse("$.score > 10").expect("parse score");
+        let unsupported = crate::parse::parser::parse(r#"match @ with { _ -> true }"#)
+            .expect("parse unsupported");
+
+        let predicates = direct_tape_predicates_for_exprs([&active, &score]).expect("predicates");
+        assert_eq!(predicates.len(), 2);
+        assert!(direct_tape_predicates_for_exprs([&active, &unsupported]).is_none());
     }
 
     #[test]

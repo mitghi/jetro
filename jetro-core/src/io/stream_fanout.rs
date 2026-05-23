@@ -8,7 +8,8 @@ use super::ndjson_byte::{
 };
 use super::ndjson_direct::{
     direct_cmp_literal_predicate, direct_tape_plan_for_expr, direct_tape_predicate_for_expr,
-    physical_paths_equal, NdjsonDirectPredicate, NdjsonDirectTapePlan, NdjsonPhysicalPath,
+    direct_tape_predicates_for_exprs, physical_paths_equal, NdjsonDirectPredicate,
+    NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
 use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;
@@ -738,20 +739,13 @@ fn direct_predicate_sink_consumer(plan: &RowStreamPlan) -> Option<DirectPredicat
     })
 }
 fn direct_filter_prefix(stages: &[RowStreamStage]) -> Option<Vec<NdjsonDirectPredicate>> {
-    RowStreamStage::filter_prefix(stages)?
-        .into_iter()
-        .map(direct_tape_predicate_for_expr)
-        .collect()
+    direct_tape_predicates_for_exprs(RowStreamStage::filter_prefix(stages)?)
 }
 fn direct_filter_take_prefix(
     stages: &[RowStreamStage],
 ) -> Option<(Vec<NdjsonDirectPredicate>, Option<usize>)> {
     let prefix = RowStreamStage::filter_take_prefix(stages)?;
-    let predicates = prefix
-        .filters
-        .into_iter()
-        .map(direct_tape_predicate_for_expr)
-        .collect::<Option<Vec<_>>>()?;
+    let predicates = direct_tape_predicates_for_exprs(prefix.filters)?;
     Some((predicates, prefix.limit))
 }
 fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
