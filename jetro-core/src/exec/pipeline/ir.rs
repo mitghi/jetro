@@ -1161,13 +1161,11 @@ impl Stage {
 
     fn chain_demand_op(&self) -> Option<ChainOp> {
         let desc = self.descriptor()?;
-        let method = desc.method?;
+        let id = desc.builtin_id()?;
         match self {
-            _ if desc.usize_arg.is_some() => Some(ChainOp::builtin_usize(method, desc.usize_arg?)),
-            Stage::Builtin(_) => Some(ChainOp::builtin(method)),
-            _ if desc.builtin_id().is_some_and(participates_in_demand) => {
-                Some(ChainOp::builtin(method))
-            }
+            _ if desc.usize_arg.is_some() => Some(ChainOp::builtin_usize_id(id, desc.usize_arg?)),
+            Stage::Builtin(_) => Some(ChainOp::builtin_id(id)),
+            _ if participates_in_demand(id) => Some(ChainOp::builtin_id(id)),
             _ => None,
         }
     }

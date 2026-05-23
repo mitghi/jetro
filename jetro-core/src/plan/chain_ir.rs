@@ -6,8 +6,9 @@
 
 use crate::{
     builtins::registry::{BuiltinDemandArg, BuiltinId},
-    builtins::BuiltinMethod,
 };
+#[cfg(test)]
+use crate::builtins::BuiltinMethod;
 
 /// A single operator node in the chain IR, carrying identity and demand
 /// metadata for each step in a composed pipeline.
@@ -39,20 +40,32 @@ pub enum MatchRole {
 }
 
 impl ChainOp {
-    /// Construct a `ChainOp::Builtin` from a `BuiltinMethod` with no demand argument.
-    pub fn builtin(method: BuiltinMethod) -> Self {
+    /// Construct a `ChainOp::Builtin` from a stable builtin id with no demand argument.
+    pub fn builtin_id(id: BuiltinId) -> Self {
         Self::Builtin {
-            id: BuiltinId::from_method(method),
+            id,
             demand_arg: BuiltinDemandArg::None,
         }
     }
 
-    /// Construct a `ChainOp::Builtin` from a `BuiltinMethod` with a `Usize(n)` demand argument.
-    pub fn builtin_usize(method: BuiltinMethod, n: usize) -> Self {
+    /// Construct a `ChainOp::Builtin` from a `BuiltinMethod` with no demand argument.
+    #[cfg(test)]
+    pub fn builtin(method: BuiltinMethod) -> Self {
+        Self::builtin_id(BuiltinId::from_method(method))
+    }
+
+    /// Construct a `ChainOp::Builtin` from a stable builtin id with a `Usize(n)` demand argument.
+    pub fn builtin_usize_id(id: BuiltinId, n: usize) -> Self {
         Self::Builtin {
-            id: BuiltinId::from_method(method),
+            id,
             demand_arg: BuiltinDemandArg::Usize(n),
         }
+    }
+
+    /// Construct a `ChainOp::Builtin` from a `BuiltinMethod` with a `Usize(n)` demand argument.
+    #[cfg(test)]
+    pub fn builtin_usize(method: BuiltinMethod, n: usize) -> Self {
+        Self::builtin_usize_id(BuiltinId::from_method(method), n)
     }
 
     /// Construct a `ChainOp::Match` for the given `role`.
