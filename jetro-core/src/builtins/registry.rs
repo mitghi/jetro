@@ -537,16 +537,16 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             }
             BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
-        BuiltinDemandLaw::First => Demand::first(ValueNeed::Whole),
+        BuiltinDemandLaw::First => Demand::first(downstream.value),
         BuiltinDemandLaw::Last => Demand {
             pull: PullDemand::LastInput(1),
-            value: ValueNeed::Whole,
+            value: downstream.value,
             order: true,
         },
         BuiltinDemandLaw::Nth => match arg {
             BuiltinDemandArg::Usize(i) => Demand {
                 pull: PullDemand::NthInput(i),
-                value: ValueNeed::Whole,
+                value: downstream.value,
                 order: false,
             },
             BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
@@ -1935,6 +1935,9 @@ mod tests {
         let slice = BuiltinId::from_method(BuiltinMethod::Slice);
         let chunk = BuiltinId::from_method(BuiltinMethod::Chunk);
         let window = BuiltinId::from_method(BuiltinMethod::Window);
+        let first = BuiltinId::from_method(BuiltinMethod::First);
+        let last = BuiltinId::from_method(BuiltinMethod::Last);
+        let nth = BuiltinId::from_method(BuiltinMethod::Nth);
 
         let demand = propagate_demand(take, BuiltinDemandArg::Usize(3), Demand::RESULT);
         assert_eq!(demand.pull, PullDemand::FirstInput(3));
@@ -2108,6 +2111,26 @@ mod tests {
         let demand = propagate_demand(window, BuiltinDemandArg::Usize(4), downstream);
         assert_eq!(demand.pull, PullDemand::FirstInput(6));
         assert_eq!(demand.value, ValueNeed::Whole);
+
+        let downstream = Demand {
+            pull: PullDemand::All,
+            value: ValueNeed::Predicate,
+            order: false,
+        };
+        let demand = propagate_demand(first, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::FirstInput(1));
+        assert_eq!(demand.value, ValueNeed::Predicate);
+        assert!(!demand.order);
+
+        let demand = propagate_demand(last, BuiltinDemandArg::None, downstream);
+        assert_eq!(demand.pull, PullDemand::LastInput(1));
+        assert_eq!(demand.value, ValueNeed::Predicate);
+        assert!(demand.order);
+
+        let demand = propagate_demand(nth, BuiltinDemandArg::Usize(3), downstream);
+        assert_eq!(demand.pull, PullDemand::NthInput(3));
+        assert_eq!(demand.value, ValueNeed::Predicate);
+        assert!(!demand.order);
     }
 
     #[test]
