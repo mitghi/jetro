@@ -2119,6 +2119,105 @@ mod tests {
     }
 
     #[test]
+    fn registry_membership_sinks_have_complete_terminal_contracts() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(sink) = membership_sink(id) else {
+                continue;
+            };
+
+            assert_eq!(sink.method(), method, "{method:?}");
+            assert_eq!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalSink),
+                "{method:?}"
+            );
+            assert_eq!(
+                pipeline_arity(id, true),
+                Some(BuiltinPipelineArity::Exact(1)),
+                "{method:?}"
+            );
+            assert_eq!(demand_law(id), BuiltinDemandLaw::PredicateMapLike, "{method:?}");
+            assert_eq!(
+                sink_accumulator(id),
+                None,
+                "{method:?} membership sink must not also expose accumulator metadata"
+            );
+            assert_eq!(
+                row_stream_op(id),
+                None,
+                "{method:?} membership sink must not silently become a rows() stream op"
+            );
+            assert!(
+                !accepts_lambda_arg(id),
+                "{method:?} membership sink expects a target value, not a predicate expression"
+            );
+            assert_eq!(membership_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
+            match sink {
+                BuiltinMembershipSink::Includes | BuiltinMembershipSink::Index => assert_eq!(
+                    membership_sink_result_demand(sink),
+                    SinkResultDemand::UntilMatch,
+                    "{method:?}"
+                ),
+                BuiltinMembershipSink::IndicesOf => assert_eq!(
+                    membership_sink_result_demand(sink),
+                    SinkResultDemand::None,
+                    "{method:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn registry_arg_extreme_sinks_have_complete_terminal_contracts() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(sink) = arg_extreme_sink(id) else {
+                continue;
+            };
+
+            assert_eq!(
+                pipeline_lowering(id),
+                Some(BuiltinPipelineLowering::TerminalSink),
+                "{method:?}"
+            );
+            assert_eq!(
+                pipeline_arity(id, true),
+                Some(BuiltinPipelineArity::Exact(1)),
+                "{method:?}"
+            );
+            assert_eq!(
+                demand_law(id),
+                BuiltinDemandLaw::RowKeyedReducer,
+                "{method:?}"
+            );
+            assert_eq!(
+                sink_accumulator(id),
+                None,
+                "{method:?} arg-extreme sink must not also expose accumulator metadata"
+            );
+            assert_eq!(
+                row_stream_op(id),
+                None,
+                "{method:?} arg-extreme sink needs global row ordering and key comparison"
+            );
+            assert!(
+                accepts_lambda_arg(id),
+                "{method:?} arg-extreme sink must accept a key expression"
+            );
+            assert_eq!(
+                arg_extreme_wants_max(id),
+                Some(sink.wants_max()),
+                "{method:?}"
+            );
+            match sink {
+                BuiltinArgExtremeSink::MaxBy => assert!(sink.wants_max(), "{method:?}"),
+                BuiltinArgExtremeSink::MinBy => assert!(!sink.wants_max(), "{method:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn registry_drives_direct_scalar_sink_projection() {
         let count = direct_scalar_for_plain_sink(BuiltinId::from_method(BuiltinMethod::Count))
             .expect("count should project as len");
