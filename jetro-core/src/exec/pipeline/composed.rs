@@ -17,7 +17,6 @@ use crate::builtins::{
     registry::{
         keyed_reducer as builtin_keyed_reducer, numeric_reducer as builtin_numeric_reducer,
         pipeline_stage_caps_input_prefix, pipeline_stage_is_positional, BuiltinComposedStage,
-        BuiltinId,
     },
     BuiltinKeyedReducer, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
 };
@@ -58,6 +57,7 @@ impl<'a> ComposedStageBuilder<'a> {
 
     /// Builds a specialised `composed::Stage` for `(stage, kernel)`; returns `None` for barrier stages.
     pub(super) fn build(&self, stage: &Stage, kernel: &BodyKernel) -> Option<Box<dyn cmp::Stage>> {
+        let stage_id = stage.descriptor().and_then(|desc| desc.builtin_id());
         Some(match (stage, kernel) {
             (Stage::CompiledMap(plan), _) => Box::new(NestedPlanStage {
                 plan: super::nested::PreparedPlan::new(plan),
@@ -84,15 +84,15 @@ impl<'a> ComposedStageBuilder<'a> {
                     keys: Arc::clone(keys),
                 })
             }
-            (Stage::UsizeBuiltin { method, value }, _)
-                if pipeline_stage_caps_input_prefix(BuiltinId::from_method(*method)) =>
+            (Stage::UsizeBuiltin { value, .. }, _)
+                if stage_id.is_some_and(pipeline_stage_caps_input_prefix) =>
             {
                 Box::new(cmp::Take {
                     remaining: Cell::new(*value),
                 })
             }
-            (Stage::UsizeBuiltin { method, value }, _)
-                if pipeline_stage_is_positional(BuiltinId::from_method(*method)) =>
+            (Stage::UsizeBuiltin { value, .. }, _)
+                if stage_id.is_some_and(pipeline_stage_is_positional) =>
             {
                 Box::new(cmp::Skip {
                     remaining: Cell::new(*value),
@@ -327,11 +327,14 @@ fn run_barrier(
             let key = key_from_kernel(kernel)?;
             cmp::barrier_unique_by(buf, &key)
         }
-        Stage::ExprBuiltin { method, .. }
-            if builtin_keyed_reducer(BuiltinId::from_method(*method)).is_some() =>
+        Stage::ExprBuiltin { .. } if stage
+            .descriptor()
+            .and_then(|desc| desc.builtin_id())
+            .is_some_and(|id| builtin_keyed_reducer(id).is_some()) =>
         {
+            let id = stage.descriptor()?.builtin_id()?;
             let key = key_from_kernel(kernel)?;
-            let value = match builtin_keyed_reducer(BuiltinId::from_method(*method))? {
+            let value = match builtin_keyed_reducer(id)? {
                 BuiltinKeyedReducer::Group => cmp::barrier_group_by(buf, &key),
                 BuiltinKeyedReducer::Count => cmp::barrier_count_by(buf, &key),
                 BuiltinKeyedReducer::Index => cmp::barrier_index_by(buf, &key),
@@ -456,7 +459,7 @@ where
 }
 
 fn numeric_reducer(sink: &Sink) -> Option<BuiltinNumericReducer> {
-    builtin_numeric_reducer(BuiltinId::from_method(sink.reducer_spec()?.method()?))
+    builtin_numeric_reducer(sink.builtin_id()?)
 }
 
 // ---------------------------------------------------------------------------
