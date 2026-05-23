@@ -84,11 +84,11 @@ pub(crate) fn sink_label(sink: &Sink) -> &'static str {
             crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Avg) => "avg",
         },
         Sink::Predicate(spec) => match spec.op {
-            crate::exec::pipeline::PredicateSinkOp::Any => "any",
-            crate::exec::pipeline::PredicateSinkOp::All => "all",
-            crate::exec::pipeline::PredicateSinkOp::FindIndex => "find-index",
-            crate::exec::pipeline::PredicateSinkOp::IndicesWhere => "indices-where",
-            crate::exec::pipeline::PredicateSinkOp::FindOne => "find-one",
+            crate::builtins::BuiltinPredicateSink::Any => "any",
+            crate::builtins::BuiltinPredicateSink::All => "all",
+            crate::builtins::BuiltinPredicateSink::FindIndex => "find-index",
+            crate::builtins::BuiltinPredicateSink::IndicesWhere => "indices-where",
+            crate::builtins::BuiltinPredicateSink::FindOne => "find-one",
         },
         Sink::Membership(_) => "membership",
         Sink::ArgExtreme(spec) => {

@@ -5,14 +5,15 @@
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
 use crate::builtins::{
-    BuiltinCardinality, BuiltinKeyedReducer, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinViewInputMode, BuiltinViewOutputMode, BuiltinViewStage,
+    BuiltinCardinality, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinPredicateSink,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode, BuiltinViewOutputMode,
+    BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
 
-use super::{MembershipSinkOp, MembershipSinkTarget, PipelineBody, PredicateSinkOp, Stage};
+use super::{MembershipSinkTarget, PipelineBody, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,14 +691,14 @@ pub(crate) enum ViewSinkCapability {
     /// Predicate terminal sink (`any`, `all`, `find_index`, `indices_where`, `find_one`).
     Predicate {
         /// Predicate terminal operation to perform.
-        op: PredicateSinkOp,
+        op: BuiltinPredicateSink,
         /// Index of the view-native predicate kernel in `sink_kernels`.
         predicate_kernel: usize,
     },
     /// Literal value-membership terminal sink (`includes`, `index`, `indices_of`).
     Membership {
         /// Membership terminal operation to perform.
-        op: MembershipSinkOp,
+        op: BuiltinMembershipSink,
         /// Target compared against each row.
         target: ViewMembershipTarget,
     },
@@ -743,7 +744,7 @@ impl ViewSinkCapability {
             } => *materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
             Self::Predicate { op, .. } => {
-                if op.is_find_one() {
+                if *op == BuiltinPredicateSink::FindOne {
                     ViewMaterialization::SinkFinalRow
                 } else {
                     ViewMaterialization::Never
@@ -882,14 +883,15 @@ mod tests {
     use std::sync::Arc;
 
     use crate::builtins::{
-        BuiltinMethod, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
+        BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator, BuiltinViewStage,
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-        NumOp, PipelineBody, PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink,
-        Stage, ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
-        ViewSinkCapability, ViewStageCapability,
+        ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget, NumOp,
+        PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
+        ViewMaterialization, ViewMembershipTarget, ViewOutputMode, ViewSinkCapability,
+        ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
 
@@ -1027,7 +1029,7 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::Predicate {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate_kernel: 0,
             }
             .materialization(),
@@ -1035,7 +1037,7 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::Predicate {
-                op: PredicateSinkOp::FindOne,
+                op: BuiltinPredicateSink::FindOne,
                 predicate_kernel: 0,
             }
             .materialization(),
@@ -1043,7 +1045,7 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::Membership {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: ViewMembershipTarget::Literal(Val::Int(3)),
             }
             .materialization(),
@@ -1051,7 +1053,7 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::Membership {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: ViewMembershipTarget::Literal(Val::arr(vec![Val::Int(3)])),
             }
             .materialization(),
@@ -1107,7 +1109,7 @@ mod tests {
         ));
         assert!(matches!(
             Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             })
@@ -1117,13 +1119,13 @@ mod tests {
                 Val::Int(10),
             )]),
             Some(ViewSinkCapability::Predicate {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate_kernel: 0,
             })
         ));
         assert!(matches!(
             Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::FindOne,
+                op: BuiltinPredicateSink::FindOne,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             })
@@ -1133,7 +1135,7 @@ mod tests {
                 Val::Int(10),
             )]),
             Some(ViewSinkCapability::Predicate {
-                op: PredicateSinkOp::FindOne,
+                op: BuiltinPredicateSink::FindOne,
                 predicate_kernel: 0,
             })
         ));
@@ -1151,18 +1153,18 @@ mod tests {
         ));
         assert!(matches!(
             Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             })
             .view_capability(&[]),
             Some(ViewSinkCapability::Membership {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: ViewMembershipTarget::Literal(Val::Int(3)),
             })
         ));
         assert!(matches!(
             Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Program(Arc::new(crate::vm::Program::new(
                     Vec::new(),
                     ""
@@ -1170,7 +1172,7 @@ mod tests {
             })
             .view_capability(&[]),
             Some(ViewSinkCapability::Membership {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: ViewMembershipTarget::Program(_),
             })
         ));

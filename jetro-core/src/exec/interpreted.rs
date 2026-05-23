@@ -1057,9 +1057,10 @@ fn pipeline_body_has_dynamic_membership_target(body: &pipeline::PipelineBody) ->
 mod tests {
     use std::sync::Arc;
 
+    use crate::builtins::BuiltinMembershipSink;
     use crate::data::value::Val;
     use crate::exec::pipeline::{
-        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody, Sink,
+        BodyKernel, MembershipSinkSpec, MembershipSinkTarget, PipelineBody, Sink,
     };
 
     fn body_with_target(target: MembershipSinkTarget) -> PipelineBody {
@@ -1067,7 +1068,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target,
             }),
             stage_kernels: Vec::new(),

@@ -6,11 +6,14 @@
 use std::collections::VecDeque;
 
 use crate::{
-    builtins::{BuiltinSelectionPosition, BuiltinSinkAccumulator},
+    builtins::{
+        BuiltinMembershipSink, BuiltinPredicateSink, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator,
+    },
     data::{context::EvalError, value::Val},
 };
 
-use super::{cmp_val_total, MembershipSinkOp, PredicateSinkOp, ReducerAccumulator, Sink};
+use super::{cmp_val_total, ReducerAccumulator, Sink};
 
 /// Stateful wrapper that accumulates one pipeline element at a time on behalf of a `Sink`.
 pub(crate) struct SinkAccumulator<'a> {
@@ -249,7 +252,7 @@ impl<'a> SinkAccumulator<'a> {
     /// Updates a predicate terminal sink with one predicate result and row value.
     pub(crate) fn observe_predicate_item(
         &mut self,
-        op: PredicateSinkOp,
+        op: BuiltinPredicateSink,
         matched: bool,
         item: Val,
     ) -> Result<bool, EvalError> {
@@ -259,7 +262,7 @@ impl<'a> SinkAccumulator<'a> {
     /// Lazy predicate sink variant; materialises the row only for sinks that store it.
     pub(crate) fn observe_predicate_lazy<F>(
         &mut self,
-        op: PredicateSinkOp,
+        op: BuiltinPredicateSink,
         matched: bool,
         materialize_item: F,
     ) -> Result<bool, EvalError>
@@ -267,7 +270,7 @@ impl<'a> SinkAccumulator<'a> {
         F: FnOnce() -> Val,
     {
         match op {
-            PredicateSinkOp::Any => {
+            BuiltinPredicateSink::Any => {
                 if matched {
                     self.predicate_matched = Some(self.predicate_seen);
                     Ok(true)
@@ -276,7 +279,7 @@ impl<'a> SinkAccumulator<'a> {
                     Ok(false)
                 }
             }
-            PredicateSinkOp::All => {
+            BuiltinPredicateSink::All => {
                 self.predicate_seen += 1;
                 if matched {
                     Ok(false)
@@ -285,7 +288,7 @@ impl<'a> SinkAccumulator<'a> {
                     Ok(true)
                 }
             }
-            PredicateSinkOp::FindIndex => {
+            BuiltinPredicateSink::FindIndex => {
                 if matched {
                     self.predicate_matched = Some(self.predicate_seen);
                     Ok(true)
@@ -294,14 +297,14 @@ impl<'a> SinkAccumulator<'a> {
                     Ok(false)
                 }
             }
-            PredicateSinkOp::IndicesWhere => {
+            BuiltinPredicateSink::IndicesWhere => {
                 if matched {
                     self.predicate_indices.push(self.predicate_seen as i64);
                 }
                 self.predicate_seen += 1;
                 Ok(false)
             }
-            PredicateSinkOp::FindOne => {
+            BuiltinPredicateSink::FindOne => {
                 if matched {
                     if self.predicate_matched.is_some() {
                         return Err(EvalError(
@@ -320,7 +323,7 @@ impl<'a> SinkAccumulator<'a> {
     /// Updates a value-membership terminal sink with one row; returns true once decided.
     pub(crate) fn observe_membership(
         &mut self,
-        op: MembershipSinkOp,
+        op: BuiltinMembershipSink,
         item: &Val,
         target: &Val,
     ) -> bool {
@@ -331,11 +334,11 @@ impl<'a> SinkAccumulator<'a> {
     /// Updates a value-membership terminal sink with an already-computed comparison result.
     pub(crate) fn observe_membership_match(
         &mut self,
-        op: MembershipSinkOp,
+        op: BuiltinMembershipSink,
         matched: bool,
     ) -> bool {
         match op {
-            MembershipSinkOp::Includes => {
+            BuiltinMembershipSink::Includes => {
                 if matched {
                     self.membership_matched = Some(self.membership_seen);
                     true
@@ -344,7 +347,7 @@ impl<'a> SinkAccumulator<'a> {
                     false
                 }
             }
-            MembershipSinkOp::Index => {
+            BuiltinMembershipSink::Index => {
                 if matched {
                     self.membership_matched = Some(self.membership_seen);
                     true
@@ -353,7 +356,7 @@ impl<'a> SinkAccumulator<'a> {
                     false
                 }
             }
-            MembershipSinkOp::IndicesOf => {
+            BuiltinMembershipSink::IndicesOf => {
                 if matched {
                     self.membership_indices.push(self.membership_seen as i64);
                 }
@@ -431,22 +434,22 @@ impl<'a> SinkAccumulator<'a> {
                 .finish(),
             Sink::ApproxCountDistinct => Val::Int(hll_estimate(&self.hll) as i64),
             Sink::Predicate(spec) => match spec.op {
-                PredicateSinkOp::Any => Val::Bool(self.predicate_matched.is_some()),
-                PredicateSinkOp::All => Val::Bool(self.predicate_all),
-                PredicateSinkOp::FindIndex => self
+                BuiltinPredicateSink::Any => Val::Bool(self.predicate_matched.is_some()),
+                BuiltinPredicateSink::All => Val::Bool(self.predicate_all),
+                BuiltinPredicateSink::FindIndex => self
                     .predicate_matched
                     .map(|idx| Val::Int(idx as i64))
                     .unwrap_or(Val::Null),
-                PredicateSinkOp::IndicesWhere => Val::int_vec(self.predicate_indices),
-                PredicateSinkOp::FindOne => self.predicate_value.unwrap_or(Val::Null),
+                BuiltinPredicateSink::IndicesWhere => Val::int_vec(self.predicate_indices),
+                BuiltinPredicateSink::FindOne => self.predicate_value.unwrap_or(Val::Null),
             },
             Sink::Membership(spec) => match spec.op {
-                MembershipSinkOp::Includes => Val::Bool(self.membership_matched.is_some()),
-                MembershipSinkOp::Index => self
+                BuiltinMembershipSink::Includes => Val::Bool(self.membership_matched.is_some()),
+                BuiltinMembershipSink::Index => self
                     .membership_matched
                     .map(|idx| Val::Int(idx as i64))
                     .unwrap_or(Val::Null),
-                MembershipSinkOp::IndicesOf => Val::int_vec(self.membership_indices),
+                BuiltinMembershipSink::IndicesOf => Val::int_vec(self.membership_indices),
             },
             Sink::ArgExtreme(_) => self.arg_extreme_value.unwrap_or(Val::Null),
             Sink::SelectMany { n: 0, .. } => Val::Null,
@@ -553,7 +556,7 @@ mod tests {
         Arc::new(Program::new(Vec::new(), "<sink-accumulator-test>"))
     }
 
-    fn predicate_sink(op: PredicateSinkOp) -> Sink {
+    fn predicate_sink(op: BuiltinPredicateSink) -> Sink {
         Sink::Predicate(PredicateSinkSpec {
             op,
             predicate: empty_program(),
@@ -561,7 +564,7 @@ mod tests {
         })
     }
 
-    fn membership_sink(op: MembershipSinkOp) -> Sink {
+    fn membership_sink(op: BuiltinMembershipSink) -> Sink {
         Sink::Membership(MembershipSinkSpec {
             op,
             target: MembershipSinkTarget::Literal(Val::Int(7)),
@@ -570,11 +573,11 @@ mod tests {
 
     #[test]
     fn predicate_short_circuit_sinks_do_not_materialize_rows() {
-        let any_sink = predicate_sink(PredicateSinkOp::Any);
+        let any_sink = predicate_sink(BuiltinPredicateSink::Any);
         let mut any = SinkAccumulator::new(&any_sink);
         let materialized = Cell::new(0);
         let decided = any
-            .observe_predicate_lazy(PredicateSinkOp::Any, true, || {
+            .observe_predicate_lazy(BuiltinPredicateSink::Any, true, || {
                 materialized.set(materialized.get() + 1);
                 Val::Int(1)
             })
@@ -584,11 +587,11 @@ mod tests {
         assert_eq!(materialized.get(), 0);
         assert_eq!(any.finish(false), Val::Bool(true));
 
-        let all_sink = predicate_sink(PredicateSinkOp::All);
+        let all_sink = predicate_sink(BuiltinPredicateSink::All);
         let mut all = SinkAccumulator::new(&all_sink);
         let materialized = Cell::new(0);
         let decided = all
-            .observe_predicate_lazy(PredicateSinkOp::All, false, || {
+            .observe_predicate_lazy(BuiltinPredicateSink::All, false, || {
                 materialized.set(materialized.get() + 1);
                 Val::Int(1)
             })
@@ -601,12 +604,12 @@ mod tests {
 
     #[test]
     fn find_one_materializes_only_matching_row_once() {
-        let sink = predicate_sink(PredicateSinkOp::FindOne);
+        let sink = predicate_sink(BuiltinPredicateSink::FindOne);
         let mut acc = SinkAccumulator::new(&sink);
         let materialized = Cell::new(0);
 
         assert!(!acc
-            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || {
+            .observe_predicate_lazy(BuiltinPredicateSink::FindOne, false, || {
                 materialized.set(materialized.get() + 1);
                 Val::Int(0)
             })
@@ -614,7 +617,7 @@ mod tests {
         assert_eq!(materialized.get(), 0);
 
         assert!(!acc
-            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+            .observe_predicate_lazy(BuiltinPredicateSink::FindOne, true, || {
                 materialized.set(materialized.get() + 1);
                 Val::Int(42)
             })
@@ -622,7 +625,7 @@ mod tests {
         assert_eq!(materialized.get(), 1);
 
         let err = acc
-            .observe_predicate_lazy(PredicateSinkOp::FindOne, true, || {
+            .observe_predicate_lazy(BuiltinPredicateSink::FindOne, true, || {
                 materialized.set(materialized.get() + 1);
                 Val::Int(99)
             })
@@ -633,34 +636,34 @@ mod tests {
 
     #[test]
     fn find_one_finish_result_requires_exactly_one_match() {
-        let empty_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let empty_sink = predicate_sink(BuiltinPredicateSink::FindOne);
         let mut empty = SinkAccumulator::new(&empty_sink);
         empty
-            .observe_predicate_lazy(PredicateSinkOp::FindOne, false, || Val::Int(0))
+            .observe_predicate_lazy(BuiltinPredicateSink::FindOne, false, || Val::Int(0))
             .unwrap();
         let err = empty.finish_result(false).unwrap_err();
         assert!(err.0.contains("got 0"));
 
-        let one_sink = predicate_sink(PredicateSinkOp::FindOne);
+        let one_sink = predicate_sink(BuiltinPredicateSink::FindOne);
         let mut one = SinkAccumulator::new(&one_sink);
-        one.observe_predicate_lazy(PredicateSinkOp::FindOne, true, || Val::Int(9))
+        one.observe_predicate_lazy(BuiltinPredicateSink::FindOne, true, || Val::Int(9))
             .unwrap();
         assert_eq!(one.finish_result(false).unwrap(), Val::Int(9));
     }
 
     #[test]
     fn membership_short_circuit_sinks_stop_on_first_match() {
-        let includes_sink = membership_sink(MembershipSinkOp::Includes);
+        let includes_sink = membership_sink(BuiltinMembershipSink::Includes);
         let mut includes = SinkAccumulator::new(&includes_sink);
-        assert!(!includes.observe_membership_match(MembershipSinkOp::Includes, false));
-        assert!(includes.observe_membership_match(MembershipSinkOp::Includes, true));
+        assert!(!includes.observe_membership_match(BuiltinMembershipSink::Includes, false));
+        assert!(includes.observe_membership_match(BuiltinMembershipSink::Includes, true));
         assert_eq!(includes.finish(false), Val::Bool(true));
 
-        let index_sink = membership_sink(MembershipSinkOp::Index);
+        let index_sink = membership_sink(BuiltinMembershipSink::Index);
         let mut index = SinkAccumulator::new(&index_sink);
-        assert!(!index.observe_membership_match(MembershipSinkOp::Index, false));
-        assert!(!index.observe_membership_match(MembershipSinkOp::Index, false));
-        assert!(index.observe_membership_match(MembershipSinkOp::Index, true));
+        assert!(!index.observe_membership_match(BuiltinMembershipSink::Index, false));
+        assert!(!index.observe_membership_match(BuiltinMembershipSink::Index, false));
+        assert!(index.observe_membership_match(BuiltinMembershipSink::Index, true));
         assert_eq!(index.finish(false), Val::Int(2));
     }
 
@@ -668,7 +671,7 @@ mod tests {
     fn scalar_short_circuit_decisions_match_sink_result_demand() {
         use crate::plan::demand::SinkResultDemand;
 
-        for op in [PredicateSinkOp::Any, PredicateSinkOp::FindIndex] {
+        for op in [BuiltinPredicateSink::Any, BuiltinPredicateSink::FindIndex] {
             let sink = predicate_sink(op);
             assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
             let mut acc = SinkAccumulator::new(&sink);
@@ -676,17 +679,17 @@ mod tests {
             assert!(acc.observe_predicate_lazy(op, true, || Val::Null).unwrap());
         }
 
-        let sink = predicate_sink(PredicateSinkOp::All);
+        let sink = predicate_sink(BuiltinPredicateSink::All);
         assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilFailure);
         let mut acc = SinkAccumulator::new(&sink);
         assert!(!acc
-            .observe_predicate_lazy(PredicateSinkOp::All, true, || Val::Null)
+            .observe_predicate_lazy(BuiltinPredicateSink::All, true, || Val::Null)
             .unwrap());
         assert!(acc
-            .observe_predicate_lazy(PredicateSinkOp::All, false, || Val::Null)
+            .observe_predicate_lazy(BuiltinPredicateSink::All, false, || Val::Null)
             .unwrap());
 
-        for op in [MembershipSinkOp::Includes, MembershipSinkOp::Index] {
+        for op in [BuiltinMembershipSink::Includes, BuiltinMembershipSink::Index] {
             let sink = membership_sink(op);
             assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
             let mut acc = SinkAccumulator::new(&sink);
@@ -697,12 +700,12 @@ mod tests {
 
     #[test]
     fn membership_indices_sink_retains_all_matches_without_stopping() {
-        let sink = membership_sink(MembershipSinkOp::IndicesOf);
+        let sink = membership_sink(BuiltinMembershipSink::IndicesOf);
         let mut acc = SinkAccumulator::new(&sink);
 
-        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, true));
-        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, false));
-        assert!(!acc.observe_membership_match(MembershipSinkOp::IndicesOf, true));
+        assert!(!acc.observe_membership_match(BuiltinMembershipSink::IndicesOf, true));
+        assert!(!acc.observe_membership_match(BuiltinMembershipSink::IndicesOf, false));
+        assert!(!acc.observe_membership_match(BuiltinMembershipSink::IndicesOf, true));
         assert_eq!(acc.finish(false), Val::int_vec(vec![0, 2]));
     }
 }

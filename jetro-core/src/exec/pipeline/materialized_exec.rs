@@ -19,8 +19,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels, eval_kernel_with_vm,
-    is_truthy, BodyKernel, MembershipSinkOp, Pipeline, PipelineBody, Sink, Source,
-    SourceAccessMode, Stage, StageFlow, StageStrategy, TerminalMapCollector,
+    is_truthy, BodyKernel, Pipeline, PipelineBody, Sink, Source, SourceAccessMode, Stage,
+    StageFlow, StageStrategy, TerminalMapCollector,
 };
 
 use crate::builtins::registry::{
@@ -28,8 +28,8 @@ use crate::builtins::registry::{
     string_pair_stage as builtin_string_pair_stage, BuiltinId,
 };
 use crate::builtins::{
-    replace_apply, slice_apply, split_apply, BuiltinMethod, BuiltinObjectLambda,
-    BuiltinStringPairStage,
+    replace_apply, slice_apply, split_apply, BuiltinMembershipSink, BuiltinMethod,
+    BuiltinObjectLambda, BuiltinStringPairStage,
 };
 use crate::plan::demand::PullDemand;
 
@@ -632,11 +632,11 @@ fn eval_membership_target(
 
 fn apply_membership_scalar_sink(spec: &super::MembershipSinkSpec, target: &Val, recv: &Val) -> Val {
     match spec.op {
-        MembershipSinkOp::Includes => crate::builtins::includes_apply(recv, target),
-        MembershipSinkOp::Index => {
+        BuiltinMembershipSink::Includes => crate::builtins::includes_apply(recv, target),
+        BuiltinMembershipSink::Index => {
             crate::builtins::index_value_apply(recv, target).unwrap_or(Val::Null)
         }
-        MembershipSinkOp::IndicesOf => {
+        BuiltinMembershipSink::IndicesOf => {
             crate::builtins::indices_of_apply(recv, target).unwrap_or(Val::Null)
         }
     }
@@ -756,10 +756,11 @@ mod tests {
     use crate::data::context::Env;
     use crate::data::value::Val;
     use crate::parse::ast::BinOp;
+    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
 
     use super::super::{
-        BodyKernel, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget, PipelineBody,
-        PredicateSinkOp, PredicateSinkSpec, Sink, Source,
+        BodyKernel, MembershipSinkSpec, MembershipSinkTarget, PipelineBody, PredicateSinkSpec,
+        Sink, Source,
     };
 
     struct CountingRows {
@@ -808,7 +809,7 @@ mod tests {
         let reads = Rc::new(Cell::new(0));
         let pipeline = empty_pipeline(
             Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -828,7 +829,7 @@ mod tests {
         let reads = Rc::new(Cell::new(0));
         let pipeline = empty_pipeline(
             Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::All,
+                op: BuiltinPredicateSink::All,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -848,7 +849,7 @@ mod tests {
         let reads = Rc::new(Cell::new(0));
         let pipeline = empty_pipeline(
             Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             }),
             Vec::new(),
@@ -867,7 +868,7 @@ mod tests {
         let reads = Rc::new(Cell::new(0));
         let pipeline = empty_pipeline(
             Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Index,
+                op: BuiltinMembershipSink::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             }),
             Vec::new(),

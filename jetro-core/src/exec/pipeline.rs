@@ -12,6 +12,8 @@ use std::sync::Arc;
 use crate::builtins::{
     BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer, BuiltinViewStage,
 };
+#[cfg(test)]
+use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
@@ -69,8 +71,8 @@ pub(crate) use lower::{
     compile_pipeline_expr_body, compile_sort_spec, starts_with_direct_view_projection,
 };
 pub use operator::{
-    ArgExtremeSinkSpec, MembershipSinkOp, MembershipSinkSpec, MembershipSinkTarget,
-    PredicateSinkOp, PredicateSinkSpec, ReducerOp, ReducerSpec,
+    ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerOp,
+    ReducerSpec,
 };
 #[cfg(test)]
 pub use plan::compute_strategies;
@@ -2887,7 +2889,7 @@ mod tests {
     #[test]
     fn predicate_terminal_sinks_keep_conservative_source_demand() {
         let any = lower_query("$.xs.any(@ > 2)").unwrap();
-        assert!(matches!(any.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::Any));
+        assert!(matches!(any.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::Any));
         assert_eq!(
             any.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
@@ -2903,7 +2905,7 @@ mod tests {
         );
 
         let all = lower_query("$.xs.all(@ > 2)").unwrap();
-        assert!(matches!(all.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::All));
+        assert!(matches!(all.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::All));
         assert_eq!(
             all.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
@@ -2920,7 +2922,7 @@ mod tests {
 
         let find_index = lower_query("$.xs.find_index(@ > 2)").unwrap();
         assert!(
-            matches!(find_index.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindIndex)
+            matches!(find_index.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::FindIndex)
         );
         assert_eq!(
             find_index.source_demand().chain.pull,
@@ -2938,7 +2940,7 @@ mod tests {
 
         let indices_where = lower_query("$.xs.indices_where(@ > 2)").unwrap();
         assert!(
-            matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::IndicesWhere)
+            matches!(indices_where.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::IndicesWhere)
         );
         assert_eq!(
             indices_where.source_demand().sink_result,
@@ -2952,7 +2954,7 @@ mod tests {
 
         let find_one = lower_query("$.xs.find_one(@ > 2)").unwrap();
         assert!(
-            matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == PredicateSinkOp::FindOne)
+            matches!(find_one.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::FindOne)
         );
         assert_eq!(
             find_one.source_demand().chain.pull,
@@ -3016,7 +3018,7 @@ mod tests {
     fn membership_terminal_sinks_keep_conservative_source_demand() {
         let includes = lower_query("$.xs.includes(\"urgent\")").unwrap();
         assert!(
-            matches!(includes.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Includes)
+            matches!(includes.sink, Sink::Membership(ref spec) if spec.op == BuiltinMembershipSink::Includes)
         );
         assert_eq!(
             includes.source_demand().chain.pull,
@@ -3033,7 +3035,7 @@ mod tests {
 
         let index = lower_query("$.xs.index(\"urgent\")").unwrap();
         assert!(
-            matches!(index.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::Index)
+            matches!(index.sink, Sink::Membership(ref spec) if spec.op == BuiltinMembershipSink::Index)
         );
         assert_eq!(
             index.source_demand().sink_result,
@@ -3043,7 +3045,7 @@ mod tests {
 
         let indices = lower_query("$.xs.indices_of(\"urgent\")").unwrap();
         assert!(
-            matches!(indices.sink, Sink::Membership(ref spec) if spec.op == MembershipSinkOp::IndicesOf)
+            matches!(indices.sink, Sink::Membership(ref spec) if spec.op == BuiltinMembershipSink::IndicesOf)
         );
         assert_eq!(
             indices.source_demand().sink_result,

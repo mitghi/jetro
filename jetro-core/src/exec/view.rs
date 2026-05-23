@@ -1463,10 +1463,11 @@ mod tests {
     use crate::data::value::Val;
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
-        eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkOp, MembershipSinkSpec,
-        MembershipSinkTarget, PipelineBody, PredicateSinkOp, PredicateSinkSpec, Sink,
-        SourceCapabilities, Stage, ViewKernelValue, ViewSinkCapability, ViewStageCapability,
+        eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget,
+        PipelineBody, PredicateSinkSpec, Sink, SourceCapabilities, Stage, ViewKernelValue,
+        ViewSinkCapability, ViewStageCapability,
     };
+    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
     use crate::util::JsonView;
@@ -1713,7 +1714,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -1735,7 +1736,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::All,
+                op: BuiltinPredicateSink::All,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -1757,7 +1758,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::FindOne,
+                op: BuiltinPredicateSink::FindOne,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -1779,7 +1780,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Predicate(PredicateSinkSpec {
-                op: PredicateSinkOp::FindOne,
+                op: BuiltinPredicateSink::FindOne,
                 predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 predicate_expr: None,
             }),
@@ -1814,7 +1815,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             }),
             stage_kernels: Vec::new(),
@@ -1835,7 +1836,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Index,
+                op: BuiltinMembershipSink::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             }),
             stage_kernels: Vec::new(),
@@ -2106,7 +2107,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(Val::Int(3)),
             }),
             stage_kernels: Vec::new(),
@@ -2123,7 +2124,7 @@ mod tests {
         let index_source = CountingView::root(&[1, 2, 3, 4]);
         let index_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Index,
+                op: BuiltinMembershipSink::Index,
                 target: MembershipSinkTarget::Literal(Val::Int(4)),
             }),
             ..includes_body
@@ -2139,7 +2140,7 @@ mod tests {
         let indices_source = CountingView::root(&[1, 2, 1, 3]);
         let indices_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::IndicesOf,
+                op: BuiltinMembershipSink::IndicesOf,
                 target: MembershipSinkTarget::Literal(Val::Int(1)),
             }),
             ..index_body
@@ -2166,7 +2167,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(Val::from(&serde_json::json!({
                     "id": 2,
                     "tags": ["b", "c"]
@@ -2182,7 +2183,7 @@ mod tests {
 
         let array_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Index,
+                op: BuiltinMembershipSink::Index,
                 target: MembershipSinkTarget::Literal(Val::from(&serde_json::json!(["nested", 3]))),
             }),
             ..object_body
@@ -2205,7 +2206,7 @@ mod tests {
             stages: Vec::new(),
             stage_exprs: Vec::new(),
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Program(Arc::clone(&target)),
             }),
             stage_kernels: Vec::new(),
@@ -2224,7 +2225,7 @@ mod tests {
         let index_source = CountingView::root(&[1, 2, 3, 4]);
         let index_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::Index,
+                op: BuiltinMembershipSink::Index,
                 target: MembershipSinkTarget::Program(Arc::clone(&target)),
             }),
             ..includes_body
@@ -2241,7 +2242,7 @@ mod tests {
         let indices_source = CountingView::root(&[3, 1, 3, 4]);
         let indices_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
-                op: MembershipSinkOp::IndicesOf,
+                op: BuiltinMembershipSink::IndicesOf,
                 target: MembershipSinkTarget::Program(target),
             }),
             ..index_body

@@ -37,7 +37,7 @@ pub struct ReducerSpec {
 #[derive(Debug, Clone)]
 pub struct PredicateSinkSpec {
     /// Terminal operation to perform.
-    pub op: PredicateSinkOp,
+    pub op: BuiltinPredicateSink,
     /// Predicate evaluated for each row until the terminal can decide.
     pub predicate: Arc<Program>,
     /// Source AST for `predicate`, used during lexical-env analysis.
@@ -48,7 +48,7 @@ pub struct PredicateSinkSpec {
 #[derive(Debug, Clone)]
 pub struct MembershipSinkSpec {
     /// Terminal operation to perform.
-    pub op: MembershipSinkOp,
+    pub op: BuiltinMembershipSink,
     /// Value compared against each row.
     pub target: MembershipSinkTarget,
 }
@@ -73,81 +73,6 @@ pub struct ArgExtremeSinkSpec {
     pub key_expr: Option<Arc<Expr>>,
 }
 
-/// Predicate terminal operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PredicateSinkOp {
-    /// Returns true when any row matches the predicate.
-    Any,
-    /// Returns true when every row matches the predicate.
-    All,
-    /// Returns the zero-based index of the first matching row, or null.
-    FindIndex,
-    /// Returns all zero-based indices whose rows match the predicate.
-    IndicesWhere,
-    /// Returns exactly one matching row, erroring on zero or multiple matches.
-    FindOne,
-}
-
-impl PredicateSinkOp {
-    #[inline]
-    fn from_builtin(kind: BuiltinPredicateSink) -> Self {
-        match kind {
-            BuiltinPredicateSink::Any => Self::Any,
-            BuiltinPredicateSink::All => Self::All,
-            BuiltinPredicateSink::FindIndex => Self::FindIndex,
-            BuiltinPredicateSink::IndicesWhere => Self::IndicesWhere,
-            BuiltinPredicateSink::FindOne => Self::FindOne,
-        }
-    }
-
-    #[inline]
-    fn into_builtin(self) -> BuiltinPredicateSink {
-        match self {
-            Self::Any => BuiltinPredicateSink::Any,
-            Self::All => BuiltinPredicateSink::All,
-            Self::FindIndex => BuiltinPredicateSink::FindIndex,
-            Self::IndicesWhere => BuiltinPredicateSink::IndicesWhere,
-            Self::FindOne => BuiltinPredicateSink::FindOne,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn is_find_one(self) -> bool {
-        self == Self::FindOne
-    }
-}
-
-/// Value-membership terminal operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MembershipSinkOp {
-    /// Returns true when any row equals the target.
-    Includes,
-    /// Returns the zero-based index of the first matching row, or null.
-    Index,
-    /// Returns all zero-based indices matching the target.
-    IndicesOf,
-}
-
-impl MembershipSinkOp {
-    #[inline]
-    fn from_builtin(kind: BuiltinMembershipSink) -> Self {
-        match kind {
-            BuiltinMembershipSink::Includes => Self::Includes,
-            BuiltinMembershipSink::Index => Self::Index,
-            BuiltinMembershipSink::IndicesOf => Self::IndicesOf,
-        }
-    }
-
-    #[inline]
-    fn into_builtin(self) -> BuiltinMembershipSink {
-        match self {
-            Self::Includes => BuiltinMembershipSink::Includes,
-            Self::Index => BuiltinMembershipSink::Index,
-            Self::IndicesOf => BuiltinMembershipSink::IndicesOf,
-        }
-    }
-}
-
 impl PredicateSinkSpec {
     /// Constructs a predicate terminal sink from the builtin method.
     pub(crate) fn from_method(
@@ -156,9 +81,7 @@ impl PredicateSinkSpec {
         predicate_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
         Some(Self {
-            op: PredicateSinkOp::from_builtin(builtin_predicate_sink(BuiltinId::from_method(
-                method,
-            ))?),
+            op: builtin_predicate_sink(BuiltinId::from_method(method))?,
             predicate,
             predicate_expr,
         })
@@ -170,27 +93,26 @@ impl PredicateSinkSpec {
         // pull model counts source rows emitted by the stage chain. Treating
         // `any`/`find_index` as `UntilOutput(1)` would stop after one non-matching
         // input row before the predicate sink has produced its scalar result.
-        let sink = self.op.into_builtin();
         Demand {
             pull: PullDemand::All,
-            value: builtin_predicate_sink_value_need(sink),
+            value: builtin_predicate_sink_value_need(self.op),
             order: false,
         }
     }
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
     pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
-        builtin_predicate_sink_result_demand(self.op.into_builtin())
+        builtin_predicate_sink_result_demand(self.op)
     }
 
     /// Returns true for the terminal sink that returns the matching row itself.
     pub(crate) fn is_find_one(&self) -> bool {
-        self.op.is_find_one()
+        self.op == BuiltinPredicateSink::FindOne
     }
 
     /// Returns the builtin method represented by this predicate sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
-        self.op.into_builtin().method()
+        self.op.method()
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -208,9 +130,7 @@ impl MembershipSinkSpec {
     /// Constructs a membership terminal sink from the builtin method.
     pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
         Some(Self {
-            op: MembershipSinkOp::from_builtin(builtin_membership_sink(BuiltinId::from_method(
-                method,
-            ))?),
+            op: builtin_membership_sink(BuiltinId::from_method(method))?,
             target,
         })
     }
@@ -223,24 +143,24 @@ impl MembershipSinkSpec {
         // executor loop when it has enough information.
         Demand {
             pull: PullDemand::All,
-            value: builtin_membership_sink_value_need(self.op.into_builtin()),
+            value: builtin_membership_sink_value_need(self.op),
             order: false,
         }
     }
 
     /// Scalar sink-result demand for accumulator-level short-circuit planning.
     pub(crate) fn sink_result_demand(&self) -> SinkResultDemand {
-        builtin_membership_sink_result_demand(self.op.into_builtin())
+        builtin_membership_sink_result_demand(self.op)
     }
 
     /// Returns true for the boolean membership sink.
     pub(crate) fn is_includes(&self) -> bool {
-        self.op == MembershipSinkOp::Includes
+        self.op == BuiltinMembershipSink::Includes
     }
 
     /// Returns the builtin method represented by this membership sink.
     pub(crate) fn method(&self) -> BuiltinMethod {
-        self.op.into_builtin().method()
+        self.op.method()
     }
 
     /// Iterates over embedded programs for kernel enumeration.
@@ -395,7 +315,7 @@ mod tests {
     fn terminal_sink_specs_construct_from_methods() {
         let predicate = PredicateSinkSpec::from_method(BuiltinMethod::Any, empty_program(), None)
             .expect("any predicate sink");
-        assert_eq!(predicate.op, PredicateSinkOp::Any);
+        assert_eq!(predicate.op, BuiltinPredicateSink::Any);
         assert!(
             PredicateSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
         );
@@ -405,7 +325,7 @@ mod tests {
             MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
         )
         .expect("indices_of membership sink");
-        assert_eq!(membership.op, MembershipSinkOp::IndicesOf);
+        assert_eq!(membership.op, BuiltinMembershipSink::IndicesOf);
         assert!(MembershipSinkSpec::from_method(
             BuiltinMethod::Count,
             MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
@@ -435,7 +355,7 @@ mod tests {
     #[test]
     fn predicate_sink_demand_matches_terminal_semantics() {
         let any = PredicateSinkSpec {
-            op: PredicateSinkOp::Any,
+            op: BuiltinPredicateSink::Any,
             predicate: empty_program(),
             predicate_expr: None,
         }
@@ -445,7 +365,7 @@ mod tests {
         assert!(!any.order);
         assert_eq!(
             PredicateSinkSpec {
-                op: PredicateSinkOp::Any,
+                op: BuiltinPredicateSink::Any,
                 predicate: empty_program(),
                 predicate_expr: None,
             }
@@ -454,7 +374,7 @@ mod tests {
         );
         assert_eq!(
             PredicateSinkSpec {
-                op: PredicateSinkOp::All,
+                op: BuiltinPredicateSink::All,
                 predicate: empty_program(),
                 predicate_expr: None,
             }
@@ -463,7 +383,7 @@ mod tests {
         );
 
         let find_one = PredicateSinkSpec {
-            op: PredicateSinkOp::FindOne,
+            op: BuiltinPredicateSink::FindOne,
             predicate: empty_program(),
             predicate_expr: None,
         }
@@ -476,7 +396,7 @@ mod tests {
     #[test]
     fn membership_and_arg_extreme_demands_match_terminal_semantics() {
         let membership = MembershipSinkSpec {
-            op: MembershipSinkOp::Includes,
+            op: BuiltinMembershipSink::Includes,
             target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
         }
         .demand();
@@ -485,7 +405,7 @@ mod tests {
         assert!(!membership.order);
         assert_eq!(
             MembershipSinkSpec {
-                op: MembershipSinkOp::Includes,
+                op: BuiltinMembershipSink::Includes,
                 target: MembershipSinkTarget::Literal(crate::data::value::Val::Int(1)),
             }
             .sink_result_demand(),
