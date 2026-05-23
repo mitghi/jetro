@@ -4352,6 +4352,68 @@ mod tests {
     }
 
     #[test]
+    fn registry_array_selector_contracts_are_exhaustive() {
+        let expected = [
+            (BuiltinMethod::First, BuiltinArraySelector::First),
+            (BuiltinMethod::Last, BuiltinArraySelector::Last),
+            (BuiltinMethod::Nth, BuiltinArraySelector::Nth),
+        ];
+        let mut registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                array_selector(BuiltinId::from_method(method)).map(|selector| (method, selector))
+            })
+            .collect();
+        registered.sort_by_key(|(method, _)| *method as u8);
+        assert_eq!(registered, expected);
+
+        let first = BuiltinId::from_method(BuiltinMethod::First);
+        assert_eq!(demand_law(first), BuiltinDemandLaw::First);
+        assert_eq!(
+            propagate_demand(first, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
+            PullDemand::FirstInput(1)
+        );
+        assert_eq!(
+            terminal_selection_position(first),
+            Some(BuiltinSelectionPosition::First)
+        );
+        assert_eq!(
+            pipeline_lowering(first),
+            Some(BuiltinPipelineLowering::TerminalSink)
+        );
+        assert_eq!(row_stream_op(first), Some(BuiltinRowStreamOp::First));
+
+        let last = BuiltinId::from_method(BuiltinMethod::Last);
+        assert_eq!(demand_law(last), BuiltinDemandLaw::Last);
+        assert_eq!(
+            propagate_demand(last, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
+            PullDemand::LastInput(1)
+        );
+        assert_eq!(
+            terminal_selection_position(last),
+            Some(BuiltinSelectionPosition::Last)
+        );
+        assert_eq!(
+            pipeline_lowering(last),
+            Some(BuiltinPipelineLowering::TerminalSink)
+        );
+        assert_eq!(row_stream_op(last), Some(BuiltinRowStreamOp::Last));
+
+        let nth = BuiltinId::from_method(BuiltinMethod::Nth);
+        assert_eq!(demand_law(nth), BuiltinDemandLaw::Nth);
+        assert_eq!(
+            propagate_demand(nth, BuiltinDemandArg::Usize(2), Demand::all(ValueNeed::Whole)).pull,
+            PullDemand::NthInput(2)
+        );
+        assert_eq!(terminal_selection_position(nth), None);
+        assert_eq!(
+            pipeline_lowering(nth),
+            Some(BuiltinPipelineLowering::TerminalUsizeSink { min: 0 })
+        );
+        assert_eq!(row_stream_op(nth), None);
+    }
+
+    #[test]
     fn registry_drives_terminal_selection_position() {
         assert_eq!(
             terminal_selection_position(BuiltinId::from_method(BuiltinMethod::First)),
