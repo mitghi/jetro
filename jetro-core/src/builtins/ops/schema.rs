@@ -222,6 +222,10 @@ pub fn schema_apply(recv: &Val) -> Option<Val> {
 
 #[cfg(test)]
 mod spec_tests {
+    use crate::builtins::registry::{
+        builtin_cardinality, builtin_category, builtin_sink, columnar_stage, keyed_reducer,
+        numeric_reducer, stage_merge, structural, view_scalar_projection, view_stage, BuiltinId,
+    };
     use crate::builtins::{
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
         BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
@@ -229,76 +233,82 @@ mod spec_tests {
         BuiltinViewInputMode, BuiltinViewOutputMode, BuiltinViewStage,
     };
 
+    fn id(method: BuiltinMethod) -> BuiltinId {
+        BuiltinId::from_method(method)
+    }
+
     #[test]
     fn builtin_specs_describe_execution_shape() {
-        let map = BuiltinMethod::Map.spec();
-        assert_eq!(map.category, BuiltinCategory::StreamingOneToOne);
-        assert_eq!(map.cardinality, BuiltinCardinality::OneToOne);
+        assert_eq!(
+            builtin_category(id(BuiltinMethod::Map)),
+            Some(BuiltinCategory::StreamingOneToOne)
+        );
+        assert_eq!(
+            builtin_cardinality(id(BuiltinMethod::Map)),
+            Some(BuiltinCardinality::OneToOne)
+        );
 
-        let flat_map = BuiltinMethod::FlatMap.spec();
-        assert_eq!(flat_map.category, BuiltinCategory::StreamingExpand);
-        assert_eq!(flat_map.cardinality, BuiltinCardinality::Expanding);
+        assert_eq!(
+            builtin_category(id(BuiltinMethod::FlatMap)),
+            Some(BuiltinCategory::StreamingExpand)
+        );
+        assert_eq!(
+            builtin_cardinality(id(BuiltinMethod::FlatMap)),
+            Some(BuiltinCardinality::Expanding)
+        );
 
-        let sum = BuiltinMethod::Sum.spec();
-        assert_eq!(sum.category, BuiltinCategory::Reducer);
-        assert_eq!(sum.cardinality, BuiltinCardinality::Reducing);
+        assert_eq!(
+            builtin_category(id(BuiltinMethod::Sum)),
+            Some(BuiltinCategory::Reducer)
+        );
+        assert_eq!(
+            builtin_cardinality(id(BuiltinMethod::Sum)),
+            Some(BuiltinCardinality::Reducing)
+        );
 
-        let sort = BuiltinMethod::Sort.spec();
-        assert_eq!(sort.category, BuiltinCategory::Barrier);
-        assert_eq!(sort.cardinality, BuiltinCardinality::Barrier);
+        assert_eq!(
+            builtin_category(id(BuiltinMethod::Sort)),
+            Some(BuiltinCategory::Barrier)
+        );
+        assert_eq!(
+            builtin_cardinality(id(BuiltinMethod::Sort)),
+            Some(BuiltinCardinality::Barrier)
+        );
     }
 
     #[test]
     fn builtin_specs_drive_view_stage_lowering() {
+        assert_eq!(view_stage(id(BuiltinMethod::Filter)), Some(BuiltinViewStage::Filter));
+        assert_eq!(view_stage(id(BuiltinMethod::Compact)), Some(BuiltinViewStage::Compact));
+        assert_eq!(view_stage(id(BuiltinMethod::Map)), Some(BuiltinViewStage::Map));
+        assert_eq!(view_stage(id(BuiltinMethod::FlatMap)), Some(BuiltinViewStage::FlatMap));
+        assert_eq!(view_stage(id(BuiltinMethod::Take)), Some(BuiltinViewStage::Take));
         assert_eq!(
-            BuiltinMethod::Filter.spec().view_stage,
-            Some(BuiltinViewStage::Filter)
-        );
-        assert_eq!(
-            BuiltinMethod::Compact.spec().view_stage,
-            Some(BuiltinViewStage::Compact)
-        );
-        assert_eq!(
-            BuiltinMethod::Map.spec().view_stage,
-            Some(BuiltinViewStage::Map)
-        );
-        assert_eq!(
-            BuiltinMethod::FlatMap.spec().view_stage,
-            Some(BuiltinViewStage::FlatMap)
-        );
-        assert_eq!(
-            BuiltinMethod::Take.spec().view_stage,
-            Some(BuiltinViewStage::Take)
-        );
-        assert_eq!(
-            BuiltinMethod::Take.spec().stage_merge,
+            stage_merge(id(BuiltinMethod::Take)),
             Some(BuiltinStageMerge::UsizeMin)
         );
+        assert_eq!(view_stage(id(BuiltinMethod::Skip)), Some(BuiltinViewStage::Skip));
         assert_eq!(
-            BuiltinMethod::Skip.spec().view_stage,
-            Some(BuiltinViewStage::Skip)
-        );
-        assert_eq!(
-            BuiltinMethod::Skip.spec().stage_merge,
+            stage_merge(id(BuiltinMethod::Skip)),
             Some(BuiltinStageMerge::UsizeSaturatingAdd)
         );
 
-        assert_eq!(BuiltinMethod::Sort.spec().view_stage, None);
-        assert_eq!(BuiltinMethod::Upper.spec().view_stage, None);
+        assert_eq!(view_stage(id(BuiltinMethod::Sort)), None);
+        assert_eq!(view_stage(id(BuiltinMethod::Upper)), None);
     }
 
     #[test]
     fn builtin_specs_drive_structural_lowering() {
         assert_eq!(
-            BuiltinMethod::DeepShape.spec().structural,
+            structural(id(BuiltinMethod::DeepShape)),
             Some(BuiltinStructural::DeepShape)
         );
         assert_eq!(
-            BuiltinMethod::DeepLike.spec().structural,
+            structural(id(BuiltinMethod::DeepLike)),
             Some(BuiltinStructural::DeepLike)
         );
         assert_eq!(
-            BuiltinMethod::DeepFind.spec().structural,
+            structural(id(BuiltinMethod::DeepFind)),
             Some(BuiltinStructural::DeepFind)
         );
     }
@@ -338,102 +348,102 @@ mod spec_tests {
     #[test]
     fn builtin_specs_drive_sink_lowering() {
         assert_eq!(
-            BuiltinMethod::Count.spec().sink.unwrap().accumulator,
+            builtin_sink(id(BuiltinMethod::Count)).unwrap().accumulator,
             BuiltinSinkAccumulator::Count
         );
         assert_eq!(
-            BuiltinMethod::Len.spec().sink.unwrap().accumulator,
+            builtin_sink(id(BuiltinMethod::Len)).unwrap().accumulator,
             BuiltinSinkAccumulator::Count
         );
         assert_eq!(
-            BuiltinMethod::Sum.spec().sink.unwrap().accumulator,
+            builtin_sink(id(BuiltinMethod::Sum)).unwrap().accumulator,
             BuiltinSinkAccumulator::Numeric
         );
         assert_eq!(
-            BuiltinMethod::Sum.spec().numeric_reducer,
+            numeric_reducer(id(BuiltinMethod::Sum)),
             Some(BuiltinNumericReducer::Sum)
         );
         assert_eq!(
-            BuiltinMethod::Avg.spec().numeric_reducer,
+            numeric_reducer(id(BuiltinMethod::Avg)),
             Some(BuiltinNumericReducer::Avg)
         );
         assert_eq!(
-            BuiltinMethod::Min.spec().numeric_reducer,
+            numeric_reducer(id(BuiltinMethod::Min)),
             Some(BuiltinNumericReducer::Min)
         );
         assert_eq!(
-            BuiltinMethod::Max.spec().numeric_reducer,
+            numeric_reducer(id(BuiltinMethod::Max)),
             Some(BuiltinNumericReducer::Max)
         );
         assert_eq!(
-            BuiltinMethod::First.spec().sink.unwrap().accumulator,
+            builtin_sink(id(BuiltinMethod::First)).unwrap().accumulator,
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
         );
         assert_eq!(
-            BuiltinMethod::First.spec().sink.unwrap().demand,
+            builtin_sink(id(BuiltinMethod::First)).unwrap().demand,
             BuiltinSinkDemand::First {
                 value: BuiltinSinkValueNeed::Whole
             }
         );
         assert_eq!(
-            BuiltinMethod::Last.spec().sink.unwrap().accumulator,
+            builtin_sink(id(BuiltinMethod::Last)).unwrap().accumulator,
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last)
         );
         assert_eq!(
-            BuiltinMethod::Last.spec().sink.unwrap().demand,
+            builtin_sink(id(BuiltinMethod::Last)).unwrap().demand,
             BuiltinSinkDemand::Last {
                 value: BuiltinSinkValueNeed::Whole
             }
         );
         assert_eq!(
-            BuiltinMethod::Count.spec().sink.unwrap().demand,
+            builtin_sink(id(BuiltinMethod::Count)).unwrap().demand,
             BuiltinSinkDemand::All {
                 value: BuiltinSinkValueNeed::None,
                 order: false
             }
         );
         assert_eq!(
-            BuiltinMethod::Sum.spec().sink.unwrap().demand,
+            builtin_sink(id(BuiltinMethod::Sum)).unwrap().demand,
             BuiltinSinkDemand::All {
                 value: BuiltinSinkValueNeed::Numeric,
                 order: false
             }
         );
 
-        assert!(BuiltinMethod::Sort.spec().sink.is_none());
+        assert!(builtin_sink(id(BuiltinMethod::Sort)).is_none());
     }
 
     #[test]
     fn builtin_specs_drive_columnar_stage_metadata() {
         assert_eq!(
-            BuiltinMethod::Filter.spec().columnar_stage,
+            columnar_stage(id(BuiltinMethod::Filter)),
             Some(BuiltinColumnarStage::Filter)
         );
         assert_eq!(
-            BuiltinMethod::Map.spec().columnar_stage,
+            columnar_stage(id(BuiltinMethod::Map)),
             Some(BuiltinColumnarStage::Map)
         );
         assert_eq!(
-            BuiltinMethod::FlatMap.spec().columnar_stage,
+            columnar_stage(id(BuiltinMethod::FlatMap)),
             Some(BuiltinColumnarStage::FlatMap)
         );
         assert_eq!(
-            BuiltinMethod::GroupBy.spec().columnar_stage,
+            columnar_stage(id(BuiltinMethod::GroupBy)),
             Some(BuiltinColumnarStage::GroupBy)
         );
         assert_eq!(
-            BuiltinMethod::CountBy.spec().keyed_reducer,
+            keyed_reducer(id(BuiltinMethod::CountBy)),
             Some(BuiltinKeyedReducer::Count)
         );
         assert_eq!(
-            BuiltinMethod::IndexBy.spec().keyed_reducer,
+            keyed_reducer(id(BuiltinMethod::IndexBy)),
             Some(BuiltinKeyedReducer::Index)
         );
         assert_eq!(
-            BuiltinMethod::GroupBy.spec().keyed_reducer,
+            keyed_reducer(id(BuiltinMethod::GroupBy)),
             Some(BuiltinKeyedReducer::Group)
         );
-        assert_eq!(BuiltinMethod::Sort.spec().columnar_stage, None);
+        assert_eq!(columnar_stage(id(BuiltinMethod::Sort)), None);
     }
 
     #[test]
@@ -458,9 +468,9 @@ mod spec_tests {
             BuiltinMethod::Abs,
         ];
         for method in supported {
-            assert!(method.spec().view_scalar);
+            assert!(view_scalar_projection(id(method)));
         }
-        assert!(!BuiltinMethod::Sort.spec().view_scalar);
-        assert!(!BuiltinMethod::FromJson.spec().view_scalar);
+        assert!(!view_scalar_projection(id(BuiltinMethod::Sort)));
+        assert!(!view_scalar_projection(id(BuiltinMethod::FromJson)));
     }
 }
