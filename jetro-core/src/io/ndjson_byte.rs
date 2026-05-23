@@ -1291,6 +1291,18 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
             let value = raw_json_path_view(row, steps)?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectPredicate::ArrayElementViewScalarCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value =
+                raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
+            direct_view_call_cmp_lit(value, call, *op, lit)
+        }
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -2681,6 +2693,14 @@ fn collect_stream_predicate_root_fields<'a>(
         | NdjsonDirectItemPredicate::ViewScalarCall {
             suffix_steps: steps,
             ..
+        }
+        | NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
+            source_steps: steps,
+            ..
+        }
+        | NdjsonDirectItemPredicate::ArrayElementViewScalarCall {
+            source_steps: steps,
+            ..
         } => collect_path_root_field(steps, out),
         NdjsonDirectItemPredicate::Literal(_) => true,
         NdjsonDirectItemPredicate::Binary { lhs, rhs, .. } => {
@@ -3227,8 +3247,42 @@ fn eval_raw_item_predicate_from_root_fields<'a>(
             let value = raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value = raw_json_array_element_path_view_from_root(
+                item,
+                root_fields,
+                spans,
+                source_steps,
+                *element,
+                suffix_steps,
+            )?;
+            direct_view_call_cmp_lit(value, call, *op, lit)
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
+            direct_view_call_truthy(value, call)
+        }
+        NdjsonDirectItemPredicate::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            let value = raw_json_array_element_path_view_from_root(
+                item,
+                root_fields,
+                spans,
+                source_steps,
+                *element,
+                suffix_steps,
+            )?;
             direct_view_call_truthy(value, call)
         }
     }
@@ -3258,6 +3312,52 @@ fn raw_json_projection_view_from_root<'a>(
     match raw_json_projection_value_from_root(item, root_fields, spans, steps) {
         RawFieldValue::Found(value) => raw_json_view(value),
         RawFieldValue::Missing | RawFieldValue::Fallback => None,
+    }
+}
+
+fn raw_json_array_element_path_view_from_root<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    source_steps: &[PhysicalPathStep],
+    element: NdjsonDirectElement,
+    suffix_steps: &[PhysicalPathStep],
+) -> Option<JsonView<'a>> {
+    match raw_json_array_element_path_value_from_root(
+        item,
+        root_fields,
+        spans,
+        source_steps,
+        element,
+        suffix_steps,
+    ) {
+        RawFieldValue::Found(value) => raw_json_view(value),
+        RawFieldValue::Missing | RawFieldValue::Fallback => None,
+    }
+}
+
+fn raw_json_array_element_path_value_from_root<'a>(
+    item: &'a [u8],
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    source_steps: &[PhysicalPathStep],
+    element: NdjsonDirectElement,
+    suffix_steps: &[PhysicalPathStep],
+) -> RawFieldValue<'a> {
+    let source = match raw_json_projection_value_from_root(item, root_fields, spans, source_steps) {
+        RawFieldValue::Found(value) => value,
+        RawFieldValue::Missing => return RawFieldValue::Missing,
+        RawFieldValue::Fallback => return RawFieldValue::Fallback,
+    };
+    let Some(element) = raw_json_array_element(source, element) else {
+        return RawFieldValue::Missing;
+    };
+    if suffix_steps.is_empty() {
+        RawFieldValue::Found(element)
+    } else {
+        raw_json_path_value(element, suffix_steps)
+            .map(RawFieldValue::Found)
+            .unwrap_or(RawFieldValue::Missing)
     }
 }
 
@@ -3687,10 +3787,44 @@ fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) ->
             let value = raw_json_path_view(row, suffix_steps)?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value =
+                raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
+            direct_view_call_cmp_lit(value, call, *op, lit)
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_path_view(row, suffix_steps)?;
             direct_view_call_truthy(value, call)
         }
+        NdjsonDirectItemPredicate::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        } => {
+            let value =
+                raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
+            direct_view_call_truthy(value, call)
+        }
+    }
+}
+
+fn raw_json_array_element_path_view<'a>(
+    row: &'a [u8],
+    source_steps: &[PhysicalPathStep],
+    element: NdjsonDirectElement,
+    suffix_steps: &[PhysicalPathStep],
+) -> Option<JsonView<'a>> {
+    match raw_json_array_element_path_value(row, source_steps, element, suffix_steps) {
+        RawFieldValue::Found(value) => raw_json_view(value),
+        RawFieldValue::Missing | RawFieldValue::Fallback => None,
     }
 }
 

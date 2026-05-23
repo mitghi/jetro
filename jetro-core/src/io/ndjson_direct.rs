@@ -501,6 +501,14 @@ pub(super) enum NdjsonDirectPredicate {
         op: crate::parse::ast::BinOp,
         lit: Val,
     },
+    ArrayElementViewScalarCmpLit {
+        source_steps: NdjsonPhysicalPath,
+        element: NdjsonDirectElement,
+        suffix_steps: NdjsonPhysicalPath,
+        call: crate::builtins::BuiltinCall,
+        op: crate::parse::ast::BinOp,
+        lit: Val,
+    },
     ArrayElementViewScalarCall {
         source_steps: NdjsonPhysicalPath,
         element: NdjsonDirectElement,
@@ -537,7 +545,21 @@ pub(super) enum NdjsonDirectItemPredicate {
         op: crate::parse::ast::BinOp,
         lit: Val,
     },
+    ArrayElementViewScalarCmpLit {
+        source_steps: NdjsonPhysicalPath,
+        element: NdjsonDirectElement,
+        suffix_steps: NdjsonPhysicalPath,
+        call: crate::builtins::BuiltinCall,
+        op: crate::parse::ast::BinOp,
+        lit: Val,
+    },
     ViewScalarCall {
+        suffix_steps: NdjsonPhysicalPath,
+        call: crate::builtins::BuiltinCall,
+    },
+    ArrayElementViewScalarCall {
+        source_steps: NdjsonPhysicalPath,
+        element: NdjsonDirectElement,
         suffix_steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
     },
@@ -1002,6 +1024,18 @@ fn direct_tape_predicate_from_kernel(
         crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit }
             if op.is_scalar_comparison() =>
         {
+            if let Some((source_steps, element, suffix_steps, call)) =
+                direct_array_element_scalar_call_from_kernel(lhs)
+            {
+                return Some(NdjsonDirectPredicate::ArrayElementViewScalarCmpLit {
+                    source_steps,
+                    element,
+                    suffix_steps,
+                    call,
+                    op: *op,
+                    lit: lit.clone(),
+                });
+            }
             let (steps, call) = direct_scalar_call_from_kernel(lhs)?;
             Some(NdjsonDirectPredicate::ViewScalarCmpLit {
                 steps,
@@ -1009,6 +1043,20 @@ fn direct_tape_predicate_from_kernel(
                 op: *op,
                 lit: lit.clone(),
             })
+        }
+        crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
+            if let Some((source_steps, element, suffix_steps, call)) =
+                direct_array_element_scalar_call_from_kernel(kernel)
+            {
+                return Some(NdjsonDirectPredicate::ArrayElementViewScalarCall {
+                    source_steps,
+                    element,
+                    suffix_steps,
+                    call,
+                });
+            }
+            let (steps, call) = direct_scalar_call_from_kernel(kernel)?;
+            Some(NdjsonDirectPredicate::ViewScalarCall { steps, call })
         }
         _ => None,
     }
@@ -1092,6 +1140,12 @@ fn item_predicate_guarantees_object_match(predicate: &NdjsonDirectItemPredicate)
         }
         | NdjsonDirectItemPredicate::ViewScalarCall {
             suffix_steps: lhs, ..
+        }
+        | NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
+            source_steps: lhs, ..
+        }
+        | NdjsonDirectItemPredicate::ArrayElementViewScalarCall {
+            source_steps: lhs, ..
         } => !lhs.is_empty(),
         NdjsonDirectItemPredicate::Binary { lhs, op, rhs } if *op == BinOp::And => {
             item_predicate_guarantees_object_match(lhs)
@@ -1383,6 +1437,18 @@ fn direct_item_predicate_from_kernel(
         crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit }
             if op.is_scalar_comparison() =>
         {
+            if let Some((source_steps, element, suffix_steps, call)) =
+                direct_array_element_scalar_call_from_kernel(lhs)
+            {
+                return Some(NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
+                    source_steps,
+                    element,
+                    suffix_steps,
+                    call,
+                    op: *op,
+                    lit: lit.clone(),
+                });
+            }
             let (suffix_steps, call) = direct_scalar_call_from_kernel(lhs)?;
             Some(NdjsonDirectItemPredicate::ViewScalarCmpLit {
                 suffix_steps,
@@ -1392,6 +1458,16 @@ fn direct_item_predicate_from_kernel(
             })
         }
         crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
+            if let Some((source_steps, element, suffix_steps, call)) =
+                direct_array_element_scalar_call_from_kernel(kernel)
+            {
+                return Some(NdjsonDirectItemPredicate::ArrayElementViewScalarCall {
+                    source_steps,
+                    element,
+                    suffix_steps,
+                    call,
+                });
+            }
             let (suffix_steps, call) = direct_scalar_call_from_kernel(kernel)?;
             Some(NdjsonDirectItemPredicate::ViewScalarCall {
                 suffix_steps,
@@ -1504,6 +1580,26 @@ fn direct_composed_projection_value_from_kernel(
 fn direct_array_element_scalar_projection_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectProjectionValue> {
+    let (source_steps, element, suffix_steps, call) =
+        direct_array_element_scalar_call_from_kernel(kernel)?;
+    Some(NdjsonDirectProjectionValue::Nested(Box::new(
+        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
+            source_steps,
+            element,
+            suffix_steps,
+            call,
+        },
+    )))
+}
+
+fn direct_array_element_scalar_call_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<(
+    NdjsonPhysicalPath,
+    NdjsonDirectElement,
+    NdjsonPhysicalPath,
+    crate::builtins::BuiltinCall,
+)> {
     let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
         return None;
     };
@@ -1511,14 +1607,7 @@ fn direct_array_element_scalar_projection_from_kernel(
         return None;
     }
     let (source_steps, element, suffix_steps) = direct_array_element_path_from_kernel(receiver)?;
-    Some(NdjsonDirectProjectionValue::Nested(Box::new(
-        NdjsonDirectTapePlan::ArrayElementViewScalarCall {
-            source_steps,
-            element,
-            suffix_steps,
-            call: call.clone(),
-        },
-    )))
+    Some((source_steps, element, suffix_steps, call.clone()))
 }
 
 fn direct_array_element_path_from_kernel(
@@ -1789,6 +1878,21 @@ mod tests {
                     )
             ));
         }
+    }
+
+    #[test]
+    fn direct_tape_predicate_accepts_array_selector_scalar_calls() {
+        let cmp = crate::parse::parser::parse("tags.first().len() > 2").expect("parse cmp");
+        let truthy = crate::parse::parser::parse("attrs.first().value.len()").expect("parse call");
+
+        assert!(matches!(
+            direct_tape_predicate_for_expr(&cmp),
+            Some(NdjsonDirectPredicate::ArrayElementViewScalarCmpLit { .. })
+        ));
+        assert!(matches!(
+            direct_tape_predicate_for_expr(&truthy),
+            Some(NdjsonDirectPredicate::ArrayElementViewScalarCall { .. })
+        ));
     }
 
     #[test]

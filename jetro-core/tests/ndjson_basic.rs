@@ -1766,6 +1766,31 @@ fn rows_stream_scalar_call_comparison_filter_is_direct() {
 }
 
 #[test]
+fn rows_stream_array_selector_scalar_filter_is_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":"a","tags":["sf"],"attrs":[{"value":"xx"}]}
+{"id":"b","tags":["tech"],"attrs":[{"value":"robot"}]}
+{"id":"c","tags":["x"],"attrs":[{"value":""}]}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"$.rows().filter(tags.first().len() > 2).filter(attrs.first().value.len()).map(id)"#,
+            &mut out,
+        )
+        .expect("array selector scalar predicates should use direct item metadata");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "\"b\"\n");
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.direct_filter_rows, 4);
+    assert_eq!(report.stats.fallback_filter_rows, 0);
+    assert_eq!(report.stats.direct_project_rows, 1);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn rows_stream_bare_array_find_filter_is_direct() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"a","custom_attributes":[{"value":"x"}]}
