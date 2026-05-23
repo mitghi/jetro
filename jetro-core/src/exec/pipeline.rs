@@ -723,6 +723,23 @@ mod tests {
         assert_eq!(iter.next().unwrap().get_field("id"), Val::Int(2));
         assert!(iter.next().is_none());
     }
+
+    #[test]
+    fn columnar_nested_path_filter_map_matches_vm() {
+        use serde_json::json;
+
+        assert_pipeline_matches_vm(
+            "$.xs.filter(a.b.c > 1).map(a.b.c)",
+            json!({
+                "xs": [
+                    {"a": {"b": {"c": 1}}, "tag": "a"},
+                    {"a": {"b": {"c": 2}}, "tag": "b"},
+                    {"a": {"b": {"c": 3}}, "tag": "c"}
+                ]
+            }),
+        );
+    }
+
     #[test]
     fn tape_row_source_walks_field_chain_array_lazily() {
         let tape = crate::data::tape::TapeData::parse(
