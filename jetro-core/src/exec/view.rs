@@ -1406,6 +1406,7 @@ mod tests {
         PipelineBody, PredicateSinkSpec, Sink, SourceCapabilities, Stage, ViewKernelValue,
         ViewSinkCapability, ViewStageCapability,
     };
+    use crate::builtins::registry::view_scalar_projection;
     use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
@@ -2306,7 +2307,7 @@ mod tests {
             method: crate::builtins::BuiltinMethod::Upper,
             args: crate::builtins::BuiltinArgs::None,
         };
-        assert!(call.spec().view_scalar);
+        assert!(view_scalar_projection(call.id()));
         let body = PipelineBody {
             stages: vec![
                 Stage::Map(

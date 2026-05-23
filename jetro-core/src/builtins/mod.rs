@@ -2477,14 +2477,6 @@ impl BuiltinCall {
         registry::view_object_items_projection_call(self.id(), &self.args).is_some()
     }
 
-    /// Returns the capability descriptor for this call, potentially overriding the
-    /// method-level spec with argument-specific cost or indexability adjustments.
-    #[inline]
-    #[cfg(test)]
-    pub fn spec(&self) -> BuiltinSpec {
-        self.method.spec()
-    }
-
     /// Returns true if applying this builtin twice is equivalent to applying it once.
     /// The pipeline optimizer uses this to eliminate redundant stages.
     #[inline]
