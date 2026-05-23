@@ -5,9 +5,9 @@
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
 use crate::builtins::{
-    BuiltinCardinality, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinPredicateSink,
-    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode, BuiltinViewOutputMode,
-    BuiltinViewStage,
+    BuiltinArgExtremeSink, BuiltinCardinality, BuiltinKeyedReducer, BuiltinMembershipSink,
+    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
+    BuiltinViewOutputMode, BuiltinViewStage,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -704,8 +704,8 @@ pub(crate) enum ViewSinkCapability {
     },
     /// Arg-extreme terminal sink (`max_by`, `min_by`).
     ArgExtreme {
-        /// When true, keeps the row with the largest key; otherwise the smallest key.
-        want_max: bool,
+        /// Terminal arg-extreme operation.
+        op: BuiltinArgExtremeSink,
         /// Index of the view-native key kernel in `sink_kernels`.
         key_kernel: usize,
     },
@@ -883,8 +883,8 @@ mod tests {
     use std::sync::Arc;
 
     use crate::builtins::{
-        BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink, BuiltinSelectionPosition,
-        BuiltinSinkAccumulator, BuiltinViewStage,
+        BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
@@ -1061,7 +1061,7 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::ArgExtreme {
-                want_max: true,
+                op: BuiltinArgExtremeSink::MaxBy,
                 key_kernel: 0,
             }
             .materialization(),
@@ -1184,7 +1184,7 @@ mod tests {
             })
             .view_capability(&[BodyKernel::FieldRead(Arc::from("score"))]),
             Some(ViewSinkCapability::ArgExtreme {
-                want_max: true,
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
                 key_kernel: 0,
             })
         ));

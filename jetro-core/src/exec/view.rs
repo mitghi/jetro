@@ -237,11 +237,11 @@ where
             }))
         }
         pipeline::ViewSinkCapability::ArgExtreme {
-            want_max,
+            op,
             key_kernel,
         } => {
             let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(*key_kernel)?, vm)?;
-            sink_acc.observe_arg_extreme_lazy(*want_max, key, || item.materialize());
+            sink_acc.observe_arg_extreme_lazy(op.wants_max(), key, || item.materialize());
             Some(Ok(ViewRowAction::Emit))
         }
         pipeline::ViewSinkCapability::SelectMany {
