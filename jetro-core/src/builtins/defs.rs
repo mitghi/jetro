@@ -71,7 +71,7 @@ fn filter_spec() -> BuiltinSpec {
         .expr_payload(BuiltinExprPayload::PredicateScan)
         .logical_shape(BuiltinLogicalShape::Filter)
         .row_stream_op(BuiltinRowStreamOp::Filter)
-        .runtime_hook(BuiltinRuntimeHook::Filter)
+        .runtime_hook(BuiltinRuntimeHook::SharedFilter)
         .output_cap_receiver()
         .lowering(BuiltinPipelineLowering::ExprArg)
 }
@@ -139,7 +139,7 @@ impl Builtin for Find {
             .expr_stage(BuiltinExprStage::Filter)
             .logical_shape(BuiltinLogicalShape::FilterThenFirst)
             .row_stream_op(BuiltinRowStreamOp::FindFirst)
-            .runtime_hook(BuiltinRuntimeHook::Filter)
+            .runtime_hook(BuiltinRuntimeHook::SharedFilter)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -169,6 +169,7 @@ impl Builtin for Compact {
             .view_stage(BuiltinViewStage::Compact)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
@@ -212,6 +213,7 @@ impl Builtin for Remove {
             .view_stage(BuiltinViewStage::RemoveValue)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
@@ -275,6 +277,7 @@ impl Builtin for Map {
             .expr_payload(BuiltinExprPayload::Projection)
             .logical_shape(BuiltinLogicalShape::Map)
             .row_stream_op(BuiltinRowStreamOp::Map)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
             .output_cap_receiver()
             .element()
@@ -340,6 +343,7 @@ impl Builtin for FlatMap {
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .expr_stage(BuiltinExprStage::FlatMap)
             .logical_shape(BuiltinLogicalShape::FlatMap)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
@@ -385,6 +389,7 @@ impl Builtin for Take {
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .logical_shape(BuiltinLogicalShape::Take)
             .row_stream_op(BuiltinRowStreamOp::Take)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
 
@@ -441,6 +446,7 @@ impl Builtin for Skip {
             .demand_law(BuiltinDemandLaw::Skip)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .logical_shape(BuiltinLogicalShape::Skip)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
 
@@ -554,6 +560,7 @@ impl Builtin for TakeWhile {
             .demand_law(BuiltinDemandLaw::TakeWhile)
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::TakeWhile)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
                 true,
@@ -618,6 +625,7 @@ impl Builtin for DropWhile {
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
                 true,
@@ -807,6 +815,7 @@ impl Builtin for FindIndex {
 
     fn spec() -> BuiltinSpec {
         predicate_terminal_sink_spec(BuiltinPredicateSink::FindIndex)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
     }
 
     #[inline]
@@ -844,6 +853,7 @@ impl Builtin for IndicesWhere {
 
     fn spec() -> BuiltinSpec {
         predicate_terminal_sink_spec(BuiltinPredicateSink::IndicesWhere)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
     }
 
     #[inline]
@@ -921,6 +931,7 @@ impl Builtin for MaxBy {
 
     fn spec() -> BuiltinSpec {
         arg_extreme_reducer_spec(BuiltinArgExtremeSink::MaxBy)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
     }
 
     #[inline]
@@ -941,6 +952,7 @@ impl Builtin for MinBy {
 
     fn spec() -> BuiltinSpec {
         arg_extreme_reducer_spec(BuiltinArgExtremeSink::MinBy)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
     }
 
     #[inline]
@@ -1226,6 +1238,7 @@ impl Builtin for Sort {
             )
             .idempotent()
             .logical_shape(BuiltinLogicalShape::Sort)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::Sort)
     }
     #[inline]
@@ -1302,6 +1315,7 @@ impl Builtin for Window {
                 1.0,
             ))
             .demand_law(BuiltinDemandLaw::Window)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 
@@ -1333,6 +1347,7 @@ impl Builtin for Chunk {
                 1.0,
             ))
             .demand_law(BuiltinDemandLaw::Chunk)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
     }
 
@@ -1443,6 +1458,7 @@ impl Builtin for GroupBy {
             .demand_law(BuiltinKeyedReducer::Group.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .logical_shape(BuiltinLogicalShape::GroupBy)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
     #[inline]
@@ -1492,6 +1508,7 @@ impl Builtin for CountBy {
                 1.0,
             ))
             .logical_shape(BuiltinLogicalShape::CountBy)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1539,6 +1556,7 @@ impl Builtin for IndexBy {
                 1.0,
             ))
             .logical_shape(BuiltinLogicalShape::IndexBy)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::TerminalExprArg {
                 terminal: BuiltinMethod::First,
             })
@@ -1581,6 +1599,7 @@ fn unique_spec() -> BuiltinSpec {
             1.0,
         ))
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .runtime_hook(BuiltinRuntimeHook::Barrier)
         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
 }
 
@@ -1688,6 +1707,7 @@ impl Builtin for Reverse {
             .nullary_stage(BuiltinNullaryStage::Reverse)
             .logical_shape(BuiltinLogicalShape::Reverse)
             .row_stream_op(BuiltinRowStreamOp::Reverse)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
@@ -2103,6 +2123,7 @@ impl Builtin for TransformKeys {
         object_lambda_spec()
             .object_lambda(lambda)
             .demand_law(lambda.demand_law())
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .expr_payload(lambda.expr_payload())
     }
 
@@ -2174,6 +2195,7 @@ impl Builtin for TransformValues {
         object_lambda_spec()
             .object_lambda(lambda)
             .demand_law(lambda.demand_law())
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .expr_payload(lambda.expr_payload())
     }
     #[inline]
@@ -2205,6 +2227,7 @@ impl Builtin for FilterKeys {
         object_lambda_spec()
             .object_lambda(lambda)
             .demand_law(lambda.demand_law())
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .expr_payload(lambda.expr_payload())
     }
     #[inline]
@@ -2236,6 +2259,7 @@ impl Builtin for FilterValues {
         object_lambda_spec()
             .object_lambda(lambda)
             .demand_law(lambda.demand_law())
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .expr_payload(lambda.expr_payload())
     }
     #[inline]

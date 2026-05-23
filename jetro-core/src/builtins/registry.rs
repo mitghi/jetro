@@ -1285,33 +1285,27 @@ pub(crate) fn apply_stream_hook_or_else<F>(
 where
     F: FnOnce(Val) -> Result<StageFlow<Val>, EvalError>,
 {
-    match runtime_hook(BuiltinId::from_method(method)) {
-        Some(BuiltinRuntimeHook::Filter) => {
-            <defs::Filter as Builtin>::apply_stream(ctx, item, body)
-        }
-        None => match method {
-            BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::Map => <defs::Map as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::Take => <defs::Take as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_stream(ctx, item, body),
-            BuiltinMethod::TransformKeys => {
-                <defs::TransformKeys as Builtin>::apply_stream(ctx, item, body)
-            }
-            BuiltinMethod::TransformValues => {
-                <defs::TransformValues as Builtin>::apply_stream(ctx, item, body)
-            }
-            BuiltinMethod::FilterKeys => {
-                <defs::FilterKeys as Builtin>::apply_stream(ctx, item, body)
-            }
-            BuiltinMethod::FilterValues => {
-                <defs::FilterValues as Builtin>::apply_stream(ctx, item, body)
-            }
-            _ => fallback(item),
-        },
+    let Some(hook) = runtime_hook(BuiltinId::from_method(method)) else {
+        return fallback(item);
+    };
+    if !hook.has_stream() {
+        return fallback(item);
     }
+    if matches!(hook, BuiltinRuntimeHook::SharedFilter) {
+        return <defs::Filter as Builtin>::apply_stream(ctx, item, body);
+    }
+    macro_rules! trait_arm {
+        ( $( $variant:ident ),* $(,)? ) => {
+            match method {
+                $(
+                    BuiltinMethod::$variant => {
+                        <defs::$variant as Builtin>::apply_stream(ctx, item, body)
+                    }
+                )*
+            }
+        };
+    }
+    crate::for_each_builtin!(trait_arm)
 }
 
 /// Dispatch migrated scalar hooks for a builtin call.
@@ -1392,49 +1386,25 @@ pub(crate) fn apply_barrier_hook(
     buf: &mut Vec<Val>,
     body: Option<&Program>,
 ) -> Option<Result<(), EvalError>> {
-    match runtime_hook(BuiltinId::from_method(method)) {
-        Some(BuiltinRuntimeHook::Filter) => {
-            <defs::Filter as Builtin>::apply_barrier(ctx, buf, body)
-        }
-        None => match method {
-            BuiltinMethod::Reverse => <defs::Reverse as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Sort => <defs::Sort as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Window => <defs::Window as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Chunk => <defs::Chunk as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::GroupBy => <defs::GroupBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::CountBy => <defs::CountBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::IndexBy => <defs::IndexBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Compact => <defs::Compact as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Remove => <defs::Remove as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Map => <defs::Map as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::FlatMap => <defs::FlatMap as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Unique => <defs::Unique as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::UniqueBy => <defs::UniqueBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::TakeWhile => <defs::TakeWhile as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::DropWhile => <defs::DropWhile as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Take => <defs::Take as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::Skip => <defs::Skip as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::FindIndex => <defs::FindIndex as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::IndicesWhere => {
-                <defs::IndicesWhere as Builtin>::apply_barrier(ctx, buf, body)
-            }
-            BuiltinMethod::MaxBy => <defs::MaxBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::MinBy => <defs::MinBy as Builtin>::apply_barrier(ctx, buf, body),
-            BuiltinMethod::TransformKeys => {
-                <defs::TransformKeys as Builtin>::apply_barrier(ctx, buf, body)
-            }
-            BuiltinMethod::TransformValues => {
-                <defs::TransformValues as Builtin>::apply_barrier(ctx, buf, body)
-            }
-            BuiltinMethod::FilterKeys => {
-                <defs::FilterKeys as Builtin>::apply_barrier(ctx, buf, body)
-            }
-            BuiltinMethod::FilterValues => {
-                <defs::FilterValues as Builtin>::apply_barrier(ctx, buf, body)
-            }
-            _ => None,
-        },
+    let hook = runtime_hook(BuiltinId::from_method(method))?;
+    if !hook.has_barrier() {
+        return None;
     }
+    if matches!(hook, BuiltinRuntimeHook::SharedFilter) {
+        return <defs::Filter as Builtin>::apply_barrier(ctx, buf, body);
+    }
+    macro_rules! trait_arm {
+        ( $( $variant:ident ),* $(,)? ) => {
+            match method {
+                $(
+                    BuiltinMethod::$variant => {
+                        <defs::$variant as Builtin>::apply_barrier(ctx, buf, body)
+                    }
+                )*
+            }
+        };
+    }
+    crate::for_each_builtin!(trait_arm)
 }
 
 impl BuiltinId {

@@ -926,7 +926,25 @@ pub enum BuiltinExprPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinRuntimeHook {
     /// Predicate filter stream/barrier hook.
-    Filter,
+    SharedFilter,
+    /// Builtin's own `Builtin::apply_barrier` implementation is available.
+    Barrier,
+    /// Builtin has both stream and barrier trait implementations.
+    StreamAndBarrier,
+}
+
+impl BuiltinRuntimeHook {
+    /// Whether this hook can run in the per-row streaming executor.
+    #[inline]
+    pub(crate) const fn has_stream(self) -> bool {
+        matches!(self, Self::SharedFilter | Self::StreamAndBarrier)
+    }
+
+    /// Whether this hook can run against a materialized barrier buffer.
+    #[inline]
+    pub(crate) const fn has_barrier(self) -> bool {
+        matches!(self, Self::SharedFilter | Self::Barrier | Self::StreamAndBarrier)
+    }
 }
 
 /// Logical planner shape for pipeline-position builtins.
