@@ -467,6 +467,16 @@ impl From<crate::exec::pipeline::ArraySelector> for NdjsonDirectElement {
     }
 }
 
+impl From<crate::exec::pipeline::SingleElementSelection> for NdjsonDirectElement {
+    fn from(selection: crate::exec::pipeline::SingleElementSelection) -> Self {
+        match selection {
+            crate::exec::pipeline::SingleElementSelection::First => Self::First,
+            crate::exec::pipeline::SingleElementSelection::Last => Self::Last,
+            crate::exec::pipeline::SingleElementSelection::Nth(n) => Self::Nth(n),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum NdjsonDirectPredicate {
     Path(NdjsonPhysicalPath),
@@ -1678,10 +1688,7 @@ fn direct_array_element_source(
             builtin_array_selector(BuiltinId::from_method(call.method))?,
             arg,
         )?;
-        return Some((
-            node_path_steps(plan, *receiver)?,
-            direct_element_from_selection(selection),
-        ));
+        return Some((node_path_steps(plan, *receiver)?, selection.into()));
     }
 
     let PlanNode::Pipeline { source, body } = plan.node(id) else {
@@ -1690,22 +1697,12 @@ fn direct_array_element_source(
     if !body.stages.is_empty() {
         return None;
     }
-    let element = direct_element_from_selection(body.sink.single_element_selection()?);
+    let element = body.sink.single_element_selection()?.into();
     let source_steps = match source {
         PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),
         PipelinePlanSource::Expr(source) => node_path_steps(plan, *source)?,
     };
     Some((source_steps, element))
-}
-
-fn direct_element_from_selection(
-    selection: crate::exec::pipeline::SingleElementSelection,
-) -> NdjsonDirectElement {
-    match selection {
-        crate::exec::pipeline::SingleElementSelection::First => NdjsonDirectElement::First,
-        crate::exec::pipeline::SingleElementSelection::Last => NdjsonDirectElement::Last,
-        crate::exec::pipeline::SingleElementSelection::Nth(n) => NdjsonDirectElement::Nth(n),
-    }
 }
 
 fn node_path_steps(
@@ -1749,15 +1746,15 @@ mod tests {
         use crate::exec::pipeline::SingleElementSelection;
 
         assert!(matches!(
-            direct_element_from_selection(SingleElementSelection::First),
+            NdjsonDirectElement::from(SingleElementSelection::First),
             NdjsonDirectElement::First
         ));
         assert!(matches!(
-            direct_element_from_selection(SingleElementSelection::Last),
+            NdjsonDirectElement::from(SingleElementSelection::Last),
             NdjsonDirectElement::Last
         ));
         assert!(matches!(
-            direct_element_from_selection(SingleElementSelection::Nth(2)),
+            NdjsonDirectElement::from(SingleElementSelection::Nth(2)),
             NdjsonDirectElement::Nth(2)
         ));
     }
