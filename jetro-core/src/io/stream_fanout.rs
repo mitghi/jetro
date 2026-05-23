@@ -8,7 +8,7 @@ use super::ndjson_byte::{
 };
 use super::ndjson_direct::{
     direct_cmp_literal_predicate, direct_tape_predicate_for_expr, direct_tape_predicates_for_exprs,
-    direct_tape_root_path_for_expr, physical_paths_equal, NdjsonDirectPredicate,
+    direct_tape_row_path_for_expr, physical_paths_equal, NdjsonDirectPredicate,
     NdjsonPhysicalPath,
 };
 use super::ndjson_scan::for_each_framed_payload_in_range;
@@ -705,7 +705,7 @@ fn direct_numeric_consumer(plan: &RowStreamPlan) -> Option<DirectNumericReducer>
         return None;
     };
     let reducer = terminal.numeric_reducer()?;
-    let value_path = direct_tape_root_path_for_expr(map)?;
+    let value_path = direct_tape_row_path_for_expr(map)?;
     let predicates = direct_filter_prefix(prefix)?;
     Some(DirectNumericReducer {
         predicates,

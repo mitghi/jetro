@@ -533,7 +533,7 @@ pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<Ndjs
 }
 
 pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapePlan> {
-    if let Some(steps) = direct_tape_root_path_for_expr(expr) {
+    if let Some(steps) = direct_tape_row_path_for_expr(expr) {
         return Some(NdjsonDirectTapePlan::RootPath(steps));
     }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
@@ -542,6 +542,10 @@ pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapeP
 
 pub(super) fn direct_tape_root_path_for_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
     direct_root_path_expr(expr)
+}
+
+pub(super) fn direct_tape_row_path_for_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
+    direct_item_path_expr(expr).or_else(|| direct_tape_root_path_for_expr(expr))
 }
 
 fn direct_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
@@ -1590,6 +1594,21 @@ mod tests {
 
         let computed = crate::parse::parser::parse("$.items.map(sku)").expect("parse computed");
         assert!(direct_tape_root_path_for_expr(&computed).is_none());
+    }
+
+    #[test]
+    fn direct_tape_row_path_accepts_row_local_paths() {
+        let bare = crate::parse::parser::parse("sku").expect("parse bare field");
+        let current = crate::parse::parser::parse("@.sku").expect("parse current field");
+        let rooted = crate::parse::parser::parse("$.sku").expect("parse root field");
+
+        for expr in [&bare, &current, &rooted] {
+            let steps = direct_tape_row_path_for_expr(expr).expect("row path");
+            assert!(matches!(
+                steps.as_slice(),
+                [PhysicalPathStep::Field(sku)] if sku.as_ref() == "sku"
+            ));
+        }
     }
 
     #[test]

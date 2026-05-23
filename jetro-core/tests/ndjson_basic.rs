@@ -575,6 +575,8 @@ fn rows_stream_top_level_map_arg_is_row_local() {
     assert_eq!(String::from_utf8(out).unwrap(), "\"Ada\"\n\"Bob\"\n");
     assert_eq!(report.route.kind.to_string(), "rows-stream");
     assert_eq!(report.stats.rows_emitted, 2);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
 }
 
 #[test]
