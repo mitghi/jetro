@@ -269,7 +269,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
+        } if !*optional && is_direct_view_scalar_call(call) =>
         {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
@@ -606,7 +606,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
+        } if is_direct_view_scalar_call(call) =>
         {
             if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
@@ -682,7 +682,7 @@ fn direct_object_value_from_node(
             receiver,
             call,
             optional,
-        } if view_scalar_value_projection(BuiltinId::from_method(call.method)) => {
+        } if is_direct_view_scalar_call(call) => {
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
                 steps: node_path_steps(plan, *receiver)?,
                 call: call.clone(),
@@ -833,6 +833,11 @@ fn plain_sink_direct_scalar_call(
         return None;
     }
     body.sink.scalar_call_for_plain_sink()
+}
+
+#[inline]
+fn is_direct_view_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
+    view_scalar_value_projection(BuiltinId::from_method(call.method))
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
@@ -1064,7 +1069,7 @@ fn direct_tape_predicate_node(
             receiver,
             call,
             optional,
-        } if !*optional && view_scalar_value_projection(BuiltinId::from_method(call.method)) => {
+        } if !*optional && is_direct_view_scalar_call(call) => {
             direct_tape_predicate_scalar_call(plan, *receiver, call.clone())
         }
         PlanNode::Pipeline { source, body } => {
@@ -1265,12 +1270,11 @@ fn direct_item_predicate_from_kernel(
         crate::exec::pipeline::BodyKernel::Or(items) => {
             combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::Or)
         }
-        crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
-            if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
-        {
+        crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
+            let (suffix_steps, call) = direct_scalar_call_from_kernel(kernel)?;
             Some(NdjsonDirectItemPredicate::ViewScalarCall {
-                suffix_steps: kernel_to_physical_path(receiver)?,
-                call: call.clone(),
+                suffix_steps,
+                call,
             })
         }
         _ => None,
@@ -1311,17 +1315,28 @@ fn direct_projection_value_from_kernel(
         | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
             NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?),
         ),
-        crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call }
-            if view_scalar_value_projection(BuiltinId::from_method(call.method)) =>
-        {
+        crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
+            let (steps, call) = direct_scalar_call_from_kernel(kernel)?;
             Some(NdjsonDirectProjectionValue::ViewScalarCall {
-                steps: kernel_to_physical_path(receiver)?,
-                call: call.clone(),
+                steps,
+                call,
                 optional: false,
             })
         }
         _ => None,
     }
+}
+
+fn direct_scalar_call_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<(NdjsonPhysicalPath, crate::builtins::BuiltinCall)> {
+    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
+        return None;
+    };
+    if !is_direct_view_scalar_call(call) {
+        return None;
+    }
+    Some((kernel_to_physical_path(receiver)?, call.clone()))
 }
 
 fn direct_object_fields_from_kernel(
