@@ -610,11 +610,13 @@ struct DirectCmp {
     op: BinOp,
     lit: Val,
 }
+#[derive(Clone)]
 struct DirectCount {
     predicates: Vec<NdjsonDirectPredicate>,
     limit: Option<usize>,
     count: usize,
 }
+#[derive(Clone)]
 struct DirectNumericReducer {
     predicates: Vec<NdjsonDirectPredicate>,
     value_path: NdjsonPhysicalPath,
@@ -973,38 +975,25 @@ struct DirectFanoutReducer {
 }
 #[derive(Clone)]
 enum DirectFanoutReducerKind {
-    Count {
-        predicates: Vec<NdjsonDirectPredicate>,
-        count: usize,
-    },
-    Numeric {
-        predicates: Vec<NdjsonDirectPredicate>,
-        value_path: NdjsonPhysicalPath,
-        acc: NumericAccumulator,
-    },
+    Count(DirectCount),
+    Numeric(DirectNumericReducer),
     PredicateSink(DirectPredicateSink),
 }
 impl DirectFanoutReducer {
     fn from_consumer(consumer: &RowStreamFanoutConsumer) -> Option<Self> {
-        if let Some(count) =
+        if let Some(mut count) =
             direct_count_consumer(&consumer.stream).filter(|count| count.limit.is_none())
         {
+            count.count = 0;
             return Some(Self {
                 binding: consumer.binding.clone(),
-                kind: DirectFanoutReducerKind::Count {
-                    predicates: count.predicates,
-                    count: 0,
-                },
+                kind: DirectFanoutReducerKind::Count(count),
             });
         }
         if let Some(numeric) = direct_numeric_consumer(&consumer.stream) {
             return Some(Self {
                 binding: consumer.binding.clone(),
-                kind: DirectFanoutReducerKind::Numeric {
-                    predicates: numeric.predicates,
-                    value_path: numeric.value_path,
-                    acc: numeric.acc,
-                },
+                kind: DirectFanoutReducerKind::Numeric(numeric),
             });
         }
         if let Some(sink) = direct_predicate_sink_consumer(&consumer.stream) {
@@ -1018,19 +1007,15 @@ impl DirectFanoutReducer {
 
     fn apply_row(&mut self, row: &[u8]) -> Result<(), JetroEngineError> {
         match &mut self.kind {
-            DirectFanoutReducerKind::Count { predicates, count } => {
-                if eval_ndjson_byte_predicates_all(row, predicates)? {
-                    *count += 1;
+            DirectFanoutReducerKind::Count(count) => {
+                if eval_ndjson_byte_predicates_all(row, &count.predicates)? {
+                    count.count += 1;
                 }
             }
-            DirectFanoutReducerKind::Numeric {
-                predicates,
-                value_path,
-                acc,
-            } => {
-                if eval_ndjson_byte_predicates_all(row, predicates)? {
-                    if let Some(value) = raw_json_path_view(row, value_path) {
-                        acc.add_view(value);
+            DirectFanoutReducerKind::Numeric(numeric) => {
+                if eval_ndjson_byte_predicates_all(row, &numeric.predicates)? {
+                    if let Some(value) = raw_json_path_view(row, &numeric.value_path) {
+                        numeric.acc.add_view(value);
                     }
                 }
             }
@@ -1045,14 +1030,13 @@ impl DirectFanoutReducer {
 
     fn merge(&mut self, other: &Self) {
         match (&mut self.kind, &other.kind) {
+            (DirectFanoutReducerKind::Count(count), DirectFanoutReducerKind::Count(other)) => {
+                count.count += other.count;
+            }
             (
-                DirectFanoutReducerKind::Count { count, .. },
-                DirectFanoutReducerKind::Count { count: other, .. },
-            ) => *count += *other,
-            (
-                DirectFanoutReducerKind::Numeric { acc, .. },
-                DirectFanoutReducerKind::Numeric { acc: other, .. },
-            ) => acc.merge(other),
+                DirectFanoutReducerKind::Numeric(numeric),
+                DirectFanoutReducerKind::Numeric(other),
+            ) => numeric.acc.merge(&other.acc),
             (
                 DirectFanoutReducerKind::PredicateSink(sink),
                 DirectFanoutReducerKind::PredicateSink(other),
@@ -1063,8 +1047,8 @@ impl DirectFanoutReducer {
 
     fn value(&self) -> Val {
         match &self.kind {
-            DirectFanoutReducerKind::Count { count, .. } => Val::Int(*count as i64),
-            DirectFanoutReducerKind::Numeric { acc, .. } => acc.value(),
+            DirectFanoutReducerKind::Count(count) => Val::Int(count.count as i64),
+            DirectFanoutReducerKind::Numeric(numeric) => numeric.acc.value(),
             DirectFanoutReducerKind::PredicateSink(sink) => sink.value(),
         }
     }
