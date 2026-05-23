@@ -1254,19 +1254,11 @@ fn direct_stream_map_from_kernel(
     if let Some(value) = direct_projection_value_from_kernel(kernel) {
         return Some(NdjsonDirectStreamMap::Value(value));
     }
-    if let crate::exec::pipeline::BodyKernel::Array(items) = kernel {
-        let items = items
-            .iter()
-            .map(direct_projection_value_from_kernel)
-            .collect::<Option<Vec<_>>>()?;
-        return Some(NdjsonDirectStreamMap::Array(items));
+    match direct_container_plan_from_kernel(kernel)? {
+        NdjsonDirectTapePlan::Array(items) => Some(NdjsonDirectStreamMap::Array(items)),
+        NdjsonDirectTapePlan::Object(fields) => Some(NdjsonDirectStreamMap::Object(fields)),
+        _ => None,
     }
-    if let crate::exec::pipeline::BodyKernel::Object(object) = kernel {
-        return Some(NdjsonDirectStreamMap::Object(
-            direct_object_fields_from_kernel(object)?,
-        ));
-    }
-    None
 }
 
 fn direct_stream_map_path(map: NdjsonDirectStreamMap) -> Option<NdjsonPhysicalPath> {
@@ -1292,6 +1284,12 @@ fn direct_tape_plan_from_kernel(
             NdjsonDirectProjectionValue::Literal(_) => None,
         };
     }
+    direct_container_plan_from_kernel(kernel)
+}
+
+fn direct_container_plan_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectTapePlan> {
     match kernel {
         crate::exec::pipeline::BodyKernel::Array(items) => Some(NdjsonDirectTapePlan::Array(
             items
@@ -1385,6 +1383,12 @@ fn direct_projection_value_from_kernel(
                 call,
                 optional: false,
             })
+        }
+        crate::exec::pipeline::BodyKernel::Array(_)
+        | crate::exec::pipeline::BodyKernel::Object(_) => {
+            direct_container_plan_from_kernel(kernel)
+                .map(Box::new)
+                .map(NdjsonDirectProjectionValue::Nested)
         }
         _ => None,
     }

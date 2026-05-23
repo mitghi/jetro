@@ -3262,7 +3262,7 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
                 let path_idx = value
                     .path_steps()
                     .and_then(|steps| suffix_cache.index(tape, item_idx, steps));
-                write_json_tape_direct_value(writer, tape, value, path_idx)?;
+                write_json_tape_direct_value(writer, tape, item_idx, value, path_idx)?;
             } else {
                 writer.write_all(b"null")?;
             }
@@ -3310,7 +3310,7 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
             let path_idx = value
                 .path_steps()
                 .and_then(|steps| suffix_cache.index(tape, item_idx, steps));
-            write_json_tape_direct_value(writer, tape, value, path_idx)?;
+            write_json_tape_direct_value(writer, tape, item_idx, value, path_idx)?;
         }
         NdjsonDirectStreamMap::Array(items) => {
             write_json_tape_array_projection_from(
@@ -3406,7 +3406,7 @@ fn write_json_tape_object_projection_from<W: Write, T: JsonTape>(
         }
         write_json_str(writer, field.key.as_ref())?;
         writer.write_all(b":")?;
-        write_json_tape_direct_value(writer, tape, &field.value, path_idx)?;
+        write_json_tape_direct_value(writer, tape, start, &field.value, path_idx)?;
         wrote = true;
     }
     writer.write_all(b"}")?;
@@ -3438,7 +3438,7 @@ fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
         let path_idx = item
             .path_steps()
             .and_then(|steps| path_caches[idx].index(tape, start, steps));
-        write_json_tape_direct_value(writer, tape, item, path_idx)?;
+        write_json_tape_direct_value(writer, tape, start, item, path_idx)?;
     }
     writer.write_all(b"]")?;
     Ok(())
@@ -3446,6 +3446,7 @@ fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
 fn write_json_tape_direct_value<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
+    start: usize,
     value: &NdjsonDirectProjectionValue,
     path_idx: Option<usize>,
 ) -> Result<(), JetroEngineError> {
@@ -3471,14 +3472,15 @@ fn write_json_tape_direct_value<W: Write, T: JsonTape>(
         }
         NdjsonDirectProjectionValue::Literal(value) => write_val_json(writer, value)?,
         NdjsonDirectProjectionValue::Nested(plan) => {
-            write_json_tape_nested_plan(writer, tape, plan)?;
+            write_json_tape_nested_plan_from(writer, tape, start, plan)?;
         }
     }
     Ok(())
 }
-fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
+fn write_json_tape_nested_plan_from<W: Write, T: JsonTape>(
     writer: &mut W,
     tape: &T,
+    start: usize,
     plan: &NdjsonDirectTapePlan,
 ) -> Result<(), JetroEngineError> {
     let mut root_cache = NdjsonPathCache::default();
@@ -3488,7 +3490,7 @@ fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
     let mut projection_caches = Vec::new();
     match plan {
         NdjsonDirectTapePlan::RootPath(steps) => {
-            if let Some(idx) = root_cache.index(tape, 0, steps) {
+            if let Some(idx) = root_cache.index(tape, start, steps) {
                 write_json_tape_at(writer, tape, idx)?;
             } else {
                 writer.write_all(b"null")?;
@@ -3499,7 +3501,7 @@ fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
             call,
             optional,
         } => {
-            let idx = root_cache.index(tape, 0, steps);
+            let idx = root_cache.index(tape, start, steps);
             let value = idx
                 .map(|idx| json_tape_scalar(tape, idx))
                 .unwrap_or(crate::util::JsonView::Null);
@@ -3524,6 +3526,7 @@ fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
                 source_steps,
                 *element,
                 suffix_steps,
+                start,
                 &mut source_cache,
                 &mut suffix_cache,
             )?;
@@ -3541,6 +3544,7 @@ fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
                 *element,
                 suffix_steps,
                 call,
+                start,
                 &mut source_cache,
                 &mut suffix_cache,
             )?;
@@ -3557,13 +3561,25 @@ fn write_json_tape_nested_plan<W: Write, T: JsonTape>(
             )?;
         }
         NdjsonDirectTapePlan::Object(fields) => {
-            write_json_tape_object_projection(writer, tape, fields, &mut projection_caches)?;
+            write_json_tape_object_projection_from(
+                writer,
+                tape,
+                start,
+                fields,
+                &mut projection_caches,
+            )?;
         }
         NdjsonDirectTapePlan::Array(items) => {
-            write_json_tape_array_projection(writer, tape, items, &mut projection_caches)?;
+            write_json_tape_array_projection_from(
+                writer,
+                tape,
+                start,
+                items,
+                &mut projection_caches,
+            )?;
         }
         NdjsonDirectTapePlan::ObjectItems { steps, method } => {
-            let idx = root_cache.index(tape, 0, steps);
+            let idx = root_cache.index(tape, start, steps);
             write_json_tape_object_items(writer, tape, idx, *method)?;
         }
         NdjsonDirectTapePlan::ViewPipeline { .. } => {
@@ -3578,11 +3594,12 @@ fn write_json_tape_array_element_path<W: Write, T: JsonTape>(
     source_steps: &[crate::ir::physical::PhysicalPathStep],
     element: super::ndjson_direct::NdjsonDirectElement,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
+    start: usize,
     source_cache: &mut NdjsonPathCache,
     suffix_cache: &mut NdjsonPathCache,
 ) -> Result<(), JetroEngineError> {
     let idx = source_cache
-        .index(tape, 0, source_steps)
+        .index(tape, start, source_steps)
         .and_then(|idx| json_tape_array_element(tape, idx, element))
         .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
     if let Some(idx) = idx {
@@ -3599,11 +3616,12 @@ fn write_json_tape_array_element_scalar<W: Write, T: JsonTape>(
     element: super::ndjson_direct::NdjsonDirectElement,
     suffix_steps: &[crate::ir::physical::PhysicalPathStep],
     call: &crate::builtins::BuiltinCall,
+    start: usize,
     source_cache: &mut NdjsonPathCache,
     suffix_cache: &mut NdjsonPathCache,
 ) -> Result<(), JetroEngineError> {
     let idx = source_cache
-        .index(tape, 0, source_steps)
+        .index(tape, start, source_steps)
         .and_then(|idx| json_tape_array_element(tape, idx, element))
         .and_then(|idx| suffix_cache.index(tape, idx, suffix_steps));
     if let Some(value) = idx
