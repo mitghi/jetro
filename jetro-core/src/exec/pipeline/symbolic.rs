@@ -136,11 +136,11 @@ impl SymbolicEmitter {
         self.out_kernels.push(kernel);
     }
 
-    fn push_expr_stage(&mut self, expr: Expr, method: BuiltinMethod) {
+    fn push_expr_stage(&mut self, expr: Expr, id: BuiltinId) {
         let expr = simplify_expr(expr);
         let prog = compile_stage_expr(&expr);
         let kernel = BodyKernel::classify(&prog);
-        let stage = Stage::expr_stage_builtin_id(BuiltinId::from_method(method), prog)
+        let stage = Stage::expr_stage_builtin_id(id, prog)
             .expect("symbolic expression stage must be registry-backed");
         self.out_stages.push(stage);
         self.out_exprs.push(Some(Arc::new(expr)));
@@ -150,7 +150,7 @@ impl SymbolicEmitter {
     fn flush_predicate(&mut self) {
         if let Some(pred) = self.predicate.take() {
             if !matches!(pred, Expr::Bool(true)) {
-                self.push_expr_stage(pred, BuiltinMethod::Filter);
+                self.push_expr_stage(pred, BuiltinId::from_method(BuiltinMethod::Filter));
             }
         }
     }
@@ -158,7 +158,7 @@ impl SymbolicEmitter {
     fn flush_item(&mut self) {
         if !matches!(self.item, Expr::Current) {
             let item = std::mem::replace(&mut self.item, Expr::Current);
-            self.push_expr_stage(item, BuiltinMethod::Map);
+            self.push_expr_stage(item, BuiltinId::from_method(BuiltinMethod::Map));
         }
     }
 
@@ -180,7 +180,7 @@ impl SymbolicEmitter {
                 return;
             }
             if self.demand.chain.value.requires_payload() {
-                self.push_expr_stage(item, BuiltinMethod::Map);
+                self.push_expr_stage(item, BuiltinId::from_method(BuiltinMethod::Map));
             }
         }
     }

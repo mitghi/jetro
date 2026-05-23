@@ -4,7 +4,7 @@
 //! stages, and sinks, and returns `None` for shapes that cannot be a linear pull chain,
 //! signalling fallback to the VM opcode path.
 //!
-//! This module also contains the registry-driven stage factory helpers (`lower_method_from_registry`
+//! This module also contains the registry-driven stage factory helpers (`lower_builtin_from_registry`
 //! and friends) that were previously in `stage_factory.rs`.
 
 use std::sync::Arc;
@@ -205,9 +205,8 @@ fn decode_method_chain(
                     continue;
                 }
                 let id = by_name(name.as_str())?;
-                let method = id.method()?;
-                lower_method_from_registry(
-                    method,
+                lower_builtin_from_registry(
+                    id,
                     args,
                     is_last,
                     &mut stages,
@@ -369,16 +368,15 @@ fn raw_arg_expr(arg: &crate::parse::ast::Arg) -> Option<Arc<Expr>> {
 
 use super::{ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
 
-/// Lowers a `BuiltinMethod` call to a concrete `Stage` or `Sink`, returning `None` when the method cannot be lowered at this position.
-pub(super) fn lower_method_from_registry(
-    method: BuiltinMethod,
+/// Lowers a resolved builtin id to a concrete `Stage` or `Sink`, returning `None` when the builtin cannot be lowered at this position.
+pub(super) fn lower_builtin_from_registry(
+    id: BuiltinId,
     args: &[crate::parse::ast::Arg],
     is_last: bool,
     stages: &mut Vec<Stage>,
     stage_exprs: &mut Vec<Option<Arc<Expr>>>,
     sink: &mut Sink,
 ) -> Option<()> {
-    let id = BuiltinId::from_method(method);
     if !pipeline_accepts_arity(id, args.len(), is_last) {
         return None;
     }
