@@ -461,10 +461,8 @@ fn builtins_drop_while_named_lambda() {
 
 #[test]
 fn builtins_flat_map_named_lambda() {
-    // `.flat_map` flattening behaviour differs across vm and engine paths
-    // (tape vs serde root); cross-form equivalence on the engine path is
-    // what the lambda fix needs to preserve.
     let doc = json!({"xs":[{"vs":[1,2]},{"vs":[3]},{"vs":[4,5]}]});
+    assert_both("$.xs.flat_map(r => r.vs)", &doc, &json!([1, 2, 3, 4, 5]));
     let named = run_engine("$.xs.flat_map(r => r.vs)", &doc);
     let at = run_engine("$.xs.flat_map(@.vs)", &doc);
     assert_eq!(named, at);
@@ -1252,4 +1250,3 @@ fn first_class_lambda_inside_nested_let() {
         &json!([101, 102, 103]),
     );
 }
-
