@@ -7,7 +7,9 @@
 
 use crate::builtins::registry::{
     by_name as builtin_by_name, numeric_reducer, predicate_sink, row_stream_op,
-    row_stream_op_blocks_parallel_partitioning, row_stream_op_is_terminal, BuiltinId,
+    row_stream_op_blocks_parallel_partitioning, row_stream_op_is_filter_like,
+    row_stream_op_is_projector, row_stream_op_is_row_selection, row_stream_op_is_terminal,
+    row_stream_op_preserves_order_before_limit, BuiltinId,
 };
 use crate::builtins::{
     BuiltinMethod, BuiltinNumericReducer, BuiltinPredicateSink, BuiltinRowStreamOp,
@@ -102,9 +104,12 @@ impl RowStreamStage {
         }
     }
 
-    fn scalar_sink(&self) -> bool {
+    fn row_stream_op(&self) -> Option<BuiltinRowStreamOp> {
         row_stream_op(BuiltinId::from_method(self.builtin_method()))
-            .is_some_and(row_stream_op_is_terminal)
+    }
+
+    fn scalar_sink(&self) -> bool {
+        self.row_stream_op().is_some_and(row_stream_op_is_terminal)
     }
 
     fn retained_limit(&self) -> Option<usize> {
@@ -133,8 +138,27 @@ impl RowStreamStage {
     }
 
     fn blocks_parallel_partitioning(&self) -> bool {
-        row_stream_op(BuiltinId::from_method(self.builtin_method()))
+        self.row_stream_op()
             .is_some_and(row_stream_op_blocks_parallel_partitioning)
+    }
+
+    fn is_filter_like(&self) -> bool {
+        self.row_stream_op()
+            .is_some_and(row_stream_op_is_filter_like)
+    }
+
+    fn is_projector(&self) -> bool {
+        self.row_stream_op().is_some_and(row_stream_op_is_projector)
+    }
+
+    fn is_row_selection(&self) -> bool {
+        self.row_stream_op()
+            .is_some_and(row_stream_op_is_row_selection)
+    }
+
+    fn preserves_order_before_limit(&self) -> bool {
+        self.row_stream_op()
+            .is_some_and(row_stream_op_preserves_order_before_limit)
     }
 }
 
@@ -332,15 +356,20 @@ impl RowStreamDemand {
         let mut demand = RowStreamDemand::default();
         let mut seen_take = None;
         for stage in &plan.stages {
-            match stage {
-                RowStreamStage::Filter(_) => demand.predicate_count += 1,
-                RowStreamStage::DistinctBy(_) => demand.key_count += 1,
-                stage if stage.retained_limit().is_some() => {
-                    seen_take.get_or_insert(stage.retained_limit().expect("retained limit"));
-                }
-                RowStreamStage::Map(_) => demand.projector_count += 1,
-                stage if stage.scalar_sink() => demand.scalar_output = true,
-                _ => {}
+            if stage.is_filter_like() {
+                demand.predicate_count += 1;
+            }
+            if matches!(stage, RowStreamStage::DistinctBy(_)) {
+                demand.key_count += 1;
+            }
+            if let Some(limit) = stage.retained_limit() {
+                seen_take.get_or_insert(limit);
+            }
+            if stage.is_projector() {
+                demand.projector_count += 1;
+            }
+            if stage.scalar_sink() {
+                demand.scalar_output = true;
             }
         }
         demand.retained_limit = seen_take;
@@ -358,15 +387,14 @@ fn classify_parallelism(
 ) -> RowStreamParallelism {
     let mut saw_filter = false;
     for stage in &plan.stages {
-        match stage {
-            RowStreamStage::Filter(_) => saw_filter = true,
-            RowStreamStage::Map(_) => {}
-            RowStreamStage::Take(_) => {}
-            stage if stage.blocks_parallel_partitioning() => {
-                return RowStreamParallelism::Sequential;
-            }
-            stage if stage.scalar_sink() => {}
-            _ => {}
+        if stage.is_filter_like() {
+            saw_filter = true;
+        } else if stage.is_projector() || stage.retained_limit().is_some() || stage.scalar_sink() {
+            // These stages do not prevent partition-filter execution.
+        } else if stage.blocks_parallel_partitioning() {
+            return RowStreamParallelism::Sequential;
+        } else {
+            return RowStreamParallelism::Sequential;
         }
     }
 
@@ -383,15 +411,13 @@ fn classify_parallelism(
 fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
     let Some(map_idx) = stages
         .iter()
-        .position(|stage| matches!(stage, RowStreamStage::Map(_)))
+        .position(RowStreamStage::is_projector)
     else {
         return false;
     };
     stages[..map_idx].iter().any(|stage| {
-        matches!(
-            stage,
-            RowStreamStage::Filter(_) | RowStreamStage::DistinctBy(_)
-        ) || stage.retained_limit().is_some()
+        stage.is_row_selection()
+            || stage.retained_limit().is_some()
             || stage.scalar_sink()
     })
 }
@@ -401,9 +427,8 @@ fn preserves_source_order_until_limit(stages: &[RowStreamStage]) -> bool {
         if stage.retained_limit().is_some() {
             return true;
         }
-        match stage {
-            RowStreamStage::Filter(_) | RowStreamStage::Map(_) => {}
-            _ => return false,
+        if !stage.preserves_order_before_limit() {
+            return false;
         }
     }
     false

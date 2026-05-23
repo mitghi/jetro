@@ -963,6 +963,33 @@ impl BuiltinRowStreamOp {
     pub(crate) const fn blocks_parallel_partitioning(self) -> bool {
         matches!(self, Self::DistinctBy | Self::Last)
     }
+
+    /// Whether this operation tests row membership with a predicate while
+    /// preserving the surviving row order.
+    #[inline]
+    pub(crate) const fn is_filter_like(self) -> bool {
+        matches!(self, Self::Filter | Self::FindFirst)
+    }
+
+    /// Whether this operation projects retained rows one-to-one.
+    #[inline]
+    pub(crate) const fn is_projector(self) -> bool {
+        matches!(self, Self::Map)
+    }
+
+    /// Whether this operation selects which rows continue downstream without
+    /// changing their order.
+    #[inline]
+    pub(crate) const fn is_row_selection(self) -> bool {
+        matches!(self, Self::Filter | Self::FindFirst | Self::DistinctBy)
+    }
+
+    /// Whether this operation can appear before a retained limit while keeping
+    /// source-order early stop semantics conservative and unchanged.
+    #[inline]
+    pub(crate) const fn preserves_order_before_limit(self) -> bool {
+        matches!(self, Self::Filter | Self::FindFirst | Self::Map)
+    }
 }
 
 /// Marker that a builtin has a structural (index-based) execution backend.

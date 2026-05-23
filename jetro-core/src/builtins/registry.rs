@@ -95,6 +95,31 @@ pub(crate) fn row_stream_op_blocks_parallel_partitioning(op: BuiltinRowStreamOp)
     op.blocks_parallel_partitioning()
 }
 
+/// Return true when a row-stream op behaves as a predicate filter.
+#[inline]
+pub(crate) fn row_stream_op_is_filter_like(op: BuiltinRowStreamOp) -> bool {
+    op.is_filter_like()
+}
+
+/// Return true when a row-stream op projects rows one-to-one.
+#[inline]
+pub(crate) fn row_stream_op_is_projector(op: BuiltinRowStreamOp) -> bool {
+    op.is_projector()
+}
+
+/// Return true when a row-stream op selects rows without reordering them.
+#[inline]
+pub(crate) fn row_stream_op_is_row_selection(op: BuiltinRowStreamOp) -> bool {
+    op.is_row_selection()
+}
+
+/// Return true when a row-stream op can precede a retained limit while
+/// preserving conservative source-order early-stop semantics.
+#[inline]
+pub(crate) fn row_stream_op_preserves_order_before_limit(op: BuiltinRowStreamOp) -> bool {
+    op.preserves_order_before_limit()
+}
+
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
 #[inline]
 pub(crate) fn predicate_sink(id: BuiltinId) -> Option<BuiltinPredicateSink> {
@@ -3368,6 +3393,34 @@ mod tests {
             assert_eq!(
                 row_stream_op_blocks_parallel_partitioning(op),
                 expected_blocks_parallel,
+                "{op:?}"
+            );
+            assert_eq!(
+                row_stream_op_is_filter_like(op),
+                matches!(op, BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst),
+                "{op:?}"
+            );
+            assert_eq!(
+                row_stream_op_is_projector(op),
+                matches!(op, BuiltinRowStreamOp::Map),
+                "{op:?}"
+            );
+            assert_eq!(
+                row_stream_op_is_row_selection(op),
+                matches!(
+                    op,
+                    BuiltinRowStreamOp::Filter
+                        | BuiltinRowStreamOp::FindFirst
+                        | BuiltinRowStreamOp::DistinctBy
+                ),
+                "{op:?}"
+            );
+            assert_eq!(
+                row_stream_op_preserves_order_before_limit(op),
+                matches!(
+                    op,
+                    BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst | BuiltinRowStreamOp::Map
+                ),
                 "{op:?}"
             );
         }
