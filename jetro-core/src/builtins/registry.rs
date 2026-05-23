@@ -3391,6 +3391,31 @@ mod tests {
     }
 
     #[test]
+    fn registry_row_stream_arg_shapes_match_pipeline_arity() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(op) = row_stream_op(id) else {
+                continue;
+            };
+            let arity = match row_stream_op_arg(op) {
+                BuiltinRowStreamArg::None => 0,
+                BuiltinRowStreamArg::Expr | BuiltinRowStreamArg::Usize => 1,
+            };
+
+            assert!(
+                pipeline_accepts_arity(id, arity, true),
+                "{method:?} row-stream op {op:?} arity {arity} is not accepted by pipeline metadata"
+            );
+            if row_stream_op_arg(op) == BuiltinRowStreamArg::Expr {
+                assert!(
+                    accepts_lambda_arg(id),
+                    "{method:?} row-stream op {op:?} requires an expression but is not lambda-capable"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_row_stream_op_terminal_flags_are_exhaustive() {
         for op in [
             BuiltinRowStreamOp::Reverse,
