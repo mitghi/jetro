@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
-    sink_accumulator as builtin_sink_accumulator, BuiltinId,
+    sink_accumulator as builtin_sink_accumulator, terminal_expr_target, BuiltinId,
 };
 use crate::builtins::{
     BuiltinCardinality, BuiltinExprStage, BuiltinPipelineLowering, BuiltinSinkAccumulator,
@@ -390,12 +390,12 @@ pub(super) fn lower_builtin_from_registry(
             }
             push_expr_stage(id, &args[0], stages, stage_exprs)
         }
-        BuiltinPipelineLowering::TerminalExprArg { terminal } => {
+        BuiltinPipelineLowering::TerminalExprArg { .. } => {
             if args.len() != 1 || !is_last {
                 return None;
             }
             push_expr_stage(id, &args[0], stages, stage_exprs)?;
-            set_terminal_sink(BuiltinId::from_method(terminal), sink)?;
+            set_terminal_sink(terminal_expr_target(id)?, sink)?;
             Some(())
         }
         BuiltinPipelineLowering::Nullary => {

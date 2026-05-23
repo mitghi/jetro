@@ -1168,6 +1168,18 @@ pub(crate) fn pipeline_lowering(id: BuiltinId) -> Option<BuiltinPipelineLowering
     id.method().map(|m| m.spec().lowering).flatten()
 }
 
+/// Return the terminal sink target for expression-stage builtins that lower as
+/// `stage(expr)` followed by a terminal sink, e.g. `find(pred)` -> `filter(pred).first()`.
+#[inline]
+pub(crate) fn terminal_expr_target(id: BuiltinId) -> Option<BuiltinId> {
+    match pipeline_lowering(id)? {
+        BuiltinPipelineLowering::TerminalExprArg { terminal } => {
+            Some(BuiltinId::from_method(terminal))
+        }
+        _ => None,
+    }
+}
+
 /// Return `true` if builtin `id` can be lowered in pipeline position with
 /// `arity` arguments. Terminal sinks are only accepted when `is_last` is true.
 #[inline]
@@ -2857,6 +2869,11 @@ mod tests {
                     assert!(
                         terminal_selection_position(BuiltinId::from_method(terminal)).is_some(),
                         "{method:?} TerminalExprArg target {terminal:?} is not a select-one sink"
+                    );
+                    assert_eq!(
+                        terminal_expr_target(id),
+                        Some(BuiltinId::from_method(terminal)),
+                        "{method:?} terminal expression target accessor must mirror lowering metadata"
                     );
                 }
                 Some(BuiltinPipelineLowering::TerminalSink) => {
