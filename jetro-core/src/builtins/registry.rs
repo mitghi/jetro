@@ -1629,6 +1629,14 @@ mod tests {
                 numeric_sink,
                 "{method:?} numeric reducer metadata must match numeric sink metadata"
             );
+
+            if let Some(view_stage) = spec.view_stage {
+                assert_eq!(
+                    spec.cardinality,
+                    view_stage.cardinality(),
+                    "{method:?} view-stage cardinality must match builtin cardinality"
+                );
+            }
         }
     }
 
