@@ -597,6 +597,8 @@ pub struct BuiltinSpec {
     pub view_native: bool,
     /// Whether the builtin can execute directly on a `JsonView` without materialising.
     pub view_scalar: bool,
+    /// Concrete borrowed-view scalar dispatch family, if any.
+    pub view_scalar_op: Option<BuiltinViewScalarOp>,
     /// View-native object/path projection operation, if any.
     pub view_object_projection: Option<BuiltinViewObjectProjection>,
     /// Raw-byte JSON scalar operation, if any.
@@ -725,6 +727,21 @@ pub enum BuiltinDemandLaw {
     OrderBarrier,
     /// Reverses one-to-one output order, swapping first/last positional demand.
     Reverse,
+}
+
+/// Concrete borrowed-view scalar execution family for a builtin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewScalarOp {
+    /// Return the length of an array, object, or string view.
+    Len,
+    /// String receiver, no static argument.
+    StringNoArg,
+    /// Numeric receiver, no static argument.
+    NumericNoArg,
+    /// String receiver with a single string argument.
+    StringArg,
+    /// String containment using a literal string target value.
+    StringContainsArg,
 }
 
 /// View-native object/path projection operation.
@@ -1907,6 +1924,7 @@ impl BuiltinSpec {
             can_indexed: false,
             view_native: false,
             view_scalar: false,
+            view_scalar_op: None,
             view_object_projection: None,
             raw_json_scalar: None,
             object_lambda: None,
@@ -1984,6 +2002,12 @@ impl BuiltinSpec {
         self.view_scalar = true;
         self.view_native = true;
         self
+    }
+
+    /// Attaches the concrete borrowed-view scalar dispatch family.
+    fn view_scalar_op(mut self, op: BuiltinViewScalarOp) -> Self {
+        self.view_scalar_op = Some(op);
+        self.view_scalar()
     }
 
     /// Attaches a view-native object/path projection operation.
@@ -2261,42 +2285,6 @@ impl BuiltinSpec {
 }
 
 impl BuiltinMethod {
-    /// Returns true for string scalar methods that take a single string argument and
-    /// can execute directly on a `JsonView` without materialising the receiver.
-    #[inline]
-    pub(crate) fn is_string_arg_view_scalar(self) -> bool {
-        matches!(
-            self,
-            Self::StartsWith | Self::EndsWith | Self::Matches | Self::IndexOf | Self::LastIndexOf
-        )
-    }
-
-    /// Returns true for zero-argument string scalar methods that can execute on a `JsonView`.
-    #[inline]
-    pub(crate) fn is_string_no_arg_view_scalar(self) -> bool {
-        matches!(
-            self,
-            Self::Upper
-                | Self::Lower
-                | Self::Trim
-                | Self::TrimLeft
-                | Self::TrimRight
-                | Self::ByteLen
-                | Self::IsBlank
-                | Self::IsNumeric
-                | Self::IsAlpha
-                | Self::IsAscii
-                | Self::ToNumber
-                | Self::ToBool
-        )
-    }
-
-    /// Returns true for zero-argument numeric scalar methods that can execute on a `JsonView`.
-    #[inline]
-    pub(crate) fn is_numeric_no_arg_view_scalar(self) -> bool {
-        matches!(self, Self::Ceil | Self::Floor | Self::Round | Self::Abs)
-    }
-
     /// Returns the full capability descriptor for this builtin.
     /// Called by the pipeline planner and VM to query cardinality, cost, and feature flags.
     #[inline]

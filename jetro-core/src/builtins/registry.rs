@@ -20,7 +20,7 @@ use crate::{
         BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
         BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
         BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection,
-        BuiltinViewStage,
+        BuiltinViewScalarOp, BuiltinViewStage,
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
@@ -1103,6 +1103,12 @@ pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
     id.method().is_some_and(|method| method.spec().view_scalar)
 }
 
+/// Return concrete borrowed-view scalar dispatch metadata for builtin `id`.
+#[inline]
+pub(crate) fn view_scalar_op(id: BuiltinId) -> Option<BuiltinViewScalarOp> {
+    id.method().and_then(|method| method.spec().view_scalar_op)
+}
+
 /// Return true when builtin `id` is a view-native scalar call usable as a
 /// direct value projection, excluding object-item enumerators that have their
 /// own object projection path.
@@ -1349,24 +1355,24 @@ pub(crate) fn apply_json_view_scalar_hook(
     if !view_scalar_projection(BuiltinId::from_method(method)) {
         return None;
     }
-    match (method, args) {
-        (BuiltinMethod::Len, BuiltinArgs::None) => super::json_view_len(recv).map(Val::Int),
-        (method, BuiltinArgs::None) if method.is_string_no_arg_view_scalar() => {
+    match (view_scalar_op(BuiltinId::from_method(method))?, args) {
+        (BuiltinViewScalarOp::Len, BuiltinArgs::None) => super::json_view_len(recv).map(Val::Int),
+        (BuiltinViewScalarOp::StringNoArg, BuiltinArgs::None) => {
             let value = super::json_view_str(recv)?;
             super::str_no_arg_scalar_apply(method, value)
         }
-        (method, BuiltinArgs::None) if method.is_numeric_no_arg_view_scalar() => {
+        (BuiltinViewScalarOp::NumericNoArg, BuiltinArgs::None) => {
             super::numeric_no_arg_scalar_apply(method, recv)
         }
-        (method, BuiltinArgs::Str(arg)) if method.is_string_arg_view_scalar() => {
+        (BuiltinViewScalarOp::StringArg, BuiltinArgs::Str(arg)) => {
             let value = super::json_view_str(recv)?;
             super::str_arg_scalar_apply(method, value, arg.as_ref())
         }
-        (BuiltinMethod::Includes, BuiltinArgs::Val(Val::Str(arg))) => {
+        (BuiltinViewScalarOp::StringContainsArg, BuiltinArgs::Val(Val::Str(arg))) => {
             let value = super::json_view_str(recv)?;
             Some(Val::Bool(value.contains(arg.as_ref())))
         }
-        (BuiltinMethod::Includes, BuiltinArgs::Val(Val::StrSlice(arg))) => {
+        (BuiltinViewScalarOp::StringContainsArg, BuiltinArgs::Val(Val::StrSlice(arg))) => {
             let value = super::json_view_str(recv)?;
             Some(Val::Bool(value.contains(arg.as_str())))
         }
@@ -2883,6 +2889,11 @@ mod tests {
                 view_scalar_projection(BuiltinId::from_method(method)),
                 "{method:?}"
             );
+            assert_eq!(
+                method.spec().view_scalar_op,
+                view_scalar_op(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
         }
     }
 
@@ -2926,6 +2937,7 @@ mod tests {
             let id = BuiltinId::from_method(method);
             let spec = method.spec();
             assert!(spec.view_native, "{method:?}");
+            assert!(spec.view_scalar_op.is_some(), "{method:?}");
             if pipeline_element(id) {
                 assert_eq!(
                     effective_pipeline_order_effect(id, true),
@@ -2944,6 +2956,38 @@ mod tests {
             );
             assert!(
                 pipeline_element(id) || matches!(method, BuiltinMethod::Len | BuiltinMethod::Includes),
+                "{method:?}"
+            );
+        }
+
+        for (method, op) in [
+            (BuiltinMethod::Len, BuiltinViewScalarOp::Len),
+            (BuiltinMethod::Includes, BuiltinViewScalarOp::StringContainsArg),
+            (BuiltinMethod::StartsWith, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::EndsWith, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::Matches, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::IndexOf, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::LastIndexOf, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::Ceil, BuiltinViewScalarOp::NumericNoArg),
+            (BuiltinMethod::Floor, BuiltinViewScalarOp::NumericNoArg),
+            (BuiltinMethod::Round, BuiltinViewScalarOp::NumericNoArg),
+            (BuiltinMethod::Abs, BuiltinViewScalarOp::NumericNoArg),
+            (BuiltinMethod::Upper, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::Lower, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::Trim, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::TrimLeft, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::TrimRight, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ByteLen, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::IsBlank, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::IsNumeric, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::IsAlpha, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::IsAscii, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ToNumber, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ToBool, BuiltinViewScalarOp::StringNoArg),
+        ] {
+            assert_eq!(
+                view_scalar_op(BuiltinId::from_method(method)),
+                Some(op),
                 "{method:?}"
             );
         }
@@ -3137,6 +3181,14 @@ mod tests {
             );
             if spec.view_scalar {
                 assert!(spec.view_native, "{method:?} view_scalar must be view_native");
+                assert!(
+                    spec.view_scalar_op.is_some(),
+                    "{method:?} view_scalar must declare a dispatch op"
+                );
+            }
+            if spec.view_scalar_op.is_some() {
+                assert!(spec.view_scalar, "{method:?} view_scalar_op implies view_scalar");
+                assert!(spec.view_native, "{method:?} view_scalar_op implies view_native");
             }
             if spec.view_object_projection.is_some() {
                 assert!(

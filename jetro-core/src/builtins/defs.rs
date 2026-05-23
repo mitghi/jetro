@@ -16,7 +16,7 @@ use super::{
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinRuntimeHook, BuiltinSelectionRewrite, BuiltinSpec,
     BuiltinStageMerge, BuiltinStructural, BuiltinStringPairStage, BuiltinViewObjectProjection,
-    BuiltinViewStage,
+    BuiltinViewScalarOp, BuiltinViewStage,
 };
 
 
@@ -670,7 +670,7 @@ impl Builtin for Len {
         let raw = BuiltinRawJsonScalar::Len;
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
             .indexed()
-            .view_scalar()
+            .view_scalar_op(BuiltinViewScalarOp::Len)
             .raw_json_scalar(raw)
             .row_stream_op(BuiltinRowStreamOp::Count)
             .demand_law(raw.demand_law())
@@ -2754,6 +2754,7 @@ macro_rules! scalar_native_element {
 // View-scalar element:
 macro_rules! scalar_view_scalar_element {
     ( $( $ty:ident => $variant:ident, $name:literal
+         , view_op: $view_op:ident
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
          $( , idempotent: $idempotent:literal )?
          $( , apply: $apply:ident )? ; )* ) => {
@@ -2764,7 +2765,8 @@ macro_rules! scalar_view_scalar_element {
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec {
-                    let spec = scalar_view_scalar_element_spec();
+                    let spec = scalar_view_scalar_element_spec()
+                        .view_scalar_op(BuiltinViewScalarOp::$view_op);
                     $( let spec = if $idempotent { spec.idempotent() } else { spec }; )?
                     spec
                 }
@@ -2781,6 +2783,7 @@ macro_rules! scalar_view_scalar_element {
 
 macro_rules! scalar_view_predicate_element {
     ( $( $ty:ident => $variant:ident, $name:literal
+         , view_op: $view_op:ident
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
          $( , apply: $apply:ident )? ; )* ) => {
         $(
@@ -2789,7 +2792,10 @@ macro_rules! scalar_view_predicate_element {
                 const METHOD: BuiltinMethod = BuiltinMethod::$variant;
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
-                fn spec() -> BuiltinSpec { scalar_view_predicate_element_spec() }
+                fn spec() -> BuiltinSpec {
+                    scalar_view_predicate_element_spec()
+                        .view_scalar_op(BuiltinViewScalarOp::$view_op)
+                }
                 $(
                     #[inline]
                     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -2869,18 +2875,18 @@ fn strip_radix_prefix(s: &str, radix: u32) -> &str {
 }
 
 scalar_view_scalar_element! {
-    Ceil => Ceil, "ceil";
-    Floor => Floor, "floor";
-    Round => Round, "round";
-    Abs => Abs, "abs";
-    Trim => Trim, "trim", idempotent: true, apply: trim_apply;
-    TrimLeft => TrimLeft, "trim_left", aliases: ["lstrip"], idempotent: true, apply: trim_left_apply;
-    TrimRight => TrimRight, "trim_right", aliases: ["rstrip"], idempotent: true, apply: trim_right_apply;
-    ToNumber => ToNumber, "to_number";
-    ToBool => ToBool, "to_bool";
-    IndexOf => IndexOf, "index_of";
-    LastIndexOf => LastIndexOf, "last_index_of";
-    ByteLen => ByteLen, "byte_len";
+    Ceil => Ceil, "ceil", view_op: NumericNoArg;
+    Floor => Floor, "floor", view_op: NumericNoArg;
+    Round => Round, "round", view_op: NumericNoArg;
+    Abs => Abs, "abs", view_op: NumericNoArg;
+    Trim => Trim, "trim", view_op: StringNoArg, idempotent: true, apply: trim_apply;
+    TrimLeft => TrimLeft, "trim_left", view_op: StringNoArg, aliases: ["lstrip"], idempotent: true, apply: trim_left_apply;
+    TrimRight => TrimRight, "trim_right", view_op: StringNoArg, aliases: ["rstrip"], idempotent: true, apply: trim_right_apply;
+    ToNumber => ToNumber, "to_number", view_op: StringNoArg;
+    ToBool => ToBool, "to_bool", view_op: StringNoArg;
+    IndexOf => IndexOf, "index_of", view_op: StringArg;
+    LastIndexOf => LastIndexOf, "last_index_of", view_op: StringArg;
+    ByteLen => ByteLen, "byte_len", view_op: StringNoArg;
 }
 
 /// `upper` — ASCII raw-json scalar capable uppercase transform.
@@ -2892,6 +2898,7 @@ impl Builtin for Upper {
         let raw = BuiltinRawJsonScalar::AsciiUpper;
         scalar_view_scalar_element_spec()
             .idempotent()
+            .view_scalar_op(BuiltinViewScalarOp::StringNoArg)
             .raw_json_scalar(raw)
             .demand_law(raw.demand_law())
     }
@@ -2910,6 +2917,7 @@ impl Builtin for Lower {
         let raw = BuiltinRawJsonScalar::AsciiLower;
         scalar_view_scalar_element_spec()
             .idempotent()
+            .view_scalar_op(BuiltinViewScalarOp::StringNoArg)
             .raw_json_scalar(raw)
             .demand_law(raw.demand_law())
     }
@@ -2920,13 +2928,13 @@ impl Builtin for Lower {
 }
 
 scalar_view_predicate_element! {
-    IsBlank => IsBlank, "is_blank";
-    IsNumeric => IsNumeric, "is_numeric";
-    IsAlpha => IsAlpha, "is_alpha";
-    IsAscii => IsAscii, "is_ascii";
-    StartsWith => StartsWith, "starts_with";
-    EndsWith => EndsWith, "ends_with";
-    Matches => Matches, "matches";
+    IsBlank => IsBlank, "is_blank", view_op: StringNoArg;
+    IsNumeric => IsNumeric, "is_numeric", view_op: StringNoArg;
+    IsAlpha => IsAlpha, "is_alpha", view_op: StringNoArg;
+    IsAscii => IsAscii, "is_ascii", view_op: StringNoArg;
+    StartsWith => StartsWith, "starts_with", view_op: StringArg;
+    EndsWith => EndsWith, "ends_with", view_op: StringArg;
+    Matches => Matches, "matches", view_op: StringArg;
 }
 
 
@@ -3064,7 +3072,7 @@ impl Builtin for Includes {
     const ALIASES: &'static [&'static str] = &["contains"];
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Includes)
-            .view_scalar()
+            .view_scalar_op(BuiltinViewScalarOp::StringContainsArg)
             .membership_sink(BuiltinMembershipSink::Includes)
             .demand_law(BuiltinMembershipSink::Includes.demand_law())
             .lowering(BuiltinPipelineLowering::TerminalSink)
@@ -3149,17 +3157,12 @@ impl Builtin for Missing {
 
 /// Default scalar fallback used by methods that previously fell to the wildcard arm.
 /// Mirrors the `_ => { ... }` body in legacy `BuiltinMethod::spec()`.
-fn default_scalar_spec(method: BuiltinMethod) -> BuiltinSpec {
-    let spec = BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+fn default_scalar_spec(_method: BuiltinMethod) -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
         .indexed()
         .view_native()
         .demand_law(BuiltinDemandLaw::MapLike)
-        .order_effect(BuiltinPipelineOrderEffect::Preserves);
-    if matches!(method, BuiltinMethod::Includes) {
-        spec.view_scalar()
-    } else {
-        spec
-    }
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
 }
 
 // Each is a scalar element with the same spec body as `scalar_native_element_spec`
