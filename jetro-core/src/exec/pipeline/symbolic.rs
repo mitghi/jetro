@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{registry::BuiltinId, BuiltinMethod};
 use crate::parse::ast::{
     Arg, ArrayElem, Expr, FStringPart, MatchArm, ObjField, PatchOp, PathStep, PipeStep, Step,
 };
@@ -140,7 +140,7 @@ impl SymbolicEmitter {
         let expr = simplify_expr(expr);
         let prog = compile_stage_expr(&expr);
         let kernel = BodyKernel::classify(&prog);
-        let stage = Stage::expr_stage_builtin(method, prog)
+        let stage = Stage::expr_stage_builtin_id(BuiltinId::from_method(method), prog)
             .expect("symbolic expression stage must be registry-backed");
         self.out_stages.push(stage);
         self.out_exprs.push(Some(Arc::new(expr)));

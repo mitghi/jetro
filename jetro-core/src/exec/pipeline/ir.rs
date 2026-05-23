@@ -156,6 +156,7 @@ impl Sink {
     }
 
     /// Build a no-argument terminal selection sink from builtin metadata.
+    #[cfg(test)]
     pub(crate) fn terminal_builtin(method: BuiltinMethod) -> Option<Self> {
         Self::terminal_builtin_id(BuiltinId::from_method(method))
     }
@@ -847,6 +848,7 @@ impl Stage {
     }
 
     /// Build a usize-argument stage only for builtins whose registry lowering accepts one.
+    #[cfg(test)]
     pub(crate) fn usize_builtin(method: BuiltinMethod, value: usize) -> Option<Self> {
         Self::usize_builtin_id(BuiltinId::from_method(method), value)
     }
@@ -866,6 +868,7 @@ impl Stage {
     }
 
     /// Build an expression-bearing stage from registry expression-stage metadata.
+    #[cfg(test)]
     pub(crate) fn expr_stage_builtin(method: BuiltinMethod, body: Arc<Program>) -> Option<Self> {
         Self::expr_stage_builtin_id(BuiltinId::from_method(method), body)
     }
@@ -1154,7 +1157,10 @@ impl Stage {
                 true
             }
             Stage::CompiledMap(_) => {
-                if let Some(stage) = Stage::expr_stage_builtin(BuiltinMethod::Map, program) {
+                if let Some(stage) = Stage::expr_stage_builtin_id(
+                    BuiltinId::from_method(BuiltinMethod::Map),
+                    program,
+                ) {
                     *self = stage;
                     true
                 } else {
@@ -1653,7 +1659,7 @@ impl Pipeline {
     /// can be consumed as a one-row `first` pipeline.
     pub(crate) fn for_selected_single_row(&self) -> Option<Self> {
         let mut selected = self.clone();
-        selected.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
+        selected.sink = Sink::terminal_builtin_id(BuiltinId::from_method(BuiltinMethod::First))?;
         selected.refresh_planned_facts();
         Some(selected)
     }
@@ -1666,7 +1672,7 @@ impl Pipeline {
             return None;
         }
         let mut reversed = self.clone();
-        reversed.sink = Sink::terminal_builtin(BuiltinMethod::First)?;
+        reversed.sink = Sink::terminal_builtin_id(BuiltinId::from_method(BuiltinMethod::First))?;
         reversed.refresh_planned_facts();
         Some(reversed)
     }

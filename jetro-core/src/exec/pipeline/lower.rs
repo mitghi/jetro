@@ -259,13 +259,16 @@ fn push_path_slice_stages(
     };
 
     if start > 0 {
-        stages.push(Stage::usize_builtin(BuiltinMethod::Skip, start)?);
+        stages.push(Stage::usize_builtin_id(
+            BuiltinId::from_method(BuiltinMethod::Skip),
+            start,
+        )?);
         stage_exprs.push(None);
     }
 
     if let Some(end) = end {
-        stages.push(Stage::usize_builtin(
-            BuiltinMethod::Take,
+        stages.push(Stage::usize_builtin_id(
+            BuiltinId::from_method(BuiltinMethod::Take),
             end.saturating_sub(start),
         )?);
         stage_exprs.push(None);

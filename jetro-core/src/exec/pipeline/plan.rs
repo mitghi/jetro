@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{registry::BuiltinId, BuiltinMethod};
 use crate::parse::ast::{BinOp, Expr};
 use crate::plan::demand::PullDemand;
 use crate::vm::{Opcode, Program};
@@ -348,7 +348,10 @@ fn fuse_filter_runs(
 
         let merged = merge_filter_programs(&stages[i..j]);
         let merged_kernel = BodyKernel::classify(&merged);
-        stages[i] = Stage::expr_stage_builtin(BuiltinMethod::Filter, merged)
+        stages[i] = Stage::expr_stage_builtin_id(
+            BuiltinId::from_method(BuiltinMethod::Filter),
+            merged,
+        )
             .expect("filter builtin must publish an expression stage");
         exprs[i] = None;
         kernels[i] = merged_kernel;
