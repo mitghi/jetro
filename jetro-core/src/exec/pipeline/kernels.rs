@@ -8,9 +8,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    apply_view_projection, array_selector as builtin_array_selector, by_name as builtin_by_name,
-    count_sink_accepts_predicate, expr_stage, numeric_reducer, view_projection,
-    view_projection_field_demand, BuiltinId, ViewProjectionResult,
+    apply_view_projection, by_name as builtin_by_name, count_sink_accepts_predicate, expr_stage,
+    numeric_reducer, view_projection, view_projection_field_demand, ViewProjectionResult,
 };
 use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
@@ -1562,9 +1561,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)]
-            if view_projection(BuiltinId::from_method(call.method)) =>
-        {
+        [receiver @ .., Opcode::CallMethod(call)] if call.is_view_projection() => {
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
             } else {
@@ -1583,7 +1580,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             )
             .ok()
             .flatten()?;
-            if !view_projection(BuiltinId::from_method(builtin_call.method)) {
+            if !builtin_call.is_view_projection() {
                 return None;
             }
             Some(BodyKernel::BuiltinCall {
@@ -1603,7 +1600,6 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
 }
 
 fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> {
-    let selector = builtin_array_selector(BuiltinId::from_method(call.method))?;
     let index = match call.sub_progs.as_ref() {
         [prog] => match static_prog_val(prog)? {
             Val::Int(index) => Some(index),
@@ -1611,7 +1607,7 @@ fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> 
         },
         _ => None,
     };
-    ArraySelector::from_builtin_selector(selector, index)
+    ArraySelector::from_builtin_selector(call.array_selector()?, index)
 }
 
 fn arithmetic_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {

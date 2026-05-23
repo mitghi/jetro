@@ -80,6 +80,18 @@ impl CompiledCall {
         crate::builtins::registry::is_pure(self.id())
     }
 
+    /// Returns true when this call can run as a borrowed-view projection.
+    #[inline]
+    pub(crate) fn is_view_projection(&self) -> bool {
+        crate::builtins::registry::view_projection(self.id())
+    }
+
+    /// Returns array-selector metadata for this call, if it is a selector.
+    #[inline]
+    pub(crate) fn array_selector(&self) -> Option<crate::builtins::BuiltinArraySelector> {
+        crate::builtins::registry::array_selector(self.id())
+    }
+
     /// Returns this call's registry heuristic cost.
     #[inline]
     #[cfg(test)]
