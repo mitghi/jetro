@@ -35,6 +35,7 @@ fn tape_matches_vm_for_borrowed_object_helpers() {
         "$.profile.entries().map(e => e[0])",
         "$.profile.to_pairs().map(e => e[1]).last()",
         "$.profile.entries().map(e => e[1]).last()",
+        "$.profile.entries().from_pairs()",
         "$.profile.pick(\"id\", \"name\")",
         "$.profile.omit(\"active\")",
         "$.profile.has_key(\"nested\")",
@@ -244,6 +245,9 @@ fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
         "$.orders.map({id, region, total}).index_by(id)",
         "$.orders.group_by(status)",
         "$.orders.group_by(region).entries().map({region: @[0], count: @[1].len()})",
+        "$.orders.count_by(region).entries().map({region: @[0], count: @[1]}).last()",
+        "$.orders.group_by(region).entries().map({region: @[0], total: @[1].sum(total), open: @[1].count(status == \"open\")})",
+        "$.orders.group_by(customer.tier).entries().map({tier: @[0], ids: @[1].map(id).take(2)})",
         "$.orders.unique_by(region).map(id)",
         "$.orders.filter(status == \"open\").unique_by(customer.tier).map({id, tier: customer.tier})",
     ] {
