@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::{dispatches_scalar_direct, BuiltinId};
+use crate::builtins::registry::dispatches_scalar_direct;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer,
     BuiltinViewStage,
@@ -624,8 +624,8 @@ fn is_scalar_direct_collect(stages: &[Stage], sink: &Sink) -> bool {
         && !stages.is_empty()
         && stages.iter().all(|stage| {
             stage
-                .method()
-                .is_some_and(|method| dispatches_scalar_direct(BuiltinId::from_method(method)))
+                .builtin_id()
+                .is_some_and(dispatches_scalar_direct)
         })
 }
 

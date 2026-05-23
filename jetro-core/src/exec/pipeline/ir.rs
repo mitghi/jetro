@@ -720,13 +720,10 @@ impl<'a> StageDescriptor<'a> {
     /// Returns how this stage affects the sort order of its input stream.
     #[inline]
     pub(crate) fn pipeline_order_effect(self) -> BuiltinPipelineOrderEffect {
-        let Some(method) = self.method else {
+        let Some(id) = self.builtin_id() else {
             return BuiltinPipelineOrderEffect::Blocks;
         };
-        effective_pipeline_order_effect(
-            BuiltinId::from_method(method),
-            self.allow_one_to_one_order_fallback,
-        )
+        effective_pipeline_order_effect(id, self.allow_one_to_one_order_fallback)
     }
 
     /// Returns `true` when the stage can run using only a materialised receiver, delegating
@@ -1025,9 +1022,9 @@ impl Stage {
         }
     }
 
-    /// Returns the canonical builtin method for stages backed by builtin metadata.
-    pub(crate) fn method(&self) -> Option<BuiltinMethod> {
-        self.descriptor().and_then(|desc| desc.method)
+    /// Returns the canonical builtin registry id for stages backed by builtin metadata.
+    pub(crate) fn builtin_id(&self) -> Option<BuiltinId> {
+        self.descriptor().and_then(StageDescriptor::builtin_id)
     }
 
     /// Returns `true` when this stage can execute using only the materialised receiver, with
@@ -1094,25 +1091,19 @@ impl Stage {
     /// Registry expression-stage shape for builtin-backed stages.
     #[inline]
     fn expr_stage_kind(&self) -> Option<BuiltinExprStage> {
-        self.descriptor()
-            .and_then(|desc| desc.method)
-            .and_then(|method| builtin_expr_stage(BuiltinId::from_method(method)))
+        self.builtin_id().and_then(builtin_expr_stage)
     }
 
     /// Returns `true` when this stage uses a positional / bounded executor (e.g. `Take`, `Skip`),
     /// meaning order must be preserved upstream.
     pub(crate) fn is_positional_stage(&self) -> bool {
-        self.descriptor()
-            .and_then(|desc| desc.method)
-            .is_some_and(|method| pipeline_stage_is_positional(BuiltinId::from_method(method)))
+        self.builtin_id().is_some_and(pipeline_stage_is_positional)
     }
 
     /// Returns `true` when this stage only changes element order without affecting membership
     /// (e.g. `Sort`, `Reverse`), allowing the demand optimiser to drop it when order is unused.
     pub(crate) fn is_order_only_stage(&self) -> bool {
-        self.descriptor()
-            .and_then(|desc| desc.method)
-            .is_some_and(|method| pipeline_stage_is_order_only(BuiltinId::from_method(method)))
+        self.builtin_id().is_some_and(pipeline_stage_is_order_only)
     }
 
     /// Returns `true` when the stage reads the actual element value rather than just membership
@@ -1123,12 +1114,8 @@ impl Stage {
             _ => self
                 .descriptor()
                 .and_then(|desc| {
-                    desc.method.map(|method| {
-                        pipeline_stage_consumes_value(
-                            BuiltinId::from_method(method),
-                            desc.body.is_some(),
-                        )
-                    })
+                    desc.builtin_id()
+                        .map(|id| pipeline_stage_consumes_value(id, desc.body.is_some()))
                 })
                 .unwrap_or(false),
         }
@@ -1142,9 +1129,8 @@ impl Stage {
         };
         match self {
             Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => {
-                desc.method.is_some_and(|m| {
-                    builtin_stage_elidable_when_value_unused(BuiltinId::from_method(m))
-                })
+                desc.builtin_id()
+                    .is_some_and(builtin_stage_elidable_when_value_unused)
             }
             Stage::ExprBuiltin { method, .. } => {
                 expr_stage_elidable_when_value_unused(BuiltinId::from_method(*method))
@@ -1179,7 +1165,7 @@ impl Stage {
         match self {
             _ if desc.usize_arg.is_some() => Some(ChainOp::builtin_usize(method, desc.usize_arg?)),
             Stage::Builtin(_) => Some(ChainOp::builtin(method)),
-            _ if participates_in_demand(BuiltinId::from_method(method)) => {
+            _ if desc.builtin_id().is_some_and(participates_in_demand) => {
                 Some(ChainOp::builtin(method))
             }
             _ => None,
