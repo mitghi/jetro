@@ -1668,6 +1668,64 @@ mod tests {
     }
 
     #[test]
+    fn registry_categories_have_coherent_cardinality_and_execution_surfaces() {
+        for (method, _, _) in all_method_entries() {
+            let spec = method.spec();
+            let expected_cardinality = match spec.category {
+                BuiltinCategory::Scalar
+                | BuiltinCategory::Object
+                | BuiltinCategory::Path
+                | BuiltinCategory::Serialization
+                | BuiltinCategory::Mutation => Some(BuiltinCardinality::OneToOne),
+                BuiltinCategory::StreamingOneToOne => Some(BuiltinCardinality::OneToOne),
+                BuiltinCategory::StreamingFilter => Some(BuiltinCardinality::Filtering),
+                BuiltinCategory::StreamingExpand | BuiltinCategory::Deep => {
+                    Some(BuiltinCardinality::Expanding)
+                }
+                BuiltinCategory::Reducer => Some(BuiltinCardinality::Reducing),
+                BuiltinCategory::Positional => Some(BuiltinCardinality::Bounded),
+                BuiltinCategory::Barrier | BuiltinCategory::Relational => {
+                    Some(BuiltinCardinality::Barrier)
+                }
+                BuiltinCategory::Unknown => None,
+            };
+
+            if let Some(expected) = expected_cardinality {
+                assert_eq!(
+                    spec.cardinality, expected,
+                    "{method:?} category {:?} must advertise {expected:?} cardinality",
+                    spec.category
+                );
+            }
+
+            assert!(
+                !spec.view_scalar || spec.view_native,
+                "{method:?} view-scalar execution must also be view-native"
+            );
+            assert!(
+                spec.raw_json_scalar.is_none() || (spec.view_scalar && spec.view_native),
+                "{method:?} raw-json scalar execution must have view-scalar fallback metadata"
+            );
+            assert!(
+                spec.view_object_projection.is_none() || spec.view_native,
+                "{method:?} object projection execution must be view-native"
+            );
+            assert!(
+                spec.view_stage.is_none() || spec.view_native,
+                "{method:?} view-stage lowering must be view-native"
+            );
+            assert!(
+                spec.structural.is_none() || matches!(spec.category, BuiltinCategory::Deep),
+                "{method:?} structural backend hints must stay on deep traversal builtins"
+            );
+            assert!(
+                spec.row_stream_op.is_none() || !spec.stream_source,
+                "{method:?} stream sources and row-stream operators are separate planner roles"
+            );
+        }
+    }
+
+    #[test]
     fn registry_accessors_match_builtin_specs() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);

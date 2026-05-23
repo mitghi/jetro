@@ -61,6 +61,7 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
 #[inline]
 fn filter_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+        .view_native()
         .view_stage(BuiltinViewStage::Filter)
         .columnar_stage(BuiltinColumnarStage::Filter)
         .cost(10.0)
@@ -164,6 +165,7 @@ impl Builtin for Compact {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_native()
             .view_stage(BuiltinViewStage::Compact)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
@@ -206,6 +208,7 @@ impl Builtin for Remove {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_native()
             .view_stage(BuiltinViewStage::RemoveValue)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FilterLike)
@@ -262,6 +265,7 @@ impl Builtin for Map {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
             .indexed()
+            .view_native()
             .view_stage(BuiltinViewStage::Map)
             .columnar_stage(BuiltinColumnarStage::Map)
             .cost(10.0)
@@ -328,6 +332,7 @@ impl Builtin for FlatMap {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
+            .view_native()
             .view_stage(BuiltinViewStage::FlatMap)
             .columnar_stage(BuiltinColumnarStage::FlatMap)
             .cost(10.0)
@@ -543,6 +548,7 @@ impl Builtin for TakeWhile {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_native()
             .view_stage(BuiltinViewStage::TakeWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::TakeWhile)
@@ -605,6 +611,7 @@ impl Builtin for DropWhile {
 
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+            .view_native()
             .view_stage(BuiltinViewStage::DropWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::DropWhile)
@@ -1428,6 +1435,7 @@ impl Builtin for GroupBy {
     const NAME: &'static str = "group_by";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Group)
             .columnar_stage(BuiltinColumnarStage::GroupBy)
@@ -1471,6 +1479,7 @@ impl Builtin for CountBy {
     const NAME: &'static str = "count_by";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Count)
             .cost(10.0)
@@ -1517,6 +1526,7 @@ impl Builtin for IndexBy {
     const NAME: &'static str = "index_by";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
+            .view_native()
             .view_stage(BuiltinViewStage::KeyedReduce)
             .keyed_reducer(BuiltinKeyedReducer::Index)
             .cost(10.0)
@@ -1560,6 +1570,7 @@ impl Builtin for IndexBy {
 #[inline]
 fn unique_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
+        .view_native()
         .view_stage(BuiltinViewStage::Distinct)
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::UniqueLike)
