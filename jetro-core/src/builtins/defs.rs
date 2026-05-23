@@ -14,7 +14,7 @@ use super::{
     BuiltinObjectLambda,
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinRuntimeHook, BuiltinSelectionPosition, BuiltinSelectionRewrite, BuiltinSpec,
+    BuiltinRuntimeHook, BuiltinSelectionRewrite, BuiltinSpec,
     BuiltinStageMerge, BuiltinStructural, BuiltinStringPairStage, BuiltinViewObjectProjection,
     BuiltinViewStage,
 };
@@ -488,14 +488,15 @@ impl Builtin for First {
     const NAME: &'static str = "first";
 
     fn spec() -> BuiltinSpec {
+        let selector = BuiltinArraySelector::First;
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
-            .array_selector(BuiltinArraySelector::First)
-            .select_one_sink(BuiltinSelectionPosition::First)
-            .demand_law(BuiltinDemandLaw::First)
+            .array_selector(selector)
+            .select_one_sink(selector.selection_position().expect("first selector position"))
+            .demand_law(selector.demand_law())
             .logical_shape(BuiltinLogicalShape::First)
-            .row_stream_op(BuiltinRowStreamOp::First)
-            .lowering(BuiltinPipelineLowering::TerminalSink)
+            .row_stream_op(selector.row_stream_op().expect("first row stream op"))
+            .lowering(selector.pipeline_lowering())
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -513,14 +514,15 @@ impl Builtin for Last {
     const NAME: &'static str = "last";
 
     fn spec() -> BuiltinSpec {
+        let selector = BuiltinArraySelector::Last;
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
-            .array_selector(BuiltinArraySelector::Last)
-            .select_one_sink(BuiltinSelectionPosition::Last)
-            .demand_law(BuiltinDemandLaw::Last)
+            .array_selector(selector)
+            .select_one_sink(selector.selection_position().expect("last selector position"))
+            .demand_law(selector.demand_law())
             .logical_shape(BuiltinLogicalShape::Last)
-            .row_stream_op(BuiltinRowStreamOp::Last)
-            .lowering(BuiltinPipelineLowering::TerminalSink)
+            .row_stream_op(selector.row_stream_op().expect("last row stream op"))
+            .lowering(selector.pipeline_lowering())
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
@@ -1161,10 +1163,11 @@ impl Builtin for Nth {
     const METHOD: BuiltinMethod = BuiltinMethod::Nth;
     const NAME: &'static str = "nth";
     fn spec() -> BuiltinSpec {
+        let selector = BuiltinArraySelector::Nth;
         positional_native_spec()
-            .array_selector(BuiltinArraySelector::Nth)
-            .demand_law(BuiltinDemandLaw::Nth)
-            .lowering(BuiltinPipelineLowering::TerminalUsizeSink { min: 0 })
+            .array_selector(selector)
+            .demand_law(selector.demand_law())
+            .lowering(selector.pipeline_lowering())
     }
     #[inline]
     fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {

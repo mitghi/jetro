@@ -4611,49 +4611,52 @@ mod tests {
         assert_eq!(registered, expected);
 
         let first = BuiltinId::from_method(BuiltinMethod::First);
-        assert_eq!(demand_law(first), BuiltinDemandLaw::First);
+        let first_selector = BuiltinArraySelector::First;
+        assert_eq!(demand_law(first), first_selector.demand_law());
         assert_eq!(
             propagate_demand(first, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
             PullDemand::FirstInput(1)
         );
         assert_eq!(
             terminal_selection_position(first),
-            Some(BuiltinSelectionPosition::First)
+            first_selector.selection_position()
         );
         assert_eq!(
             pipeline_lowering(first),
-            Some(BuiltinPipelineLowering::TerminalSink)
+            Some(first_selector.pipeline_lowering())
         );
-        assert_eq!(row_stream_op(first), Some(BuiltinRowStreamOp::First));
+        assert_eq!(row_stream_op(first), first_selector.row_stream_op());
 
         let last = BuiltinId::from_method(BuiltinMethod::Last);
-        assert_eq!(demand_law(last), BuiltinDemandLaw::Last);
+        let last_selector = BuiltinArraySelector::Last;
+        assert_eq!(demand_law(last), last_selector.demand_law());
         assert_eq!(
             propagate_demand(last, BuiltinDemandArg::None, Demand::all(ValueNeed::Whole)).pull,
             PullDemand::LastInput(1)
         );
         assert_eq!(
             terminal_selection_position(last),
-            Some(BuiltinSelectionPosition::Last)
+            last_selector.selection_position()
         );
         assert_eq!(
             pipeline_lowering(last),
-            Some(BuiltinPipelineLowering::TerminalSink)
+            Some(last_selector.pipeline_lowering())
         );
-        assert_eq!(row_stream_op(last), Some(BuiltinRowStreamOp::Last));
+        assert_eq!(row_stream_op(last), last_selector.row_stream_op());
 
         let nth = BuiltinId::from_method(BuiltinMethod::Nth);
-        assert_eq!(demand_law(nth), BuiltinDemandLaw::Nth);
+        let nth_selector = BuiltinArraySelector::Nth;
+        assert_eq!(demand_law(nth), nth_selector.demand_law());
         assert_eq!(
             propagate_demand(nth, BuiltinDemandArg::Usize(2), Demand::all(ValueNeed::Whole)).pull,
             PullDemand::NthInput(2)
         );
-        assert_eq!(terminal_selection_position(nth), None);
+        assert_eq!(terminal_selection_position(nth), nth_selector.selection_position());
         assert_eq!(
             pipeline_lowering(nth),
-            Some(BuiltinPipelineLowering::TerminalUsizeSink { min: 0 })
+            Some(nth_selector.pipeline_lowering())
         );
-        assert_eq!(row_stream_op(nth), None);
+        assert_eq!(row_stream_op(nth), nth_selector.row_stream_op());
     }
 
     #[test]

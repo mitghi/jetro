@@ -1284,6 +1284,47 @@ pub enum BuiltinArraySelector {
     Nth,
 }
 
+impl BuiltinArraySelector {
+    /// Demand law implied by this positional selector.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        match self {
+            Self::First => BuiltinDemandLaw::First,
+            Self::Last => BuiltinDemandLaw::Last,
+            Self::Nth => BuiltinDemandLaw::Nth,
+        }
+    }
+
+    /// Select-one sink position, when this selector is a terminal first/last sink.
+    #[inline]
+    pub(crate) const fn selection_position(self) -> Option<BuiltinSelectionPosition> {
+        match self {
+            Self::First => Some(BuiltinSelectionPosition::First),
+            Self::Last => Some(BuiltinSelectionPosition::Last),
+            Self::Nth => None,
+        }
+    }
+
+    /// Row-stream operation represented by this selector, when supported.
+    #[inline]
+    pub(crate) const fn row_stream_op(self) -> Option<BuiltinRowStreamOp> {
+        match self {
+            Self::First => Some(BuiltinRowStreamOp::First),
+            Self::Last => Some(BuiltinRowStreamOp::Last),
+            Self::Nth => None,
+        }
+    }
+
+    /// Pipeline lowering implied by this selector.
+    #[inline]
+    pub(crate) const fn pipeline_lowering(self) -> BuiltinPipelineLowering {
+        match self {
+            Self::First | Self::Last => BuiltinPipelineLowering::TerminalSink,
+            Self::Nth => BuiltinPipelineLowering::TerminalUsizeSink { min: 0 },
+        }
+    }
+}
+
 /// Rewrite available after a stage has rearranged rows but before selecting
 /// one end. For example, `sort().first()` can become `min()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
