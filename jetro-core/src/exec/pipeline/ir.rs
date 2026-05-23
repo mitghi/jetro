@@ -235,6 +235,22 @@ impl Sink {
         }
     }
 
+    /// Fold a pending one-to-one projection into a numeric reducer sink when
+    /// that preserves the reducer semantics.
+    pub(crate) fn fold_numeric_projection(&mut self, projection: Arc<Program>) -> bool {
+        match self {
+            Sink::Reducer(spec)
+                if spec.predicate.is_none()
+                    && spec.projection.is_none()
+                    && spec.numeric_op().is_some() =>
+            {
+                spec.projection = Some(projection);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Build a numeric reducer from builtin metadata and an optional projection program.
     pub(crate) fn numeric_builtin(
         method: BuiltinMethod,
@@ -2065,6 +2081,16 @@ mod tests {
         let predicate_count =
             Sink::count_predicate_builtin(BuiltinMethod::Count, empty_program(), None).unwrap();
         assert!(!predicate_count.is_plain_count_reducer());
+
+        let mut min = Sink::numeric_builtin(BuiltinMethod::Min, None, None).unwrap();
+        let projection = empty_program();
+        assert!(min.fold_numeric_projection(projection.clone()));
+        let (reported_projection, op) = min.projected_numeric_reducer().unwrap();
+        assert!(std::ptr::eq(reported_projection, projection.as_ref()));
+        assert_eq!(op, crate::exec::pipeline::NumOp::Min);
+        assert!(!min.fold_numeric_projection(empty_program()));
+        let mut count = Sink::count_builtin(BuiltinMethod::Count).unwrap();
+        assert!(!count.fold_numeric_projection(empty_program()));
     }
 
     #[test]

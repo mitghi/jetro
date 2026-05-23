@@ -167,22 +167,17 @@ impl SymbolicEmitter {
     // avoiding an extra Map stage for numeric reducers.
     fn finish(&mut self, sink: &mut Sink) {
         self.flush_predicate();
-        match sink {
-            Sink::Reducer(spec) if spec.is_plain_count() => {}
-            Sink::Reducer(spec)
-                if spec.numeric_op().is_some()
-                    && spec.projection.is_none()
-                    && !matches!(self.item, Expr::Current) =>
-            {
-                let item = simplify_expr(std::mem::replace(&mut self.item, Expr::Current));
-                spec.projection = Some(compile_stage_expr(&item));
+        if sink.is_plain_count_reducer() {
+            return;
+        }
+        if !matches!(self.item, Expr::Current) {
+            let item = simplify_expr(std::mem::replace(&mut self.item, Expr::Current));
+            if sink.fold_numeric_projection(compile_stage_expr(&item)) {
+                return;
             }
-            _ if self.demand.chain.value.requires_payload()
-                && !matches!(self.item, Expr::Current) =>
-            {
-                self.flush_item();
+            if self.demand.chain.value.requires_payload() {
+                self.push_expr_stage(item, BuiltinMethod::Map);
             }
-            _ => {}
         }
     }
 
