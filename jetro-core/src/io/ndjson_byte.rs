@@ -1283,6 +1283,17 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
             call.try_apply_json_view(value)
                 .map(|value| crate::util::is_truthy(&value))
         }
+        NdjsonDirectPredicate::ViewScalarCmpLit {
+            steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value = raw_json_path_view(row, steps)?;
+            call.try_apply_json_view(value).map(|value| {
+                crate::util::json_cmp_binop(JsonView::from_val(&value), *op, JsonView::from_val(lit))
+            })
+        }
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -2667,6 +2678,10 @@ fn collect_stream_predicate_root_fields<'a>(
     match predicate {
         NdjsonDirectItemPredicate::Path(steps)
         | NdjsonDirectItemPredicate::CmpLit { lhs: steps, .. }
+        | NdjsonDirectItemPredicate::ViewScalarCmpLit {
+            suffix_steps: steps,
+            ..
+        }
         | NdjsonDirectItemPredicate::ViewScalarCall {
             suffix_steps: steps,
             ..
@@ -3207,6 +3222,17 @@ fn eval_raw_item_predicate_from_root_fields<'a>(
             raw_json_projection_view_from_root(item, root_fields, spans, lhs)
                 .map(|value| crate::util::json_cmp_binop(value, *op, JsonView::from_val(lit)))
         }
+        NdjsonDirectItemPredicate::ViewScalarCmpLit {
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value = raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
+            call.try_apply_json_view(value).map(|value| {
+                crate::util::json_cmp_binop(JsonView::from_val(&value), *op, JsonView::from_val(lit))
+            })
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
             call.try_apply_json_view(value)
@@ -3659,6 +3685,17 @@ fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) ->
         }
         NdjsonDirectItemPredicate::CmpLit { lhs, op, lit } => raw_json_path_view(row, lhs)
             .map(|value| crate::util::json_cmp_binop(value, *op, JsonView::from_val(lit))),
+        NdjsonDirectItemPredicate::ViewScalarCmpLit {
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => {
+            let value = raw_json_path_view(row, suffix_steps)?;
+            call.try_apply_json_view(value).map(|value| {
+                crate::util::json_cmp_binop(JsonView::from_val(&value), *op, JsonView::from_val(lit))
+            })
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_path_view(row, suffix_steps)?;
             call.try_apply_json_view(value)

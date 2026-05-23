@@ -2964,6 +2964,15 @@ mod tests {
     }
 
     #[test]
+    fn compiled_scalar_call_comparison_uses_kernel_metadata() {
+        let expr = parse(r#"name.upper() == "ADA""#).expect("parse scalar comparison");
+        let program = Compiler::compile(&expr, "scalar-call-cmp");
+        let kernel = BodyKernel::classify(&program);
+        assert!(matches!(kernel, BodyKernel::CmpLit { .. }), "{kernel:#?}");
+        assert!(kernel.is_view_native());
+    }
+
+    #[test]
     fn composed_field_demand_prefixes_downstream_paths() {
         let kernel = BodyKernel::Compose {
             first: Box::new(BodyKernel::FieldRead(Arc::from("user"))),

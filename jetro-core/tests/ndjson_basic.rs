@@ -1742,6 +1742,30 @@ fn rows_stream_top_level_filter_arg_is_direct() {
 }
 
 #[test]
+fn rows_stream_scalar_call_comparison_filter_is_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":1,"name":"ada"}
+{"id":2,"name":"bob"}
+{"id":3,"name":"Ada"}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"$.rows().filter(name.upper() == "ADA").map(id)"#,
+            &mut out,
+        )
+        .expect("rows stream scalar-call comparison should use direct predicates");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
+    assert_eq!(report.stats.direct_filter_rows, 3);
+    assert_eq!(report.stats.fallback_filter_rows, 0);
+    assert_eq!(report.stats.direct_project_rows, 2);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn rows_stream_bare_array_find_filter_is_direct() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"a","custom_attributes":[{"value":"x"}]}

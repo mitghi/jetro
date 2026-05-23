@@ -2880,6 +2880,22 @@ pub(super) fn eval_tape_predicate(
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| call.try_apply_json_view(value))
             .is_some_and(|value| crate::util::is_truthy(&value)),
+        NdjsonDirectPredicate::ViewScalarCmpLit {
+            steps,
+            call,
+            op,
+            lit,
+        } => cache
+            .index(tape, 0, steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| {
+                crate::util::json_cmp_binop(
+                    crate::util::JsonView::from_val(&value),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                )
+            }),
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -2921,6 +2937,7 @@ pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
         NdjsonDirectPredicate::Path(_)
         | NdjsonDirectPredicate::Literal(_)
         | NdjsonDirectPredicate::ViewScalarCall { .. }
+        | NdjsonDirectPredicate::ViewScalarCmpLit { .. }
         | NdjsonDirectPredicate::ArrayElementViewScalarCall { .. } => false,
     }
 }
@@ -3814,6 +3831,22 @@ fn eval_json_tape_item_predicate_cached<T: JsonTape>(
             .map(|idx| json_tape_scalar(tape, idx))
             .is_some_and(|value| {
                 crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
+            }),
+        NdjsonDirectItemPredicate::ViewScalarCmpLit {
+            suffix_steps,
+            call,
+            op,
+            lit,
+        } => cache
+            .index(tape, item_idx, suffix_steps)
+            .map(|idx| json_tape_scalar(tape, idx))
+            .and_then(|value| call.try_apply_json_view(value))
+            .is_some_and(|value| {
+                crate::util::json_cmp_binop(
+                    crate::util::JsonView::from_val(&value),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                )
             }),
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => cache
             .index(tape, item_idx, suffix_steps)
