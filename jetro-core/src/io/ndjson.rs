@@ -3258,14 +3258,9 @@ fn write_json_tape_stream<W: Write, T: JsonTape>(
                 Ok(())
             })?;
             if let Some(item_idx) = best_idx {
-                let path_idx = match value {
-                    NdjsonDirectProjectionValue::Path(steps)
-                    | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-                        suffix_cache.index(tape, item_idx, steps)
-                    }
-                    NdjsonDirectProjectionValue::Nested(_)
-                    | NdjsonDirectProjectionValue::Literal(_) => None,
-                };
+                let path_idx = value
+                    .path_steps()
+                    .and_then(|steps| suffix_cache.index(tape, item_idx, steps));
                 write_json_tape_direct_value(writer, tape, value, path_idx)?;
             } else {
                 writer.write_all(b"null")?;
@@ -3311,14 +3306,9 @@ fn write_json_tape_stream_map<W: Write, T: JsonTape>(
 ) -> Result<(), JetroEngineError> {
     match map {
         NdjsonDirectStreamMap::Value(value) => {
-            let path_idx = match value {
-                NdjsonDirectProjectionValue::Path(steps)
-                | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-                    suffix_cache.index(tape, item_idx, steps)
-                }
-                NdjsonDirectProjectionValue::Nested(_) => None,
-                NdjsonDirectProjectionValue::Literal(_) => None,
-            };
+            let path_idx = value
+                .path_steps()
+                .and_then(|steps| suffix_cache.index(tape, item_idx, steps));
             write_json_tape_direct_value(writer, tape, value, path_idx)?;
         }
         NdjsonDirectStreamMap::Array(items) => {
@@ -3444,14 +3434,9 @@ fn write_json_tape_array_projection_from<W: Write, T: JsonTape>(
         if idx > 0 {
             writer.write_all(b",")?;
         }
-        let path_idx = match item {
-            NdjsonDirectProjectionValue::Path(steps)
-            | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-                path_caches[idx].index(tape, start, steps)
-            }
-            NdjsonDirectProjectionValue::Nested(_) => None,
-            NdjsonDirectProjectionValue::Literal(_) => None,
-        };
+        let path_idx = item
+            .path_steps()
+            .and_then(|steps| path_caches[idx].index(tape, start, steps));
         write_json_tape_direct_value(writer, tape, item, path_idx)?;
     }
     writer.write_all(b"]")?;

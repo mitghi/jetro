@@ -394,6 +394,13 @@ pub(super) enum NdjsonDirectProjectionValue {
 }
 
 impl NdjsonDirectProjectionValue {
+    pub(super) fn path_steps(&self) -> Option<&[PhysicalPathStep]> {
+        match self {
+            Self::Path(steps) | Self::ViewScalarCall { steps, .. } => Some(steps),
+            Self::Nested(_) | Self::Literal(_) => None,
+        }
+    }
+
     pub(super) fn into_path(self) -> Option<NdjsonPhysicalPath> {
         match self {
             Self::Path(steps) => Some(steps),
@@ -1587,6 +1594,19 @@ mod tests {
         assert!(matches!(
             path.as_deref(),
             Some([PhysicalPathStep::Field(name)]) if name.as_ref() == "name"
+        ));
+
+        let value = NdjsonDirectProjectionValue::ViewScalarCall {
+            steps: vec![PhysicalPathStep::Field(Arc::from("email"))],
+            call: crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Len,
+                crate::builtins::BuiltinArgs::None,
+            ),
+            optional: false,
+        };
+        assert!(matches!(
+            value.path_steps(),
+            Some([PhysicalPathStep::Field(name)]) if name.as_ref() == "email"
         ));
     }
 }

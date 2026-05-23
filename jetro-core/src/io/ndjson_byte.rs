@@ -2637,14 +2637,10 @@ fn collect_projection_root_field<'a>(
     value: &'a NdjsonDirectProjectionValue,
     out: &mut RootFieldSet<'a>,
 ) -> bool {
-    match value {
-        NdjsonDirectProjectionValue::Path(steps)
-        | NdjsonDirectProjectionValue::ViewScalarCall { steps, .. } => {
-            collect_path_root_field(steps, out)
-        }
-        NdjsonDirectProjectionValue::Nested(_) => false,
-        NdjsonDirectProjectionValue::Literal(_) => true,
+    if let Some(steps) = value.path_steps() {
+        return collect_path_root_field(steps, out);
     }
+    matches!(value, NdjsonDirectProjectionValue::Literal(_))
 }
 
 fn collect_stream_predicate_root_fields<'a>(
