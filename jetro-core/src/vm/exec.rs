@@ -567,6 +567,11 @@ impl PathCache {
             .insert(ptr, val);
     }
 
+    fn clear(&mut self) {
+        self.docs.clear();
+        self.order.clear();
+    }
+
     /// Return the current number of cached entries; available in test builds only.
     #[cfg(test)]
     fn len(&self) -> usize {
@@ -705,6 +710,20 @@ impl VM {
     ) -> Result<Val, EvalError> {
         self.root_hash_cache = None;
         self.execute_val_raw(program, root)
+    }
+
+    /// Clear per-document caches while preserving compile caches.
+    ///
+    /// Long-lived `JetroEngine` instances reuse one VM across many byte-backed
+    /// documents. Physical-plan execution can enter row-local VM programs
+    /// through `exec_in_env`, which intentionally does not own the document
+    /// root setup. Resetting these caches at the plan boundary prevents stale
+    /// path values from leaking between documents without recompiling programs.
+    pub(crate) fn reset_document_caches(&mut self) {
+        self.path_cache.clear();
+        self.root_chain_cache.clear();
+        self.doc_hash = 0;
+        self.root_hash_cache = None;
     }
 
     /// Execute `program` within an already-constructed `Env`, bypassing document-hash

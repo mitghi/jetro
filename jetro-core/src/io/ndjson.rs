@@ -2651,6 +2651,7 @@ impl<'a> NdjsonRowExecutor<'a> {
         line_no: u64,
         document: &Jetro,
     ) -> Result<Val, JetroEngineError> {
+        self.vm.reset_document_caches();
         crate::exec::router::collect_plan_val_with_vm(document, &self.plan, &mut self.vm)
             .map_err(|err| row_eval_error(line_no, err))
     }
@@ -4061,6 +4062,38 @@ pub(super) fn non_ws_range(buf: &[u8]) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
+    fn assert_ndjson_matches_per_row_collect(rows: &[&str], query: &str) {
+        let engine = crate::JetroEngine::new();
+        let mut input = Vec::new();
+        for row in rows {
+            input.extend_from_slice(row.as_bytes());
+            input.push(b'\n');
+        }
+
+        let mut actual = Vec::new();
+        engine
+            .run_ndjson(std::io::Cursor::new(input), query, &mut actual)
+            .unwrap_or_else(|err| panic!("{query}: ndjson failed: {err}"));
+
+        let mut expected = Vec::new();
+        for row in rows {
+            let value: serde_json::Value = crate::Jetro::from_bytes(row.as_bytes().to_vec())
+                .unwrap_or_else(|err| panic!("{query}: build row engine failed: {err}"))
+                .collect(query)
+                .unwrap_or_else(|err| panic!("{query}: row collect failed: {}", err.0));
+            if !value.is_null() {
+                expected.push(value);
+            }
+        }
+
+        let actual = std::str::from_utf8(&actual).expect("ndjson output should be utf8");
+        let actual: Vec<serde_json::Value> = actual
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap_or_else(|err| panic!("{query}: {err}")))
+            .collect();
+        assert_eq!(actual, expected, "{query}");
+    }
+
     #[test]
     fn rows_stream_driver_reports_direct_stage_stats() {
         let engine = crate::JetroEngine::new();
@@ -5131,5 +5164,23 @@ not-json
             "{\"id\":1,\"name\":\"ada\",\"count\":2,\"first\":\"x\",\"values\":[\"x\",\"y\"]}\n\
 {\"id\":2,\"name\":\"bob\",\"count\":1,\"first\":\"z\",\"values\":[\"z\"]}\n"
         );
+    }
+
+    #[test]
+    fn run_ndjson_matches_per_row_collect_for_direct_and_tape_paths() {
+        let rows = [
+            r#"{"name":" Ada ","attributes":[{"key":" a ","value":"x_3","weight":1},{"key":"b ","value":"no","weight":10},{"key":" c","value":"y_3","weight":2.5}]}"#,
+            r#"{"name":"Bob","attributes":[{"key":"z ","value":"skip","weight":4},{"key":" y","value":"z_3","weight":8}]}"#,
+            r#"{"name":" Cy ","attributes":[]}"#,
+        ];
+
+        for query in [
+            r#"{name: $.name.trim(), keys: $.attributes.map(@.key.trim())}"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map({key: @.key.trim(), w: @.weight}).last()"#,
+            r#"$.attributes.filter(@.value.contains("_3")).map(@.weight).sum()"#,
+            r#"$.attributes.sort_by(@.weight).last().key.trim()"#,
+        ] {
+            assert_ndjson_matches_per_row_collect(&rows, query);
+        }
     }
 }

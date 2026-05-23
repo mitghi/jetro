@@ -367,6 +367,7 @@ impl JetroEngine {
         plan: &ir::physical::QueryPlan,
     ) -> std::result::Result<Val, EvalError> {
         let mut vm = self.vm.lock().expect("vm cache poisoned");
+        vm.reset_document_caches();
         exec::router::collect_plan_val_with_vm(document, plan, &mut vm)
     }
 
