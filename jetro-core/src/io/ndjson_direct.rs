@@ -1,6 +1,7 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    logical_shape, view_object_items_projection, view_scalar_value_projection, BuiltinId,
+    logical_shape, view_object_items_projection_call, view_scalar_value_projection,
+    BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -241,7 +242,12 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && view_object_items_projection(BuiltinId::from_method(call.method)) =>
+        } if !*optional
+            && view_object_items_projection_call(
+                BuiltinId::from_method(call.method),
+                &call.args,
+            )
+            .is_some() =>
         {
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
@@ -460,8 +466,6 @@ fn direct_tape_plan_for_node(
     plan: &QueryPlan,
     id: crate::ir::physical::NodeId,
 ) -> Option<NdjsonDirectTapePlan> {
-    use crate::builtins::BuiltinArgs;
-
     if let PlanNode::Chain { base, steps } = plan.node(id) {
         if let Some(plan) =
             direct_tape_sort_extreme_plan_for_node(plan, *base, physical_chain_to_path(steps)?)
@@ -532,8 +536,11 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if view_object_items_projection(BuiltinId::from_method(call.method))
-            && matches!(call.args, BuiltinArgs::None)
+        } if view_object_items_projection_call(
+            BuiltinId::from_method(call.method),
+            &call.args,
+        )
+        .is_some()
             && !*optional =>
         {
             Some(NdjsonDirectTapePlan::ObjectItems {

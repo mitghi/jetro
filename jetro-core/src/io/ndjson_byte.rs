@@ -6,7 +6,8 @@ use super::ndjson_direct::{
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::registry::{
-    raw_json_scalar, view_object_projection, view_scalar_projection, BuiltinId,
+    raw_json_scalar, view_object_items_projection_call, view_scalar_value_projection_call,
+    BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinCall, BuiltinMethod, BuiltinRawJsonScalar,
@@ -227,8 +228,7 @@ fn byte_projection_plan_supported(plan: &NdjsonDirectTapePlan) -> bool {
 }
 
 fn byte_scalar_call_supported(call: &BuiltinCall) -> bool {
-    view_scalar_projection(BuiltinId::from_method(call.method))
-        && matches!(&call.args, BuiltinArgs::None)
+    view_scalar_value_projection_call(BuiltinId::from_method(call.method), &call.args)
 }
 
 pub(super) fn write_ndjson_byte_tape_plan_row<W: Write>(
@@ -752,7 +752,10 @@ fn write_json_object_items_raw<W: Write>(
     row: &[u8],
     method: BuiltinMethod,
 ) -> Result<BytePlanWrite, JetroEngineError> {
-    let Some(projection) = view_object_projection(BuiltinId::from_method(method)) else {
+    let Some(projection) = view_object_items_projection_call(
+        BuiltinId::from_method(method),
+        &BuiltinArgs::None,
+    ) else {
         return Ok(BytePlanWrite::Fallback);
     };
     let mut pos = skip_json_ws(row, 0);

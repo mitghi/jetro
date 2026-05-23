@@ -826,6 +826,26 @@ pub(crate) fn view_object_items_projection(id: BuiltinId) -> bool {
     )
 }
 
+/// Return the object item projection for no-argument builtin calls such as
+/// `keys()`, `values()`, and `entries()`.
+#[inline]
+pub(crate) fn view_object_items_projection_call(
+    id: BuiltinId,
+    args: &BuiltinArgs,
+) -> Option<BuiltinViewObjectProjection> {
+    if !matches!(args, BuiltinArgs::None) {
+        return None;
+    }
+    let projection = view_object_projection(id)?;
+    matches!(
+        projection,
+        BuiltinViewObjectProjection::Keys
+            | BuiltinViewObjectProjection::Values
+            | BuiltinViewObjectProjection::Entries
+    )
+    .then_some(projection)
+}
+
 /// Return positional array selector behavior for builtin `id`, if any.
 #[inline]
 pub(crate) fn array_selector(id: BuiltinId) -> Option<BuiltinArraySelector> {
@@ -1003,6 +1023,13 @@ pub(crate) fn view_scalar_projection(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn view_scalar_value_projection(id: BuiltinId) -> bool {
     view_scalar_projection(id) && !view_object_items_projection(id)
+}
+
+/// Return true when builtin `id` is a no-argument view scalar call that can be
+/// applied directly to one JSON value.
+#[inline]
+pub(crate) fn view_scalar_value_projection_call(id: BuiltinId, args: &BuiltinArgs) -> bool {
+    matches!(args, BuiltinArgs::None) && view_scalar_value_projection(id)
 }
 
 /// Return raw-byte scalar execution support for builtin `id`, if the operation
@@ -2074,9 +2101,21 @@ mod tests {
         assert!(view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Len
         )));
+        assert!(view_scalar_value_projection_call(
+            BuiltinId::from_method(BuiltinMethod::Len),
+            &BuiltinArgs::None
+        ));
+        assert!(!view_scalar_value_projection_call(
+            BuiltinId::from_method(BuiltinMethod::Len),
+            &BuiltinArgs::Str(std::sync::Arc::from("x"))
+        ));
         assert!(!view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Keys
         )));
+        assert!(!view_scalar_value_projection_call(
+            BuiltinId::from_method(BuiltinMethod::Keys),
+            &BuiltinArgs::None
+        ));
         assert!(!view_scalar_value_projection(BuiltinId::from_method(
             BuiltinMethod::Entries
         )));
@@ -3364,6 +3403,20 @@ mod tests {
         assert!(view_object_items_projection(BuiltinId::from_method(
             BuiltinMethod::Keys
         )));
+        assert_eq!(
+            view_object_items_projection_call(
+                BuiltinId::from_method(BuiltinMethod::Keys),
+                &BuiltinArgs::None
+            ),
+            Some(BuiltinViewObjectProjection::Keys)
+        );
+        assert_eq!(
+            view_object_items_projection_call(
+                BuiltinId::from_method(BuiltinMethod::Keys),
+                &BuiltinArgs::Str(std::sync::Arc::from("x"))
+            ),
+            None
+        );
         assert!(view_object_items_projection(BuiltinId::from_method(
             BuiltinMethod::Values
         )));
@@ -3384,6 +3437,13 @@ mod tests {
         assert!(!view_object_items_projection(BuiltinId::from_method(
             BuiltinMethod::Pick
         )));
+        assert_eq!(
+            view_object_items_projection_call(
+                BuiltinId::from_method(BuiltinMethod::Pick),
+                &BuiltinArgs::None
+            ),
+            None
+        );
         assert_eq!(
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None
