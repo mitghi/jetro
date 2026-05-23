@@ -1702,6 +1702,99 @@ mod tests {
     }
 
     #[test]
+    fn registry_runtime_hooks_are_explicit_and_coherent() {
+        let mut registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                runtime_hook(BuiltinId::from_method(method)).map(|hook| (method, hook))
+            })
+            .collect();
+        registered.sort_by_key(|(method, _)| *method as u16);
+        let mut expected = vec![
+            (BuiltinMethod::Filter, BuiltinRuntimeHook::SharedFilter),
+            (BuiltinMethod::Find, BuiltinRuntimeHook::SharedFilter),
+            (BuiltinMethod::FindAll, BuiltinRuntimeHook::SharedFilter),
+            (BuiltinMethod::Compact, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Map, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::FlatMap, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Remove, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Take, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Skip, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::TakeWhile, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::DropWhile, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::FindIndex, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::IndicesWhere, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::MaxBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::MinBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Sort, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Window, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Chunk, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Unique, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::UniqueBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Reverse, BuiltinRuntimeHook::Barrier),
+            (
+                BuiltinMethod::TransformKeys,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::TransformValues,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::FilterKeys,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::FilterValues,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+        ];
+        expected.sort_by_key(|(method, _)| *method as u16);
+        assert_eq!(
+            registered,
+            expected
+        );
+
+        for (method, hook) in registered {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            if hook.has_stream() {
+                assert!(
+                    spec.view_stage.is_some()
+                        || spec.object_lambda.is_some()
+                        || matches!(hook, BuiltinRuntimeHook::SharedFilter),
+                    "{method:?} stream hook must be tied to stage/object-lambda metadata"
+                );
+            }
+            if hook.has_barrier() {
+                assert!(
+                    spec.lowering.is_some()
+                        || spec.view_stage.is_some()
+                        || spec.object_lambda.is_some()
+                        || spec.sink.is_some()
+                        || spec.arg_extreme_sink.is_some(),
+                    "{method:?} barrier hook must be tied to lowering, stage, or sink metadata"
+                );
+            }
+            if matches!(hook, BuiltinRuntimeHook::SharedFilter) {
+                assert_eq!(
+                    expr_stage(id),
+                    Some(BuiltinExprStage::Filter),
+                    "{method:?} shared filter hook must expose filter expression metadata"
+                );
+                assert_eq!(
+                    demand_law(id),
+                    BuiltinDemandLaw::FilterLike,
+                    "{method:?} shared filter hook must use filter-like demand"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_accessors_match_builtin_specs() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
