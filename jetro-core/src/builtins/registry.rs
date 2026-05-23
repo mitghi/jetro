@@ -2218,11 +2218,7 @@ mod tests {
                 Some(BuiltinPipelineArity::Exact(1)),
                 "{method:?}"
             );
-            assert_eq!(
-                demand_law(id),
-                BuiltinDemandLaw::RowKeyedReducer,
-                "{method:?}"
-            );
+            assert_eq!(demand_law(id), sink.demand_law(), "{method:?}");
             assert_eq!(
                 sink_accumulator(id),
                 None,

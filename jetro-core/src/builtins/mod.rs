@@ -1160,6 +1160,12 @@ pub enum BuiltinArgExtremeSink {
 }
 
 impl BuiltinArgExtremeSink {
+    /// Demand law implied by arg-extreme selection.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::RowKeyedReducer
+    }
+
     /// Whether this sink keeps the largest projected key.
     #[inline]
     pub(crate) const fn wants_max(self) -> bool {

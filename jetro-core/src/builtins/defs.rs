@@ -40,7 +40,7 @@ fn arg_extreme_reducer_spec(sink: BuiltinArgExtremeSink) -> BuiltinSpec {
         .view_native()
         .arg_extreme_sink(sink)
         .cost(10.0)
-        .demand_law(BuiltinDemandLaw::RowKeyedReducer)
+        .demand_law(sink.demand_law())
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
@@ -919,7 +919,7 @@ impl Builtin for MaxBy {
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::data::context::EvalError>> {
-        arg_extreme_apply_barrier(ctx, buf, body, true)
+        arg_extreme_apply_barrier(ctx, buf, body, BuiltinArgExtremeSink::MaxBy.wants_max())
     }
 }
 
@@ -939,7 +939,7 @@ impl Builtin for MinBy {
         buf: &mut Vec<crate::data::value::Val>,
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::data::context::EvalError>> {
-        arg_extreme_apply_barrier(ctx, buf, body, false)
+        arg_extreme_apply_barrier(ctx, buf, body, BuiltinArgExtremeSink::MinBy.wants_max())
     }
 }
 
