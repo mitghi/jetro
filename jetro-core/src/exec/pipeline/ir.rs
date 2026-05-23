@@ -15,7 +15,7 @@ use crate::builtins::registry::{
     expr_stage as builtin_expr_stage, expr_stage_elidable_when_value_unused,
     keyed_reducer as builtin_keyed_reducer, direct_scalar_for_plain_sink,
     nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
-    pipeline_element, pipeline_legacy_materialized, pipeline_lowering,
+    pipeline_builtin_call_stage, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
     pipeline_streams, sink_accumulator as builtin_sink_accumulator,
     sink_demand as builtin_sink_demand, stage_delayable_view_projection,
@@ -770,11 +770,7 @@ impl Stage {
     /// Build a generic builtin-call stage only when registry metadata allows pipeline use.
     pub(crate) fn builtin_call(call: BuiltinCall) -> Option<Self> {
         let id = BuiltinId::from_method(call.method);
-        let view_filter_like = matches!(
-            builtin_view_stage(id),
-            Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
-        );
-        (pipeline_element(id) || view_filter_like).then_some(Stage::Builtin(call))
+        pipeline_builtin_call_stage(id).then_some(Stage::Builtin(call))
     }
 
     /// Build a usize-argument stage only for builtins whose registry lowering accepts one.

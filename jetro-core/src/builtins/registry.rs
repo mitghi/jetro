@@ -1195,6 +1195,17 @@ pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
     id.method().map(|m| m.spec().is_element).unwrap_or(false)
 }
 
+/// Return `true` if a concrete builtin call can be represented as a generic
+/// pipeline `Stage::Builtin` stage.
+#[inline]
+pub(crate) fn pipeline_builtin_call_stage(id: BuiltinId) -> bool {
+    pipeline_element(id)
+        || matches!(
+            view_stage(id),
+            Some(BuiltinViewStage::Compact | BuiltinViewStage::RemoveValue)
+        )
+}
+
 /// Return the structural traversal variant for builtin `id` (`DeepFind`,
 /// `DeepShape`, `DeepLike`), or `None` for non-structural builtins.
 #[inline]
@@ -4338,6 +4349,28 @@ mod tests {
             BuiltinMethod::Flatten,
         ] {
             assert!(!pipeline_element(BuiltinId::from_method(method)));
+        }
+
+        for method in [
+            BuiltinMethod::Upper,
+            BuiltinMethod::Compact,
+            BuiltinMethod::Remove,
+        ] {
+            assert!(
+                pipeline_builtin_call_stage(BuiltinId::from_method(method)),
+                "{method:?} should be accepted as a builtin-call stage"
+            );
+        }
+
+        for method in [
+            BuiltinMethod::Has,
+            BuiltinMethod::Len,
+            BuiltinMethod::Sort,
+        ] {
+            assert!(
+                !pipeline_builtin_call_stage(BuiltinId::from_method(method)),
+                "{method:?} should not be accepted as a builtin-call stage"
+            );
         }
     }
 
