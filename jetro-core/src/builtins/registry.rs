@@ -1590,6 +1590,43 @@ mod tests {
                 Some(spec.cardinality),
                 "{method:?}"
             );
+            assert_eq!(logical_shape(id), spec.logical_shape, "{method:?}");
+            assert_eq!(row_stream_op(id), spec.row_stream_op, "{method:?}");
+            let expected_expr_stage = spec.expr_stage.or_else(|| {
+                matches!(
+                    spec.lowering,
+                    Some(
+                        BuiltinPipelineLowering::ExprArg
+                            | BuiltinPipelineLowering::TerminalExprArg { .. }
+                    )
+                )
+                .then_some(BuiltinExprStage::ExprBuiltin)
+            });
+            assert_eq!(expr_stage(id), expected_expr_stage, "{method:?}");
+            let expected_nullary_stage = spec.nullary_stage.or_else(|| {
+                (matches!(spec.lowering, Some(BuiltinPipelineLowering::Nullary))
+                    && spec.is_element)
+                    .then_some(BuiltinNullaryStage::Element)
+            });
+            assert_eq!(nullary_stage(id), expected_nullary_stage, "{method:?}");
+            assert_eq!(
+                string_pair_stage(id),
+                spec.string_pair_stage,
+                "{method:?}"
+            );
+            assert_eq!(object_lambda(id), spec.object_lambda, "{method:?}");
+            assert_eq!(
+                pipeline_materialization(id),
+                spec.materialization,
+                "{method:?}"
+            );
+            assert_eq!(pipeline_shape(id), spec.pipeline_shape, "{method:?}");
+            assert_eq!(
+                pipeline_order_effect(id),
+                spec.order_effect,
+                "{method:?}"
+            );
+            assert_eq!(pipeline_lowering(id), spec.lowering, "{method:?}");
             assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
             assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
             assert_eq!(
@@ -1597,9 +1634,19 @@ mod tests {
                 spec.selection_rewrite,
                 "{method:?}"
             );
+            assert_eq!(view_stage(id), spec.view_stage, "{method:?}");
+            assert_eq!(
+                view_object_projection(id),
+                spec.view_object_projection,
+                "{method:?}"
+            );
+            assert_eq!(array_selector(id), spec.array_selector, "{method:?}");
             assert_eq!(builtin_sink(id), spec.sink, "{method:?}");
             assert_eq!(keyed_reducer(id), spec.keyed_reducer, "{method:?}");
             assert_eq!(numeric_reducer(id), spec.numeric_reducer, "{method:?}");
+            assert_eq!(arg_extreme_sink(id), spec.arg_extreme_sink, "{method:?}");
+            assert_eq!(predicate_sink(id), spec.predicate_sink, "{method:?}");
+            assert_eq!(membership_sink(id), spec.membership_sink, "{method:?}");
             assert_eq!(is_pure(id), spec.pure, "{method:?}");
             assert_eq!(cancellation(id), spec.cancellation, "{method:?}");
             assert_eq!(is_idempotent(id), spec.idempotent, "{method:?}");
@@ -1614,6 +1661,12 @@ mod tests {
                 "{method:?}"
             );
             assert_eq!(runtime_hook(id), spec.runtime_hook, "{method:?}");
+            assert_eq!(structural(id), spec.structural, "{method:?}");
+            assert_eq!(
+                raw_json_scalar(id, &BuiltinArgs::None),
+                spec.raw_json_scalar,
+                "{method:?}"
+            );
             let effective_shape =
                 effective_pipeline_shape(id).expect("registered builtin should have shape");
             let expected_shape = pipeline_shape(id).unwrap_or(BuiltinPipelineShape {
