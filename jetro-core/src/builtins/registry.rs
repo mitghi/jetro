@@ -2310,15 +2310,15 @@ mod tests {
 
     #[test]
     fn registry_converts_sink_demands() {
-        let first = sink_demand(BuiltinMethod::First.spec().sink.unwrap());
+        let first = sink_demand(builtin_sink(BuiltinId::FIRST).unwrap());
         assert_eq!(first.pull, PullDemand::FirstInput(1));
         assert_eq!(first.value, ValueNeed::Whole);
 
-        let last = sink_demand(BuiltinMethod::Last.spec().sink.unwrap());
+        let last = sink_demand(builtin_sink(BuiltinId::LAST).unwrap());
         assert_eq!(last.pull, PullDemand::LastInput(1));
         assert_eq!(last.value, ValueNeed::Whole);
 
-        let count = sink_demand(BuiltinMethod::Count.spec().sink.unwrap());
+        let count = sink_demand(builtin_sink(BuiltinId::COUNT).unwrap());
         assert_eq!(count.pull, PullDemand::All);
         assert_eq!(count.value, ValueNeed::CountOnly);
         assert!(!count.order);
