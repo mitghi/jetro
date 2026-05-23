@@ -1861,6 +1861,34 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn view_sort_drop_while_filter_map_last_matches_value_backend() {
+        let doc = json!({
+            "data": [
+                {"name": "skip_test", "isbn": "skip", "score": 100, "price": 90},
+                {"name": "keep-high", "isbn": "high", "score": 90, "price": 30},
+                {"name": "keep-low", "isbn": "low", "score": 80, "price": 25},
+                {"name": "cheap", "isbn": "cheap", "score": 70, "price": 5}
+            ],
+            "unused": {"large": [1, 2, 3, 4]}
+        });
+        let data = serde_json::to_vec(&doc).unwrap();
+        let from_tape = Jetro::from_bytes(data).unwrap();
+        let engine = JetroEngine::new();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let query =
+            r#"$.data.sort_by(-score).drop_while(name.contains("_test")).filter(price > 20).map(isbn).last()"#;
+        let tape_out = from_tape.collect(query).unwrap();
+        let value_out = engine.collect_value(doc, query).unwrap();
+
+        assert_eq!(tape_out, value_out);
+        assert_eq!(tape_out, json!("low"));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn view_sort_filter_map_last_scans_sorted_tail_until_match() {
         let j = Jetro::from_bytes(
