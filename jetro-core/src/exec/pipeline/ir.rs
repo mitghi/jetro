@@ -1896,9 +1896,11 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             lanes.merge_scan(FieldDemand::Whole);
             lanes
         }
-        Stage::ExprBuiltin { method, .. } => {
-            expr_builtin_payload_lanes(*method, kernel, downstream)
-        }
+        Stage::ExprBuiltin { method, .. } => expr_builtin_payload_lanes(
+            BuiltinId::from_method(*method),
+            kernel,
+            downstream,
+        ),
         Stage::Builtin(call) if call.cardinality() == Some(BuiltinCardinality::OneToOne) =>
         {
             if downstream.scan_need.is_none() && downstream.result_need.is_none() {
@@ -1939,11 +1941,11 @@ fn builtin_stage_lane_payload(demand: &FieldDemand, kernel: &BodyKernel) -> Fiel
 }
 
 fn expr_builtin_payload_lanes(
-    method: BuiltinMethod,
+    id: BuiltinId,
     kernel: &BodyKernel,
     downstream: DemandLanes,
 ) -> DemandLanes {
-    match expr_payload(BuiltinId::from_method(method)) {
+    match expr_payload(id) {
         Some(BuiltinExprPayload::PredicateScan) => {
             let mut lanes = downstream;
             lanes.merge_scan(kernel.field_demand());
