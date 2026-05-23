@@ -1,6 +1,7 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    direct_view_call, logical_shape, raw_json_scalar_call, BuiltinDirectViewCall, BuiltinId,
+    direct_view_call, logical_shape, raw_json_scalar_call, view_object_items_projection_call,
+    BuiltinDirectViewCall, BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -929,10 +930,7 @@ fn is_direct_raw_json_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
 
 #[inline]
 fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
-    matches!(
-        direct_view_call(BuiltinId::from_method(call.method), &call.args),
-        Some(BuiltinDirectViewCall::ObjectItems(_))
-    )
+    view_object_items_projection_call(BuiltinId::from_method(call.method), &call.args).is_some()
 }
 
 fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
