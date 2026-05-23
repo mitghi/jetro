@@ -1347,6 +1347,34 @@ impl BuiltinNumericReducer {
             Self::Max => BuiltinMethod::Max,
         }
     }
+
+    /// Logical reducer shape represented by this numeric accumulator.
+    #[inline]
+    pub(crate) const fn logical_shape(self) -> BuiltinLogicalShape {
+        match self {
+            Self::Sum => BuiltinLogicalShape::Sum,
+            Self::Avg => BuiltinLogicalShape::Avg,
+            Self::Min => BuiltinLogicalShape::Min,
+            Self::Max => BuiltinLogicalShape::Max,
+        }
+    }
+
+    /// Row-stream operation represented by this numeric accumulator.
+    #[inline]
+    pub(crate) const fn row_stream_op(self) -> BuiltinRowStreamOp {
+        match self {
+            Self::Sum => BuiltinRowStreamOp::Sum,
+            Self::Avg => BuiltinRowStreamOp::Avg,
+            Self::Min => BuiltinRowStreamOp::Min,
+            Self::Max => BuiltinRowStreamOp::Max,
+        }
+    }
+
+    /// Demand law shared by numeric reducers.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::NumericReducer
+    }
 }
 
 /// Describes how two adjacent identical stages can be collapsed into one.

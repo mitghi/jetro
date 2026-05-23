@@ -23,19 +23,13 @@ use super::{
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
 #[inline]
 fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
-    let (logical, row_op) = match reducer {
-        BuiltinNumericReducer::Sum => (BuiltinLogicalShape::Sum, BuiltinRowStreamOp::Sum),
-        BuiltinNumericReducer::Avg => (BuiltinLogicalShape::Avg, BuiltinRowStreamOp::Avg),
-        BuiltinNumericReducer::Min => (BuiltinLogicalShape::Min, BuiltinRowStreamOp::Min),
-        BuiltinNumericReducer::Max => (BuiltinLogicalShape::Max, BuiltinRowStreamOp::Max),
-    };
     BuiltinSpec::new(BuiltinCategory::Reducer, BuiltinCardinality::Reducing)
         .view_native()
         .numeric_sink(reducer)
         .cost(10.0)
-        .demand_law(BuiltinDemandLaw::NumericReducer)
-        .logical_shape(logical)
-        .row_stream_op(row_op)
+        .demand_law(reducer.demand_law())
+        .logical_shape(reducer.logical_shape())
+        .row_stream_op(reducer.row_stream_op())
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 

@@ -2084,12 +2084,14 @@ mod tests {
 
             assert_eq!(reducer.method(), method, "{method:?}");
             assert_eq!(sink.accumulator, BuiltinSinkAccumulator::Numeric, "{method:?}");
-            assert_eq!(demand_law(id), BuiltinDemandLaw::NumericReducer, "{method:?}");
+            assert_eq!(demand_law(id), reducer.demand_law(), "{method:?}");
+            assert_eq!(logical_shape(id), Some(reducer.logical_shape()), "{method:?}");
             assert_eq!(
                 pipeline_lowering(id),
                 Some(BuiltinPipelineLowering::TerminalSink),
                 "{method:?}"
             );
+            assert_eq!(row_stream_op(id), Some(reducer.row_stream_op()), "{method:?}");
             assert_eq!(
                 row_stream_op(id).map(row_stream_op_arg),
                 Some(BuiltinRowStreamArg::None),
