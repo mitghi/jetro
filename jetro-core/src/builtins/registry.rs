@@ -1863,6 +1863,60 @@ mod tests {
     }
 
     #[test]
+    fn registry_raw_json_scalar_contracts_are_safe_for_byte_paths() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            let Some(raw) = spec.raw_json_scalar else {
+                assert_eq!(
+                    raw_json_scalar(id, &crate::builtins::BuiltinArgs::None),
+                    None,
+                    "{method:?} without raw metadata must not expose raw byte execution"
+                );
+                continue;
+            };
+
+            assert!(spec.pure, "{method:?} raw byte scalar must be pure");
+            assert!(
+                spec.view_native && spec.view_scalar,
+                "{method:?} raw byte scalar must also be valid on borrowed views"
+            );
+            assert!(
+                !spec.stream_source,
+                "{method:?} raw byte scalar must not consume stream-source syntax"
+            );
+            assert_eq!(
+                pipeline_materialization(id),
+                BuiltinPipelineMaterialization::Streaming,
+                "{method:?} raw byte scalar must not force materialization"
+            );
+            assert_eq!(
+                spec.demand_law,
+                raw.demand_law(),
+                "{method:?} raw byte scalar demand law must match the raw operation"
+            );
+            assert_eq!(
+                raw_json_scalar(id, &crate::builtins::BuiltinArgs::None),
+                Some(raw),
+                "{method:?} raw byte scalar lookup must round-trip registry metadata"
+            );
+            assert!(
+                raw_json_scalar_call(id, &crate::builtins::BuiltinArgs::None),
+                "{method:?} nullary raw byte scalar call must be enabled"
+            );
+            assert_eq!(
+                raw_json_scalar(id, &crate::builtins::BuiltinArgs::Str(Arc::from("arg"))),
+                None,
+                "{method:?} raw byte scalar calls with args must fall back"
+            );
+            assert!(
+                !raw_json_scalar_call(id, &crate::builtins::BuiltinArgs::Str(Arc::from("arg"))),
+                "{method:?} raw byte scalar call predicate must honor call args"
+            );
+        }
+    }
+
+    #[test]
     fn registry_propagates_core_streaming_demands() {
         let filter = BuiltinId::from_method(BuiltinMethod::Filter);
         let map = BuiltinId::from_method(BuiltinMethod::Map);
