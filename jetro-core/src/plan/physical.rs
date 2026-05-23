@@ -809,6 +809,12 @@ pub(crate) fn physical_path_steps(steps: &[Step]) -> Option<Vec<PhysicalPathStep
     Some(out)
 }
 
+pub(crate) fn physical_field_keys_to_path_steps(keys: &[Arc<str>]) -> Vec<PhysicalPathStep> {
+    keys.iter()
+        .map(|key| PhysicalPathStep::Field(Arc::clone(key)))
+        .collect()
+}
+
 /// Lowers a general `Expr::Chain` into a sequence of `PhysicalChainStep`s, flushing accumulated
 /// steps into `Chain` nodes whenever a method call interrupts the sequence.
 fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {

@@ -8,7 +8,8 @@ use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
 use crate::plan::physical::{
-    physical_path_steps, physical_steps_to_path_steps, plan_ast_with_context, PlanningContext,
+    physical_field_keys_to_path_steps, physical_path_steps, physical_steps_to_path_steps,
+    plan_ast_with_context, PlanningContext,
 };
 use crate::util::JsonView;
 use crate::JetroEngine;
@@ -885,7 +886,9 @@ fn pipeline_source_to_steps(
     source: &crate::ir::physical::PipelinePlanSource,
 ) -> Option<NdjsonPhysicalPath> {
     match source {
-        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => Some(keys_to_path(keys)),
+        crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
+            Some(physical_field_keys_to_path_steps(keys))
+        }
         crate::ir::physical::PipelinePlanSource::Expr(source) => node_path_steps(plan, *source),
     }
 }
@@ -920,12 +923,6 @@ fn is_direct_raw_json_scalar_call(call: &crate::builtins::BuiltinCall) -> bool {
 #[inline]
 fn is_direct_object_items_call(call: &crate::builtins::BuiltinCall) -> bool {
     view_object_items_projection_call(BuiltinId::from_method(call.method), &call.args).is_some()
-}
-
-fn keys_to_path(keys: &[Arc<str>]) -> NdjsonPhysicalPath {
-    keys.iter()
-        .map(|key| PhysicalPathStep::Field(key.clone()))
-        .collect()
 }
 
 fn root_path_steps(
@@ -1364,7 +1361,7 @@ fn direct_item_predicate_from_kernel(
     }
     if let Some((keys, op, lit)) = kernel.field_path_literal_cmp() {
         return Some(NdjsonDirectItemPredicate::CmpLit {
-            lhs: keys_to_path(&keys),
+            lhs: physical_field_keys_to_path_steps(&keys),
             op,
             lit,
         });
@@ -1424,7 +1421,9 @@ fn combine_direct_item_predicate_kernels(
 fn kernel_to_physical_path(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonPhysicalPath> {
-    kernel.field_path_keys().map(|keys| keys_to_path(&keys))
+    kernel
+        .field_path_keys()
+        .map(|keys| physical_field_keys_to_path_steps(&keys))
 }
 
 fn direct_projection_value_from_kernel(
@@ -1607,7 +1606,7 @@ fn direct_tape_predicate_source_scalar_call(
     match source {
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
             Some(NdjsonDirectPredicate::ViewScalarCall {
-                steps: keys_to_path(keys),
+                steps: physical_field_keys_to_path_steps(keys),
                 call,
             })
         }
@@ -1673,7 +1672,7 @@ fn direct_array_element_source(
     }
     let element = body.sink.single_element_selection()?.into();
     let source_steps = match source {
-        PipelinePlanSource::FieldChain { keys } => keys_to_path(keys),
+        PipelinePlanSource::FieldChain { keys } => physical_field_keys_to_path_steps(keys),
         PipelinePlanSource::Expr(source) => node_path_steps(plan, *source)?,
     };
     Some((source_steps, element))
