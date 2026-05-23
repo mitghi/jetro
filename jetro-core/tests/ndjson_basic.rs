@@ -1633,6 +1633,31 @@ fn rows_stream_bare_array_find_filter_is_direct() {
 }
 
 #[test]
+fn rows_stream_array_find_item_scalar_call_filter_is_direct() {
+    let engine = JetroEngine::new();
+    let input = br#"{"id":"a","custom_attributes":[{"value":""}]}
+{"id":"b","custom_attributes":[{"value":"z"}]}
+{"id":"c","custom_attributes":[{"value":""}]}
+"#;
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            r#"$.rows().filter(custom_attributes.find(value.len())).map(id)"#,
+            &mut out,
+        )
+        .expect("array find scalar-call predicate should use direct item kernels");
+
+    assert_eq!(String::from_utf8(out).unwrap(), "\"b\"\n");
+    assert_eq!(report.stats.rows_scanned, 3);
+    assert_eq!(report.stats.direct_filter_rows, 3);
+    assert_eq!(report.stats.fallback_filter_rows, 0);
+    assert_eq!(report.stats.direct_project_rows, 1);
+    assert_eq!(report.stats.fallback_project_rows, 0);
+}
+
+#[test]
 fn rows_stream_filter_distinct_take_projects_retained_rows() {
     let engine = JetroEngine::new();
     let input = br#"{"id":"a","active":false,"v":1}

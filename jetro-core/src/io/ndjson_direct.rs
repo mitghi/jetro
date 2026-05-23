@@ -950,6 +950,12 @@ fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate>
 }
 
 fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredicate> {
+    let kernel = crate::exec::pipeline::BodyKernel::classify_expr(expr);
+    if !matches!(kernel, crate::exec::pipeline::BodyKernel::Generic) {
+        if let Some(predicate) = direct_item_predicate_from_kernel(&kernel) {
+            return Some(predicate);
+        }
+    }
     match expr {
         Expr::Bool(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Bool(*value))),
         Expr::Null => Some(NdjsonDirectItemPredicate::Literal(Val::Null)),
@@ -1671,6 +1677,30 @@ mod tests {
         assert!(matches!(
             source_steps.as_slice(),
             [PhysicalPathStep::Field(name)] if name.as_ref() == "custom_attributes"
+        ));
+    }
+
+    #[test]
+    fn recognizes_array_find_item_view_scalar_predicate_from_kernel_metadata() {
+        let expr = crate::parse::parser::parse(r#"custom_attributes.find(value.len())"#)
+            .expect("parse");
+        let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
+            direct_array_any_predicate_expr(&expr)
+        else {
+            panic!("expected array-any predicate");
+        };
+        assert!(matches!(
+            predicate,
+            NdjsonDirectItemPredicate::ViewScalarCall {
+                ref suffix_steps,
+                call: crate::builtins::BuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Len,
+                    ..
+                },
+            } if matches!(
+                suffix_steps.as_slice(),
+                [PhysicalPathStep::Field(name)] if name.as_ref() == "value"
+            )
         ));
     }
 
