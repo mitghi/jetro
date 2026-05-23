@@ -649,6 +649,8 @@ impl StageShape {
 pub(crate) struct StageDescriptor<'a> {
     /// The `BuiltinMethod` this stage maps to, if any.
     pub method: Option<BuiltinMethod>,
+    /// Stable registry identity for this stage's builtin, if any.
+    id: Option<BuiltinId>,
     /// The compiled predicate or projection program carried by the stage, if any.
     pub body: Option<&'a Program>,
     /// Integer argument (e.g. the `n` in `take(n)`), if applicable.
@@ -667,6 +669,7 @@ impl<'a> StageDescriptor<'a> {
     pub(crate) fn new(method: BuiltinMethod) -> Self {
         Self {
             method: Some(method),
+            id: Some(BuiltinId::from_method(method)),
             body: None,
             usize_arg: None,
             view_stage_override: None,
@@ -681,6 +684,7 @@ impl<'a> StageDescriptor<'a> {
     pub(crate) fn special() -> Self {
         Self {
             method: None,
+            id: None,
             body: None,
             usize_arg: None,
             view_stage_override: None,
@@ -730,7 +734,7 @@ impl<'a> StageDescriptor<'a> {
     /// Returns the registry id for the builtin method described by this stage.
     #[inline]
     pub(crate) fn builtin_id(self) -> Option<BuiltinId> {
-        self.method.map(BuiltinId::from_method)
+        self.id
     }
 
     /// Returns the effective `BuiltinViewStage` for this descriptor, using the override if set
