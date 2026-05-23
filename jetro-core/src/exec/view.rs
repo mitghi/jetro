@@ -277,7 +277,7 @@ where
     if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
         return crate::util::json_vals_eq(item.scalar(), target_view);
     }
-    crate::util::vals_eq(&item.materialize(), target)
+    crate::util::vals_deep_eq(&item.materialize(), target)
 }
 
 fn view_arg_extreme_key_with_vm<'a, V>(
@@ -2152,6 +2152,45 @@ mod tests {
         assert_eq!(indices_json, serde_json::json!([0, 2]));
         assert_eq!(indices_source.materialize_reads(), 0);
         assert_eq!(indices_source.scalar_reads(), 4);
+    }
+
+    #[test]
+    fn view_membership_sinks_match_compound_values_deeply() {
+        let rows = Val::from(&serde_json::json!([
+            {"id": 1, "tags": ["a"]},
+            {"id": 2, "tags": ["b", "c"]},
+            ["nested", 3]
+        ]));
+
+        let object_body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Includes,
+                target: MembershipSinkTarget::Literal(Val::from(&serde_json::json!({
+                    "id": 2,
+                    "tags": ["b", "c"]
+                }))),
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let object_out = super::run_full(ValView::new(&rows), &object_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(object_out, Val::Bool(true));
+
+        let array_body = PipelineBody {
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: MembershipSinkOp::Index,
+                target: MembershipSinkTarget::Literal(Val::from(&serde_json::json!(["nested", 3]))),
+            }),
+            ..object_body
+        };
+        let array_out = super::run_full(ValView::new(&rows), &array_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(array_out, Val::Int(2));
     }
 
     #[test]
