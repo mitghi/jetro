@@ -457,6 +457,16 @@ pub(super) enum NdjsonDirectElement {
     Nth(usize),
 }
 
+impl From<crate::exec::pipeline::ArraySelector> for NdjsonDirectElement {
+    fn from(selector: crate::exec::pipeline::ArraySelector) -> Self {
+        match selector {
+            crate::exec::pipeline::ArraySelector::First => Self::First,
+            crate::exec::pipeline::ArraySelector::Last => Self::Last,
+            crate::exec::pipeline::ArraySelector::Nth(n) => Self::Nth(n),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum NdjsonDirectPredicate {
     Path(NdjsonPhysicalPath),
@@ -1550,20 +1560,7 @@ fn direct_array_select_from_kernel(
     array: &crate::exec::pipeline::BodyKernel,
     selector: crate::exec::pipeline::ArraySelector,
 ) -> Option<(NdjsonPhysicalPath, NdjsonDirectElement)> {
-    Some((
-        kernel_to_physical_path(array)?,
-        direct_element_from_kernel_selector(selector),
-    ))
-}
-
-fn direct_element_from_kernel_selector(
-    selector: crate::exec::pipeline::ArraySelector,
-) -> NdjsonDirectElement {
-    match selector {
-        crate::exec::pipeline::ArraySelector::First => NdjsonDirectElement::First,
-        crate::exec::pipeline::ArraySelector::Last => NdjsonDirectElement::Last,
-        crate::exec::pipeline::ArraySelector::Nth(n) => NdjsonDirectElement::Nth(n),
-    }
+    Some((kernel_to_physical_path(array)?, selector.into()))
 }
 
 fn direct_scalar_call_from_kernel(

@@ -239,6 +239,33 @@ pub enum ArraySelector {
     Nth(usize),
 }
 
+impl ArraySelector {
+    /// Build a pipeline selector from registry selector metadata plus an optional integer arg.
+    pub(crate) fn from_builtin_selector(
+        selector: BuiltinArraySelector,
+        index: Option<i64>,
+    ) -> Option<Self> {
+        match selector {
+            BuiltinArraySelector::First => Some(Self::First),
+            BuiltinArraySelector::Last => Some(Self::Last),
+            BuiltinArraySelector::Nth => match index {
+                Some(index) if index >= 0 => Some(Self::Nth(index as usize)),
+                _ => None,
+            },
+        }
+    }
+
+    /// Return the selected array index for an array of `len`, if the selector can be satisfied.
+    #[inline]
+    pub(crate) fn index_for_len(self, len: usize) -> Option<usize> {
+        match self {
+            Self::First => Some(0),
+            Self::Last => len.checked_sub(1),
+            Self::Nth(idx) => Some(idx),
+        }
+    }
+}
+
 impl ObjectKernel {
     /// Returns the number of key/value entries in this object kernel.
     #[inline]
@@ -568,14 +595,14 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
 }
 
 fn array_selector_builtin_call(call: &BuiltinCall) -> Option<ArraySelector> {
-    match builtin_array_selector(BuiltinId::from_method(call.method))? {
-        BuiltinArraySelector::First => Some(ArraySelector::First),
-        BuiltinArraySelector::Last => Some(ArraySelector::Last),
-        BuiltinArraySelector::Nth => match call.args {
-            BuiltinArgs::I64(index) if index >= 0 => Some(ArraySelector::Nth(index as usize)),
-            _ => None,
-        },
-    }
+    let index = match call.args {
+        BuiltinArgs::I64(index) => Some(index),
+        _ => None,
+    };
+    ArraySelector::from_builtin_selector(
+        builtin_array_selector(BuiltinId::from_method(call.method))?,
+        index,
+    )
 }
 
 impl BodyKernel {
@@ -1505,17 +1532,15 @@ fn static_prog_val(prog: &crate::vm::Program) -> Option<Val> {
 }
 
 fn array_selector_call(call: &crate::vm::CompiledCall) -> Option<ArraySelector> {
-    match builtin_array_selector(BuiltinId::from_method(call.method))? {
-        BuiltinArraySelector::First => Some(ArraySelector::First),
-        BuiltinArraySelector::Last => Some(ArraySelector::Last),
-        BuiltinArraySelector::Nth => match call.sub_progs.as_ref() {
-            [prog] => match static_prog_val(prog)? {
-                Val::Int(index) if index >= 0 => Some(ArraySelector::Nth(index as usize)),
-                _ => None,
-            },
+    let selector = builtin_array_selector(BuiltinId::from_method(call.method))?;
+    let index = match call.sub_progs.as_ref() {
+        [prog] => match static_prog_val(prog)? {
+            Val::Int(index) => Some(index),
             _ => None,
         },
-    }
+        _ => None,
+    };
+    ArraySelector::from_builtin_selector(selector, index)
 }
 
 fn arithmetic_binop(op: &crate::vm::Opcode) -> Option<crate::parse::ast::BinOp> {
@@ -1926,13 +1951,8 @@ fn eval_array_select_native(array: &Val, selector: ArraySelector) -> Val {
     let Some(items) = array.as_vals() else {
         return Val::Null;
     };
-    let idx = match selector {
-        ArraySelector::First => 0,
-        ArraySelector::Last => match items.len().checked_sub(1) {
-            Some(idx) => idx,
-            None => return Val::Null,
-        },
-        ArraySelector::Nth(idx) => idx,
+    let Some(idx) = selector.index_for_len(items.len()) else {
+        return Val::Null;
     };
     items.get(idx).cloned().unwrap_or(Val::Null)
 }
@@ -2961,6 +2981,42 @@ mod tests {
             owned_value(eval_view_kernel(&kernel, &ValView::new(&value))),
             Some(Val::Str(Arc::from("delivered")))
         );
+    }
+
+    #[test]
+    fn array_selector_conversion_is_shared_and_bounds_safe() {
+        assert_eq!(
+            super::ArraySelector::from_builtin_selector(
+                crate::builtins::BuiltinArraySelector::First,
+                None
+            ),
+            Some(super::ArraySelector::First)
+        );
+        assert_eq!(
+            super::ArraySelector::from_builtin_selector(
+                crate::builtins::BuiltinArraySelector::Last,
+                None
+            ),
+            Some(super::ArraySelector::Last)
+        );
+        assert_eq!(
+            super::ArraySelector::from_builtin_selector(
+                crate::builtins::BuiltinArraySelector::Nth,
+                Some(2)
+            ),
+            Some(super::ArraySelector::Nth(2))
+        );
+        assert_eq!(
+            super::ArraySelector::from_builtin_selector(
+                crate::builtins::BuiltinArraySelector::Nth,
+                Some(-1)
+            ),
+            None
+        );
+        assert_eq!(super::ArraySelector::First.index_for_len(0), Some(0));
+        assert_eq!(super::ArraySelector::Last.index_for_len(0), None);
+        assert_eq!(super::ArraySelector::Last.index_for_len(3), Some(2));
+        assert_eq!(super::ArraySelector::Nth(5).index_for_len(3), Some(5));
     }
 
     #[test]
