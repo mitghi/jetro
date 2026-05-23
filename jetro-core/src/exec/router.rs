@@ -1548,6 +1548,45 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn view_count_by_reduces_tape_rows_without_materializing_rows() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"genre":"sf","title":"a"},{"genre":"fantasy","title":"b"},{"genre":"sf","title":"c"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.count_by(genre)"#).unwrap();
+
+        assert_eq!(out, json!({"sf": 2, "fantasy": 1}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_index_by_materializes_only_indexed_result_rows() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"id":"a","title":"old"},{"id":"b","title":"bee"},{"id":"a","title":"new"}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.index_by(id)"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!({
+                "a": {"id": "a", "title": "new"},
+                "b": {"id": "b", "title": "bee"}
+            })
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 3);
+    }
+
     #[test]
     fn view_group_by_reduces_tape_rows_without_materializing_root() {
         let j = Jetro::from_bytes(
