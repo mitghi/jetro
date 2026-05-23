@@ -937,7 +937,7 @@ fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate>
     let [Arg::Pos(predicate_expr)] = args.as_slice() else {
         return None;
     };
-    let mut source_steps = direct_current_or_root_path_expr(base)?;
+    let mut source_steps = direct_tape_row_path_for_expr(base)?;
     source_steps.extend(physical_path_from_steps(prefix)?);
     let predicate = direct_item_predicate_from_expr(predicate_expr)?;
     if !item_predicate_guarantees_object_match(&predicate) {
@@ -947,18 +947,6 @@ fn direct_array_any_predicate_expr(expr: &Expr) -> Option<NdjsonDirectPredicate>
         source_steps,
         predicate,
     })
-}
-
-fn direct_current_or_root_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
-    match expr {
-        Expr::Current | Expr::Root => Some(Vec::new()),
-        Expr::Chain(base, steps) => {
-            let mut path = direct_current_or_root_path_expr(base)?;
-            path.extend(physical_path_from_steps(steps)?);
-            Some(path)
-        }
-        _ => None,
-    }
 }
 
 fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredicate> {
@@ -1668,6 +1656,21 @@ mod tests {
         assert!(matches!(
             direct_array_any_predicate_expr(&expr),
             Some(NdjsonDirectPredicate::ArrayAny { .. })
+        ));
+    }
+
+    #[test]
+    fn recognizes_array_find_on_bare_row_local_source() {
+        let expr = crate::parse::parser::parse(r#"custom_attributes.find(value == "z")"#)
+            .expect("parse");
+        let Some(NdjsonDirectPredicate::ArrayAny { source_steps, .. }) =
+            direct_array_any_predicate_expr(&expr)
+        else {
+            panic!("expected array-any predicate");
+        };
+        assert!(matches!(
+            source_steps.as_slice(),
+            [PhysicalPathStep::Field(name)] if name.as_ref() == "custom_attributes"
         ));
     }
 
