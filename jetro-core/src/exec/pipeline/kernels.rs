@@ -12,7 +12,7 @@ use crate::builtins::registry::{
     count_sink_accepts_predicate, expr_stage, numeric_reducer, view_projection,
     view_projection_field_demand, view_projection_returns_owned, BuiltinId, ViewProjectionResult,
 };
-use crate::builtins::{BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
+use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, ValView, ValueView};
@@ -524,6 +524,16 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                         .unwrap_or(BodyKernel::Generic);
                 };
                 let id = BuiltinId::from_method(call.method);
+                if let Some(selector) = array_selector_builtin_call(&call) {
+                    if !receiver.is_view_native() {
+                        return BodyKernel::Generic;
+                    }
+                    receiver = BodyKernel::ArraySelect {
+                        array: Box::new(receiver),
+                        selector,
+                    };
+                    continue;
+                }
                 if !view_projection(id) && !receiver.view_result_owned() {
                     return super::lower::try_decode_map_body(&nested_arg)
                         .map(|plan| {
@@ -555,6 +565,17 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
     }
 
     receiver
+}
+
+fn array_selector_builtin_call(call: &BuiltinCall) -> Option<ArraySelector> {
+    match builtin_array_selector(BuiltinId::from_method(call.method))? {
+        BuiltinArraySelector::First => Some(ArraySelector::First),
+        BuiltinArraySelector::Last => Some(ArraySelector::Last),
+        BuiltinArraySelector::Nth => match call.args {
+            BuiltinArgs::I64(index) if index >= 0 => Some(ArraySelector::Nth(index as usize)),
+            _ => None,
+        },
+    }
 }
 
 impl BodyKernel {
@@ -2913,6 +2934,31 @@ mod tests {
 
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
+            Some(Val::Str(Arc::from("delivered")))
+        );
+    }
+
+    #[test]
+    fn ast_array_selector_methods_use_shared_kernel_metadata() {
+        let expr = parse("events.last().kind").expect("parse array selector method");
+        let kernel = BodyKernel::classify_expr(&expr);
+        assert!(matches!(kernel, BodyKernel::Compose { .. }), "{kernel:#?}");
+        assert!(kernel.is_view_native());
+        assert_eq!(field_paths(&kernel), vec!["events"]);
+
+        let value = Val::obj(
+            [(
+                Arc::from("events"),
+                Val::arr(vec![
+                    Val::obj([(Arc::from("kind"), Val::Str(Arc::from("placed")))].into()),
+                    Val::obj([(Arc::from("kind"), Val::Str(Arc::from("delivered")))].into()),
+                ]),
+            )]
+            .into(),
+        );
+
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &ValView::new(&value))),
             Some(Val::Str(Arc::from("delivered")))
         );
     }
