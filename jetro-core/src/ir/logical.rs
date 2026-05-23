@@ -51,6 +51,10 @@ pub(crate) enum LogicalPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins::{
+        registry::{builtin_sink, logical_shape, pipeline_lowering, BuiltinId},
+        BuiltinLogicalShape,
+    };
     use crate::exec::pipeline::Source;
 
     #[test]
@@ -79,6 +83,202 @@ mod tests {
             LogicalPlan::Source(Source::Receiver(crate::data::value::Val::Null))
                 .builtin_method(),
             None
+        );
+    }
+
+    #[test]
+    fn logical_nodes_match_registry_shapes_and_execution_metadata() {
+        fn assert_node(
+            plan: LogicalPlan,
+            method: BuiltinMethod,
+            shape: BuiltinLogicalShape,
+            expects_sink: bool,
+        ) {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(plan.builtin_method(), Some(method), "{method:?}");
+            assert_eq!(logical_shape(id), Some(shape), "{method:?}");
+            assert!(
+                pipeline_lowering(id).is_some(),
+                "{method:?} must carry pipeline lowering metadata"
+            );
+            assert_eq!(
+                builtin_sink(id).is_some(),
+                expects_sink,
+                "{method:?} sink metadata mismatch"
+            );
+        }
+
+        let input = || Box::new(LogicalPlan::ScalarExpr);
+        assert_node(
+            LogicalPlan::Filter {
+                input: input(),
+                predicate: Expr::Bool(true),
+            },
+            BuiltinMethod::Filter,
+            BuiltinLogicalShape::Filter,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Map {
+                input: input(),
+                projection: Expr::Current,
+            },
+            BuiltinMethod::Map,
+            BuiltinLogicalShape::Map,
+            false,
+        );
+        assert_node(
+            LogicalPlan::FlatMap {
+                input: input(),
+                expansion: Expr::Current,
+            },
+            BuiltinMethod::FlatMap,
+            BuiltinLogicalShape::FlatMap,
+            false,
+        );
+        assert_node(
+            LogicalPlan::TakeWhile {
+                input: input(),
+                predicate: Expr::Bool(true),
+            },
+            BuiltinMethod::TakeWhile,
+            BuiltinLogicalShape::TakeWhile,
+            false,
+        );
+        assert_node(
+            LogicalPlan::DropWhile {
+                input: input(),
+                predicate: Expr::Bool(true),
+            },
+            BuiltinMethod::DropWhile,
+            BuiltinLogicalShape::DropWhile,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Take {
+                input: input(),
+                n: 1,
+            },
+            BuiltinMethod::Take,
+            BuiltinLogicalShape::Take,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Skip {
+                input: input(),
+                n: 1,
+            },
+            BuiltinMethod::Skip,
+            BuiltinLogicalShape::Skip,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Sort {
+                input: input(),
+                spec: crate::exec::pipeline::SortSpec::identity(),
+            },
+            BuiltinMethod::Sort,
+            BuiltinLogicalShape::Sort,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Unique {
+                input: input(),
+                key: None,
+            },
+            BuiltinMethod::Unique,
+            BuiltinLogicalShape::Unique,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Unique {
+                input: input(),
+                key: Some(Expr::Current),
+            },
+            BuiltinMethod::UniqueBy,
+            BuiltinLogicalShape::UniqueBy,
+            false,
+        );
+        assert_node(
+            LogicalPlan::Reverse { input: input() },
+            BuiltinMethod::Reverse,
+            BuiltinLogicalShape::Reverse,
+            false,
+        );
+        assert_node(
+            LogicalPlan::GroupBy {
+                input: input(),
+                key: Expr::Current,
+            },
+            BuiltinMethod::GroupBy,
+            BuiltinLogicalShape::GroupBy,
+            false,
+        );
+        assert_node(
+            LogicalPlan::CountBy {
+                input: input(),
+                key: Expr::Current,
+            },
+            BuiltinMethod::CountBy,
+            BuiltinLogicalShape::CountBy,
+            false,
+        );
+        assert_node(
+            LogicalPlan::IndexBy {
+                input: input(),
+                key: Expr::Current,
+            },
+            BuiltinMethod::IndexBy,
+            BuiltinLogicalShape::IndexBy,
+            false,
+        );
+        assert_node(
+            LogicalPlan::First(input()),
+            BuiltinMethod::First,
+            BuiltinLogicalShape::First,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Last(input()),
+            BuiltinMethod::Last,
+            BuiltinLogicalShape::Last,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Sum(input()),
+            BuiltinMethod::Sum,
+            BuiltinLogicalShape::Sum,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Avg(input()),
+            BuiltinMethod::Avg,
+            BuiltinLogicalShape::Avg,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Min(input()),
+            BuiltinMethod::Min,
+            BuiltinLogicalShape::Min,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Max(input()),
+            BuiltinMethod::Max,
+            BuiltinLogicalShape::Max,
+            true,
+        );
+        assert_node(
+            LogicalPlan::Count(input()),
+            BuiltinMethod::Count,
+            BuiltinLogicalShape::Count,
+            true,
+        );
+        assert_node(
+            LogicalPlan::ApproxCountDistinct(input()),
+            BuiltinMethod::ApproxCountDistinct,
+            BuiltinLogicalShape::ApproxCountDistinct,
+            true,
         );
     }
 }
