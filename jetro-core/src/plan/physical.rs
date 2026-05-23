@@ -351,7 +351,9 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
 /// Tries the logical path (`logical_planner → optimizer → logical_lower`) first; falls back
 /// to the legacy `Pipeline::lower()` for shapes the logical planner cannot classify.
 fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
-    if expr_is_direct_view_projection_chain(expr) {
+    if expr_is_direct_view_projection_chain(expr)
+        || field_chain_pipeline_starts_with_direct_view_projection(expr)
+    {
         return None;
     }
     let pipeline = lower_via_logical(expr).or_else(|| Pipeline::lower(expr))?;
@@ -364,6 +366,22 @@ fn try_lower_pipeline(builder: &PlanBuilder, expr: &Expr) -> Option<PlanNode> {
     let (source, mut body) = pipeline.into_source_body();
     mask_active_local_stage_kernels(&mut body, builder);
     pipeline_parts_to_plan_node(source, body)
+}
+
+fn field_chain_pipeline_starts_with_direct_view_projection(expr: &Expr) -> bool {
+    let Expr::Chain(base, steps) = expr else {
+        return false;
+    };
+    if !matches!(base.as_ref(), Expr::Root) {
+        return false;
+    }
+    let Some(first_method) = steps
+        .iter()
+        .find(|step| !matches!(step, Step::Field(_) | Step::OptField(_) | Step::Index(_)))
+    else {
+        return false;
+    };
+    receiver_pipeline_step_is_direct_view_projection(first_method)
 }
 
 /// Returns `true` for path-receiver pipelines whose every stage is a
@@ -724,9 +742,7 @@ fn try_lower_receiver_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option
         if matches!(base.as_ref(), Expr::Root) && method_start == 0 {
             continue;
         }
-        if method_start + 1 == steps.len()
-            && receiver_pipeline_step_is_direct_view_projection(&steps[method_start])
-        {
+        if receiver_pipeline_step_is_direct_view_projection(&steps[method_start]) {
             continue;
         }
         let Some(mut body) = Pipeline::lower_body_from_steps(&steps[method_start..]) else {
@@ -1094,7 +1110,9 @@ pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> Quer
         context,
         locals: Vec::new(),
     };
-    let top_level_pipeline = if expr_is_direct_view_projection_chain(&ast) {
+    let top_level_pipeline = if expr_is_direct_view_projection_chain(&ast)
+        || field_chain_pipeline_starts_with_direct_view_projection(&ast)
+    {
         None
     } else {
         lower_via_logical(&ast).or_else(|| Pipeline::lower(&ast))
@@ -1791,6 +1809,21 @@ mod tests {
                     if user.as_ref() == "user" && name.as_ref() == "name"
                 )
         ));
+    }
+
+    #[test]
+    fn direct_view_projection_prefix_does_not_lower_as_field_chain_pipeline() {
+        let plan = plan_query(r#"$.profile.entries().first()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { .. },
+                ..
+            } => panic!("entries().first() must not stream the object as one pipeline row"),
+            _ => {}
+        }
     }
 
     #[test]

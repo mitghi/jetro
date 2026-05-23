@@ -44,3 +44,5 @@ mod entries_wrap;
 mod builtin_migrations;
 #[cfg(test)]
 mod v0_5_5_quickfixes;
+#[cfg(test)]
+mod tape_parity;
