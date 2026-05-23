@@ -393,3 +393,60 @@ fn tape_matches_vm_for_object_helper_chains_inside_projection_bodies() {
         assert_tape_vm_eq(query, &doc);
     }
 }
+
+#[test]
+fn tape_matches_vm_for_late_projection_after_mixed_boundaries() {
+    let doc = json!({
+        "orders": [
+            {
+                "id": "a1",
+                "score": 30,
+                "status": "open",
+                "customer": {"name": "Ada", "tier": "gold"},
+                "items": [
+                    {"sku": "p1", "price": 12, "qty": 2, "tags": ["hot", "fragile"]},
+                    {"sku": "p2", "price": 4, "qty": 1, "tags": ["cold"]}
+                ]
+            },
+            {
+                "id": "a2",
+                "score": 10,
+                "status": "closed",
+                "customer": {"name": "Bob", "tier": "silver"},
+                "items": [
+                    {"sku": "p3", "price": 9, "qty": 3, "tags": ["hot"]},
+                    {"sku": "p4", "price": 16, "qty": 1, "tags": ["bulk", "hot"]}
+                ]
+            },
+            {
+                "id": "a3",
+                "score": 20,
+                "status": "open",
+                "customer": {"name": "Cy", "tier": "gold"},
+                "items": [
+                    {"sku": "p5", "price": 7, "qty": 4, "tags": []}
+                ]
+            },
+            {
+                "id": "a4",
+                "score": 40,
+                "status": "open",
+                "customer": {"name": "Dee", "tier": "bronze"},
+                "items": [
+                    {"sku": "p6", "price": 20, "qty": 1, "tags": ["hot"]},
+                    {"sku": "p7", "price": 3, "qty": 5, "tags": ["clearance"]}
+                ]
+            }
+        ]
+    });
+    for query in [
+        "$.orders.map({id, gross: items.map(price * qty).sum(), first_hot: items.find(tags.has(\"hot\")).sku}).last()",
+        "$.orders.filter(status == \"open\").map({id, name: customer.name.upper(), total: items.sum(price)}).nth(1)",
+        "$.orders.sort_by(score).take(2).map({id, top_sku: items.sort_by(-price).first().sku, tag_count: items.flat_map(tags).count()}).last()",
+        "$.orders.drop_while(score > 25).map({id, keys: customer.keys(), tier: customer.get_path(\"tier\")}).first()",
+        "$.orders.take_while(status == \"open\").map({id, item: items.last().pick(\"sku\", \"price\")}).last()",
+        "$.orders.filter(items.any(price > 15)).map({id, match: items.filter(price > 10).map(sku).first()}).last()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
