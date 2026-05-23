@@ -567,6 +567,7 @@ fn terminal_sink_for_method(
     method: BuiltinMethod,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
+    let id = BuiltinId::from_method(method);
     if let Some(sink) = predicate_sink_for_method(method, args) {
         return Some(sink);
     }
@@ -576,7 +577,7 @@ fn terminal_sink_for_method(
     if let Some(sink) = arg_extreme_sink_for_method(method, args) {
         return Some(sink);
     }
-    match builtin_sink_accumulator(BuiltinId::from_method(method))? {
+    match builtin_sink_accumulator(id)? {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
             Sink::approx_distinct_builtin(method)
         }
