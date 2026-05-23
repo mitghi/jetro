@@ -497,6 +497,26 @@ pub(super) enum NdjsonDirectItemPredicate {
     },
 }
 
+pub(super) fn direct_cmp_literal_predicate(
+    predicate: &NdjsonDirectPredicate,
+) -> Option<(NdjsonPhysicalPath, BinOp, Val)> {
+    let NdjsonDirectPredicate::Binary { lhs, op, rhs } = predicate else {
+        return None;
+    };
+    if !is_direct_cmp_op(*op) {
+        return None;
+    }
+    match (lhs.as_ref(), rhs.as_ref()) {
+        (NdjsonDirectPredicate::Path(steps), NdjsonDirectPredicate::Literal(lit)) => {
+            Some((steps.clone(), *op, lit.clone()))
+        }
+        (NdjsonDirectPredicate::Literal(lit), NdjsonDirectPredicate::Path(steps)) => {
+            Some((steps.clone(), flip_cmp_op(*op)?, lit.clone()))
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn direct_tape_plan(engine: &JetroEngine, query: &str) -> Option<NdjsonDirectTapePlan> {
     rootless_ndjson_query(query)
         .and_then(|query| direct_tape_plan_inner(engine, query))
@@ -1569,6 +1589,37 @@ mod tests {
     fn rejects_array_find_scalar_current_predicate() {
         let expr = crate::parse::parser::parse(r#"@.items.find(@ == 0)"#).expect("parse");
         assert!(direct_array_any_predicate_expr(&expr).is_none());
+    }
+
+    #[test]
+    fn direct_cmp_literal_predicate_normalizes_literal_lhs() {
+        let predicate = direct_tape_predicate_for_expr(
+            &crate::parse::parser::parse(r#""Ada" == $.name"#).expect("parse"),
+        )
+        .expect("predicate");
+        let Some((steps, op, lit)) = direct_cmp_literal_predicate(&predicate) else {
+            panic!("expected direct literal comparison");
+        };
+        assert!(matches!(
+            steps.as_slice(),
+            [PhysicalPathStep::Field(name)] if name.as_ref() == "name"
+        ));
+        assert_eq!(op, BinOp::Eq);
+        assert_eq!(lit, Val::Str(Arc::from("Ada")));
+
+        let predicate = direct_tape_predicate_for_expr(
+            &crate::parse::parser::parse(r#"10 < $.score"#).expect("parse"),
+        )
+        .expect("predicate");
+        let Some((steps, op, lit)) = direct_cmp_literal_predicate(&predicate) else {
+            panic!("expected flipped direct comparison");
+        };
+        assert!(matches!(
+            steps.as_slice(),
+            [PhysicalPathStep::Field(name)] if name.as_ref() == "score"
+        ));
+        assert_eq!(op, BinOp::Gt);
+        assert_eq!(lit, Val::Int(10));
     }
 
     #[test]

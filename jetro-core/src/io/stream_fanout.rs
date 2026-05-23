@@ -7,8 +7,8 @@ use super::ndjson_byte::{
     eval_ndjson_byte_predicate_row, eval_ndjson_byte_predicates_all, raw_json_path_view,
 };
 use super::ndjson_direct::{
-    direct_tape_plan_for_expr, direct_tape_predicate_for_expr, NdjsonDirectPredicate,
-    NdjsonDirectTapePlan, NdjsonPhysicalPath,
+    direct_cmp_literal_predicate, direct_tape_plan_for_expr, direct_tape_predicate_for_expr,
+    NdjsonDirectPredicate, NdjsonDirectTapePlan, NdjsonPhysicalPath,
 };
 use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;
@@ -766,42 +766,8 @@ fn direct_filter_take_prefix(
     Some((predicates, limit))
 }
 fn direct_cmp_from_predicate(predicate: &NdjsonDirectPredicate) -> Option<DirectCmp> {
-    fn supported_op(op: BinOp) -> bool {
-        matches!(
-            op,
-            BinOp::Eq | BinOp::Neq | BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte
-        )
-    }
-
-    match predicate {
-        NdjsonDirectPredicate::Binary { lhs, op, rhs } if supported_op(*op) => {
-            match (lhs.as_ref(), rhs.as_ref()) {
-                (NdjsonDirectPredicate::Path(steps), NdjsonDirectPredicate::Literal(lit)) => {
-                    Some(DirectCmp {
-                        steps: steps.clone(),
-                        op: *op,
-                        lit: lit.clone(),
-                    })
-                }
-                (NdjsonDirectPredicate::Literal(lit), NdjsonDirectPredicate::Path(steps)) => {
-                    let op = match op {
-                        BinOp::Lt => BinOp::Gt,
-                        BinOp::Lte => BinOp::Gte,
-                        BinOp::Gt => BinOp::Lt,
-                        BinOp::Gte => BinOp::Lte,
-                        other => *other,
-                    };
-                    Some(DirectCmp {
-                        steps: steps.clone(),
-                        op,
-                        lit: lit.clone(),
-                    })
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    let (steps, op, lit) = direct_cmp_literal_predicate(predicate)?;
+    Some(DirectCmp { steps, op, lit })
 }
 
 fn apply_fanout_row(
