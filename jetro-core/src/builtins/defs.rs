@@ -1908,6 +1908,7 @@ impl Builtin for ToPairs {
         object_simple_spec()
             .view_native()
             .view_object_projection(BuiltinViewObjectProjection::Entries)
+            .lowering(BuiltinPipelineLowering::Nullary)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

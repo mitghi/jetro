@@ -2894,6 +2894,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registry_view_object_item_projection_calls_are_nullary_only() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let item_projection = view_object_projection(id)
+                .filter(|projection| projection.is_item_projection());
+
+            assert_eq!(
+                view_object_items_projection_call(id, &BuiltinArgs::None),
+                item_projection,
+                "{method:?}"
+            );
+            assert_eq!(
+                view_object_items_projection_call(id, &BuiltinArgs::Str(Arc::from("x"))),
+                None,
+                "{method:?}"
+            );
+
+            if item_projection.is_some() {
+                assert_eq!(
+                    pipeline_lowering(id),
+                    Some(BuiltinPipelineLowering::Nullary),
+                    "{method:?} object item projection must lower as a nullary call"
+                );
+                assert!(
+                    !view_scalar_value_projection(id),
+                    "{method:?} object item projection must not be treated as scalar value projection"
+                );
+            }
+        }
+    }
+
     fn field_paths(demand: Option<FieldDemand>) -> Vec<String> {
         match demand.expect("field demand") {
             FieldDemand::None => Vec::new(),
