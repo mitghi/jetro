@@ -227,6 +227,24 @@ impl Sink {
         direct_scalar_for_plain_sink(BuiltinId::from_method(spec.method()?))
     }
 
+    /// Returns the registry id for sinks backed by builtin terminal metadata.
+    #[inline]
+    pub(crate) fn builtin_id(&self) -> Option<BuiltinId> {
+        match self {
+            Sink::Terminal(method) => Some(BuiltinId::from_method(*method)),
+            Sink::Reducer(spec) => Some(BuiltinId::from_method(spec.method()?)),
+            Sink::ApproxCountDistinct => Some(BuiltinId::from_method(
+                BuiltinMethod::ApproxCountDistinct,
+            )),
+            Sink::Collect
+            | Sink::Nth(_)
+            | Sink::SelectMany { .. }
+            | Sink::Predicate(_)
+            | Sink::Membership(_)
+            | Sink::ArgExtreme(_) => None,
+        }
+    }
+
     /// Returns a no-predicate/no-projection numeric reducer operation.
     #[inline]
     pub(crate) fn identity_numeric_reducer(&self) -> Option<super::NumOp> {
@@ -489,19 +507,7 @@ impl Sink {
     /// Looks up the `BuiltinSinkSpec` for this sink from the builtin registry, returning `None`
     /// for `Sink::Collect` which has no associated spec.
     pub(crate) fn builtin_sink_spec(&self) -> Option<BuiltinSinkSpec> {
-        match self {
-            Sink::Terminal(method) => builtin_sink(BuiltinId::from_method(*method)),
-            Sink::Nth(_) => None,
-            Sink::SelectMany { .. } => None,
-            Sink::Predicate(_) => None,
-            Sink::Membership(_) => None,
-            Sink::ArgExtreme(_) => None,
-            Sink::Reducer(spec) => builtin_sink(BuiltinId::from_method(spec.method()?)),
-            Sink::ApproxCountDistinct => {
-                builtin_sink(BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct))
-            }
-            Sink::Collect => None,
-        }
+        builtin_sink(self.builtin_id()?)
     }
 
     fn select_many_demand(&self) -> Option<ChainDemand> {
