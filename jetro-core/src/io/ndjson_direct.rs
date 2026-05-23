@@ -536,6 +536,12 @@ pub(super) fn direct_tape_plan_for_expr(expr: &Expr) -> Option<NdjsonDirectTapeP
     if let Some(steps) = direct_tape_row_path_for_expr(expr) {
         return Some(NdjsonDirectTapePlan::RootPath(steps));
     }
+    let kernel = crate::exec::pipeline::BodyKernel::classify_expr(expr);
+    if !matches!(kernel, crate::exec::pipeline::BodyKernel::Generic) {
+        if let Some(plan) = direct_tape_plan_from_kernel(&kernel) {
+            return Some(plan);
+        }
+    }
     let plan = plan_ast_with_context(expr.clone(), PlanningContext::bytes());
     direct_tape_plan_from_plan(&plan)
 }
@@ -1267,6 +1273,39 @@ fn direct_stream_map_path(map: NdjsonDirectStreamMap) -> Option<NdjsonPhysicalPa
     map.value_path()
 }
 
+fn direct_tape_plan_from_kernel(
+    kernel: &crate::exec::pipeline::BodyKernel,
+) -> Option<NdjsonDirectTapePlan> {
+    if let Some(value) = direct_projection_value_from_kernel(kernel) {
+        return match value {
+            NdjsonDirectProjectionValue::Path(steps) => Some(NdjsonDirectTapePlan::RootPath(steps)),
+            NdjsonDirectProjectionValue::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            } => Some(NdjsonDirectTapePlan::ViewScalarCall {
+                steps,
+                call,
+                optional,
+            }),
+            NdjsonDirectProjectionValue::Nested(plan) => Some(*plan),
+            NdjsonDirectProjectionValue::Literal(_) => None,
+        };
+    }
+    match kernel {
+        crate::exec::pipeline::BodyKernel::Array(items) => Some(NdjsonDirectTapePlan::Array(
+            items
+                .iter()
+                .map(direct_projection_value_from_kernel)
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        crate::exec::pipeline::BodyKernel::Object(object) => {
+            Some(NdjsonDirectTapePlan::Object(direct_object_fields_from_kernel(object)?))
+        }
+        _ => None,
+    }
+}
+
 fn direct_item_predicate_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectItemPredicate> {
@@ -1624,6 +1663,37 @@ mod tests {
                     )
             ));
         }
+    }
+
+    #[test]
+    fn direct_tape_plan_uses_kernel_metadata_for_row_local_object_projection() {
+        let expr = crate::parse::parser::parse(r#"{id: id, label: name.upper()}"#)
+            .expect("parse object projection");
+        let Some(NdjsonDirectTapePlan::Object(fields)) = direct_tape_plan_for_expr(&expr) else {
+            panic!("expected direct object plan");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].key.as_ref(), "id");
+        assert!(matches!(
+            fields[0].value,
+            NdjsonDirectProjectionValue::Path(ref steps)
+                if matches!(steps.as_slice(), [PhysicalPathStep::Field(id)] if id.as_ref() == "id")
+        ));
+        assert_eq!(fields[1].key.as_ref(), "label");
+        assert!(matches!(
+            fields[1].value,
+            NdjsonDirectProjectionValue::ViewScalarCall {
+                ref steps,
+                call: crate::builtins::BuiltinCall {
+                    method: crate::builtins::BuiltinMethod::Upper,
+                    ..
+                },
+                optional: false,
+            } if matches!(
+                steps.as_slice(),
+                [PhysicalPathStep::Field(name)] if name.as_ref() == "name"
+            )
+        ));
     }
 
     #[test]
