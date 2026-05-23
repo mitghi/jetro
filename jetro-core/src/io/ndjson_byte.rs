@@ -1038,6 +1038,9 @@ fn write_raw_string_case_call<W: Write>(
     if skip_json_ws(value, next) != trim_json_ws_end(value) || !s.is_ascii() {
         return Ok(false);
     }
+    if matches!(op, BuiltinRawJsonScalar::Len) {
+        return Ok(false);
+    }
     writer.write_all(b"\"")?;
     match op {
         BuiltinRawJsonScalar::AsciiUpper => {
@@ -1050,7 +1053,7 @@ fn write_raw_string_case_call<W: Write>(
                 writer.write_all(&[byte.to_ascii_lowercase()])?;
             }
         }
-        BuiltinRawJsonScalar::Len => return Ok(false),
+        BuiltinRawJsonScalar::Len => unreachable!("handled before writing"),
     }
     writer.write_all(b"\"")?;
     Ok(true)

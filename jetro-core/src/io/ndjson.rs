@@ -4598,6 +4598,54 @@ not-json
     }
 
     #[test]
+    fn direct_byte_projection_calls_match_engine_results() {
+        let engine = crate::JetroEngine::new();
+        let row = br#"{"id":7,"name":"Ada","tags":["sf","hugo"],"meta":{"id":1,"kind":"a"}}"#;
+        for query in ["$.name.len()", "$.name.upper()", "$.name.lower()"] {
+            let plan = super::direct_tape_plan(&engine, query)
+                .unwrap_or_else(|| panic!("{query} should have a direct tape plan"));
+            assert!(
+                super::tape_plan_can_write_byte_row(&plan),
+                "{query} should be byte-writable"
+            );
+
+            let mut direct = Vec::new();
+            let mut scratch = Vec::new();
+            let wrote =
+                super::write_ndjson_byte_tape_plan_row(&mut direct, row, &plan, &mut scratch)
+                    .expect("direct byte writer should run");
+            assert!(matches!(wrote, super::BytePlanWrite::Done), "{query}");
+
+            let direct: serde_json::Value =
+                serde_json::from_slice(&direct).unwrap_or_else(|err| panic!("{query}: {err}"));
+            let engine_value = crate::Jetro::from_bytes(row.to_vec())
+                .unwrap()
+                .collect(query.to_string())
+                .unwrap_or_else(|err| panic!("{query}: {}", err.0));
+            let expected: serde_json::Value =
+                serde_json::from_str(&engine_value.to_string()).unwrap();
+            assert_eq!(direct, expected, "{query}");
+        }
+
+        for query in ["$.meta.keys()", "$.meta.values()", "$.meta.entries()"] {
+            let mut direct = Vec::new();
+            engine
+                .run_ndjson(std::io::Cursor::new(row), query, &mut direct)
+                .unwrap_or_else(|err| panic!("{query}: {err}"));
+            let direct: serde_json::Value =
+                serde_json::from_slice(direct.trim_ascii_end())
+                    .unwrap_or_else(|err| panic!("{query}: {err}"));
+            let engine_value = crate::Jetro::from_bytes(row.to_vec())
+                .unwrap()
+                .collect(query.to_string())
+                .unwrap_or_else(|err| panic!("{query}: {}", err.0));
+            let expected: serde_json::Value =
+                serde_json::from_str(&engine_value.to_string()).unwrap();
+            assert_eq!(direct, expected, "{query}");
+        }
+    }
+
+    #[test]
     fn run_ndjson_uses_byte_paths_for_nested_array_demands() {
         let engine = crate::JetroEngine::new();
         let rows = std::io::Cursor::new(
