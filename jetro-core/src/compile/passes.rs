@@ -6,11 +6,8 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{
-    apply_scalar_hook,
-    cancellation as builtin_cancellation, canonical_name,
-    index_selection_rewrite, is_idempotent as builtin_is_idempotent,
-    is_pure as builtin_is_pure, output_cap_receiver, pipeline_stage_caps_input_prefix, BuiltinId,
-    stage_elidable_before_sink, terminal_selection_position, terminal_selection_rewrite,
+    apply_scalar_hook, canonical_name, index_selection_rewrite, stage_elidable_before_sink,
+    terminal_selection_position, terminal_selection_rewrite, BuiltinId,
 };
 use crate::builtins::{BuiltinArgs, BuiltinMethod};
 use crate::data::value::Val;
@@ -45,13 +42,13 @@ fn no_arg_call(op: &Opcode) -> Option<&Arc<CompiledCall>> {
 }
 
 fn no_arg_calls_cancel(prev: &CompiledCall, next: &CompiledCall) -> bool {
-    builtin_cancellation(BuiltinId::from_method(prev.method))
-        .zip(builtin_cancellation(BuiltinId::from_method(next.method)))
+    prev.cancellation()
+        .zip(next.cancellation())
         .is_some_and(|(a, b)| a.cancels_with(b))
 }
 
 fn no_arg_call_is_redundant(prev: &CompiledCall, next: &CompiledCall) -> bool {
-    prev.method == next.method && builtin_is_idempotent(BuiltinId::from_method(next.method))
+    prev.method == next.method && next.is_idempotent()
 }
 
 /// Demand-annotation pass: when a `filter` or `map` is immediately followed by
@@ -59,7 +56,7 @@ fn no_arg_call_is_redundant(prev: &CompiledCall, next: &CompiledCall) -> bool {
 pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
     fn take_const(call: &CompiledCall) -> Option<usize> {
         use crate::parse::ast::Expr;
-        if !pipeline_stage_caps_input_prefix(BuiltinId::from_method(call.method)) {
+        if !call.caps_input_prefix() {
             return None;
         }
         if call.orig_args.len() != 1 {
@@ -76,9 +73,7 @@ pub(crate) fn pass_method_demand(ops: Vec<Opcode>) -> Vec<Opcode> {
     while i < ops.len() {
         if i + 1 < ops.len() {
             if let (Opcode::CallMethod(a), Opcode::CallMethod(b)) = (&ops[i], &ops[i + 1]) {
-                if output_cap_receiver(BuiltinId::from_method(a.method))
-                    && a.demand_max_keep.is_none()
-                {
+                if a.output_caps_receiver() && a.demand_max_keep.is_none() {
                     if let Some(n) = take_const(b) {
                         let mut new_call = (**a).clone();
                         new_call.demand_max_keep = Some(n);
@@ -141,8 +136,7 @@ pub(crate) fn pass_method_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
     for op in ops {
         if let Opcode::CallMethod(c) = &op {
             if c.sub_progs.is_empty() {
-                let id = BuiltinId::from_method(c.method);
-                if builtin_is_pure(id) {
+                if c.is_pure() {
                     if let Some(recv) = out.last().and_then(literal_operand) {
                         if let Some(value) = apply_scalar_hook(c.method, &BuiltinArgs::None, &recv)
                             .and_then(literal_opcode)
@@ -219,30 +213,22 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
         if let Some(Opcode::CallMethod(prev)) = out.last().cloned() {
             let replaced = match (prev.method, &op) {
                 (_, Opcode::GetIndex(index)) if prev.sub_progs.is_empty() => {
-                    index_selection_rewrite(BuiltinId::from_method(prev.method), *index)
-                        .map(make_noarg_builtin_call)
+                    index_selection_rewrite(prev.id(), *index).map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
                     if prev.sub_progs.is_empty()
                         && next.sub_progs.is_empty()
-                        && terminal_selection_position(BuiltinId::from_method(next.method))
-                            .is_some() =>
+                        && terminal_selection_position(next.id()).is_some() =>
                 {
-                    terminal_selection_position(BuiltinId::from_method(next.method))
+                    terminal_selection_position(next.id())
                         .and_then(|position| {
-                            terminal_selection_rewrite(
-                                BuiltinId::from_method(prev.method),
-                                position,
-                            )
+                            terminal_selection_rewrite(prev.id(), position)
                         })
                         .map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
                     if next.sub_progs.is_empty()
-                        && stage_elidable_before_sink(
-                            BuiltinId::from_method(prev.method),
-                            BuiltinId::from_method(next.method),
-                        ) =>
+                        && stage_elidable_before_sink(prev.id(), next.id()) =>
                 {
                     Some(Opcode::CallMethod(Arc::clone(next)))
                 }

@@ -43,6 +43,51 @@ pub struct CompiledCall {
     pub demand_max_keep: Option<usize>,
 }
 
+impl CompiledCall {
+    /// Returns this compiled call's registry id.
+    #[inline]
+    pub(crate) fn id(&self) -> crate::builtins::registry::BuiltinId {
+        crate::builtins::registry::BuiltinId::from_method(self.method)
+    }
+
+    /// Returns stage cancellation metadata for this call, if any.
+    #[inline]
+    pub(crate) fn cancellation(&self) -> Option<crate::builtins::BuiltinCancellation> {
+        crate::builtins::registry::cancellation(self.id())
+    }
+
+    /// Returns true when this call is idempotent.
+    #[inline]
+    pub(crate) fn is_idempotent(&self) -> bool {
+        crate::builtins::registry::is_idempotent(self.id())
+    }
+
+    /// Returns true when this stage can cap upstream input after a following prefix sink.
+    #[inline]
+    pub(crate) fn caps_input_prefix(&self) -> bool {
+        crate::builtins::registry::pipeline_stage_caps_input_prefix(self.id())
+    }
+
+    /// Returns true when this call's output can be treated as the next receiver.
+    #[inline]
+    pub(crate) fn output_caps_receiver(&self) -> bool {
+        crate::builtins::registry::output_cap_receiver(self.id())
+    }
+
+    /// Returns true when this call is pure according to builtin metadata.
+    #[inline]
+    pub(crate) fn is_pure(&self) -> bool {
+        crate::builtins::registry::is_pure(self.id())
+    }
+
+    /// Returns this call's registry heuristic cost.
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn heuristic_cost(&self) -> u32 {
+        crate::builtins::registry::heuristic_cost(self.id())
+    }
+}
+
 /// A field entry inside a `MakeObj` opcode. `Short` is the fast path for
 /// `{name}` shorthand — reads from `current` using an inline-cache hint;
 /// `KvPath` is the structural fast path for `{key: $.a.b}` chains.

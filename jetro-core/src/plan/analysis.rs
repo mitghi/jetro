@@ -1149,7 +1149,7 @@ pub fn opcode_cost(op: &Opcode) -> u32 {
         Opcode::TryExpr { body, default } => 2 + program_cost(body) + program_cost(default),
         Opcode::InlineFilter(p) | Opcode::DynIndex(p) => 10 + program_cost(p),
         Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
-            let base = crate::builtins::registry::heuristic_cost(BuiltinId::from_method(c.method));
+            let base = c.heuristic_cost();
             base + c.sub_progs.iter().map(|p| program_cost(p)).sum::<u32>()
         }
         Opcode::MakeObj(entries) => {
