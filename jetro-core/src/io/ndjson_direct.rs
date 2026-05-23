@@ -7,6 +7,7 @@ use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
 use crate::plan::physical::{plan_ast_with_context, PlanningContext};
+use crate::util::JsonView;
 use crate::JetroEngine;
 use std::sync::Arc;
 
@@ -516,6 +517,25 @@ pub(super) enum NdjsonDirectItemPredicate {
         suffix_steps: NdjsonPhysicalPath,
         call: crate::builtins::BuiltinCall,
     },
+}
+
+pub(super) fn direct_view_call_truthy(
+    value: JsonView<'_>,
+    call: &crate::builtins::BuiltinCall,
+) -> Option<bool> {
+    call.try_apply_json_view(value)
+        .map(|value| crate::util::is_truthy(&value))
+}
+
+pub(super) fn direct_view_call_cmp_lit(
+    value: JsonView<'_>,
+    call: &crate::builtins::BuiltinCall,
+    op: BinOp,
+    lit: &Val,
+) -> Option<bool> {
+    call.try_apply_json_view(value).map(|value| {
+        crate::util::json_cmp_binop(JsonView::from_val(&value), op, JsonView::from_val(lit))
+    })
 }
 
 pub(super) fn direct_cmp_literal_predicate(

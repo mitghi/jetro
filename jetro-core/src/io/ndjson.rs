@@ -7,10 +7,11 @@ pub(super) use super::ndjson_direct::{
     direct_byte_plan, direct_writer_plan_kind, NdjsonDirectPlanKind,
 };
 pub(super) use super::ndjson_direct::{
-    direct_tape_plan, direct_tape_predicate, direct_writer_plans, NdjsonDirectBytePlan,
-    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPredicate,
-    NdjsonDirectProjectionValue, NdjsonDirectStreamMap, NdjsonDirectStreamPlan,
-    NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+    direct_tape_plan, direct_tape_predicate, direct_view_call_cmp_lit,
+    direct_view_call_truthy, direct_writer_plans, NdjsonDirectBytePlan, NdjsonDirectElement,
+    NdjsonDirectItemPredicate, NdjsonDirectPredicate, NdjsonDirectProjectionValue,
+    NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink,
+    NdjsonDirectTapePlan,
 };
 use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::ndjson_hint::{
@@ -2878,8 +2879,8 @@ pub(super) fn eval_tape_predicate(
         NdjsonDirectPredicate::ViewScalarCall { steps, call } => cache
             .index(tape, 0, steps)
             .map(|idx| json_tape_scalar(tape, idx))
-            .and_then(|value| call.try_apply_json_view(value))
-            .is_some_and(|value| crate::util::is_truthy(&value)),
+            .and_then(|value| direct_view_call_truthy(value, call))
+            .unwrap_or(false),
         NdjsonDirectPredicate::ViewScalarCmpLit {
             steps,
             call,
@@ -2888,14 +2889,8 @@ pub(super) fn eval_tape_predicate(
         } => cache
             .index(tape, 0, steps)
             .map(|idx| json_tape_scalar(tape, idx))
-            .and_then(|value| call.try_apply_json_view(value))
-            .is_some_and(|value| {
-                crate::util::json_cmp_binop(
-                    crate::util::JsonView::from_val(&value),
-                    *op,
-                    crate::util::JsonView::from_val(lit),
-                )
-            }),
+            .and_then(|value| direct_view_call_cmp_lit(value, call, *op, lit))
+            .unwrap_or(false),
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -2905,8 +2900,8 @@ pub(super) fn eval_tape_predicate(
             .and_then(|idx| json_tape_array_element(tape, idx, *element))
             .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
             .map(|idx| json_tape_scalar(tape, idx))
-            .and_then(|value| call.try_apply_json_view(value))
-            .is_some_and(|value| crate::util::is_truthy(&value)),
+            .and_then(|value| direct_view_call_truthy(value, call))
+            .unwrap_or(false),
         NdjsonDirectPredicate::ArrayAny { .. } => {
             return Err(crate::EvalError(
                 "array-any predicate requires VM state".to_string(),
@@ -3840,19 +3835,13 @@ fn eval_json_tape_item_predicate_cached<T: JsonTape>(
         } => cache
             .index(tape, item_idx, suffix_steps)
             .map(|idx| json_tape_scalar(tape, idx))
-            .and_then(|value| call.try_apply_json_view(value))
-            .is_some_and(|value| {
-                crate::util::json_cmp_binop(
-                    crate::util::JsonView::from_val(&value),
-                    *op,
-                    crate::util::JsonView::from_val(lit),
-                )
-            }),
+            .and_then(|value| direct_view_call_cmp_lit(value, call, *op, lit))
+            .unwrap_or(false),
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => cache
             .index(tape, item_idx, suffix_steps)
             .map(|idx| json_tape_scalar(tape, idx))
-            .and_then(|value| call.try_apply_json_view(value))
-            .is_some_and(|value| crate::util::is_truthy(&value)),
+            .and_then(|value| direct_view_call_truthy(value, call))
+            .unwrap_or(false),
     }
 }
 fn eval_json_tape_item_scalar_cached<'a, T: JsonTape>(
