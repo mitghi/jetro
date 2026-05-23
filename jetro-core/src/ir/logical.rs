@@ -5,7 +5,7 @@
 //! `Arc<Program>` happens only in the lowering pass after optimizer rules have
 //! been applied.
 
-use crate::builtins::BuiltinMethod;
+use crate::builtins::{registry::BuiltinId, BuiltinMethod};
 use crate::parse::ast::Expr;
 use crate::exec::pipeline::{SortSpec, Source};
 
@@ -286,8 +286,15 @@ mod tests {
 impl LogicalPlan {
     /// Returns the canonical builtin method represented by this logical node,
     /// if the node maps to a pipeline stage or terminal sink.
+    #[cfg(test)]
     pub(crate) fn builtin_method(&self) -> Option<BuiltinMethod> {
-        Some(match self {
+        self.builtin_id()?.method()
+    }
+
+    /// Returns the canonical builtin id represented by this logical node,
+    /// if the node maps to a pipeline stage or terminal sink.
+    pub(crate) fn builtin_id(&self) -> Option<BuiltinId> {
+        let method = match self {
             LogicalPlan::Filter { .. } => BuiltinMethod::Filter,
             LogicalPlan::Map { .. } => BuiltinMethod::Map,
             LogicalPlan::FlatMap { .. } => BuiltinMethod::FlatMap,
@@ -311,7 +318,8 @@ impl LogicalPlan {
             LogicalPlan::Count(_) => BuiltinMethod::Count,
             LogicalPlan::ApproxCountDistinct(_) => BuiltinMethod::ApproxCountDistinct,
             LogicalPlan::Source(_) | LogicalPlan::ScalarExpr => return None,
-        })
+        };
+        Some(BuiltinId::from_method(method))
     }
 
     /// Consumes `self` and returns `(input, node_without_input)` for use in rewrites.

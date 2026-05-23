@@ -204,6 +204,7 @@ impl Sink {
     }
 
     /// Build a plain count reducer from builtin metadata.
+    #[cfg(test)]
     pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
         Self::count_builtin_id(BuiltinId::from_method(method))
     }
@@ -239,6 +240,7 @@ impl Sink {
     }
 
     /// Build an approximate distinct count sink from builtin metadata.
+    #[cfg(test)]
     pub(crate) fn approx_distinct_builtin(method: BuiltinMethod) -> Option<Self> {
         Self::approx_distinct_builtin_id(BuiltinId::from_method(method))
     }
@@ -333,6 +335,7 @@ impl Sink {
     }
 
     /// Build a numeric reducer from builtin metadata and an optional projection program.
+    #[cfg(test)]
     pub(crate) fn numeric_builtin(
         method: BuiltinMethod,
         projection: Option<Arc<Program>>,
@@ -821,6 +824,7 @@ impl Stage {
     }
 
     /// Build a nullary stage from its registry-declared stage shape.
+    #[cfg(test)]
     pub(crate) fn nullary_builtin(method: BuiltinMethod) -> Option<Self> {
         Self::nullary_builtin_id(BuiltinId::from_method(method))
     }
@@ -944,6 +948,7 @@ impl Stage {
     }
 
     /// Build a sort stage only for builtins with registry-declared sort lowering.
+    #[cfg(test)]
     pub(crate) fn sort_builtin(method: BuiltinMethod, spec: super::SortSpec) -> Option<Self> {
         Self::sort_builtin_id(BuiltinId::from_method(method), spec)
     }
