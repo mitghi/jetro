@@ -1513,7 +1513,8 @@ impl PipelineBody {
     /// Returns `true` when all stages and the sink can execute using only the materialised
     /// receiver value, without needing a document-root (`$`) reference.
     pub(crate) fn can_run_with_materialized_receiver(&self) -> bool {
-        stages_can_run_with_materialized_receiver(&self.stages)
+        !self.suffix_starts_with_direct_view_projection(0)
+            && stages_can_run_with_materialized_receiver(&self.stages)
             && self
                 .sink
                 .can_run_with_receiver_only(program_is_current_only)
@@ -2156,5 +2157,15 @@ mod tests {
         assert!(!flat_map.is_symbolic_map_stage());
         assert!(!flat_map.is_symbolic_filter_stage());
         assert!(!flat_map.can_use_terminal_map_collector());
+    }
+
+    #[test]
+    fn materialized_receiver_rejects_direct_value_projection_prefix() {
+        let entries = Stage::Builtin(BuiltinCall::new(BuiltinMethod::Entries, BuiltinArgs::None));
+        let body = PipelineBody::planned(vec![entries], vec![None], Sink::Collect);
+
+        assert!(body.suffix_starts_with_direct_view_projection(0));
+        assert!(!body.can_run_with_materialized_receiver());
+        assert!(!body.suffix_can_run_with_materialized_receiver(0));
     }
 }
