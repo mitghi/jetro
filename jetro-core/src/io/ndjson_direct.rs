@@ -1,7 +1,6 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name,
-    logical_shape, terminal_selection_wants_last, view_object_items_projection,
-    view_scalar_value_projection, BuiltinId,
+    logical_shape, view_object_items_projection, view_scalar_value_projection, BuiltinId,
 };
 use crate::builtins::BuiltinLogicalShape;
 use crate::data::value::Val;
@@ -653,7 +652,8 @@ fn direct_tape_sort_extreme_plan_for_node(
         if *optional {
             return None;
         }
-        let want_last = terminal_selection_wants_last(BuiltinId::from_method(call.method))?;
+        let want_last =
+            crate::exec::pipeline::Sink::terminal_builtin(call.method)?.select_one_wants_last()?;
         let PlanNode::Pipeline { source, body } = plan.node(*receiver) else {
             return None;
         };

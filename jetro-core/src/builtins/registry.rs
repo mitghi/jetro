@@ -841,15 +841,6 @@ pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelect
     }
 }
 
-/// Return true when a terminal select-one sink wants the last retained row.
-#[inline]
-pub(crate) fn terminal_selection_wants_last(id: BuiltinId) -> Option<bool> {
-    match terminal_selection_position(id)? {
-        BuiltinSelectionPosition::First => Some(false),
-        BuiltinSelectionPosition::Last => Some(true),
-    }
-}
-
 /// Return true when builtin `id` can be composed into a view-native projection
 /// kernel without materialising the receiver row.
 #[inline]
@@ -3549,23 +3540,11 @@ mod tests {
             Some(BuiltinSelectionPosition::First)
         );
         assert_eq!(
-            terminal_selection_wants_last(BuiltinId::from_method(BuiltinMethod::First)),
-            Some(false)
-        );
-        assert_eq!(
             terminal_selection_position(BuiltinId::from_method(BuiltinMethod::Last)),
             Some(BuiltinSelectionPosition::Last)
         );
         assert_eq!(
-            terminal_selection_wants_last(BuiltinId::from_method(BuiltinMethod::Last)),
-            Some(true)
-        );
-        assert_eq!(
             terminal_selection_position(BuiltinId::from_method(BuiltinMethod::Count)),
-            None
-        );
-        assert_eq!(
-            terminal_selection_wants_last(BuiltinId::from_method(BuiltinMethod::Count)),
             None
         );
     }
