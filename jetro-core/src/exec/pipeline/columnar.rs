@@ -101,6 +101,21 @@ fn stage_program_pair<'a>(
     ))
 }
 
+fn single_field_key(kernel: &BodyKernel) -> Option<Arc<str>> {
+    let keys = kernel.field_path_keys()?;
+    (keys.len() == 1).then(|| Arc::clone(&keys[0]))
+}
+
+fn field_path_keys(kernel: &BodyKernel) -> Option<Vec<Arc<str>>> {
+    let keys = kernel.field_path_keys()?;
+    (!keys.is_empty()).then_some(keys)
+}
+
+fn single_field_cmp_lit(kernel: &BodyKernel) -> Option<(Arc<str>, crate::parse::ast::BinOp, Val)> {
+    let (keys, op, lit) = kernel.field_path_literal_cmp()?;
+    (keys.len() == 1).then(|| (Arc::clone(&keys[0]), op, lit))
+}
+
 // Builds per-column typed vectors from a flat row-major cell buffer.
 // Enables scalar loops in hot aggregation paths by avoiding per-element Val dispatch.
 fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::data::value::ObjVecCol> {
@@ -212,7 +227,7 @@ impl Pipeline {
         };
 
         if matches!(self.sink, Sink::Collect) {
-            if let (Some(BodyKernel::FieldRead(key)), Val::ObjVec(d)) = (
+            if let (Some(kernel), Val::ObjVec(d)) = (
                 stage_kernel(
                     &self.stages,
                     &self.stage_kernels,
@@ -220,8 +235,10 @@ impl Pipeline {
                 ),
                 &recv,
             ) {
-                if let Some(out) = objvec_typed_group_by(d, key) {
-                    return Some(Ok(out));
+                if let Some(key) = single_field_key(kernel) {
+                    if let Some(out) = objvec_typed_group_by(d, key.as_ref()) {
+                        return Some(Ok(out));
+                    }
                 }
             }
         }
@@ -229,16 +246,19 @@ impl Pipeline {
         if !matches!(self.sink, Sink::Collect) {
             return None;
         }
-        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
-            stage_kernel_pair(
+        if let Some((predicate, map)) = stage_kernel_pair(
                 &self.stages,
                 &self.stage_kernels,
                 BuiltinColumnarStage::Filter,
                 BuiltinColumnarStage::Map,
             )
         {
-            if let Val::ObjVec(d) = &recv {
-                return objvec_typed_predicate_projection_collect(d, pk, *pop, plit, mk);
+            if let (Val::ObjVec(d), Some((pk, pop, plit)), Some(mk)) = (
+                &recv,
+                single_field_cmp_lit(predicate),
+                single_field_key(map),
+            ) {
+                return objvec_typed_predicate_projection_collect(d, pk.as_ref(), pop, &plit, mk.as_ref());
             }
         }
         None
@@ -308,8 +328,9 @@ impl Pipeline {
             _ => return None,
         };
 
-        if let Some(BodyKernel::FieldRead(k)) =
+        if let Some(k) =
             stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
+                .and_then(single_field_key)
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -318,24 +339,26 @@ impl Pipeline {
             return Some(Ok(Val::arr(out)));
         }
 
-        if let Some(BodyKernel::FieldCmpLit(k, op, lit)) = stage_kernel(
+        if let Some((keys, op, lit)) = stage_kernel(
             &self.stages,
             &self.stage_kernels,
             BuiltinColumnarStage::Filter,
-        ) {
+        )
+        .and_then(BodyKernel::field_path_literal_cmp)
+        {
             return match Arc::try_unwrap(arr) {
                 Ok(mut owned) => {
                     owned.retain(|v| {
-                        let lhs = v.get_field(k.as_ref());
-                        eval_cmp_op(&lhs, *op, lit)
+                        let lhs = walk_field_chain(v, &keys);
+                        eval_cmp_op(&lhs, op, &lit)
                     });
                     Some(Ok(Val::arr(owned)))
                 }
                 Err(arr) => {
                     let mut out = Vec::with_capacity(arr.len());
                     for v in arr.iter() {
-                        let lhs = v.get_field(k.as_ref());
-                        if eval_cmp_op(&lhs, *op, lit) {
+                        let lhs = walk_field_chain(v, &keys);
+                        if eval_cmp_op(&lhs, op, &lit) {
                             out.push(v.clone());
                         }
                     }
@@ -351,21 +374,25 @@ impl Pipeline {
             BuiltinColumnarStage::Map,
         );
 
-        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldRead(mk))) =
-            predicate_projection
+        if let Some((predicate, map)) = predicate_projection
         {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr.iter() {
-                let lhs = v.get_field(pk.as_ref());
-                if eval_cmp_op(&lhs, *pop, plit) {
-                    out.push(v.get_field(mk.as_ref()));
+            if let (Some((pks, pop, plit)), Some(mks)) =
+                (predicate.field_path_literal_cmp(), map.field_path_keys())
+            {
+                let mut out = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let lhs = walk_field_chain(v, &pks);
+                    if eval_cmp_op(&lhs, pop, &plit) {
+                        out.push(walk_field_chain(v, &mks));
+                    }
                 }
+                return Some(Ok(Val::arr(out)));
             }
-            return Some(Ok(Val::arr(out)));
         }
 
-        if let Some(BodyKernel::FieldChain(ks)) =
+        if let Some(ks) =
             stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
+                .and_then(field_path_keys)
         {
             let mut out = Vec::with_capacity(arr.len());
             let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
@@ -378,45 +405,6 @@ impl Pipeline {
                     }
                 }
                 out.push(cur);
-            }
-            return Some(Ok(Val::arr(out)));
-        }
-
-        if let Some((BodyKernel::FieldCmpLit(pk, pop, plit), BodyKernel::FieldChain(mks))) =
-            predicate_projection
-        {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr.iter() {
-                let lhs = v.get_field(pk.as_ref());
-                if eval_cmp_op(&lhs, *pop, plit) {
-                    let mut cur = v.clone();
-                    for k in mks.iter() {
-                        cur = cur.get_field(k.as_ref());
-                        if matches!(cur, Val::Null) {
-                            break;
-                        }
-                    }
-                    out.push(cur);
-                }
-            }
-            return Some(Ok(Val::arr(out)));
-        }
-
-        if let Some((BodyKernel::FieldChainCmpLit(pks, pop, plit), BodyKernel::FieldRead(mk))) =
-            predicate_projection
-        {
-            let mut out = Vec::with_capacity(arr.len());
-            for v in arr.iter() {
-                let mut lhs = v.clone();
-                for k in pks.iter() {
-                    lhs = lhs.get_field(k.as_ref());
-                    if matches!(lhs, Val::Null) {
-                        break;
-                    }
-                }
-                if eval_cmp_op(&lhs, *pop, plit) {
-                    out.push(v.get_field(mk.as_ref()));
-                }
             }
             return Some(Ok(Val::arr(out)));
         }
