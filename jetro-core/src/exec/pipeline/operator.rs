@@ -79,18 +79,27 @@ pub struct ArgExtremeSinkSpec {
 }
 
 impl PredicateSinkSpec {
-    /// Constructs a predicate terminal sink from the builtin method.
-    pub(crate) fn from_method(
-        method: BuiltinMethod,
+    /// Constructs a predicate terminal sink from a resolved builtin id.
+    pub(crate) fn from_id(
+        id: BuiltinId,
         predicate: Arc<Program>,
         predicate_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
         Some(Self {
             op: builtin_predicate_sink(id)?,
             predicate,
             predicate_expr,
         })
+    }
+
+    /// Constructs a predicate terminal sink from the builtin method.
+    #[cfg(test)]
+    pub(crate) fn from_method(
+        method: BuiltinMethod,
+        predicate: Arc<Program>,
+        predicate_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Self::from_id(BuiltinId::from_method(method), predicate, predicate_expr)
     }
 
     /// Demand placed on the row stream by this terminal predicate sink.
@@ -125,13 +134,18 @@ impl PredicateSinkSpec {
 }
 
 impl MembershipSinkSpec {
-    /// Constructs a membership terminal sink from the builtin method.
-    pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Constructs a membership terminal sink from a resolved builtin id.
+    pub(crate) fn from_id(id: BuiltinId, target: MembershipSinkTarget) -> Option<Self> {
         Some(Self {
             op: builtin_membership_sink(id)?,
             target,
         })
+    }
+
+    /// Constructs a membership terminal sink from the builtin method.
+    #[cfg(test)]
+    pub(crate) fn from_method(method: BuiltinMethod, target: MembershipSinkTarget) -> Option<Self> {
+        Self::from_id(BuiltinId::from_method(method), target)
     }
 
     /// Demand placed on the row stream by this terminal membership sink.
@@ -165,18 +179,27 @@ impl MembershipSinkSpec {
 }
 
 impl ArgExtremeSinkSpec {
-    /// Constructs an arg-extreme sink from the terminal builtin method.
-    pub(crate) fn from_method(
-        method: BuiltinMethod,
+    /// Constructs an arg-extreme sink from a resolved builtin id.
+    pub(crate) fn from_id(
+        id: BuiltinId,
         key: Arc<Program>,
         key_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
         Some(Self {
             op: builtin_arg_extreme_sink(id)?,
             key,
             key_expr,
         })
+    }
+
+    /// Constructs an arg-extreme sink from the terminal builtin method.
+    #[cfg(test)]
+    pub(crate) fn from_method(
+        method: BuiltinMethod,
+        key: Arc<Program>,
+        key_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Self::from_id(BuiltinId::from_method(method), key, key_expr)
     }
 
     /// Demand placed on the row stream by this terminal arg-extreme sink.
@@ -241,12 +264,11 @@ impl ReducerSpec {
     }
 
     /// Constructs a numeric reducer from builtin metadata.
-    pub fn numeric(
-        method: BuiltinMethod,
+    pub fn numeric_id(
+        id: BuiltinId,
         projection: Option<Arc<Program>>,
         projection_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
         Some(Self {
             op: ReducerOp::Numeric(NumOp::from_builtin_reducer(numeric_reducer(id)?)),
             predicate: None,
@@ -254,6 +276,16 @@ impl ReducerSpec {
             predicate_expr: None,
             projection_expr,
         })
+    }
+
+    /// Constructs a numeric reducer from builtin metadata.
+    #[cfg(test)]
+    pub fn numeric(
+        method: BuiltinMethod,
+        projection: Option<Arc<Program>>,
+        projection_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Self::numeric_id(BuiltinId::from_method(method), projection, projection_expr)
     }
 
     /// Returns the `NumOp` for a `Numeric` reducer, or `None` for `Count`.

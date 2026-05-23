@@ -381,7 +381,7 @@ pub(super) fn lower_method_from_registry(
     }
     let Some(lowering) = pipeline_lowering(id) else {
         if is_last {
-            *sink = terminal_sink_for_method(method, args)?;
+            *sink = terminal_sink_for_id(id, args)?;
             return Some(());
         }
         return None;
@@ -398,7 +398,7 @@ pub(super) fn lower_method_from_registry(
                 return None;
             }
             push_expr_stage(method, &args[0], stages, stage_exprs)?;
-            set_terminal_sink(terminal, sink)?;
+            set_terminal_sink(BuiltinId::from_method(terminal), sink)?;
             Some(())
         }
         BuiltinPipelineLowering::Nullary => {
@@ -470,7 +470,7 @@ pub(super) fn lower_method_from_registry(
             _ => None,
         },
         BuiltinPipelineLowering::TerminalSink if is_last => {
-            *sink = terminal_sink_for_method(method, args)?;
+            *sink = terminal_sink_for_id(id, args)?;
             Some(())
         }
         BuiltinPipelineLowering::TerminalSink => None,
@@ -478,7 +478,7 @@ pub(super) fn lower_method_from_registry(
             if args.len() != 1 {
                 return None;
             }
-            *sink = Sink::nth_builtin(method, usize_arg_at_least(&args[0], min)?)?;
+            *sink = Sink::nth_builtin_id(id, usize_arg_at_least(&args[0], min)?)?;
             Some(())
         }
         BuiltinPipelineLowering::TerminalUsizeSink { .. } => None,
@@ -520,9 +520,9 @@ fn push_expr_builtin(
     Some(())
 }
 
-// Writes the no-arg terminal `Sink` for `method` into `*sink`.
-fn set_terminal_sink(method: BuiltinMethod, sink: &mut Sink) -> Option<()> {
-    *sink = terminal_sink_for_method(method, &[])?;
+// Writes the no-arg terminal `Sink` for `id` into `*sink`.
+fn set_terminal_sink(id: BuiltinId, sink: &mut Sink) -> Option<()> {
+    *sink = terminal_sink_for_id(id, &[])?;
     Some(())
 }
 
@@ -562,29 +562,28 @@ fn literal_arg_value(arg: &crate::parse::ast::Arg) -> Option<Val> {
     }
 }
 
-// Constructs the terminal `Sink` for `method`, handling count predicates, numeric reducers, and positional selects.
-fn terminal_sink_for_method(
-    method: BuiltinMethod,
+// Constructs the terminal `Sink` for `id`, handling count predicates, numeric reducers, and positional selects.
+fn terminal_sink_for_id(
+    id: BuiltinId,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
-    let id = BuiltinId::from_method(method);
-    if let Some(sink) = predicate_sink_for_method(method, args) {
+    if let Some(sink) = predicate_sink_for_id(id, args) {
         return Some(sink);
     }
-    if let Some(sink) = membership_sink_for_method(method, args) {
+    if let Some(sink) = membership_sink_for_id(id, args) {
         return Some(sink);
     }
-    if let Some(sink) = arg_extreme_sink_for_method(method, args) {
+    if let Some(sink) = arg_extreme_sink_for_id(id, args) {
         return Some(sink);
     }
     match builtin_sink_accumulator(id)? {
         BuiltinSinkAccumulator::ApproxDistinct if args.is_empty() => {
-            Sink::approx_distinct_builtin(method)
+            Sink::approx_distinct_builtin_id(id)
         }
         BuiltinSinkAccumulator::Count => match args {
-            [] => Sink::count_builtin(method),
+            [] => Sink::count_builtin_id(id),
             [arg] => {
-                Sink::count_predicate_builtin(method, compile_subexpr(arg)?, raw_arg_expr(arg))
+                Sink::count_predicate_builtin_id(id, compile_subexpr(arg)?, raw_arg_expr(arg))
             }
             _ => None,
         },
@@ -599,55 +598,55 @@ fn terminal_sink_for_method(
                 [arg] => raw_arg_expr(arg),
                 _ => return None,
             };
-            Sink::numeric_builtin(method, projection, projection_expr)
+            Sink::numeric_builtin_id(id, projection, projection_expr)
         }
         BuiltinSinkAccumulator::SelectOne(_) => match args {
-            [] => Sink::terminal_builtin(method),
-            [arg] => Sink::select_many_builtin(method, usize_arg_at_least(arg, 1)?),
+            [] => Sink::terminal_builtin_id(id),
+            [arg] => Sink::select_many_builtin_id(id, usize_arg_at_least(arg, 1)?),
             _ => None,
         },
         _ => None,
     }
 }
 
-fn predicate_sink_for_method(
-    method: BuiltinMethod,
+fn predicate_sink_for_id(
+    id: BuiltinId,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };
-    Some(Sink::Predicate(PredicateSinkSpec::from_method(
-        method,
+    Some(Sink::Predicate(PredicateSinkSpec::from_id(
+        id,
         compile_subexpr(arg)?,
         raw_arg_expr(arg),
     )?))
 }
 
-fn membership_sink_for_method(
-    method: BuiltinMethod,
+fn membership_sink_for_id(
+    id: BuiltinId,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };
-    Some(Sink::Membership(MembershipSinkSpec::from_method(
-        method,
+    Some(Sink::Membership(MembershipSinkSpec::from_id(
+        id,
         literal_arg_value(arg)
             .map(MembershipSinkTarget::Literal)
             .or_else(|| Some(MembershipSinkTarget::Program(compile_raw_arg_expr(arg)?)))?,
     )?))
 }
 
-fn arg_extreme_sink_for_method(
-    method: BuiltinMethod,
+fn arg_extreme_sink_for_id(
+    id: BuiltinId,
     args: &[crate::parse::ast::Arg],
 ) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };
-    Some(Sink::ArgExtreme(ArgExtremeSinkSpec::from_method(
-        method,
+    Some(Sink::ArgExtreme(ArgExtremeSinkSpec::from_id(
+        id,
         compile_subexpr(arg)?,
         raw_arg_expr(arg),
     )?))

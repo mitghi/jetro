@@ -145,9 +145,9 @@ impl From<DemandLanes> for PayloadDemand {
 }
 
 impl Sink {
-    /// Build a no-argument terminal selection sink from builtin metadata.
-    pub(crate) fn terminal_builtin(method: BuiltinMethod) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Build a no-argument terminal selection sink from resolved builtin metadata.
+    pub(crate) fn terminal_builtin_id(id: BuiltinId) -> Option<Self> {
+        let method = id.method()?;
         matches!(
             builtin_sink_accumulator(id)?,
             BuiltinSinkAccumulator::SelectOne(_)
@@ -155,9 +155,13 @@ impl Sink {
         .then_some(Sink::Terminal(method))
     }
 
-    /// Build a multi-row selection sink from builtin metadata.
-    pub(crate) fn select_many_builtin(method: BuiltinMethod, n: usize) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Build a no-argument terminal selection sink from builtin metadata.
+    pub(crate) fn terminal_builtin(method: BuiltinMethod) -> Option<Self> {
+        Self::terminal_builtin_id(BuiltinId::from_method(method))
+    }
+
+    /// Build a multi-row selection sink from resolved builtin metadata.
+    pub(crate) fn select_many_builtin_id(id: BuiltinId, n: usize) -> Option<Self> {
         let BuiltinSinkAccumulator::SelectOne(position) =
             builtin_sink_accumulator(id)?
         else {
@@ -169,9 +173,14 @@ impl Sink {
         })
     }
 
-    /// Build a terminal usize sink only for builtins with terminal-usize lowering.
-    pub(crate) fn nth_builtin(method: BuiltinMethod, index: usize) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Build a multi-row selection sink from builtin metadata.
+    #[cfg(test)]
+    pub(crate) fn select_many_builtin(method: BuiltinMethod, n: usize) -> Option<Self> {
+        Self::select_many_builtin_id(BuiltinId::from_method(method), n)
+    }
+
+    /// Build a terminal usize sink only for resolved builtins with terminal-usize lowering.
+    pub(crate) fn nth_builtin_id(id: BuiltinId, index: usize) -> Option<Self> {
         matches!(
             pipeline_lowering(id),
             Some(BuiltinPipelineLowering::TerminalUsizeSink { .. })
@@ -179,9 +188,14 @@ impl Sink {
         .then_some(Sink::Nth(index))
     }
 
-    /// Build a plain count reducer from builtin metadata.
-    pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Build a terminal usize sink only for builtins with terminal-usize lowering.
+    #[cfg(test)]
+    pub(crate) fn nth_builtin(method: BuiltinMethod, index: usize) -> Option<Self> {
+        Self::nth_builtin_id(BuiltinId::from_method(method), index)
+    }
+
+    /// Build a plain count reducer from resolved builtin metadata.
+    pub(crate) fn count_builtin_id(id: BuiltinId) -> Option<Self> {
         matches!(
             builtin_sink_accumulator(id)?,
             BuiltinSinkAccumulator::Count
@@ -189,26 +203,44 @@ impl Sink {
         .then_some(Sink::Reducer(ReducerSpec::count()))
     }
 
-    /// Build a count reducer with a predicate when the builtin declares predicate-count support.
-    pub(crate) fn count_predicate_builtin(
-        method: BuiltinMethod,
+    /// Build a plain count reducer from builtin metadata.
+    pub(crate) fn count_builtin(method: BuiltinMethod) -> Option<Self> {
+        Self::count_builtin_id(BuiltinId::from_method(method))
+    }
+
+    /// Build a count reducer with a predicate when the resolved builtin declares predicate-count support.
+    pub(crate) fn count_predicate_builtin_id(
+        id: BuiltinId,
         predicate: Arc<Program>,
         predicate_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
         count_sink_accepts_predicate(id).then_some(Sink::Reducer(
             ReducerSpec::count_with_predicate(predicate, predicate_expr),
         ))
     }
 
-    /// Build an approximate distinct count sink from builtin metadata.
-    pub(crate) fn approx_distinct_builtin(method: BuiltinMethod) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
+    /// Build a count reducer with a predicate when the builtin declares predicate-count support.
+    #[cfg(test)]
+    pub(crate) fn count_predicate_builtin(
+        method: BuiltinMethod,
+        predicate: Arc<Program>,
+        predicate_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Self::count_predicate_builtin_id(BuiltinId::from_method(method), predicate, predicate_expr)
+    }
+
+    /// Build an approximate distinct count sink from resolved builtin metadata.
+    pub(crate) fn approx_distinct_builtin_id(id: BuiltinId) -> Option<Self> {
         matches!(
             builtin_sink_accumulator(id)?,
             BuiltinSinkAccumulator::ApproxDistinct
         )
         .then_some(Sink::ApproxCountDistinct)
+    }
+
+    /// Build an approximate distinct count sink from builtin metadata.
+    pub(crate) fn approx_distinct_builtin(method: BuiltinMethod) -> Option<Self> {
+        Self::approx_distinct_builtin_id(BuiltinId::from_method(method))
     }
 
     /// Returns true when this sink is a plain count reducer with no predicate or projection.
@@ -282,23 +314,31 @@ impl Sink {
     }
 
     /// Build a numeric reducer from builtin metadata and an optional projection program.
-    pub(crate) fn numeric_builtin(
-        method: BuiltinMethod,
+    pub(crate) fn numeric_builtin_id(
+        id: BuiltinId,
         projection: Option<Arc<Program>>,
         projection_expr: Option<Arc<Expr>>,
     ) -> Option<Self> {
-        let id = BuiltinId::from_method(method);
         if !matches!(
             builtin_sink_accumulator(id)?,
             BuiltinSinkAccumulator::Numeric
         ) {
             return None;
         }
-        Some(Sink::Reducer(ReducerSpec::numeric(
-            method,
+        Some(Sink::Reducer(ReducerSpec::numeric_id(
+            id,
             projection,
             projection_expr,
         )?))
+    }
+
+    /// Build a numeric reducer from builtin metadata and an optional projection program.
+    pub(crate) fn numeric_builtin(
+        method: BuiltinMethod,
+        projection: Option<Arc<Program>>,
+        projection_expr: Option<Arc<Expr>>,
+    ) -> Option<Self> {
+        Self::numeric_builtin_id(BuiltinId::from_method(method), projection, projection_expr)
     }
 
     /// Computes the `SinkDemand` for this sink by consulting its builtin metadata, falling back
