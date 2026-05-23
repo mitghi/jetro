@@ -29,8 +29,8 @@ use crate::builtins::registry::{
     string_pair_stage as builtin_string_pair_stage,
 };
 use crate::builtins::{
-    replace_apply, slice_apply, split_apply, BuiltinMembershipSink, BuiltinMethod,
-    BuiltinObjectLambda, BuiltinStringPairStage,
+    replace_apply, BuiltinArgs, BuiltinCall, BuiltinMembershipSink, BuiltinObjectLambda,
+    BuiltinStringPairStage,
 };
 use crate::plan::demand::PullDemand;
 
@@ -529,10 +529,18 @@ fn apply_adapter_materialized(
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
         Stage::IntRangeBuiltin {
-            method: BuiltinMethod::Slice,
+            method,
             start,
             end,
-        } => slice_apply(v, *start, *end),
+        } => BuiltinCall::new(
+            *method,
+            BuiltinArgs::I64Opt {
+                first: *start,
+                second: *end,
+            },
+        )
+        .apply(&v)
+        .unwrap_or(v),
         Stage::StringPairBuiltin {
             first,
             second,
@@ -553,12 +561,9 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
 }
 
 fn apply_expanding_adapter(stage: &Stage, v: &Val, out: &mut Vec<Val>) {
-    if let Stage::StringBuiltin {
-        method: BuiltinMethod::Split,
-        value,
-    } = stage
-    {
-        if let Some(Val::Arr(a)) = split_apply(v, value.as_ref()) {
+    if let Stage::StringBuiltin { method, value } = stage {
+        let call = BuiltinCall::new(*method, BuiltinArgs::Str(Arc::clone(value)));
+        if let Some(Val::Arr(a)) = call.apply(v) {
             out.extend(Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()));
         }
     }
