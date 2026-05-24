@@ -5577,6 +5577,80 @@ mod tests {
     }
 
     #[test]
+    fn view_pad_builtins_transform_tape_strings_without_materializing_receivers() {
+        let tape = crate::data::tape::TapeData::parse(br#"["ab","wide"]"#.to_vec()).unwrap();
+
+        for (method, expected) in [
+            (
+                crate::builtins::BuiltinMethod::PadLeft,
+                serde_json::json!(["__ab", "wide"]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::PadRight,
+                serde_json::json!(["ab__", "wide"]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::Center,
+                serde_json::json!(["_ab_", "wide"]),
+            ),
+        ] {
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::Pad {
+                        width: 4,
+                        fill: '_',
+                    },
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected);
+            assert_eq!(tape.materialized_subtrees(), 0);
+        }
+    }
+
+    #[test]
+    fn view_pad_builtin_passes_non_strings_as_borrowed_views() {
+        let tape = crate::data::tape::TapeData::parse(br#"[{"k":"ab"}]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::PadLeft,
+                    crate::builtins::BuiltinArgs::Pad {
+                        width: 4,
+                        fill: '_',
+                    },
+                )),
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Type,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!(["object"]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {

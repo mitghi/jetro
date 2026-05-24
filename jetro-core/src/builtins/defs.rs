@@ -4243,14 +4243,16 @@ impl Builtin for Indent {
     }
 }
 
-macro_rules! pad_arg_scalar_native {
-    ( $( $ty:ident, $name:literal, $apply:ident ; )* ) => {
+macro_rules! pad_arg_scalar_view {
+    ( $( $ty:ident, $name:literal, $projection:ident, $apply:ident ; )* ) => {
         $(
             pub(crate) struct $ty;
             impl Builtin for $ty {
                 const METHOD: BuiltinMethod = BuiltinMethod::$ty;
                 const NAME: &'static str = $name;
-                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+                fn spec() -> BuiltinSpec {
+                    scalar_view_value_element_spec(super::BuiltinViewValueProjection::$projection)
+                }
                 #[inline]
                 fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
@@ -4264,10 +4266,10 @@ macro_rules! pad_arg_scalar_native {
         )*
     };
 }
-pad_arg_scalar_native! {
-    PadLeft, "pad_left", pad_left_apply;
-    PadRight, "pad_right", pad_right_apply;
-    Center, "center", center_apply;
+pad_arg_scalar_view! {
+    PadLeft, "pad_left", PadLeft, pad_left_apply;
+    PadRight, "pad_right", PadRight, pad_right_apply;
+    Center, "center", Center, center_apply;
 }
 
 macro_rules! str_pair_scalar_native {

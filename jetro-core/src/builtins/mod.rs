@@ -918,6 +918,12 @@ pub enum BuiltinViewScalarOp {
 /// materialising the receiver by traversing borrowed child views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewValueProjection {
+    /// Center-pad a string value.
+    Center,
+    /// Left-pad a string value.
+    PadLeft,
+    /// Right-pad a string value.
+    PadRight,
     /// Replace the first matching substring in a string value.
     Replace,
     /// Replace all matching substrings in a string value.
@@ -942,7 +948,10 @@ impl BuiltinViewValueProjection {
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
         match self {
             BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
-            BuiltinViewValueProjection::Replace
+            BuiltinViewValueProjection::Center
+            | BuiltinViewValueProjection::PadLeft
+            | BuiltinViewValueProjection::PadRight
+            | BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
             | BuiltinViewValueProjection::Repeat
             | BuiltinViewValueProjection::ToString

@@ -1094,6 +1094,22 @@ where
 {
     let mut out = String::new();
     match projection {
+        BuiltinViewValueProjection::Center
+        | BuiltinViewValueProjection::PadLeft
+        | BuiltinViewValueProjection::PadRight => {
+            let BuiltinArgs::Pad { width, fill } = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => ViewProjectionResult::Owned(pad_view_string(
+                    value,
+                    *width,
+                    *fill,
+                    projection,
+                )),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Replace | BuiltinViewValueProjection::ReplaceAll => {
             let BuiltinArgs::StrPair { first, second } = args else {
                 return None;
@@ -1157,6 +1173,33 @@ where
         }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn pad_view_string(
+    value: &str,
+    width: usize,
+    fill: char,
+    projection: BuiltinViewValueProjection,
+) -> Val {
+    let len = value.chars().count();
+    if len >= width {
+        return Val::Str(Arc::from(value));
+    }
+    let total = width - len;
+    let (left, right) = match projection {
+        BuiltinViewValueProjection::PadLeft => (total, 0),
+        BuiltinViewValueProjection::PadRight => (0, total),
+        BuiltinViewValueProjection::Center => {
+            let left = total / 2;
+            (left, total - left)
+        }
+        _ => unreachable!("non-pad projection passed to pad_view_string"),
+    };
+    let mut out = String::with_capacity(value.len() + total.saturating_mul(fill.len_utf8()));
+    out.extend(std::iter::repeat(fill).take(left));
+    out.push_str(value);
+    out.extend(std::iter::repeat(fill).take(right));
+    Val::Str(Arc::from(out))
 }
 
 fn replace_view_string(value: &str, needle: &str, replacement: &str, all: bool) -> Val {
@@ -3807,6 +3850,9 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
+            (BuiltinMethod::Center, BuiltinViewValueProjection::Center),
+            (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
+            (BuiltinMethod::PadRight, BuiltinViewValueProjection::PadRight),
             (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
             (
@@ -5836,6 +5882,18 @@ mod tests {
             Some(BuiltinViewValueProjection::Replace)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::PadLeft)),
+            Some(BuiltinViewValueProjection::PadLeft)
+        );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::PadRight)),
+            Some(BuiltinViewValueProjection::PadRight)
+        );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::Center)),
+            Some(BuiltinViewValueProjection::Center)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::Repeat)),
             Some(BuiltinViewValueProjection::Repeat)
         );
@@ -6040,6 +6098,17 @@ mod tests {
         let repeated_non_string = apply(BuiltinMethod::Repeat, BuiltinArgs::Usize(2));
         assert_eq!(
             serde_json::Value::from(repeated_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
+        let padded_non_string = apply(
+            BuiltinMethod::PadLeft,
+            BuiltinArgs::Pad {
+                width: 8,
+                fill: '_',
+            },
+        );
+        assert_eq!(
+            serde_json::Value::from(padded_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }
