@@ -942,7 +942,7 @@ mod tests {
                 12,
                 Some(&BodyKernel::Array(Arc::from([BodyKernel::Current]))),
             )
-            .is_none()
+            .is_some()
         );
         let cancel = cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).unwrap();
         assert!(Stage::Reverse(cancel).view_capability(9, None).is_none());

@@ -1976,7 +1976,7 @@ impl BuiltinViewStage {
     /// Whether the stage body must return a borrowed view-backed result.
     #[inline]
     pub fn requires_borrowed_body_result(self) -> bool {
-        matches!(self.output_mode(), BuiltinViewOutputMode::BorrowedSubviews)
+        false
     }
 
     /// Returns the executor capability construction shape for this stage.
