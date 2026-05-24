@@ -792,6 +792,9 @@ where
 {
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
+        return Some(Ok(collector.finish()));
+    }
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -829,6 +832,9 @@ where
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix_len], &body.sink);
+    if deterministic_prefix_is_empty(&source, &prefix, &body.stage_kernels) {
+        return Some(Ok(Val::Null));
+    }
     let mut selected = Val::Null;
     let mut seen = false;
     let mut nth_seen = 0usize;
@@ -3440,6 +3446,62 @@ mod tests {
         assert_eq!(nth, Val::Int(3));
         assert_eq!(nth_source.scalar_reads(), 2);
         assert_eq!(nth_source.array_iter_reads(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_skips_empty_prefix_without_iterating_rows() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_terminal_collect(source.clone(), &body, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn terminal_select_projection_skips_empty_prefix_without_iterating_rows() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_terminal_select_projection(source.clone(), &body, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Null);
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
