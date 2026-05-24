@@ -213,6 +213,9 @@ where
     if let Some(result) = run_terminal_select_projection(source.clone(), body, vm) {
         return Some(result);
     }
+    if let Some(result) = run_arg_extreme_view(source.clone(), body, vm) {
+        return Some(result);
+    }
     if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
         return Some(result);
     }
@@ -721,6 +724,60 @@ where
     }
 
     Some(sink_acc.finish_result(false))
+}
+
+fn run_arg_extreme_view<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let capabilities = pipeline::view_capabilities(body)?;
+    let pipeline::ViewSinkCapability::ArgExtreme { op, key_kernel } = capabilities.sink else {
+        return None;
+    };
+    if deterministic_prefix_is_empty(&source, &capabilities.stages, &body.stage_kernels) {
+        return Some(Ok(Val::Null));
+    }
+
+    let mut best_key = None::<Val>;
+    let mut best_row = None::<FrontierRow<V>>;
+
+    if let Err(err) = drive_view_frontier(
+        source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
+        &capabilities.stages,
+        &body.stage_kernels,
+        body.pull_demand(),
+        vm,
+        |item, vm| {
+            let key = view_arg_extreme_key_with_vm(item, body.sink_kernels.get(key_kernel)?, vm)?;
+            let should_take = match best_key.as_ref() {
+                None => true,
+                Some(existing) => {
+                    let ordering = pipeline::cmp_val_total(&key, existing);
+                    if op.wants_max() {
+                        ordering.is_gt()
+                    } else {
+                        ordering.is_lt()
+                    }
+                }
+            };
+            if should_take {
+                best_key = Some(key);
+                best_row = Some(item.clone());
+            }
+            Some(Ok(ViewRowAction::Emit))
+        },
+    )? {
+        return Some(Err(err));
+    }
+
+    Some(Ok(best_row
+        .map(pipeline::view_kernel_view_to_owned)
+        .unwrap_or(Val::Null)))
 }
 
 fn direct_count_from_source_len<'a, V>(
@@ -4782,6 +4839,39 @@ mod tests {
         assert_eq!(min, Val::Int(1));
         assert_eq!(min_source.scalar_reads(), 6);
         assert_eq!(min_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn arg_extreme_view_sink_materializes_only_final_compound_winner() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"score":1},{"id":2,"score":2},{"id":3,"score":3},{"id":4,"score":4}]"#
+                .to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("score"))],
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(TapeView::root(&tape), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"id": 4, "score": 4})
+        );
+        assert_eq!(tape.materialized_subtrees(), 1);
     }
 
     #[test]
