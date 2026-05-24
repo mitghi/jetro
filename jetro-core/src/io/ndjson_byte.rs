@@ -2013,14 +2013,13 @@ fn write_raw_json_stream_last_projected<W: Write>(
         };
         if matches {
             selected.clear();
-            if let Some(direct_map) = direct_map.as_ref() {
-                write_direct_root_stream_map(&mut selected, source, &spans, direct_map)?;
-            } else if !write_raw_json_stream_map_with_root_spans(
+            if !write_raw_json_stream_map_with_direct_root_spans(
                 &mut selected,
                 source,
                 map,
                 root_fields,
                 &spans,
+                direct_map.as_ref(),
             )? {
                 return Ok(None);
             }
@@ -2165,14 +2164,13 @@ fn write_raw_json_stream_collect_projected_filtered<W: Write>(
             if wrote {
                 writer.write_all(b",")?;
             }
-            if let Some(direct_map) = direct_map.as_ref() {
-                write_direct_root_stream_map(writer, source, &spans, direct_map)?;
-            } else if !write_raw_json_stream_map_with_root_spans(
+            if !write_raw_json_stream_map_with_direct_root_spans(
                 writer,
                 source,
                 map,
                 root_fields,
                 &spans,
+                direct_map.as_ref(),
             )? {
                 return Ok(None);
             }
@@ -2238,14 +2236,13 @@ fn write_raw_json_stream_first_projected<W: Write>(
             true
         };
         if matches {
-            if let Some(direct_map) = direct_map.as_ref() {
-                write_direct_root_stream_map(writer, source, &spans, direct_map)?;
-            } else if !write_raw_json_stream_map_with_root_spans(
+            if !write_raw_json_stream_map_with_direct_root_spans(
                 writer,
                 source,
                 map,
                 root_fields,
                 &spans,
+                direct_map.as_ref(),
             )? {
                 return Ok(None);
             }
@@ -2521,14 +2518,13 @@ fn write_raw_json_stream_collect_root_projected<W: Write>(
         if wrote {
             writer.write_all(b",")?;
         }
-        if let Some(direct_map) = direct_map.as_ref() {
-            write_direct_root_stream_map(writer, source, &spans, direct_map)?;
-        } else if !write_raw_json_stream_map_with_root_spans(
+        if !write_raw_json_stream_map_with_direct_root_spans(
             writer,
             source,
             map,
             root_fields,
             &spans,
+            direct_map.as_ref(),
         )? {
             return Ok(None);
         }
@@ -2718,6 +2714,22 @@ fn write_raw_json_stream_map_from_root_fields<W: Write>(
         return Ok(false);
     }
     write_raw_json_stream_map_with_root_spans(writer, item, map, root_fields, spans)
+}
+
+fn write_raw_json_stream_map_with_direct_root_spans<W: Write>(
+    writer: &mut W,
+    item: &[u8],
+    map: &NdjsonDirectStreamMap,
+    root_fields: &[&str],
+    spans: &[Option<std::ops::Range<usize>>],
+    direct_map: Option<&DirectRootStreamMap<'_>>,
+) -> Result<bool, JetroEngineError> {
+    if let Some(direct_map) = direct_map {
+        write_direct_root_stream_map(writer, item, spans, direct_map)?;
+        Ok(true)
+    } else {
+        write_raw_json_stream_map_with_root_spans(writer, item, map, root_fields, spans)
+    }
 }
 
 fn write_raw_json_stream_map_with_root_spans<W: Write>(
