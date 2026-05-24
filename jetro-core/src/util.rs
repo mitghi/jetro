@@ -224,22 +224,51 @@ pub fn vals_deep_eq(a: &Val, b: &Val) -> bool {
         }
         return av.iter().zip(bv.iter()).all(|(x, y)| vals_deep_eq(x, y));
     }
-    let am = a.as_object();
-    let bm = b.as_object();
-    if let (Some(am), Some(bm)) = (am, bm) {
-        if am.len() != bm.len() {
+    if let (Some(a_len), Some(b_len)) = (object_len(a), object_len(b)) {
+        if a_len != b_len {
             return false;
         }
-        for (k, av) in am.iter() {
-            match bm.get(k.as_ref()) {
-                Some(bv) if vals_deep_eq(av, bv) => continue,
-                _ => return false,
-            }
-        }
-        return true;
+        return object_entries_match(a, |key, av| match b.get(key.as_ref()) {
+            Some(bv) => vals_deep_eq(av, bv),
+            None => false,
+        });
     }
     // Mixed types or scalar: fall back to scalar equality.
     vals_eq(a, b)
+}
+
+#[inline]
+fn object_len(value: &Val) -> Option<usize> {
+    match value {
+        Val::Obj(map) => Some(map.len()),
+        Val::ObjSmall(pairs) => Some(pairs.len()),
+        _ => None,
+    }
+}
+
+fn object_entries_match<F>(value: &Val, mut f: F) -> bool
+where
+    F: FnMut(&Arc<str>, &Val) -> bool,
+{
+    match value {
+        Val::Obj(map) => {
+            for (key, item) in map.iter() {
+                if !f(key, item) {
+                    return false;
+                }
+            }
+            true
+        }
+        Val::ObjSmall(pairs) => {
+            for (key, item) in pairs.iter() {
+                if !f(key, item) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Compare two `Val` references and return their ordering.
