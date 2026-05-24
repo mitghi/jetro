@@ -15,7 +15,7 @@ use crate::{
         BuiltinDemandLaw,
         BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
         BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
-        BuiltinObjectLambda, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
+        BuiltinObjectLambda, BuiltinPipelineArity, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
         BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
         BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
@@ -45,27 +45,6 @@ pub(crate) enum BuiltinDemandArg {
     None,
     /// A specific count (e.g. the `n` in `.take(n)` or `.skip(n)`).
     Usize(usize),
-}
-
-/// Canonical argument-count contract for pipeline lowering. This keeps
-/// receiver-start checks, stage construction, and tests from re-encoding
-/// per-builtin arity rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BuiltinPipelineArity {
-    /// Accepts exactly N arguments.
-    Exact(usize),
-    /// Accepts any count in the inclusive range.
-    Range { min: usize, max: usize },
-}
-
-impl BuiltinPipelineArity {
-    #[inline]
-    pub(crate) fn accepts(self, arity: usize) -> bool {
-        match self {
-            Self::Exact(n) => arity == n,
-            Self::Range { min, max } => (min..=max).contains(&arity),
-        }
-    }
 }
 
 /// Concrete composed-pipeline implementation selected by builtin metadata.
@@ -1223,21 +1202,7 @@ fn terminal_sink_arity(method: BuiltinMethod) -> Option<BuiltinPipelineArity> {
     if spec.sink.is_none() && matches!(spec.lowering, Some(BuiltinPipelineLowering::TerminalSink)) {
         return Some(BuiltinPipelineArity::Exact(1));
     }
-    let Some(sink) = spec.sink else {
-        return None;
-    };
-    Some(match sink.accumulator {
-        BuiltinSinkAccumulator::Count => {
-            if sink.accepts_predicate {
-                BuiltinPipelineArity::Range { min: 0, max: 1 }
-            } else {
-                BuiltinPipelineArity::Exact(0)
-            }
-        }
-        BuiltinSinkAccumulator::Numeric => BuiltinPipelineArity::Range { min: 0, max: 1 },
-        BuiltinSinkAccumulator::SelectOne(_) => BuiltinPipelineArity::Range { min: 0, max: 1 },
-        BuiltinSinkAccumulator::ApproxDistinct => BuiltinPipelineArity::Exact(0),
-    })
+    Some(spec.sink?.pipeline_arity())
 }
 
 /// Return `true` if builtin `id` is an element-wise operation that can be
@@ -4995,6 +4960,40 @@ mod tests {
             1,
             true
         ));
+    }
+
+    #[test]
+    fn sink_specs_own_terminal_pipeline_arity() {
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::Count))
+                .unwrap()
+                .pipeline_arity(),
+            BuiltinPipelineArity::Range { min: 0, max: 1 }
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::Len))
+                .unwrap()
+                .pipeline_arity(),
+            BuiltinPipelineArity::Exact(0)
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::Sum))
+                .unwrap()
+                .pipeline_arity(),
+            BuiltinPipelineArity::Range { min: 0, max: 1 }
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::First))
+                .unwrap()
+                .pipeline_arity(),
+            BuiltinPipelineArity::Range { min: 0, max: 1 }
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::ApproxCountDistinct))
+                .unwrap()
+                .pipeline_arity(),
+            BuiltinPipelineArity::Exact(0)
+        );
     }
 
     #[test]

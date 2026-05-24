@@ -1246,6 +1246,31 @@ pub enum BuiltinViewMaterialization {
     SinkInputRows,
 }
 
+/// Canonical argument-count contract for pipeline lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinPipelineArity {
+    /// Accepts exactly N arguments.
+    Exact(usize),
+    /// Accepts any count in the inclusive range.
+    Range {
+        /// Minimum accepted argument count.
+        min: usize,
+        /// Maximum accepted argument count.
+        max: usize,
+    },
+}
+
+impl BuiltinPipelineArity {
+    /// Returns whether this contract accepts `arity` arguments.
+    #[inline]
+    pub(crate) const fn accepts(self, arity: usize) -> bool {
+        match self {
+            Self::Exact(n) => arity == n,
+            Self::Range { min, max } => arity >= min && arity <= max,
+        }
+    }
+}
+
 /// Describes how a terminal reducing builtin accumulates its final result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinSinkSpec {
@@ -1258,6 +1283,24 @@ pub struct BuiltinSinkSpec {
 }
 
 impl BuiltinSinkSpec {
+    /// Returns the argument-count contract for pipeline terminal lowering.
+    #[inline]
+    pub(crate) const fn pipeline_arity(self) -> BuiltinPipelineArity {
+        match self.accumulator {
+            BuiltinSinkAccumulator::Count => {
+                if self.accepts_predicate {
+                    BuiltinPipelineArity::Range { min: 0, max: 1 }
+                } else {
+                    BuiltinPipelineArity::Exact(0)
+                }
+            }
+            BuiltinSinkAccumulator::Numeric | BuiltinSinkAccumulator::SelectOne(_) => {
+                BuiltinPipelineArity::Range { min: 0, max: 1 }
+            }
+            BuiltinSinkAccumulator::ApproxDistinct => BuiltinPipelineArity::Exact(0),
+        }
+    }
+
     /// Returns when a borrowed-view executor must materialise input or result
     /// rows to run this sink.
     #[inline]
