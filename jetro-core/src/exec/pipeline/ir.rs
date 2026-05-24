@@ -1411,7 +1411,7 @@ impl Stage {
             }
             (Stage::UniqueBy(Some(a)), Stage::Sort(super::SortSpec { key: Some(b), .. }))
             | (Stage::Sort(super::SortSpec { key: Some(a), .. }), Stage::UniqueBy(Some(b)))
-                if Arc::ptr_eq(a, b) =>
+                if a.id == b.id =>
             {
                 Some(Stage::SortedDedup(Some(a.clone())))
             }

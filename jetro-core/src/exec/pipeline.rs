@@ -1961,6 +1961,22 @@ mod tests {
             "$.xs.unique().sort().take(3)",
             json!({"xs": [3, 1, 2, 3, 1, 4]}),
         );
+
+        let keyed = lower_query("$.rows.unique_by(k).sort_by(k).take(3)").unwrap();
+        assert!(matches!(keyed.stages[0], Stage::SortedDedup(Some(_))));
+        assert!(keyed.stages[0].is_composed_barrier());
+        assert_eq!(keyed.fallback_boundary, FallbackBoundary::None);
+        assert_pipeline_matches_vm(
+            "$.rows.unique_by(k).sort_by(k).take(3)",
+            json!({
+                "rows": [
+                    {"k": 3, "v": "c"},
+                    {"k": 1, "v": "a"},
+                    {"k": 2, "v": "b"},
+                    {"k": 3, "v": "later-c"}
+                ]
+            }),
+        );
     }
 
     #[test]
