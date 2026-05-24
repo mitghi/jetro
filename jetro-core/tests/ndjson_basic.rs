@@ -1039,6 +1039,30 @@ fn run_ndjson_file_with_report_covers_fanout_route() {
 }
 
 #[test]
+fn rows_fanout_preserves_take_before_filter_count_order() {
+    let engine = JetroEngine::new();
+    let path = temp_path("jetro-ndjson-fanout-take-filter-count");
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":false}\n{\"id\":2,\"active\":true}\n{\"id\":3,\"active\":true}\n",
+    )
+    .unwrap();
+    let mut out = Vec::new();
+
+    let report = engine
+        .run_ndjson_file_with_report(
+            &path,
+            r#"let stream = $.rows(), count = stream.take(2).filter($.active).count() in {count}"#,
+            &mut out,
+        )
+        .expect("file-backed fanout report should run");
+
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(String::from_utf8(out).unwrap(), "{\"count\":1}\n");
+    assert_eq!(report.route.kind.to_string(), "rows-fanout");
+}
+
+#[test]
 fn run_ndjson_file_with_report_covers_subquery_route() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-subquery-report");

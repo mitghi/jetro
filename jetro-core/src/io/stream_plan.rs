@@ -156,6 +156,9 @@ impl RowStreamStage {
         let mut limit = None;
         for stage in stages {
             if let Some(expr) = stage.filter_expr() {
+                if limit.is_some() {
+                    return None;
+                }
                 filters.push(expr);
             } else if let Some(n) = stage.take_limit() {
                 limit = Some(limit.map_or(n, |prev: usize| prev.min(n)));
@@ -1132,7 +1135,7 @@ mod tests {
     #[test]
     fn row_stream_stages_classify_prefix_legality() {
         let plan = lower_root_rows_query(
-            "$.rows().filter($.active).take(7).filter($.score > 10).count()",
+            "$.rows().filter($.active).filter($.score > 10).take(7).count()",
             RowStreamSourceKind::NdjsonRows,
         )
         .unwrap()
@@ -1154,6 +1157,18 @@ mod tests {
             panic!("expected count terminal");
         };
         assert!(RowStreamStage::filter_take_prefix(bad_prefix).is_none());
+
+        let post_take_filter = lower_root_rows_query(
+            "$.rows().take(7).filter($.active).count()",
+            RowStreamSourceKind::NdjsonRows,
+        )
+        .unwrap()
+        .unwrap();
+        let [post_take_prefix @ .., RowStreamStage::Count] = post_take_filter.stages.as_slice()
+        else {
+            panic!("expected count terminal");
+        };
+        assert!(RowStreamStage::filter_take_prefix(post_take_prefix).is_none());
 
         let first_match = lower_root_rows_query(
             "$.rows().filter($.name == \"a\").take(1)",
