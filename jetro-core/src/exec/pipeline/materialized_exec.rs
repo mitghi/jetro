@@ -235,6 +235,8 @@ where
     let mut stage_unique_seen: Vec<crate::util::StructuralValueSet> = (0..pipeline.stages.len())
         .map(|_| crate::util::StructuralValueSet::default())
         .collect();
+    let mut stage_window_buffers: Vec<std::collections::VecDeque<Val>> =
+        (0..pipeline.stages.len()).map(|_| Default::default()).collect();
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
         Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
@@ -302,6 +304,7 @@ where
                     &mut stage_taken,
                     &mut stage_skipped,
                     &mut stage_unique_seen,
+                    &mut stage_window_buffers,
                     terminal_map_idx,
                     &mut terminal_map_collect,
                 )? {

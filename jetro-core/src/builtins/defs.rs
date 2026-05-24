@@ -1322,7 +1322,6 @@ impl Builtin for Window {
     const NAME: &'static str = "window";
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
-            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
@@ -1331,8 +1330,34 @@ impl Builtin for Window {
                 1.0,
             ))
             .demand_law(BuiltinDemandLaw::Window)
-            .runtime_hook(BuiltinRuntimeHook::Barrier)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let Some(n) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+        buffer.push_back(item);
+        if buffer.len() < n {
+            return Ok(crate::exec::pipeline::StageFlow::SkipRow);
+        }
+        while buffer.len() > n {
+            buffer.pop_front();
+        }
+        let window = buffer.iter().cloned().collect();
+        Ok(crate::exec::pipeline::StageFlow::Continue(
+            crate::data::value::Val::arr(window),
+        ))
     }
 
     #[inline]

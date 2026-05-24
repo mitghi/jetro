@@ -1803,7 +1803,7 @@ mod tests {
             (BuiltinMethod::MaxBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::MinBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Sort, BuiltinRuntimeHook::Barrier),
-            (BuiltinMethod::Window, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Window, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Chunk, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
@@ -1841,6 +1841,10 @@ mod tests {
                 assert!(
                     spec.view_stage.is_some()
                         || spec.object_lambda.is_some()
+                        || matches!(
+                            spec.lowering,
+                            Some(BuiltinPipelineLowering::UsizeArg { .. })
+                        )
                         || matches!(hook, BuiltinRuntimeHook::SharedFilter),
                     "{method:?} stream hook must be tied to stage/object-lambda metadata"
                 );

@@ -2914,6 +2914,7 @@ mod tests {
         assert_eq!(out, json!([[1, 2, 3], [4, 5, 6]]));
 
         let p = lower_query("$.xs.window(3).take(2)").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
             p.source_demand().chain.pull,
             crate::plan::demand::PullDemand::FirstInput(4)
@@ -2922,6 +2923,7 @@ mod tests {
         assert_eq!(out, json!([[1, 2, 3], [2, 3, 4]]));
 
         let p = lower_query("$.xs.window(3).last()").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
             p.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All

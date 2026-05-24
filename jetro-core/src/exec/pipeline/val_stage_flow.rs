@@ -20,6 +20,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     stage_taken: &mut [usize],
     stage_skipped: &mut [usize],
     stage_unique_seen: &mut [crate::util::StructuralValueSet],
+    stage_window_buffers: &mut [std::collections::VecDeque<Val>],
     terminal_map_idx: Option<usize>,
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
 ) -> Result<StageFlow<Val>, EvalError> {
@@ -35,6 +36,7 @@ pub(super) fn apply_adapter_streaming<'a>(
             stage_taken,
             stage_skipped,
             stage_unique_seen,
+            stage_window_buffers,
             terminal_map_idx,
             terminal_map_collect,
         };
