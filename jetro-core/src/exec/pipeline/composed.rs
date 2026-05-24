@@ -240,10 +240,11 @@ impl cmp::Stage for NestedPlanStage {
 
 /// Extracts a `KeySource` from `kernel`; returns `None` for generic kernels.
 pub(super) fn key_from_kernel(kernel: &BodyKernel) -> Option<cmp::KeySource> {
-    match kernel {
-        BodyKernel::FieldRead(field) => Some(cmp::KeySource::Field(Arc::clone(field))),
-        BodyKernel::FieldChain(keys) => Some(cmp::KeySource::Chain(Arc::clone(keys))),
-        _ => None,
+    let keys = kernel.field_path_keys()?;
+    match keys.as_slice() {
+        [] => Some(cmp::KeySource::None),
+        [field] => Some(cmp::KeySource::Field(Arc::clone(field))),
+        _ => Some(cmp::KeySource::Chain(keys.into())),
     }
 }
 
@@ -985,4 +986,40 @@ fn append_reducer_sink_stages(
     }
 
     Some((sink, chain))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use indexmap::IndexMap;
+
+    use crate::data::value::Val;
+    use crate::exec::pipeline::BodyKernel;
+    use crate::parse::parser::parse;
+
+    use super::key_from_kernel;
+
+    fn obj(pairs: impl IntoIterator<Item = (&'static str, Val)>) -> Val {
+        let mut out = IndexMap::new();
+        for (key, value) in pairs {
+            out.insert(Arc::from(key), value);
+        }
+        Val::Obj(Arc::new(out))
+    }
+
+    #[test]
+    fn composed_key_source_uses_shared_field_path_metadata() {
+        let kernel = BodyKernel::classify_expr(
+            &parse(r#"profile.get_path("author.name")"#).expect("parse get_path key"),
+        );
+        let key = key_from_kernel(&kernel).expect("key source");
+        let row = obj([(
+            "profile",
+            obj([("author", obj([("name", Val::Str(Arc::from("Ada")))]))]),
+        )]);
+
+        assert_eq!(key.extract(&row), Val::Str(Arc::from("Ada")));
+        assert_eq!(key.extract(&obj([])), Val::Null);
+    }
 }
