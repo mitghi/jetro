@@ -1296,6 +1296,18 @@ where
         return None;
     }
     let source_demand = body.pull_demand();
+    if let Some(0) =
+        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
+    {
+        return Some(run_materialized_value_suffix(
+            body,
+            plan.consumed_stages,
+            plan.reducer.finish(),
+            cache,
+            base_env,
+            vm,
+        ));
+    }
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -3949,6 +3961,50 @@ mod tests {
         assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));
         assert_eq!(source.scalar_reads(), 6);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn reducing_keyed_stage_skips_empty_prefix_without_iterating_rows() {
+        for method in [
+            crate::builtins::BuiltinMethod::CountBy,
+            crate::builtins::BuiltinMethod::GroupBy,
+            crate::builtins::BuiltinMethod::IndexBy,
+        ] {
+            let source = CountingView::root(&[1, 2, 1, 3]);
+            let body = PipelineBody {
+                stages: vec![
+                    Stage::UsizeBuiltin {
+                        method: crate::builtins::BuiltinMethod::Take,
+                        value: 0,
+                    },
+                    Stage::ExprBuiltin {
+                        method,
+                        body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    },
+                ],
+                stage_exprs: Vec::new(),
+                sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+                stage_kernels: vec![BodyKernel::Generic, BodyKernel::Current],
+                sink_kernels: Vec::new(),
+            };
+
+            let env = Env::new(Val::Null);
+            let mut vm = crate::vm::VM::new();
+            let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+                source.clone(),
+                &body,
+                None,
+                &env,
+                &mut vm,
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), serde_json::json!({}));
+            assert_eq!(source.scalar_reads(), 1, "{method:?}");
+            assert_eq!(source.array_iter_reads(), 0, "{method:?}");
+            assert_eq!(source.materialize_reads(), 0, "{method:?}");
+        }
     }
 
     #[test]
