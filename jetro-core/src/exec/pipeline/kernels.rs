@@ -11,7 +11,9 @@ use crate::builtins::registry::{
     apply_view_projection, by_name as builtin_by_name, count_sink_accepts_predicate, expr_stage,
     numeric_reducer, view_projection, view_projection_receiver_field_demand, ViewProjectionResult,
 };
-use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
+use crate::builtins::{
+    BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinMethod, PathSeg,
+};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, write_json_view, ValView, ValueView};
@@ -171,6 +173,31 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
 fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
     let receiver_path = receiver.field_path_keys()?;
     view_projection_receiver_field_demand(call.id(), &call.args, &receiver_path)
+}
+
+fn view_result_field_path(receiver: &BodyKernel, call: &BuiltinCall) -> Option<Vec<Arc<str>>> {
+    if call.method != BuiltinMethod::GetPath {
+        return None;
+    }
+    let mut keys = receiver.field_path_keys()?;
+    keys.extend(field_only_path_args(&call.args)?);
+    Some(keys)
+}
+
+fn field_only_path_args(args: &BuiltinArgs) -> Option<Vec<Arc<str>>> {
+    let path = match args {
+        BuiltinArgs::Str(path) => crate::builtins::parse_path_segs(path.as_ref()),
+        BuiltinArgs::Path(path) => path.to_vec(),
+        _ => return None,
+    };
+    let mut keys = Vec::with_capacity(path.len());
+    for segment in path {
+        match segment {
+            PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
+            PathSeg::Index(_) => return None,
+        }
+    }
+    Some(keys)
 }
 
 fn nested_array_child_field_demand(source: &BodyKernel, child: &BodyKernel) -> FieldDemand {
@@ -710,6 +737,12 @@ impl BodyKernel {
             Self::Current => Some(Vec::new()),
             Self::FieldRead(key) => Some(vec![Arc::clone(key)]),
             Self::FieldChain(keys) => Some(keys.iter().cloned().collect()),
+            Self::BuiltinCall { receiver, call } => view_result_field_path(receiver, call),
+            Self::Compose { first, then } => {
+                let mut keys = first.field_path_keys()?;
+                keys.extend(then.field_path_keys()?);
+                Some(keys)
+            }
             _ => None,
         }
     }
@@ -3002,6 +3035,17 @@ mod tests {
             field_paths(&path_call(BuiltinMethod::GetPath, "items[0].price")),
             vec!["items"]
         );
+        let chained = BodyKernel::classify_expr(
+            &parse(r#"profile.get_path("author").has_key("name")"#)
+                .expect("parse chained get_path key check"),
+        );
+        assert_eq!(field_paths(&chained), vec!["profile.author.name"]);
+
+        let indexed = BodyKernel::classify_expr(
+            &parse(r#"profile.get_path("items[0]").has_key("sku")"#)
+                .expect("parse indexed get_path key check"),
+        );
+        assert_eq!(field_paths(&indexed), vec!["profile.items"]);
         assert_eq!(
             field_paths(&key_call(BuiltinMethod::Has, "isbn")),
             vec!["*"]
