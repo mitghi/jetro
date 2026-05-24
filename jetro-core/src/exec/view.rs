@@ -391,13 +391,11 @@ where
                 Some(Val::arr(Vec::new()))
             }
         }
-        pipeline::ViewSinkCapability::Membership { op, target } if target.is_scalar_literal() => {
-            match op {
-                crate::builtins::BuiltinMembershipSink::Includes => Some(Val::Bool(false)),
-                crate::builtins::BuiltinMembershipSink::Index => Some(Val::Null),
-                crate::builtins::BuiltinMembershipSink::IndicesOf => Some(Val::arr(Vec::new())),
-            }
-        }
+        pipeline::ViewSinkCapability::Membership { op, .. } => match op {
+            crate::builtins::BuiltinMembershipSink::Includes => Some(Val::Bool(false)),
+            crate::builtins::BuiltinMembershipSink::Index => Some(Val::Null),
+            crate::builtins::BuiltinMembershipSink::IndicesOf => Some(Val::arr(Vec::new())),
+        },
         _ => None,
     }
 }
@@ -2693,6 +2691,34 @@ mod tests {
         assert_eq!(membership_source.scalar_reads(), 1);
         assert_eq!(membership_source.array_iter_reads(), 0);
         assert_eq!(membership_source.materialize_reads(), 0);
+
+        let compound_membership_source = CountingView::root(&[1, 2, 3]);
+        let compound_membership_body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: BuiltinMembershipSink::IndicesOf,
+                target: MembershipSinkTarget::Literal(Val::arr(vec![Val::Int(1)])),
+            }),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let compound_membership =
+            super::run_full(compound_membership_source.clone(), &compound_membership_body)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(compound_membership),
+            serde_json::json!([])
+        );
+        assert_eq!(compound_membership_source.scalar_reads(), 1);
+        assert_eq!(compound_membership_source.array_iter_reads(), 0);
+        assert_eq!(compound_membership_source.materialize_reads(), 0);
     }
 
     #[test]
