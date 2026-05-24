@@ -63,9 +63,10 @@ impl ViewKey {
         match value {
             Val::Null => Self::Null,
             Val::Bool(value) => Self::Bool(value),
-            Val::Int(value) => Self::Int(value),
-            Val::Float(value) => Self::Float(value.to_bits()),
+            Val::Int(value) => structural_number_key(value as f64),
+            Val::Float(value) => structural_number_key(value),
             Val::Str(value) => Self::Str(value),
+            Val::StrSlice(value) => Self::Str(Arc::from(value.as_str())),
             value => Self::Owned(Arc::from(
                 crate::util::val_to_structural_key(&value).as_str(),
             )),
@@ -89,7 +90,7 @@ impl ViewKey {
     where
         V: ValueView<'a> + 'a,
     {
-        Self::from_view(view.scalar()).or_else(|| {
+        from_structural_scalar_view(view.scalar()).or_else(|| {
             let mut out = String::new();
             write_structural_view_key(view, &mut out)?;
             Some(Self::Owned(Arc::from(out)))
@@ -108,6 +109,23 @@ impl ViewKey {
             Self::Str(value) | Self::Owned(value) => value,
         }
     }
+}
+
+fn from_structural_scalar_view(view: JsonView<'_>) -> Option<ViewKey> {
+    match view {
+        JsonView::Null => Some(ViewKey::Null),
+        JsonView::Bool(value) => Some(ViewKey::Bool(value)),
+        JsonView::Int(value) => Some(structural_number_key(value as f64)),
+        JsonView::UInt(value) => Some(structural_number_key(value as f64)),
+        JsonView::Float(value) => Some(structural_number_key(value)),
+        JsonView::Str(value) => Some(ViewKey::Str(Arc::from(value))),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => None,
+    }
+}
+
+fn structural_number_key(value: f64) -> ViewKey {
+    let value = if value == 0.0 { 0.0 } else { value };
+    ViewKey::Float(value.to_bits())
 }
 
 fn write_structural_view_key<'a, V>(view: &V, out: &mut String) -> Option<()>
@@ -168,4 +186,45 @@ where
         }
     }
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::data::{
+        tape::TapeData,
+        value::Val,
+        view::{TapeView, ValView},
+    };
+
+    use super::ViewKey;
+
+    #[test]
+    fn structural_scalar_numbers_share_key_across_int_and_float_views() {
+        let int = Val::Int(1);
+        let float = Val::Float(1.0);
+
+        assert_eq!(
+            ViewKey::from_structural_owned(int.clone()),
+            ViewKey::from_structural_owned(float.clone())
+        );
+        assert_eq!(
+            ViewKey::from_structural_value_view(&ValView::new(&int)),
+            ViewKey::from_structural_value_view(&ValView::new(&float))
+        );
+    }
+
+    #[test]
+    fn structural_compound_tape_keys_are_canonical_without_materializing() {
+        let left = TapeData::parse(br#"{"a":1,"b":[1,{"x":true}]}"#.to_vec()).unwrap();
+        let right = TapeData::parse(br#"{"b":[1.0,{"x":true}],"a":1.0}"#.to_vec()).unwrap();
+        left.reset_materialized_subtrees();
+        right.reset_materialized_subtrees();
+
+        assert_eq!(
+            ViewKey::from_structural_value_view(&TapeView::root(&left)),
+            ViewKey::from_structural_value_view(&TapeView::root(&right))
+        );
+        assert_eq!(left.materialized_subtrees(), 0);
+        assert_eq!(right.materialized_subtrees(), 0);
+    }
 }
