@@ -4193,30 +4193,26 @@ str_vec_arg_scalar_native! {
     ContainsAll, "contains_all", contains_all_apply;
 }
 
-macro_rules! usize_arg_scalar_native {
-    ( $( $ty:ident, $name:literal, $apply:ident $( , aliases: [ $( $alias:literal ),* $(,)? ] )? ; )* ) => {
-        $(
-            pub(crate) struct $ty;
-            impl Builtin for $ty {
-                const METHOD: BuiltinMethod = BuiltinMethod::$ty;
-                const NAME: &'static str = $name;
-                $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
-                fn spec() -> BuiltinSpec { scalar_native_element_spec() }
-                #[inline]
-                fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
-                    match args {
-                        super::BuiltinArgs::Usize(n) => {
-                            Some(super::$apply(recv, *n).unwrap_or_else(|| recv.clone()))
-                        }
-                        _ => None,
-                    }
-                }
+pub(crate) struct Repeat;
+impl Builtin for Repeat {
+    const METHOD: BuiltinMethod = BuiltinMethod::Repeat;
+    const NAME: &'static str = "repeat";
+    const ALIASES: &'static [&'static str] = &["repeat_str"];
+    fn spec() -> BuiltinSpec {
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::Repeat)
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Usize(n) => {
+                Some(super::repeat_apply(recv, *n).unwrap_or_else(|| recv.clone()))
             }
-        )*
-    };
-}
-usize_arg_scalar_native! {
-    Repeat, "repeat", repeat_apply, aliases: ["repeat_str"];
+            _ => None,
+        }
+    }
 }
 
 /// `indent(n_or_prefix)` — prepend each line with `n` spaces (when `n` is a

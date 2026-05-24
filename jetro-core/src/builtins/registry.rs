@@ -1108,6 +1108,17 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Repeat => {
+            let BuiltinArgs::Usize(n) = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => ViewProjectionResult::Owned(Val::Str(Arc::from(
+                    value.repeat(*n),
+                ))),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Slice => {
             let BuiltinArgs::I64Opt { first, second } = args else {
                 return None;
@@ -3796,6 +3807,7 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
+            (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
             (
                 BuiltinMethod::ReplaceAll,
@@ -5824,6 +5836,10 @@ mod tests {
             Some(BuiltinViewValueProjection::Replace)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::Repeat)),
+            Some(BuiltinViewValueProjection::Repeat)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
             Some(BuiltinViewValueProjection::ReplaceAll)
         );
@@ -6019,6 +6035,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::from(stripped_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
+        let repeated_non_string = apply(BuiltinMethod::Repeat, BuiltinArgs::Usize(2));
+        assert_eq!(
+            serde_json::Value::from(repeated_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }

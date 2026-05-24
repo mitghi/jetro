@@ -922,6 +922,8 @@ pub enum BuiltinViewValueProjection {
     Replace,
     /// Replace all matching substrings in a string value.
     ReplaceAll,
+    /// Repeat a string value N times.
+    Repeat,
     /// Slice a string value by character offsets.
     Slice,
     /// Remove a matching string prefix.
@@ -942,6 +944,7 @@ impl BuiltinViewValueProjection {
             BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
             BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
+            | BuiltinViewValueProjection::Repeat
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
             | BuiltinViewValueProjection::StripPrefix
