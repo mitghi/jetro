@@ -433,6 +433,39 @@ fn tape_matches_vm_for_materialized_suffix_after_view_prefix() {
 }
 
 #[test]
+fn tape_matches_vm_for_compound_set_equality() {
+    let doc = json!({
+        "xs": [
+            {"a": 1, "b": 2},
+            {"b": 2, "a": 1},
+            {"a": 2}
+        ],
+        "ys": [
+            {"b": 2, "a": 1},
+            {"z": 0}
+        ],
+        "rows": [
+            {"id": 1, "key": {"x": 1, "y": 2}},
+            {"id": 2, "key": {"y": 2, "x": 1}},
+            {"id": 3, "key": {"x": 3}}
+        ]
+    });
+    for query in [
+        "$.xs.unique().len()",
+        "$.xs.unique().last()",
+        "$.xs.unique_by(@).len()",
+        "$.xs.remove({\"b\": 2, \"a\": 1}).last()",
+        "$.xs.intersect($.ys).len()",
+        "$.xs.diff($.ys).last()",
+        "$.xs.union($.ys).len()",
+        "$.rows.unique_by(key).map(id)",
+        "$.rows.map(key).unique().len()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
 fn tape_matches_vm_for_keyed_reducers_and_distinct_stages() {
     let doc = json!({
         "orders": [
