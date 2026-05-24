@@ -1486,12 +1486,17 @@ impl BuiltinPredicateSink {
     /// Returns when a borrowed-view executor must materialise rows for this sink.
     #[inline]
     pub(crate) const fn view_materialization(self) -> BuiltinViewMaterialization {
-        match self {
-            Self::FindOne => BuiltinViewMaterialization::SinkFinalRow,
-            Self::Any | Self::All | Self::FindIndex | Self::IndicesWhere => {
-                BuiltinViewMaterialization::Never
-            }
+        if self.returns_matching_row() {
+            BuiltinViewMaterialization::SinkFinalRow
+        } else {
+            BuiltinViewMaterialization::Never
         }
+    }
+
+    /// Whether this predicate sink returns the matching input row itself.
+    #[inline]
+    pub(crate) const fn returns_matching_row(self) -> bool {
+        matches!(self, Self::FindOne)
     }
 }
 

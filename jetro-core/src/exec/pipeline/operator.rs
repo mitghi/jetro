@@ -114,7 +114,7 @@ impl PredicateSinkSpec {
 
     /// Returns true for the terminal sink that returns the matching row itself.
     pub(crate) fn is_find_one(&self) -> bool {
-        self.op == BuiltinPredicateSink::FindOne
+        self.op.returns_matching_row()
     }
 
     /// Returns the builtin method represented by this predicate sink.

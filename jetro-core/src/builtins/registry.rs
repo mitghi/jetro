@@ -2461,6 +2461,7 @@ mod tests {
             );
             match sink {
                 BuiltinPredicateSink::FindOne => {
+                    assert!(sink.returns_matching_row(), "{method:?}");
                     assert_eq!(predicate_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
                     assert_eq!(
                         predicate_sink_result_demand(sink),
@@ -2477,6 +2478,7 @@ mod tests {
                 | BuiltinPredicateSink::All
                 | BuiltinPredicateSink::FindIndex
                 | BuiltinPredicateSink::IndicesWhere => {
+                    assert!(!sink.returns_matching_row(), "{method:?}");
                     assert_eq!(
                         predicate_sink_value_need(sink),
                         ValueNeed::Predicate,
