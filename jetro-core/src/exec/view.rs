@@ -374,6 +374,10 @@ where
             ..
         } => Some(Val::Int(0)),
         pipeline::ViewSinkCapability::Builtin {
+            accumulator: crate::builtins::BuiltinSinkAccumulator::Count,
+            ..
+        } => Some(Val::Int(0)),
+        pipeline::ViewSinkCapability::Builtin {
             accumulator: crate::builtins::BuiltinSinkAccumulator::SelectOne(_),
             ..
         } => Some(Val::Null),
@@ -2804,6 +2808,31 @@ mod tests {
             assert_eq!(source.array_iter_reads(), 0);
             assert_eq!(source.materialize_reads(), 0);
         }
+    }
+
+    #[test]
+    fn view_empty_cardinality_predicate_count_skips_predicate_evaluation() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(ReducerSpec::count_with_predicate(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                None,
+            )),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(0))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(0));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
