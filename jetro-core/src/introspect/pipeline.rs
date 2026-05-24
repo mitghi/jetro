@@ -1,8 +1,8 @@
 use super::report::{PipelineInspection, PipelineStageInspection};
+use crate::data::value::Val;
 use crate::exec::pipeline::{
     FallbackBoundary, PhysicalExecPath, PipelineBody, Sink, Source, Stage,
 };
-use crate::data::value::Val;
 use crate::ir::physical::{PipelinePlanSource, PlanNode, QueryPlan};
 
 pub(crate) fn inspect_first_pipeline(plan: &QueryPlan) -> Option<PipelineInspection> {
@@ -83,13 +83,7 @@ pub(crate) fn sink_label(sink: &Sink) -> &'static str {
             crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Max) => "max",
             crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Avg) => "avg",
         },
-        Sink::Predicate(spec) => match spec.op {
-            crate::builtins::BuiltinPredicateSink::Any => "any",
-            crate::builtins::BuiltinPredicateSink::All => "all",
-            crate::builtins::BuiltinPredicateSink::FindIndex => "find-index",
-            crate::builtins::BuiltinPredicateSink::IndicesWhere => "indices-where",
-            crate::builtins::BuiltinPredicateSink::FindOne => "find-one",
-        },
+        Sink::Predicate(spec) => super::labels::predicate_sink_label(spec.op),
         Sink::Membership(_) => "membership",
         Sink::ArgExtreme(spec) => match spec.op {
             crate::builtins::BuiltinArgExtremeSink::MaxBy => "max-by",

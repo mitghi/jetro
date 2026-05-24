@@ -1,4 +1,7 @@
-use super::report::{DirectPlanInspection, NdjsonInspection, RowStreamInspection};
+use super::{
+    labels::predicate_sink_label,
+    report::{DirectPlanInspection, NdjsonInspection, RowStreamInspection},
+};
 use crate::io::{
     ndjson_route_plan, ndjson_writer_path_kind, NdjsonOptions, NdjsonRoutePlan, NdjsonSourceMode,
 };
@@ -145,16 +148,6 @@ fn row_sink_label(stages: &[crate::io::RowStreamStage]) -> &'static str {
         Some(crate::io::RowStreamStage::Numeric(reducer)) => numeric_reducer_label(*reducer),
         Some(crate::io::RowStreamStage::PredicateSink { sink, .. }) => predicate_sink_label(*sink),
         _ => "collect",
-    }
-}
-
-fn predicate_sink_label(sink: crate::builtins::BuiltinPredicateSink) -> &'static str {
-    match sink {
-        crate::builtins::BuiltinPredicateSink::Any => "any",
-        crate::builtins::BuiltinPredicateSink::All => "all",
-        crate::builtins::BuiltinPredicateSink::FindOne => "find-one",
-        crate::builtins::BuiltinPredicateSink::FindIndex => "find-index",
-        crate::builtins::BuiltinPredicateSink::IndicesWhere => "indices-where",
     }
 }
 

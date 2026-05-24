@@ -5,6 +5,7 @@
 //! explicit inspection APIs.
 
 mod inspect;
+mod labels;
 pub(crate) mod ndjson;
 pub(crate) mod physical;
 pub(crate) mod pipeline;
