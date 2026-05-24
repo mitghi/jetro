@@ -4,7 +4,11 @@
 
 use std::sync::Arc;
 
-use crate::{data::value::Val, data::view::ValueView, util::JsonView};
+use crate::{
+    data::value::Val,
+    data::view::{write_json_view, ValueView},
+    util::JsonView,
+};
 
 /// A hashable, equality-comparable key derived from a `ValueView` scalar,
 /// used as the hash-map key for `group_by`, `count_by`, `index_by`, and
@@ -63,7 +67,7 @@ impl ViewKey {
     {
         Self::from_view(view.scalar()).or_else(|| {
             let mut out = String::new();
-            write_view_key(view, &mut out)?;
+            write_json_view(view, &mut out)?;
             Some(Self::Owned(Arc::from(out)))
         })
     }
@@ -80,49 +84,4 @@ impl ViewKey {
             Self::Str(value) | Self::Owned(value) => value,
         }
     }
-}
-
-fn write_view_key<'a, V>(view: &V, out: &mut String) -> Option<()>
-where
-    V: ValueView<'a> + 'a,
-{
-    match view.scalar() {
-        JsonView::Null => out.push_str("null"),
-        JsonView::Bool(value) => out.push_str(if value { "true" } else { "false" }),
-        JsonView::Int(value) => out.push_str(&value.to_string()),
-        JsonView::UInt(value) => out.push_str(&value.to_string()),
-        JsonView::Float(value) => out.push_str(&value.to_string()),
-        JsonView::Str(value) => {
-            out.push_str(&serde_json::to_string(value).ok()?);
-        }
-        JsonView::ArrayLen(_) => {
-            out.push('[');
-            let mut first = true;
-            for child in view.array_iter()? {
-                if first {
-                    first = false;
-                } else {
-                    out.push(',');
-                }
-                write_view_key(&child, out)?;
-            }
-            out.push(']');
-        }
-        JsonView::ObjectLen(_) => {
-            out.push('{');
-            let mut first = true;
-            for (key, child) in view.object_iter()? {
-                if first {
-                    first = false;
-                } else {
-                    out.push(',');
-                }
-                out.push_str(&serde_json::to_string(key.as_ref()).ok()?);
-                out.push(':');
-                write_view_key(&child, out)?;
-            }
-            out.push('}');
-        }
-    }
-    Some(())
 }

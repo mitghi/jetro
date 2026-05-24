@@ -14,7 +14,7 @@ use crate::builtins::registry::{
 use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
-use crate::data::view::{scalar_view_to_owned_val, ValView, ValueView};
+use crate::data::view::{scalar_view_to_owned_val, write_json_view, ValView, ValueView};
 use crate::parse::ast::{Expr, ObjField, Step};
 use crate::plan::demand::{FieldDemand, FieldSet};
 use crate::util::JsonView;
@@ -1954,61 +1954,9 @@ where
         JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
         JsonView::Str(value) => out.push_str(value),
         JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
-            append_json_view_value(out, view)?;
-        }
-    }
-    Ok(())
-}
-
-fn append_json_view_value<'a, V>(out: &mut String, view: &V) -> Result<(), EvalError>
-where
-    V: ValueView<'a> + 'a,
-{
-    match view.scalar() {
-        JsonView::Null => out.push_str("null"),
-        JsonView::Bool(true) => out.push_str("true"),
-        JsonView::Bool(false) => out.push_str("false"),
-        JsonView::Int(value) => out.push_str(itoa::Buffer::new().format(value)),
-        JsonView::UInt(value) => out.push_str(itoa::Buffer::new().format(value)),
-        JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
-        JsonView::Str(value) => out.push_str(
-            &serde_json::to_string(value)
-                .map_err(|err| EvalError(format!("string format error: {err}")))?,
-        ),
-        JsonView::ArrayLen(_) => {
-            out.push('[');
-            let mut first = true;
-            for child in view.array_iter().ok_or_else(|| {
-                EvalError("array view format error: missing child iterator".to_string())
-            })? {
-                if first {
-                    first = false;
-                } else {
-                    out.push(',');
-                }
-                append_json_view_value(out, &child)?;
-            }
-            out.push(']');
-        }
-        JsonView::ObjectLen(_) => {
-            out.push('{');
-            let mut first = true;
-            for (key, child) in view.object_iter().ok_or_else(|| {
-                EvalError("object view format error: missing field iterator".to_string())
-            })? {
-                if first {
-                    first = false;
-                } else {
-                    out.push(',');
-                }
-                out.push_str(
-                    &serde_json::to_string(key.as_ref())
-                        .map_err(|err| EvalError(format!("object key format error: {err}")))?,
-                );
-                out.push(':');
-                append_json_view_value(out, &child)?;
-            }
-            out.push('}');
+            write_json_view(view, out).ok_or_else(|| {
+                EvalError("view format error: missing child iterator".to_string())
+            })?;
         }
     }
     Ok(())

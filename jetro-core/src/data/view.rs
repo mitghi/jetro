@@ -356,6 +356,52 @@ pub(crate) fn scalar_view_to_owned_val(view: JsonView<'_>) -> Option<Val> {
     }
 }
 
+/// Write the current view as compact JSON by traversing borrowed child views.
+/// This is used by view-native keying and formatting paths that need a stable
+/// compound representation without materialising a `Val` subtree first.
+pub(crate) fn write_json_view<'a, V>(view: &V, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Null => out.push_str("null"),
+        JsonView::Bool(value) => out.push_str(if value { "true" } else { "false" }),
+        JsonView::Int(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::UInt(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
+        JsonView::Str(value) => out.push_str(&serde_json::to_string(value).ok()?),
+        JsonView::ArrayLen(_) => {
+            out.push('[');
+            let mut first = true;
+            for child in view.array_iter()? {
+                if first {
+                    first = false;
+                } else {
+                    out.push(',');
+                }
+                write_json_view(&child, out)?;
+            }
+            out.push(']');
+        }
+        JsonView::ObjectLen(_) => {
+            out.push('{');
+            let mut first = true;
+            for (key, child) in view.object_iter()? {
+                if first {
+                    first = false;
+                } else {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key.as_ref()).ok()?);
+                out.push(':');
+                write_json_view(&child, out)?;
+            }
+            out.push('}');
+        }
+    }
+    Some(())
+}
+
 /// `ValueView` implementation for in-memory `Val` trees.
 /// Borrows the source `Val` when possible and falls back to an owned clone
 /// only for dynamically computed results such as index out-of-range fallbacks.
