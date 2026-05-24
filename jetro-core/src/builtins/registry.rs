@@ -1205,6 +1205,15 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Or => {
+            let BuiltinArgs::Val(default) = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Null => ViewProjectionResult::Owned(default.clone()),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -3981,6 +3990,7 @@ mod tests {
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
+            (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
             (
                 BuiltinMethod::PadRight,
@@ -6049,6 +6059,7 @@ mod tests {
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
+            (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
@@ -6348,6 +6359,22 @@ mod tests {
                 "indent"
             ),
             Val::Str(std::sync::Arc::from(">   a\n>     b"))
+        );
+        assert_eq!(
+            apply_field(
+                BuiltinMethod::Or,
+                BuiltinArgs::Val(Val::Str(std::sync::Arc::from("fallback"))),
+                "case"
+            ),
+            Val::Str(std::sync::Arc::from("hello WORLD"))
+        );
+        assert_eq!(
+            apply_field(
+                BuiltinMethod::Or,
+                BuiltinArgs::Val(Val::Str(std::sync::Arc::from("fallback"))),
+                "missing"
+            ),
+            Val::Str(std::sync::Arc::from("fallback"))
         );
         let sliced_non_string = apply(
             BuiltinMethod::Slice,

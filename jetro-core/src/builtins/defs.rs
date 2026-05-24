@@ -3961,7 +3961,7 @@ impl Builtin for Or {
     const METHOD: BuiltinMethod = BuiltinMethod::Or;
     const NAME: &'static str = "or";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::Or)
     }
     #[inline]
     fn apply_args(

@@ -5378,6 +5378,38 @@ mod tests {
     }
 
     #[test]
+    fn view_or_builtin_defaults_null_without_materializing_non_null_receivers() {
+        let tape = crate::data::tape::TapeData::parse(br#"["a",null,"b"]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Or,
+                    crate::builtins::BuiltinArgs::Val(Val::Str(Arc::from("fallback"))),
+                )),
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Type,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["string", "string", "string"])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_value_string_builtins_traverse_tape_without_materializing_receivers() {
         let tape =
             crate::data::tape::TapeData::parse(br#"[{"a":1,"b":[true,null]},"plain"]"#.to_vec())

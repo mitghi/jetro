@@ -934,6 +934,8 @@ pub enum BuiltinViewValueProjection {
     HtmlEscape,
     /// Prepend a prefix to each line.
     Indent,
+    /// Return a default value when the receiver is null/missing.
+    Or,
     /// Center-pad a string value.
     Center,
     /// Left-pad a string value.
@@ -989,6 +991,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::HtmlUnescape
             | BuiltinViewValueProjection::Indent
             | BuiltinViewValueProjection::KebabCase
+            | BuiltinViewValueProjection::Or
             | BuiltinViewValueProjection::PadLeft
             | BuiltinViewValueProjection::PadRight
             | BuiltinViewValueProjection::PascalCase
