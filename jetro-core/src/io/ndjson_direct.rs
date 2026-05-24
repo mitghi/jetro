@@ -2033,6 +2033,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_writer_accepts_all_registry_raw_json_scalars() {
+        let engine = JetroEngine::new();
+        let raw_methods: Vec<_> = crate::builtins::registry::all_method_entries()
+            .into_iter()
+            .filter_map(|(method, name, _)| {
+                let call = crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::None,
+                );
+                call.is_raw_json_scalar_call().then_some(name)
+            })
+            .collect();
+
+        assert!(!raw_methods.is_empty());
+        for name in raw_methods {
+            let query = format!("$.value.{name}()");
+            assert_eq!(
+                direct_writer_plan_kind(&engine, &query),
+                Some((
+                    Some(NdjsonDirectPlanKind::ByteExpr),
+                    NdjsonDirectPlanKind::TapeScalarCall,
+                )),
+                "{query} should lower through raw-json scalar metadata"
+            );
+        }
+    }
+
+    #[test]
     fn stream_map_values_iterates_projection_values() {
         let map = NdjsonDirectStreamMap::Object(vec![
             NdjsonDirectObjectField {
