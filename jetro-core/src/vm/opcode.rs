@@ -703,6 +703,166 @@ pub struct Program {
     pub ics: Arc<[AtomicU64]>,
 }
 
+pub(crate) fn program_loads_ident_matching(
+    program: &Program,
+    matches_ident: impl Fn(&str) -> bool + Copy,
+) -> bool {
+    program
+        .ops
+        .iter()
+        .any(|opcode| opcode_loads_ident_matching(opcode, matches_ident))
+}
+
+fn opcode_loads_ident_matching(
+    opcode: &Opcode,
+    matches_ident: impl Fn(&str) -> bool + Copy,
+) -> bool {
+    match opcode {
+        Opcode::LoadIdent(name) => matches_ident(name),
+        Opcode::DynIndex(program)
+        | Opcode::InlineFilter(program)
+        | Opcode::AndOp(program)
+        | Opcode::OrOp(program)
+        | Opcode::CoalesceOp(program) => program_loads_ident_matching(program, matches_ident),
+        Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
+            .sub_progs
+            .iter()
+            .any(|program| program_loads_ident_matching(program, matches_ident)),
+        Opcode::MakeObj(entries) => entries.iter().any(|entry| match entry {
+            CompiledObjEntry::Short { name, .. } => matches_ident(name),
+            CompiledObjEntry::Kv { prog, cond, .. } => {
+                program_loads_ident_matching(prog, matches_ident)
+                    || cond
+                        .as_ref()
+                        .is_some_and(|program| program_loads_ident_matching(program, matches_ident))
+            }
+            CompiledObjEntry::Dynamic { key, val } => {
+                program_loads_ident_matching(key, matches_ident)
+                    || program_loads_ident_matching(val, matches_ident)
+            }
+            CompiledObjEntry::Spread(program) | CompiledObjEntry::SpreadDeep(program) => {
+                program_loads_ident_matching(program, matches_ident)
+            }
+            CompiledObjEntry::KvPath { .. } => false,
+        }),
+        Opcode::MakeArr(items) => items
+            .iter()
+            .any(|(program, _)| program_loads_ident_matching(program, matches_ident)),
+        Opcode::FString(parts) => parts.iter().any(|part| match part {
+            CompiledFSPart::Lit(_) => false,
+            CompiledFSPart::Interp { prog, .. } => {
+                program_loads_ident_matching(prog, matches_ident)
+            }
+        }),
+        Opcode::BindLamCurrent { name, body } => {
+            name.as_ref().is_some_and(|name| matches_ident(name))
+                || program_loads_ident_matching(body, matches_ident)
+        }
+        Opcode::PipelineRun { base, steps } => {
+            program_loads_ident_matching(base, matches_ident)
+                || steps.iter().any(|step| match step {
+                    CompiledPipeStep::Forward(program) => {
+                        program_loads_ident_matching(program, matches_ident)
+                    }
+                    CompiledPipeStep::BindName(name) => matches_ident(name),
+                    CompiledPipeStep::BindObj(spec) => {
+                        spec.fields.iter().any(|name| matches_ident(name))
+                            || spec.rest.as_ref().is_some_and(|name| matches_ident(name))
+                    }
+                    CompiledPipeStep::BindArr(names) => {
+                        names.iter().any(|name| matches_ident(name))
+                    }
+                })
+        }
+        Opcode::LetExpr { name, body } => {
+            matches_ident(name) || program_loads_ident_matching(body, matches_ident)
+        }
+        Opcode::IfElse { then_, else_ } => {
+            program_loads_ident_matching(then_, matches_ident)
+                || program_loads_ident_matching(else_, matches_ident)
+        }
+        Opcode::TryExpr { body, default } => {
+            program_loads_ident_matching(body, matches_ident)
+                || program_loads_ident_matching(default, matches_ident)
+        }
+        Opcode::ListComp(spec) | Opcode::SetComp(spec) => {
+            program_loads_ident_matching(&spec.iter, matches_ident)
+                || spec.vars.iter().any(|name| matches_ident(name))
+                || program_loads_ident_matching(&spec.expr, matches_ident)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|program| program_loads_ident_matching(program, matches_ident))
+        }
+        Opcode::DictComp(spec) => {
+            program_loads_ident_matching(&spec.iter, matches_ident)
+                || spec.vars.iter().any(|name| matches_ident(name))
+                || program_loads_ident_matching(&spec.key, matches_ident)
+                || program_loads_ident_matching(&spec.val, matches_ident)
+                || spec
+                    .cond
+                    .as_ref()
+                    .is_some_and(|program| program_loads_ident_matching(program, matches_ident))
+        }
+        Opcode::PatchEval(patch) => {
+            program_loads_ident_matching(&patch.root_prog, matches_ident)
+                || patch.ops.iter().any(|op| {
+                    patch_path_loads_ident_matching(&op.path, matches_ident)
+                        || match &op.val {
+                            CompiledPatchVal::Replace(program) => {
+                                program_loads_ident_matching(program, matches_ident)
+                            }
+                            CompiledPatchVal::Delete => false,
+                        }
+                        || op.cond.as_ref().is_some_and(|program| {
+                            program_loads_ident_matching(program, matches_ident)
+                        })
+                })
+        }
+        Opcode::UpdateBatchEval(update) => {
+            program_loads_ident_matching(&update.root_prog, matches_ident)
+                || patch_path_loads_ident_matching(&update.selector, matches_ident)
+                || update.ops.iter().any(|op| {
+                    patch_path_loads_ident_matching(&op.path, matches_ident)
+                        || match &op.val {
+                            CompiledPatchVal::Replace(program) => {
+                                program_loads_ident_matching(program, matches_ident)
+                            }
+                            CompiledPatchVal::Delete => false,
+                        }
+                        || op.cond.as_ref().is_some_and(|program| {
+                            program_loads_ident_matching(program, matches_ident)
+                        })
+                })
+        }
+        Opcode::Match(compiled)
+        | Opcode::DeepMatchAll(compiled)
+        | Opcode::DeepMatchFirst(compiled) => {
+            matches!(
+                &compiled.scrutinee,
+                MatchScrutinee::Program(program) if program_loads_ident_matching(program, matches_ident)
+            ) || compiled
+                .guards
+                .iter()
+                .chain(compiled.bodies.iter())
+                .any(|program| program_loads_ident_matching(program, matches_ident))
+        }
+        _ => false,
+    }
+}
+
+fn patch_path_loads_ident_matching(
+    path: &[CompiledPathStep],
+    matches_ident: impl Fn(&str) -> bool + Copy,
+) -> bool {
+    path.iter().any(|step| match step {
+        CompiledPathStep::DynIndex(program) | CompiledPathStep::WildcardFilter(program) => {
+            program_loads_ident_matching(program, matches_ident)
+        }
+        _ => false,
+    })
+}
+
 /// A compiled `patch` expression: a root document program plus a list of
 /// individual field-mutation operations applied in order.
 ///

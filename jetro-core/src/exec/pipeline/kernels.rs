@@ -976,6 +976,12 @@ impl BodyKernel {
     pub fn classify(prog: &crate::vm::Program) -> Self {
         use crate::vm::Opcode;
         let ops = prog.ops.as_ref();
+        if ops
+            .iter()
+            .any(|op| matches!(op, Opcode::BindLamCurrent { .. }))
+        {
+            return Self::Generic;
+        }
         if ops.len() == 1 {
             if let Some(lit) = trivial_lit(&ops[0]) {
                 return match &ops[0] {

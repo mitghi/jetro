@@ -196,10 +196,12 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let key = match kernel {
-                Some(kernel) => {
-                    super::eval_view_key_with_vm(&item, Some(stage_kernels.get(kernel)?), vm)?
-                }
-                None => super::eval_view_key_scalar(&item)?,
+                Some(kernel) => super::eval_structural_view_key_with_vm(
+                    &item,
+                    Some(stage_kernels.get(kernel)?),
+                    vm,
+                )?,
+                None => super::eval_structural_view_key_with_vm(&item, None, vm)?,
             };
             if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))

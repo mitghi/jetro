@@ -121,6 +121,10 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
         Arg::Pos(e) => e,
         _ => return None,
     };
+    let capture_param = match expr {
+        Expr::Lambda { params, .. } if params.len() == 1 => Some(params[0].as_str()),
+        _ => None,
+    };
     let (base, steps) = match expr {
         Expr::Chain(b, s) => (b.as_ref(), s.as_slice()),
         _ => return None,
@@ -165,11 +169,26 @@ pub(super) fn try_decode_map_body(arg: &crate::parse::ast::Arg) -> Option<Plan> 
     let mut stages: Vec<Stage> = Vec::new();
     let (mut more_stages, more_exprs, sink) = decode_method_chain(trailing)?;
     stages.append(&mut more_stages);
+    if capture_param.is_some_and(|name| nested_plan_loads_identifier(&stages, &sink, name)) {
+        return None;
+    }
 
     let kernels = Stage::body_kernels(&stages);
     let mut plan = plan_with_exprs(stages, more_exprs, &kernels, sink);
     plan.source = source;
     Some(plan)
+}
+
+fn nested_plan_loads_identifier(stages: &[Stage], sink: &Sink, name: &str) -> bool {
+    stages
+        .iter()
+        .filter_map(Stage::body_program)
+        .any(|program| program_loads_identifier(program, name))
+        || !sink.can_run_with_receiver_only(|program| !program_loads_identifier(program, name))
+}
+
+fn program_loads_identifier(program: &crate::vm::Program, name: &str) -> bool {
+    crate::vm::program_loads_ident_matching(program, |ident| ident == name)
 }
 
 fn trailing_has_collection_operator(trailing: &[crate::parse::ast::Step]) -> bool {
@@ -557,10 +576,7 @@ fn literal_arg_value(arg: &crate::parse::ast::Arg) -> Option<Val> {
 }
 
 // Constructs the terminal `Sink` for `id`, handling count predicates, numeric reducers, and positional selects.
-fn terminal_sink_for_id(
-    id: BuiltinId,
-    args: &[crate::parse::ast::Arg],
-) -> Option<Sink> {
+fn terminal_sink_for_id(id: BuiltinId, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
     if let Some(sink) = predicate_sink_for_id(id, args) {
         return Some(sink);
     }
@@ -576,9 +592,7 @@ fn terminal_sink_for_id(
         }
         BuiltinSinkAccumulator::Count => match args {
             [] => Sink::count_builtin_id(id),
-            [arg] => {
-                Sink::count_predicate_builtin_id(id, compile_subexpr(arg)?, raw_arg_expr(arg))
-            }
+            [arg] => Sink::count_predicate_builtin_id(id, compile_subexpr(arg)?, raw_arg_expr(arg)),
             _ => None,
         },
         BuiltinSinkAccumulator::Numeric => {
@@ -603,10 +617,7 @@ fn terminal_sink_for_id(
     }
 }
 
-fn predicate_sink_for_id(
-    id: BuiltinId,
-    args: &[crate::parse::ast::Arg],
-) -> Option<Sink> {
+fn predicate_sink_for_id(id: BuiltinId, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };
@@ -617,10 +628,7 @@ fn predicate_sink_for_id(
     )?))
 }
 
-fn membership_sink_for_id(
-    id: BuiltinId,
-    args: &[crate::parse::ast::Arg],
-) -> Option<Sink> {
+fn membership_sink_for_id(id: BuiltinId, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };
@@ -632,10 +640,7 @@ fn membership_sink_for_id(
     )?))
 }
 
-fn arg_extreme_sink_for_id(
-    id: BuiltinId,
-    args: &[crate::parse::ast::Arg],
-) -> Option<Sink> {
+fn arg_extreme_sink_for_id(id: BuiltinId, args: &[crate::parse::ast::Arg]) -> Option<Sink> {
     let [arg] = args else {
         return None;
     };

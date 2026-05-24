@@ -32,6 +32,23 @@ pub(crate) fn classify_sub_kernels(
         .into()
 }
 
+fn classify_sub_kernels_with_ctx(
+    progs: &[Arc<Program>],
+    ctx: &VarCtx,
+) -> Arc<[crate::exec::pipeline::BodyKernel]> {
+    progs
+        .iter()
+        .map(|p| {
+            if !ctx.is_empty() && crate::vm::program_loads_ident_matching(p, |name| ctx.has(name)) {
+                crate::exec::pipeline::BodyKernel::Generic
+            } else {
+                crate::exec::pipeline::BodyKernel::classify(p)
+            }
+        })
+        .collect::<Vec<_>>()
+        .into()
+}
+
 /// Compile-time variable scope used by the `Compiler` to decide whether an
 /// identifier refers to a bound variable or a built-in/field name.
 #[derive(Clone, Default)]
@@ -62,6 +79,10 @@ impl VarCtx {
     /// Return `true` if `name` is currently in scope as a bound variable.
     fn has(&self, name: &str) -> bool {
         self.known.iter().any(|k| k.as_ref() == name)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.known.is_empty()
     }
 }
 
@@ -581,7 +602,7 @@ impl Compiler {
                             Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
                         })
                         .collect();
-                    let sub_kernels = classify_sub_kernels(&sub_progs);
+                    let sub_kernels = classify_sub_kernels_with_ctx(&sub_progs, ctx);
                     let call = Arc::new(CompiledCall {
                         method: BuiltinMethod::from_name(name.as_str()),
                         name: Arc::from(name.as_str()),
@@ -598,7 +619,7 @@ impl Compiler {
                             Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_sub(e, ctx)),
                         })
                         .collect();
-                    let sub_kernels = classify_sub_kernels(&sub_progs);
+                    let sub_kernels = classify_sub_kernels_with_ctx(&sub_progs, ctx);
                     let call = Arc::new(CompiledCall {
                         method: BuiltinMethod::Unknown,
                         name: Arc::from(name.as_str()),
@@ -705,7 +726,7 @@ impl Compiler {
                 Arg::Pos(e) | Arg::Named(_, e) => Arc::new(Self::compile_lambda_or_expr(e, ctx)),
             })
             .collect();
-        let sub_kernels = classify_sub_kernels(&sub_progs);
+        let sub_kernels = classify_sub_kernels_with_ctx(&sub_progs, ctx);
         CompiledCall {
             method,
             name: Arc::from(name),

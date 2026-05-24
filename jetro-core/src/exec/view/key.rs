@@ -59,6 +59,19 @@ impl ViewKey {
         }
     }
 
+    pub(super) fn from_structural_owned(value: Val) -> Self {
+        match value {
+            Val::Null => Self::Null,
+            Val::Bool(value) => Self::Bool(value),
+            Val::Int(value) => Self::Int(value),
+            Val::Float(value) => Self::Float(value.to_bits()),
+            Val::Str(value) => Self::Str(value),
+            value => Self::Owned(Arc::from(
+                crate::util::val_to_structural_key(&value).as_str(),
+            )),
+        }
+    }
+
     /// Constructs a key from a borrowed view, serialising compound values by
     /// traversing child views instead of materialising the subtree into `Val`.
     pub(super) fn from_value_view<'a, V>(view: &V) -> Option<Self>
@@ -68,6 +81,17 @@ impl ViewKey {
         Self::from_view(view.scalar()).or_else(|| {
             let mut out = String::new();
             write_json_view(view, &mut out)?;
+            Some(Self::Owned(Arc::from(out)))
+        })
+    }
+
+    pub(super) fn from_structural_value_view<'a, V>(view: &V) -> Option<Self>
+    where
+        V: ValueView<'a> + 'a,
+    {
+        Self::from_view(view.scalar()).or_else(|| {
+            let mut out = String::new();
+            write_structural_view_key(view, &mut out)?;
             Some(Self::Owned(Arc::from(out)))
         })
     }
@@ -84,4 +108,64 @@ impl ViewKey {
             Self::Str(value) | Self::Owned(value) => value,
         }
     }
+}
+
+fn write_structural_view_key<'a, V>(view: &V, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Null => out.push_str("z:null"),
+        JsonView::Bool(value) => {
+            out.push_str("b:");
+            out.push_str(if value { "1" } else { "0" });
+        }
+        JsonView::Int(value) => {
+            out.push_str("n:");
+            out.push_str(&(value as f64).to_bits().to_string());
+        }
+        JsonView::UInt(value) => {
+            out.push_str("n:");
+            let number = if value <= i64::MAX as u64 {
+                value as i64 as f64
+            } else {
+                value as f64
+            };
+            out.push_str(&number.to_bits().to_string());
+        }
+        JsonView::Float(value) => {
+            out.push_str("n:");
+            let number = if value == 0.0 { 0.0 } else { value };
+            out.push_str(&number.to_bits().to_string());
+        }
+        JsonView::Str(value) => {
+            out.push_str("s:");
+            out.push_str(&value.len().to_string());
+            out.push(':');
+            out.push_str(value);
+        }
+        JsonView::ArrayLen(_) => {
+            out.push_str("a[");
+            for item in view.array_iter()? {
+                write_structural_view_key(&item, out)?;
+                out.push(',');
+            }
+            out.push(']');
+        }
+        JsonView::ObjectLen(_) => {
+            out.push_str("o{");
+            let mut fields = view.object_iter()?.collect::<Vec<_>>();
+            fields.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            for (key, value) in fields {
+                out.push_str(&key.len().to_string());
+                out.push(':');
+                out.push_str(&key);
+                out.push('=');
+                write_structural_view_key(&value, out)?;
+                out.push(',');
+            }
+            out.push('}');
+        }
+    }
+    Some(())
 }

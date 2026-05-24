@@ -46,8 +46,8 @@ mod val_stage_flow;
 pub(crate) use capability::{
     index_from_end, view_capabilities, view_never_materializing_stage_capability,
     view_never_materializing_stage_range, view_prefix_capabilities, SourceAccessMode,
-    SourceCapabilities, ViewInputMode, ViewMaterialization, ViewMembershipTarget,
-    ViewOutputMode, ViewSinkCapability, ViewStageCapability,
+    SourceCapabilities, ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+    ViewSinkCapability, ViewStageCapability,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
@@ -55,22 +55,23 @@ pub(crate) use common::{
     num_finalise, num_fold, num_fold_f64, num_fold_i64, ordered_by_key_cmp, walk_field_chain,
     BoundedKeySorter, OrderedKeySorter,
 };
+pub(crate) use ir::SingleElementSelection;
 #[cfg(test)]
 pub use ir::Strategy;
 pub use ir::{
     FallbackBoundary, LateProjection, PayloadDemand, PhysicalExecPath, Plan, Position, SinkDemand,
     StageStrategy,
 };
-pub(crate) use ir::SingleElementSelection;
-pub use kernels::{eval_cmp_op, BodyKernel};
 #[cfg(test)]
 pub(crate) use kernels::eval_kernel;
-pub(crate) use kernels::{
-    eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm, ArraySelector,
-    CollectLayout, NestedPlanKernel, ObjectKernel, ViewKernelValue, view_kernel_view_to_owned,
-};
 #[cfg(test)]
 pub(crate) use kernels::eval_view_kernel;
+pub use kernels::{eval_cmp_op, BodyKernel};
+pub(crate) use kernels::{
+    eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm,
+    view_kernel_view_to_owned, ArraySelector, CollectLayout, NestedPlanKernel, ObjectKernel,
+    ViewKernelValue,
+};
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerOp,
@@ -566,6 +567,12 @@ fn classify_stage_kernels(stages: &[Stage], exprs: &[Option<Arc<Expr>>]) -> Vec<
         .iter()
         .enumerate()
         .map(|(idx, stage)| {
+            if stage
+                .body_program()
+                .is_some_and(program_binds_lambda_current)
+            {
+                return stage.body_kernel();
+            }
             exprs
                 .get(idx)
                 .and_then(|expr| expr.as_ref())
@@ -574,6 +581,13 @@ fn classify_stage_kernels(stages: &[Stage], exprs: &[Option<Arc<Expr>>]) -> Vec<
                 .unwrap_or_else(|| stage.body_kernel())
         })
         .collect()
+}
+
+fn program_binds_lambda_current(program: &crate::vm::Program) -> bool {
+    program
+        .ops
+        .iter()
+        .any(|op| matches!(op, crate::vm::Opcode::BindLamCurrent { .. }))
 }
 
 impl Pipeline {
@@ -615,11 +629,9 @@ impl Pipeline {
 fn is_scalar_direct_collect(stages: &[Stage], sink: &Sink) -> bool {
     matches!(sink, Sink::Collect)
         && !stages.is_empty()
-        && stages.iter().all(|stage| {
-            stage
-                .builtin_id()
-                .is_some_and(dispatches_scalar_direct)
-        })
+        && stages
+            .iter()
+            .all(|stage| stage.builtin_id().is_some_and(dispatches_scalar_direct))
 }
 
 #[cfg(test)]
@@ -981,7 +993,10 @@ mod tests {
         use crate::builtins::{BuiltinPipelineLowering, BuiltinSinkAccumulator};
         use crate::vm::{Opcode, Program};
 
-        let program = Arc::new(Program::new(vec![Opcode::PushCurrent], "<sink-factory-test>"));
+        let program = Arc::new(Program::new(
+            vec![Opcode::PushCurrent],
+            "<sink-factory-test>",
+        ));
         for (method, _, _) in all_method_entries() {
             if pipeline_lowering(BuiltinId::from_method(method))
                 != Some(BuiltinPipelineLowering::TerminalSink)
@@ -1013,8 +1028,9 @@ mod tests {
                         )
                         .is_some()
                 }
-                BuiltinSinkAccumulator::Numeric => Sink::numeric_builtin(method, None, None)
-                    .is_some(),
+                BuiltinSinkAccumulator::Numeric => {
+                    Sink::numeric_builtin(method, None, None).is_some()
+                }
                 BuiltinSinkAccumulator::SelectOne(_) => {
                     Sink::terminal_builtin(method).is_some()
                         && Sink::select_many_builtin(method, 1).is_some()
@@ -1764,8 +1780,8 @@ mod tests {
         use serde_json::json;
 
         let query = "$.books.map(items.filter(price > 20).map(isbn).last()).last()";
-        let p = lower_query("$.books.map(items.filter(price > 20).map(isbn).last()).last()")
-            .unwrap();
+        let p =
+            lower_query("$.books.map(items.filter(price > 20).map(isbn).last()).last()").unwrap();
         let demand = p.payload_demand();
 
         assert_eq!(demand_paths(&demand.scan_need), Vec::<String>::new());
@@ -1778,7 +1794,9 @@ mod tests {
             Some(LateProjection { prefix_len: 0, .. })
         ));
         assert!(matches!(
-            p.late_projection.as_ref().map(|projection| &projection.kernel),
+            p.late_projection
+                .as_ref()
+                .map(|projection| &projection.kernel),
             Some(BodyKernel::NestedPlan(_))
         ));
         assert_pipeline_matches_vm(
@@ -1918,7 +1936,9 @@ mod tests {
         let p = lower_query("$.books.flat_map(tags).last()").unwrap();
         assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
-            p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+            p.stages[0]
+                .builtin_id()
+                .map(crate::builtins::registry::streaming_boundary),
             Some(crate::builtins::BuiltinStreamingBoundary::Expanding)
         );
     }
@@ -1928,7 +1948,9 @@ mod tests {
         let p = lower_query("$.books.drop_while(price < 20).map(isbn).first()").unwrap();
         assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
-            p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+            p.stages[0]
+                .builtin_id()
+                .map(crate::builtins::registry::streaming_boundary),
             Some(crate::builtins::BuiltinStreamingBoundary::PrefixState)
         );
     }
@@ -1942,7 +1964,9 @@ mod tests {
             let p = lower_query(query).unwrap();
             assert_eq!(p.fallback_boundary, FallbackBoundary::None, "{query}");
             assert_eq!(
-                p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+                p.stages[0]
+                    .builtin_id()
+                    .map(crate::builtins::registry::streaming_boundary),
                 Some(crate::builtins::BuiltinStreamingBoundary::FullInputState),
                 "{query}"
             );
@@ -3002,7 +3026,9 @@ mod tests {
     #[test]
     fn predicate_terminal_sinks_keep_conservative_source_demand() {
         let any = lower_query("$.xs.any(@ > 2)").unwrap();
-        assert!(matches!(any.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::Any));
+        assert!(
+            matches!(any.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::Any)
+        );
         assert_eq!(
             any.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All
@@ -3018,7 +3044,9 @@ mod tests {
         );
 
         let all = lower_query("$.xs.all(@ > 2)").unwrap();
-        assert!(matches!(all.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::All));
+        assert!(
+            matches!(all.sink, Sink::Predicate(ref spec) if spec.op == BuiltinPredicateSink::All)
+        );
         assert_eq!(
             all.source_demand().chain.pull,
             crate::plan::demand::PullDemand::All

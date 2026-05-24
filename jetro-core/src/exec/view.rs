@@ -2733,6 +2733,23 @@ where
     }
 }
 
+fn eval_structural_view_key_with_vm<'a, V>(
+    item: &V,
+    kernel: Option<&pipeline::BodyKernel>,
+    vm: &mut VM,
+) -> Option<ViewKey>
+where
+    V: ValueView<'a> + 'a,
+{
+    match kernel {
+        Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_structural_value_view(&view),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_structural_owned(value)),
+        },
+        None => ViewKey::from_structural_value_view(item),
+    }
+}
+
 fn eval_view_key_scalar<'a, V>(item: &V) -> Option<ViewKey>
 where
     V: ValueView<'a> + 'a,
