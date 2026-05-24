@@ -1367,6 +1367,19 @@ where
     {
         return None;
     }
+    if let Some(0) =
+        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
+    {
+        return run_sorted_winners_suffix(
+            Vec::<FrontierRow<V>>::new(),
+            body,
+            suffix_start,
+            collect_suffix,
+            cache,
+            base_env,
+            vm,
+        );
+    }
 
     let mut sorter =
         pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
@@ -1386,7 +1399,29 @@ where
         return Some(Err(err));
     }
 
-    let winners = sorter.finish();
+    run_sorted_winners_suffix(
+        sorter.finish(),
+        body,
+        suffix_start,
+        collect_suffix,
+        cache,
+        base_env,
+        vm,
+    )
+}
+
+fn run_sorted_winners_suffix<'a, V>(
+    winners: Vec<FrontierRow<V>>,
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+    collect_suffix: Option<TerminalCollectPlan>,
+    cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
     if let Some(collect_plan) = collect_suffix {
         return run_sorted_rows_terminal_collect_suffix(
             winners,
@@ -4005,6 +4040,41 @@ mod tests {
             assert_eq!(source.array_iter_reads(), 0, "{method:?}");
             assert_eq!(source.materialize_reads(), 0, "{method:?}");
         }
+    }
+
+    #[test]
+    fn sort_stage_skips_empty_prefix_without_iterating_rows() {
+        let source = CountingView::root(&[3, 1, 2]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::Sort(crate::exec::pipeline::SortSpec::identity()),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
