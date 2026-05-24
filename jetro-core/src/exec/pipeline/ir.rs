@@ -1055,13 +1055,18 @@ impl Stage {
         kernel: Option<&BodyKernel>,
     ) -> Option<ViewStageCapability> {
         if let Stage::StringBuiltin { method, value } = self {
-            if *method == crate::builtins::BuiltinMethod::Split {
-                return Some(ViewStageCapability::Split {
-                    sep: Arc::clone(value),
+            let id = BuiltinId::from_method(*method);
+            if let Some(op) = crate::builtins::registry::view_string_expand(id) {
+                return Some(ViewStageCapability::StringExpand {
+                    op,
+                    arg: Some(Arc::clone(value)),
                 });
             }
         }
         if let Stage::Builtin(call) = self {
+            if let Some(op) = crate::builtins::registry::view_string_expand(call.id()) {
+                return Some(ViewStageCapability::StringExpand { op, arg: None });
+            }
             if call.is_view_projection() {
                 return Some(ViewStageCapability::BuiltinProjection {
                     id: call.id(),

@@ -766,6 +766,8 @@ pub struct BuiltinSpec {
     pub view_value_projection: Option<BuiltinViewValueProjection>,
     /// View-native object/path projection operation, if any.
     pub view_object_projection: Option<BuiltinViewObjectProjection>,
+    /// View-native string expansion operation, if any.
+    pub view_string_expand: Option<BuiltinViewStringExpand>,
     /// Raw-byte JSON scalar operation, if any.
     pub raw_json_scalar: Option<BuiltinRawJsonScalar>,
     /// Object-lambda operation behavior, if any.
@@ -1039,6 +1041,23 @@ pub enum BuiltinViewObjectProjection {
     Pick,
     /// Drop selected keys.
     Omit,
+}
+
+/// View-native string expansion operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewStringExpand {
+    /// Split on a supplied separator.
+    Split,
+    /// Split on line boundaries.
+    Lines,
+    /// Split on whitespace.
+    Words,
+    /// Emit Unicode scalar values as strings.
+    Chars,
+    /// Emit Unicode scalar values re-encoded as UTF-8 strings.
+    CharsOf,
+    /// Emit UTF-8 bytes as integers.
+    Bytes,
 }
 
 impl BuiltinViewObjectProjection {
@@ -2533,6 +2552,7 @@ impl BuiltinSpec {
             view_scalar_op: None,
             view_value_projection: None,
             view_object_projection: None,
+            view_string_expand: None,
             raw_json_scalar: None,
             object_lambda: None,
             string_pair_stage: None,
@@ -2628,6 +2648,13 @@ impl BuiltinSpec {
     /// Attaches a view-native object/path projection operation.
     fn view_object_projection(mut self, projection: BuiltinViewObjectProjection) -> Self {
         self.view_object_projection = Some(projection);
+        self.view_native = true;
+        self
+    }
+
+    /// Attaches a view-native string expansion operation.
+    fn view_string_expand(mut self, expand: BuiltinViewStringExpand) -> Self {
+        self.view_string_expand = Some(expand);
         self.view_native = true;
         self
     }

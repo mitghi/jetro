@@ -962,7 +962,7 @@ where
             pipeline::ViewStageCapability::Compact
             | pipeline::ViewStageCapability::RemoveValue(_)
             | pipeline::ViewStageCapability::FlatMap { .. }
-            | pipeline::ViewStageCapability::Split { .. }
+            | pipeline::ViewStageCapability::StringExpand { .. }
             | pipeline::ViewStageCapability::Distinct { .. }
             | pipeline::ViewStageCapability::KeyedReduce { .. } => return None,
         }
@@ -988,7 +988,7 @@ fn deterministic_cardinality_supported(
         pipeline::ViewStageCapability::Compact
         | pipeline::ViewStageCapability::RemoveValue(_)
         | pipeline::ViewStageCapability::FlatMap { .. }
-        | pipeline::ViewStageCapability::Split { .. }
+        | pipeline::ViewStageCapability::StringExpand { .. }
         | pipeline::ViewStageCapability::Distinct { .. }
         | pipeline::ViewStageCapability::KeyedReduce { .. } => false,
     })
@@ -1046,7 +1046,7 @@ fn deterministic_prefix_forces_empty(
             pipeline::ViewStageCapability::Compact
             | pipeline::ViewStageCapability::RemoveValue(_)
             | pipeline::ViewStageCapability::FlatMap { .. }
-            | pipeline::ViewStageCapability::Split { .. }
+            | pipeline::ViewStageCapability::StringExpand { .. }
             | pipeline::ViewStageCapability::Distinct { .. }
             | pipeline::ViewStageCapability::KeyedReduce { .. } => return false,
         }
@@ -1733,6 +1733,72 @@ where
     Some(Ok(()))
 }
 
+fn drive_owned_child<'a, V, F>(
+    value: Val,
+    stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    drive_view_item(
+        FrontierRow::Owned(value),
+        stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn drive_owned_children<'a, V, F, I>(
+    values: I,
+    stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+    I: IntoIterator<Item = Val>,
+{
+    for value in values {
+        let flow = match drive_owned_child(
+            value,
+            stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        )? {
+            Ok(flow) => flow,
+            Err(err) => return Some(Err(err)),
+        };
+        if matches!(flow, ViewDriveFlow::Stop) {
+            return Some(Ok(ViewDriveFlow::Stop));
+        }
+    }
+    Some(Ok(ViewDriveFlow::Continue))
+}
+
 /// Recursively applies one view stage to `item`, then advances to the next stage.
 /// When all stages have been applied it calls `observe`. `FlatMap` stages expand
 /// into child views, each of which is recursed independently.
@@ -1832,30 +1898,87 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
-    if let pipeline::ViewStageCapability::Split { sep } = stage {
+    if let pipeline::ViewStageCapability::StringExpand { op, arg } = stage {
         let JsonView::Str(value) = item.scalar() else {
             return Some(Ok(ViewDriveFlow::Continue));
         };
-        for part in value.split(sep.as_ref()) {
-            let flow = match drive_view_item(
-                FrontierRow::Owned(Val::Str(Arc::from(part))),
-                stage_idx + 1,
-                stages,
-                op_state,
-                stage_kernels,
-                source_demand,
-                emitted_outputs,
-                vm,
-                observe,
-            )? {
-                Ok(flow) => flow,
-                Err(err) => return Some(Err(err)),
-            };
-            if matches!(flow, ViewDriveFlow::Stop) {
-                return Some(Ok(ViewDriveFlow::Stop));
+        match op {
+            crate::builtins::BuiltinViewStringExpand::Split => {
+                let sep = arg.as_deref().unwrap_or("");
+                return drive_owned_children(
+                    value.split(sep).map(|part| Val::Str(Arc::from(part))),
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    vm,
+                    observe,
+                );
+            }
+            crate::builtins::BuiltinViewStringExpand::Lines => {
+                return drive_owned_children(
+                    value.lines().map(|part| Val::Str(Arc::from(part))),
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    vm,
+                    observe,
+                );
+            }
+            crate::builtins::BuiltinViewStringExpand::Words => {
+                return drive_owned_children(
+                    value
+                        .split_whitespace()
+                        .map(|part| Val::Str(Arc::from(part))),
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    vm,
+                    observe,
+                );
+            }
+            crate::builtins::BuiltinViewStringExpand::Chars
+            | crate::builtins::BuiltinViewStringExpand::CharsOf => {
+                return drive_owned_children(
+                    value.chars().map(|ch| {
+                        let mut buf = [0u8; 4];
+                        Val::Str(Arc::from(ch.encode_utf8(&mut buf)))
+                    }),
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    vm,
+                    observe,
+                );
+            }
+            crate::builtins::BuiltinViewStringExpand::Bytes => {
+                return drive_owned_children(
+                    value
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| Val::Int(i64::from(*byte))),
+                    stage_idx + 1,
+                    stages,
+                    op_state,
+                    stage_kernels,
+                    source_demand,
+                    emitted_outputs,
+                    vm,
+                    observe,
+                );
             }
         }
-        return Some(Ok(ViewDriveFlow::Continue));
     }
 
     match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels, vm)? {
@@ -5124,6 +5247,52 @@ mod tests {
     }
 
     #[test]
+    fn view_string_expanders_stream_tape_strings_without_materializing_receivers() {
+        fn expanded_count(method: crate::builtins::BuiltinMethod) -> Val {
+            let tape =
+                crate::data::tape::TapeData::parse(br#"["a b","c\nd","xy"]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::None,
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+            out
+        }
+
+        assert_eq!(
+            expanded_count(crate::builtins::BuiltinMethod::Lines),
+            Val::Int(4)
+        );
+        assert_eq!(
+            expanded_count(crate::builtins::BuiltinMethod::Words),
+            Val::Int(5)
+        );
+        assert_eq!(
+            expanded_count(crate::builtins::BuiltinMethod::Chars),
+            Val::Int(8)
+        );
+        assert_eq!(
+            expanded_count(crate::builtins::BuiltinMethod::CharsOf),
+            Val::Int(8)
+        );
+        assert_eq!(
+            expanded_count(crate::builtins::BuiltinMethod::Bytes),
+            Val::Int(8)
+        );
+    }
+
+    #[test]
     fn view_map_streams_owned_rows_into_later_stages() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let body = PipelineBody {
@@ -5512,8 +5681,7 @@ mod tests {
 
     #[test]
     fn view_replace_stages_transform_tape_strings_without_materializing_receivers() {
-        let tape =
-            crate::data::tape::TapeData::parse(br#"["foo foo","bar"]"#.to_vec()).unwrap();
+        let tape = crate::data::tape::TapeData::parse(br#"["foo foo","bar"]"#.to_vec()).unwrap();
 
         for (method, expected) in [
             (
@@ -5664,7 +5832,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(serde_json::Value::from(out), serde_json::json!(["ababab", ""]));
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["ababab", ""])
+        );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
@@ -5790,7 +5961,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(serde_json::Value::from(out), serde_json::json!(["cba", "xé"]));
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["cba", "xé"])
+        );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
@@ -5905,27 +6079,45 @@ mod tests {
         }
 
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::Capitalize, br#"["hello WORLD"]"#),
+            run(
+                crate::builtins::BuiltinMethod::Capitalize,
+                br#"["hello WORLD"]"#
+            ),
             serde_json::json!(["Hello world"])
         );
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::TitleCase, br#"["hello WORLD"]"#),
+            run(
+                crate::builtins::BuiltinMethod::TitleCase,
+                br#"["hello WORLD"]"#
+            ),
             serde_json::json!(["Hello World"])
         );
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::SnakeCase, br#"["Hello world_test"]"#),
+            run(
+                crate::builtins::BuiltinMethod::SnakeCase,
+                br#"["Hello world_test"]"#
+            ),
             serde_json::json!(["hello_world_test"])
         );
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::KebabCase, br#"["Hello world_test"]"#),
+            run(
+                crate::builtins::BuiltinMethod::KebabCase,
+                br#"["Hello world_test"]"#
+            ),
             serde_json::json!(["hello-world-test"])
         );
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::CamelCase, br#"["Hello world_test"]"#),
+            run(
+                crate::builtins::BuiltinMethod::CamelCase,
+                br#"["Hello world_test"]"#
+            ),
             serde_json::json!(["helloWorldTest"])
         );
         assert_eq!(
-            run(crate::builtins::BuiltinMethod::PascalCase, br#"["Hello world_test"]"#),
+            run(
+                crate::builtins::BuiltinMethod::PascalCase,
+                br#"["Hello world_test"]"#
+            ),
             serde_json::json!(["HelloWorldTest"])
         );
         assert_eq!(

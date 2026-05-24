@@ -4,14 +4,15 @@
 //! the view execution path decide, per stage, whether it can operate on borrowed
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
-use crate::builtins::{
-    BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
-    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
-};
 use crate::builtins::registry::BuiltinId;
 pub(crate) use crate::builtins::BuiltinViewInputMode as ViewInputMode;
 pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
 pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
+use crate::builtins::{
+    BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
+    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinViewStringExpand,
+};
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
@@ -533,10 +534,12 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the body kernel.
         kernel: usize,
     },
-    /// Split a string row into owned string rows.
-    Split {
-        /// Separator string.
-        sep: std::sync::Arc<str>,
+    /// Expand a string row into owned rows without materialising the receiver.
+    StringExpand {
+        /// Expansion operation declared by builtin metadata.
+        op: BuiltinViewStringExpand,
+        /// Optional static string argument, used by `split`.
+        arg: Option<std::sync::Arc<str>>,
     },
     /// TakeWhile stage: passes views while the predicate at `kernel` is truthy.
     TakeWhile {
@@ -606,7 +609,7 @@ impl ViewStageCapability {
             Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
-            Self::Split { .. } => BuiltinViewStage::FlatMap,
+            Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
@@ -623,7 +626,10 @@ impl ViewStageCapability {
 
     /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
     pub(crate) fn output_mode(&self) -> ViewOutputMode {
-        self.view_stage().output_mode()
+        match self {
+            Self::StringExpand { .. } => ViewOutputMode::EmitsOwnedValue,
+            _ => self.view_stage().output_mode(),
+        }
     }
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
@@ -633,7 +639,7 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        !matches!(self, Self::Split { .. }) && self.view_stage().preserves_cardinality()
+        !matches!(self, Self::StringExpand { .. }) && self.view_stage().preserves_cardinality()
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.
@@ -925,25 +931,21 @@ mod tests {
             remove,
             ViewStageCapability::RemoveValue(Val::Int(2))
         ));
-        assert!(
-            Stage::Map(
-                Arc::new(crate::vm::Program::new(Vec::new(), "")),
-                BuiltinViewStage::Map
-            )
-            .view_capability(11, Some(&BodyKernel::Const(Val::Int(1))))
-            .is_some()
-        );
-        assert!(
-            Stage::FlatMap(
-                Arc::new(crate::vm::Program::new(Vec::new(), "")),
-                BuiltinViewStage::FlatMap
-            )
-            .view_capability(
-                12,
-                Some(&BodyKernel::Array(Arc::from([BodyKernel::Current]))),
-            )
-            .is_some()
-        );
+        assert!(Stage::Map(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            BuiltinViewStage::Map
+        )
+        .view_capability(11, Some(&BodyKernel::Const(Val::Int(1))))
+        .is_some());
+        assert!(Stage::FlatMap(
+            Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            BuiltinViewStage::FlatMap
+        )
+        .view_capability(
+            12,
+            Some(&BodyKernel::Array(Arc::from([BodyKernel::Current]))),
+        )
+        .is_some());
         let cancel = cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).unwrap();
         assert!(Stage::Reverse(cancel).view_capability(9, None).is_none());
     }

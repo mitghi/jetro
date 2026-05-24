@@ -20,7 +20,7 @@ use crate::{
         BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
         BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStringPairStage,
         BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
-        BuiltinViewValueProjection,
+        BuiltinViewStringExpand, BuiltinViewValueProjection,
     },
     data::{
         context::EvalError,
@@ -845,6 +845,13 @@ pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectP
         .and_then(|method| method.spec().view_object_projection)
 }
 
+/// Return the view-native string expansion operation for builtin `id`, if any.
+#[inline]
+pub(crate) fn view_string_expand(id: BuiltinId) -> Option<BuiltinViewStringExpand> {
+    id.method()
+        .and_then(|method| method.spec().view_string_expand)
+}
+
 /// Return concrete whole-value borrowed-view projection metadata for builtin `id`.
 #[inline]
 pub(crate) fn view_value_projection(id: BuiltinId) -> Option<BuiltinViewValueProjection> {
@@ -1012,10 +1019,12 @@ where
 {
     if let Some(method) = id.method() {
         if view_scalar_projection(id) {
-            return Some(match apply_json_view_scalar_hook(method, args, view.scalar()) {
-                Some(value) => ViewProjectionResult::Owned(value),
-                None => ViewProjectionResult::View(view),
-            });
+            return Some(
+                match apply_json_view_scalar_hook(method, args, view.scalar()) {
+                    Some(value) => ViewProjectionResult::Owned(value),
+                    None => ViewProjectionResult::View(view),
+                },
+            );
         }
     }
     if let Some(projection) = view_value_projection(id) {
@@ -2188,6 +2197,11 @@ mod tests {
                 BuiltinMethod::FilterValues,
                 BuiltinRuntimeHook::StreamAndBarrier,
             ),
+            (BuiltinMethod::Lines, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Words, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Chars, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::CharsOf, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Bytes, BuiltinRuntimeHook::StreamAndBarrier),
         ];
         expected.sort_by_key(|(method, _)| *method as u16);
         assert_eq!(registered, expected);
@@ -2199,6 +2213,7 @@ mod tests {
                 assert!(
                     spec.view_stage.is_some()
                         || spec.object_lambda.is_some()
+                        || spec.view_string_expand.is_some()
                         || matches!(
                             spec.lowering,
                             Some(
@@ -3441,6 +3456,7 @@ mod tests {
                         spec.nullary_stage.is_some()
                             || spec.view_object_projection.is_some()
                             || spec.view_value_projection.is_some()
+                            || spec.view_string_expand.is_some()
                             || spec.view_scalar,
                         "{method:?} has Nullary lowering but no nullary/view execution metadata"
                     );
@@ -3682,8 +3698,14 @@ mod tests {
             (BuiltinMethod::Matches, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::IndexOf, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::LastIndexOf, BuiltinViewScalarOp::StringArg),
-            (BuiltinMethod::ContainsAny, BuiltinViewScalarOp::StringVecArg),
-            (BuiltinMethod::ContainsAll, BuiltinViewScalarOp::StringVecArg),
+            (
+                BuiltinMethod::ContainsAny,
+                BuiltinViewScalarOp::StringVecArg,
+            ),
+            (
+                BuiltinMethod::ContainsAll,
+                BuiltinViewScalarOp::StringVecArg,
+            ),
             (BuiltinMethod::Ceil, BuiltinViewScalarOp::NumericNoArg),
             (BuiltinMethod::Floor, BuiltinViewScalarOp::NumericNoArg),
             (BuiltinMethod::Round, BuiltinViewScalarOp::NumericNoArg),
@@ -3969,7 +3991,10 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
-            (BuiltinMethod::CamelCase, BuiltinViewValueProjection::CamelCase),
+            (
+                BuiltinMethod::CamelCase,
+                BuiltinViewValueProjection::CamelCase,
+            ),
             (
                 BuiltinMethod::Capitalize,
                 BuiltinViewValueProjection::Capitalize,
@@ -3989,7 +4014,10 @@ mod tests {
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
-            (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
+            (
+                BuiltinMethod::KebabCase,
+                BuiltinViewValueProjection::KebabCase,
+            ),
             (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
             (
@@ -4011,7 +4039,10 @@ mod tests {
                 BuiltinViewValueProjection::ReverseStr,
             ),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
-            (BuiltinMethod::SnakeCase, BuiltinViewValueProjection::SnakeCase),
+            (
+                BuiltinMethod::SnakeCase,
+                BuiltinViewValueProjection::SnakeCase,
+            ),
             (
                 BuiltinMethod::StripPrefix,
                 BuiltinViewValueProjection::StripPrefix,
@@ -4020,7 +4051,10 @@ mod tests {
                 BuiltinMethod::StripSuffix,
                 BuiltinViewValueProjection::StripSuffix,
             ),
-            (BuiltinMethod::TitleCase, BuiltinViewValueProjection::TitleCase),
+            (
+                BuiltinMethod::TitleCase,
+                BuiltinViewValueProjection::TitleCase,
+            ),
             (
                 BuiltinMethod::ToBase64,
                 BuiltinViewValueProjection::ToBase64,
@@ -6039,7 +6073,10 @@ mod tests {
             None
         );
         for (method, projection) in [
-            (BuiltinMethod::CamelCase, BuiltinViewValueProjection::CamelCase),
+            (
+                BuiltinMethod::CamelCase,
+                BuiltinViewValueProjection::CamelCase,
+            ),
             (
                 BuiltinMethod::Capitalize,
                 BuiltinViewValueProjection::Capitalize,
@@ -6058,14 +6095,23 @@ mod tests {
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
-            (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
+            (
+                BuiltinMethod::KebabCase,
+                BuiltinViewValueProjection::KebabCase,
+            ),
             (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
             ),
-            (BuiltinMethod::SnakeCase, BuiltinViewValueProjection::SnakeCase),
-            (BuiltinMethod::TitleCase, BuiltinViewValueProjection::TitleCase),
+            (
+                BuiltinMethod::SnakeCase,
+                BuiltinViewValueProjection::SnakeCase,
+            ),
+            (
+                BuiltinMethod::TitleCase,
+                BuiltinViewValueProjection::TitleCase,
+            ),
             (
                 BuiltinMethod::ToBase64,
                 BuiltinViewValueProjection::ToBase64,

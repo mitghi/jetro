@@ -215,6 +215,6 @@ where
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,
-        pipeline::ViewStageCapability::Split { .. } => None,
+        pipeline::ViewStageCapability::StringExpand { .. } => None,
     }
 }

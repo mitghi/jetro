@@ -15,7 +15,7 @@ use super::{
     BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
     BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp,
-    BuiltinViewStage,
+    BuiltinViewStage, BuiltinViewStringExpand,
 };
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
@@ -1204,6 +1204,8 @@ impl Builtin for Split {
             2.0,
             1.0,
         ))
+        .view_native()
+        .view_string_expand(BuiltinViewStringExpand::Split)
         .lowering(BuiltinPipelineLowering::StringArg)
     }
     #[inline]
@@ -1239,85 +1241,99 @@ impl Builtin for Split {
 }
 
 #[inline]
-fn expand_element_spec() -> BuiltinSpec {
+fn expand_element_spec(expand: BuiltinViewStringExpand) -> BuiltinSpec {
     BuiltinSpec::new(
         BuiltinCategory::StreamingExpand,
         BuiltinCardinality::Expanding,
     )
+    .view_string_expand(expand)
     .cost(10.0)
     .demand_law(BuiltinDemandLaw::FlatMapLike)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::Expanding)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::Expanding,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::Nullary)
     .element()
 }
 
-/// `lines` — split string on newlines.
-pub(crate) struct Lines;
-impl Builtin for Lines {
-    const METHOD: BuiltinMethod = BuiltinMethod::Lines;
-    const NAME: &'static str = "lines";
-    fn spec() -> BuiltinSpec {
-        expand_element_spec()
-    }
-    #[inline]
-    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
-        Some(super::lines_apply(recv).unwrap_or_else(|| recv.clone()))
-    }
-}
-
-/// `words` — whitespace-tokenise string.
-pub(crate) struct Words;
-impl Builtin for Words {
-    const METHOD: BuiltinMethod = BuiltinMethod::Words;
-    const NAME: &'static str = "words";
-    fn spec() -> BuiltinSpec {
-        expand_element_spec()
-    }
-    #[inline]
-    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
-        Some(super::words_apply(recv).unwrap_or_else(|| recv.clone()))
+#[inline]
+fn expand_string_stage_flow(
+    item: crate::data::value::Val,
+    apply: impl FnOnce(&crate::data::value::Val) -> Option<crate::data::value::Val>,
+) -> crate::exec::pipeline::StageFlow<crate::data::value::Val> {
+    match apply(&item) {
+        Some(crate::data::value::Val::Arr(items)) => crate::exec::pipeline::StageFlow::Expand(
+            std::sync::Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()),
+        ),
+        Some(other) => crate::exec::pipeline::StageFlow::Continue(other),
+        None => crate::exec::pipeline::StageFlow::Continue(item),
     }
 }
 
-/// `chars` — string char iterator.
-pub(crate) struct Chars;
-impl Builtin for Chars {
-    const METHOD: BuiltinMethod = BuiltinMethod::Chars;
-    const NAME: &'static str = "chars";
-    fn spec() -> BuiltinSpec {
-        expand_element_spec()
+#[inline]
+fn expand_string_barrier(
+    buf: &mut Vec<crate::data::value::Val>,
+    apply: impl Fn(&crate::data::value::Val) -> Option<crate::data::value::Val>,
+) {
+    let mut out = Vec::with_capacity(buf.len());
+    for value in std::mem::take(buf) {
+        match apply(&value) {
+            Some(crate::data::value::Val::Arr(items)) => out
+                .extend(std::sync::Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone())),
+            Some(other) => out.push(other),
+            None => out.push(value),
+        }
     }
-    #[inline]
-    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
-        Some(super::chars_apply(recv).unwrap_or_else(|| recv.clone()))
-    }
+    *buf = out;
 }
 
-/// `chars_of` — chars at given positions.
-pub(crate) struct CharsOf;
-impl Builtin for CharsOf {
-    const METHOD: BuiltinMethod = BuiltinMethod::CharsOf;
-    const NAME: &'static str = "chars_of";
-    fn spec() -> BuiltinSpec {
-        expand_element_spec()
-    }
-    #[inline]
-    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
-        Some(super::chars_of_apply(recv).unwrap_or_else(|| recv.clone()))
-    }
+macro_rules! string_expand_builtin {
+    ($ty:ident, $method:ident, $name:literal, $expand:ident, $apply:path) => {
+        pub(crate) struct $ty;
+        impl Builtin for $ty {
+            const METHOD: BuiltinMethod = BuiltinMethod::$method;
+            const NAME: &'static str = $name;
+            fn spec() -> BuiltinSpec {
+                expand_element_spec(BuiltinViewStringExpand::$expand)
+            }
+            #[inline]
+            fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+                Some($apply(recv).unwrap_or_else(|| recv.clone()))
+            }
+            #[inline]
+            fn apply_stream(
+                _ctx: &mut super::builtin::StreamCtx<'_, '_>,
+                item: crate::data::value::Val,
+                _body: Option<&crate::vm::Program>,
+            ) -> Result<
+                crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+                crate::data::context::EvalError,
+            > {
+                Ok(expand_string_stage_flow(item, $apply))
+            }
+            #[inline]
+            fn apply_barrier(
+                _ctx: &mut super::builtin::BarrierCtx<'_>,
+                buf: &mut Vec<crate::data::value::Val>,
+                _body: Option<&crate::vm::Program>,
+            ) -> Option<Result<(), crate::data::context::EvalError>> {
+                expand_string_barrier(buf, $apply);
+                Some(Ok(()))
+            }
+        }
+    };
 }
 
-/// `bytes` — string byte iterator.
-pub(crate) struct Bytes;
-impl Builtin for Bytes {
-    const METHOD: BuiltinMethod = BuiltinMethod::Bytes;
-    const NAME: &'static str = "bytes";
-    fn spec() -> BuiltinSpec {
-        expand_element_spec()
-    }
-    #[inline]
-    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
-        Some(super::bytes_of_apply(recv).unwrap_or_else(|| recv.clone()))
-    }
-}
+string_expand_builtin!(Lines, Lines, "lines", Lines, super::lines_apply);
+string_expand_builtin!(Words, Words, "words", Words, super::words_apply);
+string_expand_builtin!(Chars, Chars, "chars", Chars, super::chars_apply);
+string_expand_builtin!(CharsOf, CharsOf, "chars_of", CharsOf, super::chars_of_apply);
+string_expand_builtin!(Bytes, Bytes, "bytes", Bytes, super::bytes_of_apply);
 
 /// `find_first(pred)` — terminal expr-arg returning first match with First demand.
 pub(crate) struct FindFirst;
