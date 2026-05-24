@@ -139,6 +139,38 @@ where
         }
     }
 
+    fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
+        match self {
+            Self::Borrowed(view) => Some(Box::new(
+                view.object_iter()?
+                    .map(|(key, value)| (key, Self::Borrowed(value))),
+            )),
+            Self::Owned(Val::Obj(map)) => {
+                let entries = map
+                    .iter()
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect::<Vec<_>>();
+                Some(Box::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, Self::Owned(value))),
+                ))
+            }
+            Self::Owned(Val::ObjSmall(pairs)) => {
+                let entries = pairs
+                    .iter()
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect::<Vec<_>>();
+                Some(Box::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, Self::Owned(value))),
+                ))
+            }
+            Self::Owned(_) => None,
+        }
+    }
+
     fn materialize(&self) -> Val {
         match self {
             Self::Borrowed(view) => view.materialize(),
@@ -1181,11 +1213,57 @@ fn view_matches_value<'a, V>(item: &V, target: &Val) -> bool
 where
     V: ValueView<'a> + 'a,
 {
-    let target_view = JsonView::from_val(target);
-    if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
-        return crate::util::json_vals_eq(item.scalar(), target_view);
+    view_deep_eq_value(item, target)
+        .unwrap_or_else(|| crate::util::vals_deep_eq(&item.materialize(), target))
+}
+
+fn view_deep_eq_value<'a, V>(item: &V, target: &Val) -> Option<bool>
+where
+    V: ValueView<'a> + 'a,
+{
+    match (item.scalar(), target) {
+        (JsonView::ArrayLen(len), _) => {
+            let Some(target_items) = target.as_vals() else {
+                return Some(false);
+            };
+            if len != target_items.len() {
+                return Some(false);
+            }
+            let mut item_iter = item.array_iter()?;
+            for target_item in target_items.iter() {
+                let item = item_iter.next()?;
+                if !view_deep_eq_value(&item, target_item)? {
+                    return Some(false);
+                }
+            }
+            Some(item_iter.next().is_none())
+        }
+        (JsonView::ObjectLen(len), _) => {
+            let Some(target_len) = target_object_len(target) else {
+                return Some(false);
+            };
+            if len != target_len {
+                return Some(false);
+            }
+            let item_iter = item.object_iter()?;
+            for (key, value) in item_iter {
+                let target_value = target.get(key.as_ref())?;
+                if !view_deep_eq_value(&value, target_value)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        }
+        (view, _) => Some(crate::util::json_vals_eq(view, JsonView::from_val(target))),
     }
-    crate::util::vals_deep_eq(&item.materialize(), target)
+}
+
+fn target_object_len(target: &Val) -> Option<usize> {
+    match target {
+        Val::Obj(map) => Some(map.len()),
+        Val::ObjSmall(pairs) => Some(pairs.len()),
+        _ => None,
+    }
 }
 
 fn view_arg_extreme_key_with_vm<'a, V>(
@@ -2533,7 +2611,7 @@ mod tests {
     use crate::compile::compiler::Compiler;
     use crate::data::context::Env;
     use crate::data::value::Val;
-    use crate::data::view::{ValView, ValueView};
+    use crate::data::view::{TapeView, ValView, ValueView};
     use crate::exec::pipeline::{
         eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget,
         NumOp, PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, SourceCapabilities,
@@ -4567,11 +4645,12 @@ mod tests {
 
     #[test]
     fn view_membership_sinks_match_compound_values_deeply() {
-        let rows = Val::from(&serde_json::json!([
-            {"id": 1, "tags": ["a"]},
-            {"id": 2, "tags": ["b", "c"]},
-            ["nested", 3]
-        ]));
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"tags":["a"]},{"id":2,"tags":["b","c"]},["nested",3]]"#.to_vec(),
+        )
+        .unwrap();
+        let rows = TapeView::root(&tape);
+        tape.reset_materialized_subtrees();
 
         let object_body = PipelineBody {
             stages: Vec::new(),
@@ -4586,10 +4665,9 @@ mod tests {
             stage_kernels: Vec::new(),
             sink_kernels: Vec::new(),
         };
-        let object_out = super::run_full(ValView::new(&rows), &object_body)
-            .unwrap()
-            .unwrap();
+        let object_out = super::run_full(rows, &object_body).unwrap().unwrap();
         assert_eq!(object_out, Val::Bool(true));
+        assert_eq!(tape.materialized_subtrees(), 0);
 
         let array_body = PipelineBody {
             sink: Sink::Membership(MembershipSinkSpec {
@@ -4598,10 +4676,9 @@ mod tests {
             }),
             ..object_body
         };
-        let array_out = super::run_full(ValView::new(&rows), &array_body)
-            .unwrap()
-            .unwrap();
+        let array_out = super::run_full(rows, &array_body).unwrap().unwrap();
         assert_eq!(array_out, Val::Int(2));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]

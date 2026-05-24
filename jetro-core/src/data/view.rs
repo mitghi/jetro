@@ -329,6 +329,10 @@ pub(crate) trait ValueView<'a>: Clone {
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
     /// Return an iterator over the elements of an array node from the end.
     fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>>;
+    /// Return an iterator over object fields without materialising field values.
+    fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
+        None
+    }
     /// Fully materialise the current node as a `Val`, allocating as needed.
     fn materialize(&self) -> Val;
 }
@@ -717,6 +721,45 @@ impl<'a> ValueView<'a> for ValView<'a> {
     }
 
     #[inline]
+    fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
+        match self {
+            Self::Borrowed(Val::Obj(map)) => Some(Box::new(
+                map.iter()
+                    .map(|(key, value)| (Arc::clone(key), Self::Borrowed(value))),
+            )),
+            Self::Borrowed(Val::ObjSmall(pairs)) => Some(Box::new(
+                pairs
+                    .iter()
+                    .map(|(key, value)| (Arc::clone(key), Self::Borrowed(value))),
+            )),
+            Self::Borrowed(_) => None,
+            Self::Owned(Val::Obj(map)) => {
+                let entries = map
+                    .iter()
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect::<Vec<_>>();
+                Some(Box::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, Self::Owned(value))),
+                ))
+            }
+            Self::Owned(Val::ObjSmall(pairs)) => {
+                let entries = pairs
+                    .iter()
+                    .map(|(key, value)| (Arc::clone(key), value.clone()))
+                    .collect::<Vec<_>>();
+                Some(Box::new(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, Self::Owned(value))),
+                ))
+            }
+            Self::Owned(_) => None,
+        }
+    }
+
+    #[inline]
     fn materialize(&self) -> Val {
         self.value().clone()
     }
@@ -941,6 +984,23 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+        Some(Box::new(TapeObjectIter {
+            tape,
+            remaining: len,
+            cur: *idx + 1,
+        }))
+    }
+
+    #[inline]
     fn materialize(&self) -> Val {
         match self {
             Self::Node { tape, idx } => {
@@ -951,6 +1011,35 @@ impl<'a> ValueView<'a> for TapeView<'a> {
             }
             Self::Missing => Val::Null,
         }
+    }
+}
+
+struct TapeObjectIter<'a> {
+    tape: &'a crate::data::tape::TapeData,
+    remaining: usize,
+    cur: usize,
+}
+
+impl<'a> Iterator for TapeObjectIter<'a> {
+    type Item = (Arc<str>, TapeView<'a>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let key = Arc::from(self.tape.str_at(self.cur));
+        self.cur += 1;
+        let value_idx = self.cur;
+        self.cur += self.tape.span(self.cur);
+        self.remaining -= 1;
+        Some((
+            key,
+            TapeView::Node {
+                tape: self.tape,
+                idx: value_idx,
+            },
+        ))
     }
 }
 
@@ -1200,6 +1289,23 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
     }
 
     #[inline]
+    fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return None;
+        };
+        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
+            return None;
+        };
+        Some(Box::new(TapeScratchObjectIter {
+            tape,
+            remaining: len,
+            cur: *idx + 1,
+        }))
+    }
+
+    #[inline]
     fn materialize(&self) -> Val {
         match self {
             Self::Node { tape, idx } => {
@@ -1210,6 +1316,36 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
         }
     }
 }
+
+struct TapeScratchObjectIter<'a> {
+    tape: &'a crate::data::tape::TapeScratch,
+    remaining: usize,
+    cur: usize,
+}
+
+impl<'a> Iterator for TapeScratchObjectIter<'a> {
+    type Item = (Arc<str>, TapeScratchView<'a>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let key = Arc::from(self.tape.str_at(self.cur));
+        self.cur += 1;
+        let value_idx = self.cur;
+        self.cur += self.tape.span(self.cur);
+        self.remaining -= 1;
+        Some((
+            key,
+            TapeScratchView::Node {
+                tape: self.tape,
+                idx: value_idx,
+            },
+        ))
+    }
+}
+
 struct TapeScratchArrayIter<'a> {
     tape: &'a crate::data::tape::TapeScratch,
     remaining: usize,
