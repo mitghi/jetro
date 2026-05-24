@@ -282,7 +282,7 @@ fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
         return None;
     };
 
-    if keys.len() <= 4 {
+    if keys.len() <= 4 || keys.len().saturating_mul(4) <= len {
         let mut out = indexmap::IndexMap::with_capacity(keys.len());
         for key in keys {
             if let Some(mut value_idx) = tape.object_field_value(idx, key.as_ref()) {
@@ -1786,6 +1786,34 @@ mod tests {
 
         assert!(tape.has_object_field_index(0));
         assert_eq!(serde_json::Value::from(picked), json!({"k11": 11, "k2": 2}));
+    }
+
+    #[test]
+    fn tape_pick_keys_uses_indexed_lookup_for_sparse_multi_key_pick() {
+        use super::TapeView;
+
+        let fields = (0..40)
+            .map(|n| format!(r#""k{n}":{n}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let tape = crate::data::tape::TapeData::parse(format!("{{{fields}}}").into_bytes())
+            .expect("parse");
+        let keys = [
+            Arc::from("k39"),
+            Arc::from("k20"),
+            Arc::from("k10"),
+            Arc::from("k5"),
+            Arc::from("k1"),
+        ];
+
+        assert!(!tape.has_object_field_index(0));
+        let picked = TapeView::root(&tape).pick_keys(&keys).expect("pick");
+
+        assert!(tape.has_object_field_index(0));
+        assert_eq!(
+            serde_json::Value::from(picked),
+            json!({"k39": 39, "k20": 20, "k10": 10, "k5": 5, "k1": 1})
+        );
     }
 
     #[test]
