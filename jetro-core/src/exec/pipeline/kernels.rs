@@ -9,11 +9,10 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     apply_view_projection, by_name as builtin_by_name, count_sink_accepts_predicate, expr_stage,
-    numeric_reducer, view_projection, view_projection_receiver_field_demand, ViewProjectionResult,
+    numeric_reducer, view_projection, view_projection_receiver_field_demand,
+    view_projection_result_field_path, ViewProjectionResult,
 };
-use crate::builtins::{
-    BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage, BuiltinMethod, PathSeg,
-};
+use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, write_json_view, ValView, ValueView};
@@ -176,28 +175,7 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
 }
 
 fn view_result_field_path(receiver: &BodyKernel, call: &BuiltinCall) -> Option<Vec<Arc<str>>> {
-    if call.method != BuiltinMethod::GetPath {
-        return None;
-    }
-    let mut keys = receiver.field_path_keys()?;
-    keys.extend(field_only_path_args(&call.args)?);
-    Some(keys)
-}
-
-fn field_only_path_args(args: &BuiltinArgs) -> Option<Vec<Arc<str>>> {
-    let path = match args {
-        BuiltinArgs::Str(path) => crate::builtins::parse_path_segs(path.as_ref()),
-        BuiltinArgs::Path(path) => path.to_vec(),
-        _ => return None,
-    };
-    let mut keys = Vec::with_capacity(path.len());
-    for segment in path {
-        match segment {
-            PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
-            PathSeg::Index(_) => return None,
-        }
-    }
-    Some(keys)
+    view_projection_result_field_path(call.id(), &call.args, &receiver.field_path_keys()?)
 }
 
 fn nested_array_child_field_demand(source: &BodyKernel, child: &BodyKernel) -> FieldDemand {

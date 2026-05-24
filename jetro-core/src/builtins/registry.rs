@@ -946,6 +946,28 @@ pub(crate) fn view_projection_receiver_field_demand(
     view_projection_field_demand(id, args).map(|demand| prefix_field_demand(receiver_path, demand))
 }
 
+/// Return the field-only result path produced by applying a view-native
+/// object/path projection to `receiver_path`.
+///
+/// This is intentionally metadata-only: executors can use it to carry direct
+/// path facts through tape, byte, or owned-value lowering without re-matching
+/// builtin names.
+#[inline]
+pub(crate) fn view_projection_result_field_path(
+    id: BuiltinId,
+    args: &BuiltinArgs,
+    receiver_path: &[Arc<str>],
+) -> Option<Vec<Arc<str>>> {
+    match view_object_projection(id)? {
+        BuiltinViewObjectProjection::GetPath => {
+            let mut keys = receiver_path.to_vec();
+            keys.extend(field_only_path_arg_keys(args)?);
+            Some(keys)
+        }
+        _ => None,
+    }
+}
+
 fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand {
     if prefix.is_empty() {
         return demand;
@@ -972,6 +994,26 @@ fn field_demand_for_paths(paths: &[Arc<str>]) -> Option<FieldDemand> {
         demand = demand.merge(path_demand);
     }
     Some(demand)
+}
+
+fn field_only_path_arg_keys(args: &BuiltinArgs) -> Option<Vec<Arc<str>>> {
+    let path = match args {
+        BuiltinArgs::Str(path) => super::parse_path_segs(path.as_ref()),
+        BuiltinArgs::Path(path) => path.to_vec(),
+        _ => return None,
+    };
+    path_field_keys(&path)
+}
+
+fn path_field_keys(path: &[crate::builtins::PathSeg]) -> Option<Vec<Arc<str>>> {
+    let mut keys = Vec::with_capacity(path.len());
+    for segment in path {
+        match segment {
+            crate::builtins::PathSeg::Field(key) => keys.push(Arc::from(key.as_str())),
+            crate::builtins::PathSeg::Index(_) => return None,
+        }
+    }
+    Some(keys)
 }
 
 fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
@@ -4072,6 +4114,34 @@ mod tests {
             BuiltinId::from_method(BuiltinMethod::Pick),
             &BuiltinArgs::StrVec(vec![Arc::from("open")])
         ));
+    }
+
+    #[test]
+    fn registry_drives_view_projection_result_paths() {
+        let receiver = vec![Arc::from("profile")];
+        let result = view_projection_result_field_path(
+            BuiltinId::from_method(BuiltinMethod::GetPath),
+            &BuiltinArgs::Str(Arc::from("author.name")),
+            &receiver,
+        )
+        .expect("get_path result path");
+        assert_eq!(
+            result.iter().map(|key| key.as_ref()).collect::<Vec<_>>(),
+            vec!["profile", "author", "name"]
+        );
+
+        assert!(view_projection_result_field_path(
+            BuiltinId::from_method(BuiltinMethod::GetPath),
+            &BuiltinArgs::Str(Arc::from("items[0].price")),
+            &receiver,
+        )
+        .is_none());
+        assert!(view_projection_result_field_path(
+            BuiltinId::from_method(BuiltinMethod::HasKey),
+            &BuiltinArgs::Str(Arc::from("author")),
+            &receiver,
+        )
+        .is_none());
     }
 
     #[test]
