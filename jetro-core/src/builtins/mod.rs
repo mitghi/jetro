@@ -1283,6 +1283,13 @@ pub struct BuiltinSinkSpec {
 }
 
 impl BuiltinSinkSpec {
+    /// Returns which portion of each input row this sink needs for its
+    /// accumulator, excluding optional predicate/projection programs.
+    #[inline]
+    pub(crate) const fn value_need(self) -> BuiltinSinkValueNeed {
+        self.demand.value_need()
+    }
+
     /// Returns the argument-count contract for pipeline terminal lowering.
     #[inline]
     pub(crate) const fn pipeline_arity(self) -> BuiltinPipelineArity {
@@ -1674,6 +1681,16 @@ pub enum BuiltinSinkDemand {
         /// Which aspect of the last row's value is needed.
         value: BuiltinSinkValueNeed,
     },
+}
+
+impl BuiltinSinkDemand {
+    /// Returns which part of each input row this demand reads.
+    #[inline]
+    pub(crate) const fn value_need(self) -> BuiltinSinkValueNeed {
+        match self {
+            Self::All { value, .. } | Self::First { value } | Self::Last { value } => value,
+        }
+    }
 }
 
 /// Which portion of each row value the sink algorithm actually reads.

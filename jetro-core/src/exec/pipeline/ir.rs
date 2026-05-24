@@ -25,7 +25,7 @@ use crate::builtins::{
     BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinCardinality, BuiltinExprPayload,
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinViewStage,
+    BuiltinSinkValueNeed, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -249,16 +249,23 @@ impl Sink {
     /// Returns true when this sink is a plain count reducer with no predicate or projection.
     #[inline]
     pub(crate) fn is_plain_count_reducer(&self) -> bool {
-        matches!(self, Sink::Reducer(spec) if spec.is_plain_count())
+        matches!(
+            self,
+            Sink::Reducer(spec)
+                if spec.sink_programs().next().is_none()
+                    && self
+                        .builtin_sink_spec()
+                        .is_some_and(|sink| sink.value_need() == BuiltinSinkValueNeed::None)
+        )
     }
 
     /// Return the scalar builtin equivalent to applying this plain sink to one
     /// already-selected JSON value.
     pub(crate) fn scalar_call_for_plain_sink(&self) -> Option<BuiltinCall> {
-        let spec = self.reducer_spec()?;
-        if !spec.is_plain_count() {
+        if !self.is_plain_count_reducer() {
             return None;
         }
+        let spec = self.reducer_spec()?;
         direct_scalar_for_plain_sink(spec.id()?)
     }
 
@@ -2079,7 +2086,7 @@ mod tests {
 
         assert!(matches!(
             Sink::count_builtin(BuiltinMethod::Count),
-            Some(Sink::Reducer(spec)) if spec.is_plain_count()
+            Some(sink) if sink.is_plain_count_reducer()
         ));
         assert!(Sink::count_builtin(BuiltinMethod::Sum).is_none());
 

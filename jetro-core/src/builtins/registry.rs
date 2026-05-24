@@ -2325,6 +2325,34 @@ mod tests {
     }
 
     #[test]
+    fn sink_specs_expose_accumulator_value_need() {
+        assert_eq!(
+            builtin_sink(BuiltinId::COUNT).unwrap().value_need(),
+            BuiltinSinkValueNeed::None
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::from_method(BuiltinMethod::Len))
+                .unwrap()
+                .value_need(),
+            BuiltinSinkValueNeed::None
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::SUM).unwrap().value_need(),
+            BuiltinSinkValueNeed::Numeric
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::FIRST).unwrap().value_need(),
+            BuiltinSinkValueNeed::Whole
+        );
+        assert_eq!(
+            builtin_sink(BuiltinId::APPROX_COUNT_DISTINCT)
+                .unwrap()
+                .value_need(),
+            BuiltinSinkValueNeed::Whole
+        );
+    }
+
+    #[test]
     fn registry_sink_demands_match_all_sink_accumulators() {
         for (method, _, _) in all_method_entries() {
             let Some(sink) = method.spec().sink else {

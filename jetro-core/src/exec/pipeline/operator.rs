@@ -295,16 +295,6 @@ impl ReducerSpec {
         })
     }
 
-    /// Constructs a numeric reducer from builtin metadata.
-    #[cfg(test)]
-    pub fn numeric(
-        method: BuiltinMethod,
-        projection: Option<Arc<Program>>,
-        projection_expr: Option<Arc<Expr>>,
-    ) -> Option<Self> {
-        Self::numeric_id(BuiltinId::from_method(method), projection, projection_expr)
-    }
-
     /// Returns the `NumOp` for a `Numeric` reducer, or `None` for `Count`.
     pub fn numeric_op(&self) -> Option<NumOp> {
         match self.op {
@@ -316,11 +306,6 @@ impl ReducerSpec {
     /// Returns true for any count reducer, including predicate-bearing count sinks.
     pub(crate) fn is_count(&self) -> bool {
         self.op == ReducerOp::Count
-    }
-
-    /// Returns true for a count reducer with no predicate or projection.
-    pub(crate) fn is_plain_count(&self) -> bool {
-        self.is_count() && self.predicate.is_none() && self.projection.is_none()
     }
 
     /// Iterates over embedded programs (predicate then projection) for kernel enumeration.
@@ -401,15 +386,6 @@ mod tests {
         assert!(
             ArgExtremeSinkSpec::from_method(BuiltinMethod::Count, empty_program(), None).is_none()
         );
-    }
-
-    #[test]
-    fn reducer_spec_classifies_plain_count() {
-        assert!(ReducerSpec::count().is_plain_count());
-        assert!(!ReducerSpec::count_with_predicate(empty_program(), None).is_plain_count());
-        assert!(!ReducerSpec::numeric(BuiltinMethod::Sum, None, None)
-            .unwrap()
-            .is_plain_count());
     }
 
     #[test]
