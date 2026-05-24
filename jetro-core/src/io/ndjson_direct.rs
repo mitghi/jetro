@@ -1481,12 +1481,10 @@ fn direct_projection_value_from_kernel(
     if let Some(value) = kernel.literal_value() {
         return Some(NdjsonDirectProjectionValue::Literal(value));
     }
+    if let Some(path) = kernel_to_physical_path(kernel) {
+        return Some(NdjsonDirectProjectionValue::Path(path));
+    }
     match kernel {
-        crate::exec::pipeline::BodyKernel::Current
-        | crate::exec::pipeline::BodyKernel::FieldRead(_)
-        | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
-            NdjsonDirectProjectionValue::Path(kernel_to_physical_path(kernel)?),
-        ),
         crate::exec::pipeline::BodyKernel::BuiltinCall { .. } => {
             if let Some(value) = direct_array_element_scalar_projection_from_kernel(kernel) {
                 return Some(value);
