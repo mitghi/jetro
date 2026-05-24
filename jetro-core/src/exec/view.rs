@@ -1824,7 +1824,9 @@ where
     V: FrontierBaseView<'a>,
 {
     let mut plan = reducer_stage::plan(body)?;
-    if !body.suffix_can_run_with_materialized_source_env(plan.consumed_stages) {
+    if !body.suffix_starts_with_direct_view_projection(plan.consumed_stages)
+        && !body.suffix_can_run_with_materialized_source_env(plan.consumed_stages)
+    {
         return None;
     }
     let source_demand = body.pull_demand();
@@ -2356,11 +2358,22 @@ fn run_materialized_suffix(
 fn run_materialized_value_suffix(
     body: &pipeline::PipelineBody,
     consumed_stages: usize,
-    boundary_value: Val,
+    mut boundary_value: Val,
     cache: Option<&dyn pipeline::PipelineData>,
     base_env: &Env,
     vm: &mut VM,
 ) -> Result<Val, EvalError> {
+    let mut consumed_stages = consumed_stages;
+    while let Some(pipeline::Stage::Builtin(call)) = body.stages.get(consumed_stages) {
+        if !call.is_view_projection() {
+            break;
+        }
+        boundary_value = call
+            .try_apply(&boundary_value)?
+            .or_else(|| call.apply(&boundary_value))
+            .ok_or_else(|| EvalError(format!("{:?}: unsupported projection", call.method)))?;
+        consumed_stages += 1;
+    }
     if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
         return Ok(boundary_value);
     }
@@ -5287,5 +5300,43 @@ mod tests {
         assert_eq!(out_json, serde_json::json!({"1": 1, "2": 2, "3": 3}));
         assert_eq!(source.scalar_reads(), 4);
         assert_eq!(source.materialize_reads(), 4);
+    }
+
+    #[test]
+    fn reducing_group_by_keys_avoids_group_value_materialization() {
+        let source = CountingView::root(&[1, 2, 1, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::ExprBuiltin {
+                    method: crate::builtins::BuiltinMethod::GroupBy,
+                    body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Keys,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!(["1", "2", "3"]));
+        assert_eq!(source.scalar_reads(), 4);
+        assert_eq!(source.materialize_reads(), 0);
     }
 }

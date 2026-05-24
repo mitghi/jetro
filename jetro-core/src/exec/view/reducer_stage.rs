@@ -5,7 +5,10 @@
 use indexmap::IndexMap;
 
 use crate::{
-    builtins::BuiltinKeyedReducer, data::value::Val, data::view::ValueView, exec::pipeline,
+    builtins::{BuiltinArgs, BuiltinKeyedReducer, BuiltinMethod},
+    data::value::Val,
+    data::view::ValueView,
+    exec::pipeline,
 };
 
 use super::key::ViewKey;
@@ -31,13 +34,23 @@ pub(super) enum ViewStageReducer {
         kind: BuiltinKeyedReducer,
         /// Index into `stage_kernels` for the key-extraction kernel.
         kernel: usize,
+        /// Whether downstream suffixes need full values or only the object key set.
+        value_need: KeyedValueNeed,
         /// Accumulated entries, one per distinct key observed so far.
         entries: IndexMap<ViewKey, KeyedEntry>,
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KeyedValueNeed {
+    Full,
+    KeysOnly,
+}
+
 /// The per-key accumulated value for a `ViewStageReducer::Keyed` operation.
 pub(super) enum KeyedEntry {
+    /// Key presence only; enough for suffixes such as `.keys()`.
+    KeyOnly,
     /// Running count for `count_by`.
     Count(i64),
     /// Last-seen materialised value for `index_by`.
@@ -48,11 +61,15 @@ pub(super) enum KeyedEntry {
 
 impl ViewStageReducer {
     // Constructs a `ViewStageReducer` from a `KeyedReduce` capability; returns `None` for all other variants.
-    fn from_capability(capability: pipeline::ViewStageCapability) -> Option<Self> {
+    fn from_capability(
+        capability: pipeline::ViewStageCapability,
+        value_need: KeyedValueNeed,
+    ) -> Option<Self> {
         match capability {
             pipeline::ViewStageCapability::KeyedReduce { kind, kernel } => Some(Self::Keyed {
                 kind,
                 kernel,
+                value_need,
                 entries: IndexMap::new(),
             }),
             _ => None,
@@ -75,6 +92,7 @@ impl ViewStageReducer {
             Self::Keyed {
                 kind,
                 kernel,
+                value_need,
                 entries,
             } => {
                 let key =
@@ -91,18 +109,28 @@ impl ViewStageReducer {
                         }
                     },
                     BuiltinKeyedReducer::Index => {
-                        entries.insert(key, KeyedEntry::Value(item.materialize()));
+                        if matches!(value_need, KeyedValueNeed::KeysOnly) {
+                            entries.entry(key).or_insert(KeyedEntry::KeyOnly);
+                        } else {
+                            entries.insert(key, KeyedEntry::Value(item.materialize()));
+                        }
                     }
-                    BuiltinKeyedReducer::Group => match entries.entry(key) {
-                        indexmap::map::Entry::Occupied(mut entry) => {
-                            if let KeyedEntry::Group(items) = entry.get_mut() {
-                                items.push(item.materialize());
+                    BuiltinKeyedReducer::Group => {
+                        if matches!(value_need, KeyedValueNeed::KeysOnly) {
+                            entries.entry(key).or_insert(KeyedEntry::KeyOnly);
+                        } else {
+                            match entries.entry(key) {
+                                indexmap::map::Entry::Occupied(mut entry) => {
+                                    if let KeyedEntry::Group(items) = entry.get_mut() {
+                                        items.push(item.materialize());
+                                    }
+                                }
+                                indexmap::map::Entry::Vacant(entry) => {
+                                    entry.insert(KeyedEntry::Group(vec![item.materialize()]));
+                                }
                             }
                         }
-                        indexmap::map::Entry::Vacant(entry) => {
-                            entry.insert(KeyedEntry::Group(vec![item.materialize()]));
-                        }
-                    },
+                    }
                 }
                 Some(())
             }
@@ -118,6 +146,7 @@ impl ViewStageReducer {
                     .into_iter()
                     .map(|(key, entry)| {
                         let value = match entry {
+                            KeyedEntry::KeyOnly => Val::Null,
                             KeyedEntry::Count(count) => Val::Int(count),
                             KeyedEntry::Value(value) => value,
                             KeyedEntry::Group(items) => Val::arr(items),
@@ -141,9 +170,10 @@ pub(super) fn plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
         match capability.materialization() {
             pipeline::ViewMaterialization::Never => prefix.push(capability),
             pipeline::ViewMaterialization::StageFinalValue => {
+                let value_need = keyed_reducer_value_need(body, idx);
                 return Some(ReducingStagePlan {
                     prefix,
-                    reducer: ViewStageReducer::from_capability(capability)?,
+                    reducer: ViewStageReducer::from_capability(capability, value_need)?,
                     consumed_stages: idx + 1,
                 });
             }
@@ -151,4 +181,15 @@ pub(super) fn plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
         }
     }
     None
+}
+
+fn keyed_reducer_value_need(body: &pipeline::PipelineBody, reducer_stage: usize) -> KeyedValueNeed {
+    match body.stages.get(reducer_stage + 1) {
+        Some(pipeline::Stage::Builtin(call))
+            if call.method == BuiltinMethod::Keys && matches!(call.args, BuiltinArgs::None) =>
+        {
+            KeyedValueNeed::KeysOnly
+        }
+        _ => KeyedValueNeed::Full,
+    }
 }
