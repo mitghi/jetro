@@ -373,6 +373,10 @@ where
             project_kernel: None,
             ..
         } => Some(Val::Int(0)),
+        pipeline::ViewSinkCapability::Builtin {
+            accumulator: crate::builtins::BuiltinSinkAccumulator::SelectOne(_),
+            ..
+        } => Some(Val::Null),
         pipeline::ViewSinkCapability::Collect => Some(Val::arr(Vec::new())),
         pipeline::ViewSinkCapability::Nth { .. } => Some(Val::Null),
         pipeline::ViewSinkCapability::ArgExtreme { .. } => Some(Val::Null),
@@ -2773,6 +2777,33 @@ mod tests {
         assert_eq!(distinct_source.scalar_reads(), 1);
         assert_eq!(distinct_source.array_iter_reads(), 0);
         assert_eq!(distinct_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_empty_cardinality_builtin_selectors_skip_row_evaluation() {
+        for sink in [
+            Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            Sink::Terminal(crate::builtins::BuiltinMethod::Last),
+        ] {
+            let source = CountingView::root(&[1, 2, 3]);
+            let body = PipelineBody {
+                stages: vec![Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                )],
+                stage_exprs: Vec::new(),
+                sink,
+                stage_kernels: vec![BodyKernel::ConstBool(false)],
+                sink_kernels: Vec::new(),
+            };
+
+            let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+            assert_eq!(out, Val::Null);
+            assert_eq!(source.scalar_reads(), 1);
+            assert_eq!(source.array_iter_reads(), 0);
+            assert_eq!(source.materialize_reads(), 0);
+        }
     }
 
     #[test]
