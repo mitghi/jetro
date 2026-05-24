@@ -897,14 +897,18 @@ pub(crate) fn view_projection_field_demand(
     args: &BuiltinArgs,
 ) -> Option<FieldDemand> {
     match (view_object_projection(id)?, args) {
-        (
-            BuiltinViewObjectProjection::HasKey | BuiltinViewObjectProjection::Missing,
-            BuiltinArgs::Str(key),
-        ) => Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key)))),
-        (
-            BuiltinViewObjectProjection::Missing | BuiltinViewObjectProjection::Pick,
-            BuiltinArgs::StrVec(keys),
-        ) => Some(field_demand_for_keys(keys)),
+        (BuiltinViewObjectProjection::HasKey, BuiltinArgs::Str(key)) => {
+            Some(FieldDemand::Fields(FieldSet::single(Arc::clone(key))))
+        }
+        (BuiltinViewObjectProjection::Missing, BuiltinArgs::Str(path)) => {
+            path_field_demand(&super::parse_path_segs(path.as_ref()))
+        }
+        (BuiltinViewObjectProjection::Missing, BuiltinArgs::StrVec(keys)) => {
+            field_demand_for_paths(keys)
+        }
+        (BuiltinViewObjectProjection::Pick, BuiltinArgs::StrVec(keys)) => {
+            Some(field_demand_for_keys(keys))
+        }
         (
             BuiltinViewObjectProjection::GetPath | BuiltinViewObjectProjection::HasPath,
             BuiltinArgs::Str(path),
@@ -944,6 +948,16 @@ fn field_demand_for_keys(keys: &[Arc<str>]) -> FieldDemand {
         fields.insert(FieldPath::single(Arc::clone(key)));
     }
     FieldDemand::Fields(fields)
+}
+
+fn field_demand_for_paths(paths: &[Arc<str>]) -> Option<FieldDemand> {
+    let mut demand = FieldDemand::None;
+    for path in paths {
+        let path_demand =
+            path_field_demand(&super::parse_path_segs(path.as_ref())).unwrap_or(FieldDemand::Whole);
+        demand = demand.merge(path_demand);
+    }
+    Some(demand)
 }
 
 fn path_field_demand(path: &[crate::builtins::PathSeg]) -> Option<FieldDemand> {
@@ -1043,13 +1057,13 @@ where
             ViewProjectionResult::Owned(Val::Bool(view.has_key(key.as_ref()).unwrap_or(false))),
         ),
         (Some(BuiltinViewObjectProjection::Missing), BuiltinArgs::Str(key)) => {
-            let missing = view_path_missing(&view, key.as_ref());
+            let missing = !view_path_exists(&view, &super::parse_path_segs(key.as_ref()));
             Some(ViewProjectionResult::Owned(Val::Bool(missing)))
         }
         (Some(BuiltinViewObjectProjection::Missing), BuiltinArgs::StrVec(keys)) => {
             let missing = keys
                 .iter()
-                .filter(|key| view_path_missing(&view, key.as_ref()))
+                .filter(|key| !view_path_exists(&view, &super::parse_path_segs(key.as_ref())))
                 .map(|key| Val::Str(std::sync::Arc::clone(key)))
                 .collect();
             Some(ViewProjectionResult::Owned(Val::arr(missing)))
@@ -1062,16 +1076,14 @@ where
             Some(ViewProjectionResult::View(walk_view_path(view, path)))
         }
         (Some(BuiltinViewObjectProjection::HasPath), BuiltinArgs::Str(path)) => {
-            let found = !matches!(
-                walk_view_path(view, &super::parse_path_segs(path.as_ref())).scalar(),
-                JsonView::Null
-            );
-            Some(ViewProjectionResult::Owned(Val::Bool(found)))
+            Some(ViewProjectionResult::Owned(Val::Bool(view_path_exists(
+                &view,
+                &super::parse_path_segs(path.as_ref()),
+            ))))
         }
-        (Some(BuiltinViewObjectProjection::HasPath), BuiltinArgs::Path(path)) => {
-            let found = !matches!(walk_view_path(view, path).scalar(), JsonView::Null);
-            Some(ViewProjectionResult::Owned(Val::Bool(found)))
-        }
+        (Some(BuiltinViewObjectProjection::HasPath), BuiltinArgs::Path(path)) => Some(
+            ViewProjectionResult::Owned(Val::Bool(view_path_exists(&view, path))),
+        ),
         (Some(BuiltinViewObjectProjection::Keys), BuiltinArgs::None) => {
             view.object_keys().map(ViewProjectionResult::Owned)
         }
@@ -1427,12 +1439,11 @@ where
     cur
 }
 
-fn view_path_missing<'a, V>(view: &V, path: &str) -> bool
+fn view_path_exists<'a, V>(view: &V, path: &[crate::builtins::PathSeg]) -> bool
 where
     V: ValueView<'a>,
 {
-    let path = super::parse_path_segs(path);
-    matches!(walk_view_path(view.clone(), &path).scalar(), JsonView::Null)
+    !matches!(walk_view_path(view.clone(), path).scalar(), JsonView::Null)
 }
 
 fn view_has<'a, V>(view: &V, key: &str) -> Option<bool>
@@ -4321,6 +4332,23 @@ mod tests {
                 &BuiltinArgs::StrVec(vec![Arc::from("title"), Arc::from("isbn")])
             )),
             vec!["title", "isbn"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::Missing),
+                &BuiltinArgs::Str(Arc::from("meta.author.name"))
+            )),
+            vec!["meta.author.name"]
+        );
+        assert_eq!(
+            field_paths(view_projection_field_demand(
+                BuiltinId::from_method(BuiltinMethod::Missing),
+                &BuiltinArgs::StrVec(vec![
+                    Arc::from("meta.author.name"),
+                    Arc::from("items[0].sku")
+                ])
+            )),
+            vec!["meta.author.name", "items"]
         );
         assert_eq!(
             field_paths(view_projection_field_demand(
