@@ -2967,6 +2967,17 @@ mod tests {
             vec!["title", "isbn"]
         );
         assert_eq!(
+            field_paths(&key_call(BuiltinMethod::Missing, "meta.author.name")),
+            vec!["meta.author.name"]
+        );
+        assert_eq!(
+            field_paths(&key_vec_call(
+                BuiltinMethod::Missing,
+                &["meta.author.name", "items[0].sku"]
+            )),
+            vec!["meta.author.name", "items"]
+        );
+        assert_eq!(
             field_paths(&key_vec_call(BuiltinMethod::Pick, &["title", "isbn"])),
             vec!["title", "isbn"]
         );
