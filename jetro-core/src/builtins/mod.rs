@@ -918,8 +918,14 @@ pub enum BuiltinViewScalarOp {
 /// materialising the receiver by traversing borrowed child views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewValueProjection {
+    /// Convert to camelCase.
+    CamelCase,
+    /// Uppercase first character and lowercase the rest.
+    Capitalize,
     /// Decode Base64 text as UTF-8.
     FromBase64,
+    /// Remove common leading indentation.
+    Dedent,
     /// Unescape HTML entities.
     HtmlUnescape,
     /// Escape HTML-sensitive characters.
@@ -940,6 +946,8 @@ pub enum BuiltinViewValueProjection {
     ReverseStr,
     /// Slice a string value by character offsets.
     Slice,
+    /// Convert to snake_case.
+    SnakeCase,
     /// Remove a matching string prefix.
     StripPrefix,
     /// Remove a matching string suffix.
@@ -948,8 +956,14 @@ pub enum BuiltinViewValueProjection {
     ToString,
     /// Serialize the value to compact JSON text.
     ToJson,
+    /// Title-case whitespace-delimited words.
+    TitleCase,
     /// Encode string bytes as Base64 text.
     ToBase64,
+    /// Convert to kebab-case.
+    KebabCase,
+    /// Convert to PascalCase.
+    PascalCase,
     /// Percent-decode URL text.
     UrlDecode,
     /// Percent-encode URL text.
@@ -962,16 +976,23 @@ impl BuiltinViewValueProjection {
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
         match self {
             BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
-            BuiltinViewValueProjection::Center
+            BuiltinViewValueProjection::CamelCase
+            | BuiltinViewValueProjection::Capitalize
+            | BuiltinViewValueProjection::Center
+            | BuiltinViewValueProjection::Dedent
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
+            | BuiltinViewValueProjection::KebabCase
             | BuiltinViewValueProjection::PadLeft
             | BuiltinViewValueProjection::PadRight
+            | BuiltinViewValueProjection::PascalCase
             | BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
             | BuiltinViewValueProjection::Repeat
             | BuiltinViewValueProjection::ReverseStr
+            | BuiltinViewValueProjection::SnakeCase
+            | BuiltinViewValueProjection::TitleCase
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
             | BuiltinViewValueProjection::ToBase64

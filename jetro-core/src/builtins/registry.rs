@@ -1094,9 +1094,16 @@ where
 {
     let mut out = String::new();
     match projection {
-        BuiltinViewValueProjection::FromBase64
+        BuiltinViewValueProjection::CamelCase
+        | BuiltinViewValueProjection::Capitalize
+        | BuiltinViewValueProjection::Dedent
+        | BuiltinViewValueProjection::FromBase64
         | BuiltinViewValueProjection::HtmlEscape
         | BuiltinViewValueProjection::HtmlUnescape
+        | BuiltinViewValueProjection::KebabCase
+        | BuiltinViewValueProjection::PascalCase
+        | BuiltinViewValueProjection::SnakeCase
+        | BuiltinViewValueProjection::TitleCase
         | BuiltinViewValueProjection::ToBase64
         | BuiltinViewValueProjection::UrlDecode
         | BuiltinViewValueProjection::UrlEncode => {
@@ -1205,6 +1212,15 @@ fn reverse_view_string(value: &str) -> String {
 
 fn apply_string_codec_projection(projection: BuiltinViewValueProjection, value: &str) -> Val {
     match projection {
+        BuiltinViewValueProjection::CamelCase => {
+            Val::Str(Arc::from(crate::builtins::camel_case_str(value)))
+        }
+        BuiltinViewValueProjection::Capitalize => {
+            Val::Str(Arc::from(crate::builtins::capitalize_str(value)))
+        }
+        BuiltinViewValueProjection::Dedent => {
+            Val::Str(Arc::from(crate::builtins::dedent_str(value)))
+        }
         BuiltinViewValueProjection::FromBase64 => match crate::builtins::from_base64_str(value) {
             Ok(decoded) => Val::Str(Arc::from(decoded)),
             Err(()) => Val::Null,
@@ -1214,6 +1230,18 @@ fn apply_string_codec_projection(projection: BuiltinViewValueProjection, value: 
         }
         BuiltinViewValueProjection::HtmlUnescape => {
             Val::Str(Arc::from(crate::builtins::html_unescape_str(value)))
+        }
+        BuiltinViewValueProjection::KebabCase => {
+            Val::Str(Arc::from(crate::builtins::kebab_case_str(value)))
+        }
+        BuiltinViewValueProjection::PascalCase => {
+            Val::Str(Arc::from(crate::builtins::pascal_case_str(value)))
+        }
+        BuiltinViewValueProjection::SnakeCase => {
+            Val::Str(Arc::from(crate::builtins::snake_case_str(value)))
+        }
+        BuiltinViewValueProjection::TitleCase => {
+            Val::Str(Arc::from(crate::builtins::title_case_str(value)))
         }
         BuiltinViewValueProjection::ToBase64 => {
             Val::Str(Arc::from(crate::builtins::to_base64_str(value)))
@@ -3903,7 +3931,13 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
+            (BuiltinMethod::CamelCase, BuiltinViewValueProjection::CamelCase),
+            (
+                BuiltinMethod::Capitalize,
+                BuiltinViewValueProjection::Capitalize,
+            ),
             (BuiltinMethod::Center, BuiltinViewValueProjection::Center),
+            (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
@@ -3916,10 +3950,15 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
             (
                 BuiltinMethod::PadRight,
                 BuiltinViewValueProjection::PadRight,
+            ),
+            (
+                BuiltinMethod::PascalCase,
+                BuiltinViewValueProjection::PascalCase,
             ),
             (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
@@ -3932,6 +3971,7 @@ mod tests {
                 BuiltinViewValueProjection::ReverseStr,
             ),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
+            (BuiltinMethod::SnakeCase, BuiltinViewValueProjection::SnakeCase),
             (
                 BuiltinMethod::StripPrefix,
                 BuiltinViewValueProjection::StripPrefix,
@@ -3940,6 +3980,7 @@ mod tests {
                 BuiltinMethod::StripSuffix,
                 BuiltinViewValueProjection::StripSuffix,
             ),
+            (BuiltinMethod::TitleCase, BuiltinViewValueProjection::TitleCase),
             (
                 BuiltinMethod::ToBase64,
                 BuiltinViewValueProjection::ToBase64,
@@ -5958,6 +5999,12 @@ mod tests {
             None
         );
         for (method, projection) in [
+            (BuiltinMethod::CamelCase, BuiltinViewValueProjection::CamelCase),
+            (
+                BuiltinMethod::Capitalize,
+                BuiltinViewValueProjection::Capitalize,
+            ),
+            (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
@@ -5970,6 +6017,13 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
+            (
+                BuiltinMethod::PascalCase,
+                BuiltinViewValueProjection::PascalCase,
+            ),
+            (BuiltinMethod::SnakeCase, BuiltinViewValueProjection::SnakeCase),
+            (BuiltinMethod::TitleCase, BuiltinViewValueProjection::TitleCase),
             (
                 BuiltinMethod::ToBase64,
                 BuiltinViewValueProjection::ToBase64,
@@ -6062,7 +6116,10 @@ mod tests {
                 "text": "a b<&",
                 "base64": "aMOp",
                 "url": "a%20b%2F",
-                "html": "a &lt; b &amp; c"
+                "html": "a &lt; b &amp; c",
+                "case": "hello WORLD",
+                "words": "Hello world_test",
+                "indent": "  a\n    b"
             }));
             let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view).unwrap() {
@@ -6219,6 +6276,34 @@ mod tests {
             apply_field(BuiltinMethod::HtmlUnescape, BuiltinArgs::None, "html"),
             Val::Str(std::sync::Arc::from("a < b & c"))
         );
+        assert_eq!(
+            apply_field(BuiltinMethod::Capitalize, BuiltinArgs::None, "case"),
+            Val::Str(std::sync::Arc::from("Hello world"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::TitleCase, BuiltinArgs::None, "case"),
+            Val::Str(std::sync::Arc::from("Hello World"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::SnakeCase, BuiltinArgs::None, "words"),
+            Val::Str(std::sync::Arc::from("hello_world_test"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::KebabCase, BuiltinArgs::None, "words"),
+            Val::Str(std::sync::Arc::from("hello-world-test"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::CamelCase, BuiltinArgs::None, "words"),
+            Val::Str(std::sync::Arc::from("helloWorldTest"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::PascalCase, BuiltinArgs::None, "words"),
+            Val::Str(std::sync::Arc::from("HelloWorldTest"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::Dedent, BuiltinArgs::None, "indent"),
+            Val::Str(std::sync::Arc::from("a\n  b"))
+        );
         let sliced_non_string = apply(
             BuiltinMethod::Slice,
             BuiltinArgs::I64Opt {
@@ -6271,9 +6356,16 @@ mod tests {
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
         for method in [
+            BuiltinMethod::CamelCase,
+            BuiltinMethod::Capitalize,
+            BuiltinMethod::Dedent,
             BuiltinMethod::FromBase64,
             BuiltinMethod::HtmlEscape,
             BuiltinMethod::HtmlUnescape,
+            BuiltinMethod::KebabCase,
+            BuiltinMethod::PascalCase,
+            BuiltinMethod::SnakeCase,
+            BuiltinMethod::TitleCase,
             BuiltinMethod::ToBase64,
             BuiltinMethod::UrlDecode,
             BuiltinMethod::UrlEncode,

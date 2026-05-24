@@ -169,43 +169,49 @@ pub fn trim_right_apply(recv: &Val) -> Option<Val> {
 
 /// Uppercases the first character and lowercases the rest of a string.
 #[inline]
-pub fn capitalize_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let mut out = String::with_capacity(s.len());
-        let mut chars = s.chars();
-        if let Some(first) = chars.next() {
-            for c in first.to_uppercase() {
-                out.push(c);
-            }
-            out.push_str(&chars.as_str().to_lowercase());
+pub fn capitalize_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    if let Some(first) = chars.next() {
+        for c in first.to_uppercase() {
+            out.push(c);
         }
-        out
-    })
+        out.push_str(&chars.as_str().to_lowercase());
+    }
+    out
+}
+
+#[inline]
+pub fn title_case_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at_start = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            out.push(c);
+            at_start = true;
+        } else if at_start {
+            for u in c.to_uppercase() {
+                out.push(u);
+            }
+            at_start = false;
+        } else {
+            for l in c.to_lowercase() {
+                out.push(l);
+            }
+        }
+    }
+    out
+}
+
+#[inline]
+pub fn capitalize_apply(recv: &Val) -> Option<Val> {
+    map_str_owned(recv, capitalize_str)
 }
 
 /// Capitalises the first letter of each whitespace-delimited word.
 #[inline]
 pub fn title_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let mut out = String::with_capacity(s.len());
-        let mut at_start = true;
-        for c in s.chars() {
-            if c.is_whitespace() {
-                out.push(c);
-                at_start = true;
-            } else if at_start {
-                for u in c.to_uppercase() {
-                    out.push(u);
-                }
-                at_start = false;
-            } else {
-                for l in c.to_lowercase() {
-                    out.push(l);
-                }
-            }
-        }
-        out
-    })
+    map_str_owned(recv, title_case_str)
 }
 
 /// Escapes `<`, `>`, `&`, `"`, and `'` to their HTML entity equivalents.
@@ -320,71 +326,86 @@ pub fn to_base64_apply(recv: &Val) -> Option<Val> {
 
 /// Removes the common leading whitespace prefix from every non-blank line.
 #[inline]
+pub fn dedent_str(s: &str) -> String {
+    let min_indent = s
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    s.lines()
+        .map(|l| {
+            if l.len() >= min_indent {
+                &l[min_indent..]
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[inline]
 pub fn dedent_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let min_indent = s
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.len() - l.trim_start().len())
-            .min()
-            .unwrap_or(0);
-        s.lines()
-            .map(|l| {
-                if l.len() >= min_indent {
-                    &l[min_indent..]
-                } else {
-                    l
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
+    map_str_owned(recv, dedent_str)
 }
 
 /// Converts a string to `snake_case` by splitting on word boundaries and joining with `_`.
 #[inline]
+pub fn snake_case_str(s: &str) -> String {
+    crate::builtins::helpers::split_words_lower(s).join("_")
+}
+
+#[inline]
 pub fn snake_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        crate::builtins::helpers::split_words_lower(s).join("_")
-    })
+    map_str_owned(recv, snake_case_str)
 }
 
 /// Converts a string to `kebab-case` by splitting on word boundaries and joining with `-`.
 #[inline]
+pub fn kebab_case_str(s: &str) -> String {
+    crate::builtins::helpers::split_words_lower(s).join("-")
+}
+
+#[inline]
 pub fn kebab_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        crate::builtins::helpers::split_words_lower(s).join("-")
-    })
+    map_str_owned(recv, kebab_case_str)
 }
 
 /// Converts a string to `camelCase` (first word lowercase, subsequent words title-cased).
 #[inline]
-pub fn camel_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let parts = crate::builtins::helpers::split_words_lower(s);
-        let mut out = String::with_capacity(s.len());
-        for (i, p) in parts.iter().enumerate() {
-            if i == 0 {
-                out.push_str(p);
-            } else {
-                crate::builtins::helpers::upper_first_into(p, &mut out);
-            }
+pub fn camel_case_str(s: &str) -> String {
+    let parts = crate::builtins::helpers::split_words_lower(s);
+    let mut out = String::with_capacity(s.len());
+    for (i, p) in parts.iter().enumerate() {
+        if i == 0 {
+            out.push_str(p);
+        } else {
+            crate::builtins::helpers::upper_first_into(p, &mut out);
         }
-        out
-    })
+    }
+    out
+}
+
+#[inline]
+pub fn camel_case_apply(recv: &Val) -> Option<Val> {
+    map_str_owned(recv, camel_case_str)
 }
 
 /// Converts a string to `PascalCase` (every word title-cased, no separator).
 #[inline]
+pub fn pascal_case_str(s: &str) -> String {
+    let parts = crate::builtins::helpers::split_words_lower(s);
+    let mut out = String::with_capacity(s.len());
+    for p in parts.iter() {
+        crate::builtins::helpers::upper_first_into(p, &mut out);
+    }
+    out
+}
+
+#[inline]
 pub fn pascal_case_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let parts = crate::builtins::helpers::split_words_lower(s);
-        let mut out = String::with_capacity(s.len());
-        for p in parts.iter() {
-            crate::builtins::helpers::upper_first_into(p, &mut out);
-        }
-        out
-    })
+    map_str_owned(recv, pascal_case_str)
 }
 
 /// Reverses the Unicode codepoints of a string.

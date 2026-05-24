@@ -3308,6 +3308,7 @@ macro_rules! scalar_native_element {
     ( $( $ty:ident => $variant:ident, $name:literal
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
          $( , idempotent: $idempotent:literal )?
+         $( , view_value: $view_value:ident )?
          $( , apply: $apply:ident )? ; )* ) => {
         $(
             pub(crate) struct $ty;
@@ -3316,7 +3317,8 @@ macro_rules! scalar_native_element {
                 const NAME: &'static str = $name;
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec {
-                    let spec = scalar_native_element_spec();
+                    let spec = scalar_native_element_spec()
+                        $( .view_value_projection(super::BuiltinViewValueProjection::$view_value) )?;
                     $( let spec = if $idempotent { spec.idempotent() } else { spec }; )?
                     spec
                 }
@@ -3388,16 +3390,16 @@ macro_rules! scalar_view_predicate_element {
 }
 
 scalar_native_element! {
-    Capitalize => Capitalize, "capitalize", idempotent: true, apply: capitalize_apply;
-    TitleCase => TitleCase, "title_case", idempotent: true, apply: title_case_apply;
-    SnakeCase => SnakeCase, "snake_case", idempotent: true, apply: snake_case_apply;
-    KebabCase => KebabCase, "kebab_case", idempotent: true, apply: kebab_case_apply;
-    CamelCase => CamelCase, "camel_case", idempotent: true, apply: camel_case_apply;
-    PascalCase => PascalCase, "pascal_case", idempotent: true, apply: pascal_case_apply;
+    Capitalize => Capitalize, "capitalize", idempotent: true, view_value: Capitalize, apply: capitalize_apply;
+    TitleCase => TitleCase, "title_case", idempotent: true, view_value: TitleCase, apply: title_case_apply;
+    SnakeCase => SnakeCase, "snake_case", idempotent: true, view_value: SnakeCase, apply: snake_case_apply;
+    KebabCase => KebabCase, "kebab_case", idempotent: true, view_value: KebabCase, apply: kebab_case_apply;
+    CamelCase => CamelCase, "camel_case", idempotent: true, view_value: CamelCase, apply: camel_case_apply;
+    PascalCase => PascalCase, "pascal_case", idempotent: true, view_value: PascalCase, apply: pascal_case_apply;
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
-    Dedent => Dedent, "dedent", idempotent: true, apply: dedent_apply;
+    Dedent => Dedent, "dedent", idempotent: true, view_value: Dedent, apply: dedent_apply;
 }
 
 pub(crate) struct Type;
