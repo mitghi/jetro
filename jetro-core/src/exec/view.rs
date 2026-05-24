@@ -7,6 +7,7 @@
 //! planner selects the `View` backend preference.
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -184,6 +185,11 @@ where
         return Some(result);
     }
     if let Some(result) = run_reverse_prefix_then_view_suffix(source.clone(), body, base_env, vm) {
+        return Some(result);
+    }
+    if let Some(result) =
+        run_sorted_dedup_prefix_then_view_suffix(source.clone(), body, base_env, vm)
+    {
         return Some(result);
     }
     if let Some(result) = run_reducing_stage_prefix_then_materialized_suffix(
@@ -454,6 +460,117 @@ where
         return Some(Err(err));
     }
     Some(sink_acc.finish_result(false))
+}
+
+struct SortedDedupBarrierPlan {
+    prefix: Vec<pipeline::ViewStageCapability>,
+    dedup_stage: usize,
+    key_kernel: Option<pipeline::BodyKernel>,
+}
+
+fn run_sorted_dedup_prefix_then_view_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let plan = sorted_dedup_barrier_plan(body)?;
+    let suffix_start = plan.dedup_stage + 1;
+    let suffix = view_suffix_capabilities(body, suffix_start)?;
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
+    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, false);
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
+
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
+        return run_reversed_rows_view_suffix(
+            Vec::<FrontierRow<V>>::new(),
+            body,
+            &suffix,
+            sink,
+            source_demand,
+            vm,
+        );
+    }
+
+    let mut keyed = Vec::new();
+    if let Err(err) = drive_view_frontier(
+        source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
+        &plan.prefix,
+        &body.stage_kernels,
+        PullDemand::All,
+        vm,
+        |item, vm| {
+            let key = sorted_dedup_view_key(item, plan.key_kernel.as_ref(), vm)?;
+            keyed.push((key, item.clone()));
+            Some(Ok(ViewRowAction::Emit))
+        },
+    )? {
+        return Some(Err(err));
+    }
+    keyed.sort_by(|a, b| pipeline::cmp_val_total(&a.0, &b.0));
+    let mut rows = Vec::with_capacity(keyed.len());
+    let mut last_key: Option<Val> = None;
+    for (key, row) in keyed {
+        if last_key
+            .as_ref()
+            .is_some_and(|last| pipeline::cmp_val_total(last, &key) == Ordering::Equal)
+        {
+            continue;
+        }
+        last_key = Some(key);
+        rows.push(row);
+    }
+
+    run_reversed_rows_view_suffix(rows, body, &suffix, sink, source_demand, vm)
+}
+
+fn sorted_dedup_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortedDedupBarrierPlan> {
+    let mut prefix = Vec::new();
+    for (idx, stage) in body.stages.iter().enumerate() {
+        match stage {
+            pipeline::Stage::SortedDedup(program) => {
+                let key_kernel = match program {
+                    Some(_) => {
+                        let kernel = body.stage_kernels.get(idx)?;
+                        kernel.is_view_native().then(|| kernel.clone())?
+                    }
+                    None => pipeline::BodyKernel::Current,
+                };
+                return Some(SortedDedupBarrierPlan {
+                    prefix,
+                    dedup_stage: idx,
+                    key_kernel: Some(key_kernel),
+                });
+            }
+            _ => prefix.push(pipeline::view_never_materializing_stage_capability(
+                body, idx,
+            )?),
+        }
+    }
+    None
+}
+
+fn sorted_dedup_view_key<'a, V>(
+    item: &FrontierRow<V>,
+    key_kernel: Option<&pipeline::BodyKernel>,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    match key_kernel {
+        Some(kernel) => eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm),
+        None => Some(item.materialize()),
+    }
 }
 
 fn drive_reversed_direct_position<'a, V, F>(
@@ -4073,6 +4190,42 @@ mod tests {
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_runner_keeps_sorted_dedup_barrier_borrowed_until_suffix() {
+        let source = CountingView::root(&[3, 1, 2, 3, 2]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::SortedDedup(None),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1)),
+                BodyKernel::Generic,
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 3]));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.materialize_reads(), 2);
     }
 
     #[test]
