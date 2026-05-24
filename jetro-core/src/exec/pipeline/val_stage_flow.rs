@@ -91,6 +91,19 @@ fn fallback_streaming(stage: &Stage, item: Val) -> Result<StageFlow<Val>, EvalEr
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => Ok(
             StageFlow::Continue(materialized_exec::apply_element_adapter(stage, item)),
         ),
+        Stage::StringBuiltin { method, value } => {
+            let call = crate::builtins::BuiltinCall::new(
+                *method,
+                crate::builtins::BuiltinArgs::Str(std::sync::Arc::clone(value)),
+            );
+            Ok(match call.apply(&item) {
+                Some(Val::Arr(items)) => StageFlow::Expand(
+                    std::sync::Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()),
+                ),
+                Some(other) => StageFlow::Continue(other),
+                None => StageFlow::Continue(item),
+            })
+        }
         _ => Ok(StageFlow::Continue(item)),
     }
 }

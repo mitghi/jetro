@@ -415,6 +415,35 @@ fn process_stream_item<'a>(
                 terminal_map_collect,
             )? {
                 StageFlow::Continue(next) => item = next,
+                StageFlow::Expand(items) => {
+                    for expanded in items {
+                        match process_stream_item(
+                            pipeline,
+                            expanded,
+                            stage_idx + 1,
+                            stage_limit,
+                            late_projection,
+                            source_demand,
+                            prepared_nested,
+                            vm,
+                            loop_env,
+                            stage_taken,
+                            stage_skipped,
+                            stage_unique_seen,
+                            stage_window_buffers,
+                            terminal_map_idx,
+                            terminal_map_collect,
+                            membership_target,
+                            sink_acc,
+                            emitted_outputs,
+                        )? {
+                            StreamItemFlow::Continue => {}
+                            StreamItemFlow::Stop => return Ok(StreamItemFlow::Stop),
+                            StreamItemFlow::Return(value) => return Ok(StreamItemFlow::Return(value)),
+                        }
+                    }
+                    return Ok(StreamItemFlow::Continue);
+                }
                 StageFlow::SkipRow => return Ok(StreamItemFlow::Continue),
                 StageFlow::Stop => return Ok(StreamItemFlow::Stop),
                 StageFlow::TerminalCollected => {

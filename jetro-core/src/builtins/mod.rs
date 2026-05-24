@@ -2085,6 +2085,7 @@ pub enum BuiltinPipelineMaterialization {
     /// Stage buffers all input (barrier), then emits via the composed path.
     ComposedBarrier,
     /// Stage uses the legacy full-materialisation path.
+    #[allow(dead_code)]
     LegacyMaterialized,
 }
 

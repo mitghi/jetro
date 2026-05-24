@@ -96,6 +96,8 @@ pub(crate) use sink_accumulator::SinkAccumulator;
 pub(crate) enum StageFlow<T> {
     /// Stage produced a value; pass it to the next stage or sink.
     Continue(T),
+    /// Stage expanded one input into multiple output values.
+    Expand(Vec<T>),
     /// Stage filtered out this element; skip to the next input row.
     SkipRow,
     /// Stage signalled early termination; discard remaining input.
@@ -1914,9 +1916,10 @@ mod tests {
     #[test]
     fn fallback_boundary_marks_legacy_barrier_stage() {
         let p = lower_query("$.books.flat_map(tags).last()").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
-            p.fallback_boundary,
-            FallbackBoundary::LegacyStage { index: 0 }
+            p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+            Some(crate::builtins::BuiltinStreamingBoundary::Expanding)
         );
     }
 

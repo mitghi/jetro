@@ -1819,7 +1819,7 @@ mod tests {
             (BuiltinMethod::FindAll, BuiltinRuntimeHook::SharedFilter),
             (BuiltinMethod::Compact, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Map, BuiltinRuntimeHook::StreamAndBarrier),
-            (BuiltinMethod::FlatMap, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::FlatMap, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Remove, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Take, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Skip, BuiltinRuntimeHook::StreamAndBarrier),
@@ -1835,6 +1835,7 @@ mod tests {
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Split, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Unique, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::UniqueBy, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Reverse, BuiltinRuntimeHook::Barrier),
@@ -1870,7 +1871,10 @@ mod tests {
                         || spec.object_lambda.is_some()
                         || matches!(
                             spec.lowering,
-                            Some(BuiltinPipelineLowering::UsizeArg { .. })
+                            Some(
+                                BuiltinPipelineLowering::UsizeArg { .. }
+                                    | BuiltinPipelineLowering::StringArg
+                            )
                         )
                         || matches!(hook, BuiltinRuntimeHook::SharedFilter),
                     "{method:?} stream hook must be tied to stage/object-lambda metadata"
@@ -2977,7 +2981,7 @@ mod tests {
         assert_eq!(view_stage(flat_map), Some(BuiltinViewStage::FlatMap));
         assert_eq!(
             pipeline_materialization(flat_map),
-            BuiltinPipelineMaterialization::LegacyMaterialized
+            BuiltinPipelineMaterialization::Streaming
         );
         assert!(demand_is_conservative_barrier(flat_map));
         assert_eq!(
@@ -4092,7 +4096,7 @@ mod tests {
         }
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::Split)),
-            BuiltinPipelineMaterialization::LegacyMaterialized
+            BuiltinPipelineMaterialization::Streaming
         );
         assert_eq!(
             pipeline_materialization(BuiltinId::from_method(BuiltinMethod::TakeWhile)),
@@ -4104,9 +4108,7 @@ mod tests {
         assert!(pipeline_composed_barrier(BuiltinId::from_method(
             BuiltinMethod::Sort
         )));
-        assert!(pipeline_legacy_materialized(BuiltinId::from_method(
-            BuiltinMethod::Split
-        )));
+        assert!(pipeline_streams(BuiltinId::from_method(BuiltinMethod::Split)));
         assert_eq!(
             streaming_boundary(BuiltinId::from_method(BuiltinMethod::Map)),
             BuiltinStreamingBoundary::RowLocal

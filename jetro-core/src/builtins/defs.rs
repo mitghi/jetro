@@ -341,12 +341,35 @@ impl Builtin for FlatMap {
             .columnar_stage(BuiltinColumnarStage::FlatMap)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FlatMapLike)
-            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .streaming_boundary(BuiltinStreamingBoundary::Expanding)
             .expr_stage(BuiltinExprStage::FlatMap)
             .logical_shape(BuiltinLogicalShape::FlatMap)
-            .runtime_hook(BuiltinRuntimeHook::Barrier)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let Some(prog) = body else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        let inner = crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &item, ctx.vm, |row, vm| {
+            crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog)
+        })?;
+        if let Some(arr) = inner.as_vals() {
+            Ok(crate::exec::pipeline::StageFlow::Expand(
+                arr.iter().cloned().collect(),
+            ))
+        } else {
+            Ok(crate::exec::pipeline::StageFlow::Continue(inner))
+        }
     }
 
     #[inline]
@@ -1065,7 +1088,8 @@ impl Builtin for Split {
         BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FlatMapLike)
-            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::Expanding)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Expanding,
                 false,
@@ -1080,6 +1104,26 @@ impl Builtin for Split {
             super::BuiltinArgs::Str(p) => { super::split_apply(recv, p) }
             _ => None,
         }
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let crate::exec::pipeline::Stage::StringBuiltin { value, .. } = ctx.stage else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        Ok(match super::split_apply(&item, value) {
+            Some(crate::data::value::Val::Arr(items)) => crate::exec::pipeline::StageFlow::Expand(
+                std::sync::Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()),
+            ),
+            Some(other) => crate::exec::pipeline::StageFlow::Continue(other),
+            None => crate::exec::pipeline::StageFlow::Continue(item),
+        })
     }
 }
 
