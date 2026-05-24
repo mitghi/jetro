@@ -234,7 +234,7 @@ impl Builtin for Remove {
             return Ok(crate::exec::pipeline::StageFlow::Continue(item));
         };
         match &call.args {
-            super::BuiltinArgs::Val(target) if crate::util::vals_eq(&item, target) => {
+            super::BuiltinArgs::Val(target) if crate::util::vals_deep_eq(&item, target) => {
                 Ok(crate::exec::pipeline::StageFlow::SkipRow)
             }
             _ => Ok(crate::exec::pipeline::StageFlow::Continue(item)),
@@ -251,7 +251,7 @@ impl Builtin for Remove {
             return Some(Ok(()));
         };
         if let super::BuiltinArgs::Val(target) = &call.args {
-            buf.retain(|v| !crate::util::vals_eq(v, target));
+            buf.retain(|v| !crate::util::vals_deep_eq(v, target));
         }
         Some(Ok(()))
     }
@@ -1606,18 +1606,18 @@ fn unique_apply_barrier(
 ) -> Option<Result<(), crate::data::context::EvalError>> {
     match body {
         None => {
-            let mut seen: std::collections::HashSet<String> = Default::default();
-            buf.retain(|v| seen.insert(format!("{:?}", v)));
+            let mut seen = crate::util::StructuralValueSet::with_capacity(buf.len());
+            buf.retain(|v| seen.insert(v));
         }
         Some(prog) => {
-            let mut seen: std::collections::HashSet<String> = Default::default();
+            let mut seen = crate::util::StructuralValueSet::with_capacity(buf.len());
             let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
             for v in buf.iter() {
                 let key = crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
                     crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
                 })
                 .unwrap_or(crate::data::value::Val::Null);
-                keep.push(seen.insert(format!("{:?}", key)));
+                keep.push(seen.insert(&key));
             }
             let mut out: Vec<crate::data::value::Val> = Vec::with_capacity(buf.len());
             for (i, v) in std::mem::take(buf).into_iter().enumerate() {

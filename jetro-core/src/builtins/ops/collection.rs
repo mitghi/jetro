@@ -759,6 +759,7 @@ pub fn rename_apply(recv: &Val, renames: &Val) -> Option<Val> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indexmap::IndexMap;
 
     #[test]
     fn first_last_apply_support_typed_vectors() {
@@ -773,5 +774,58 @@ mod tests {
         let ints = Val::int_vec(vec![1, 2, 3]);
         assert_eq!(first_apply(&ints, 1), Some(Val::Int(1)));
         assert_eq!(last_apply(&ints, 1), Some(Val::Int(3)));
+    }
+
+    fn obj_in_order(fields: &[(&str, Val)]) -> Val {
+        let mut out = IndexMap::new();
+        for (key, value) in fields {
+            out.insert(Arc::from(*key), value.clone());
+        }
+        Val::obj(out)
+    }
+
+    fn assert_deep_vec_eq(actual: Vec<Val>, expected: Vec<Val>) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert!(crate::util::vals_deep_eq(actual, expected));
+        }
+    }
+
+    #[test]
+    fn set_value_ops_use_structural_object_equality() {
+        let ab = obj_in_order(&[("a", Val::Int(1)), ("b", Val::Int(2))]);
+        let ba = obj_in_order(&[("b", Val::Int(2)), ("a", Val::Int(1))]);
+        let other = obj_in_order(&[("a", Val::Int(2))]);
+        let recv = Val::arr(vec![ab.clone(), ba.clone(), other.clone()]);
+
+        assert_eq!(
+            unique_arr_apply(&recv).unwrap().into_vec().unwrap().len(),
+            2
+        );
+        assert_deep_vec_eq(
+            remove_value_apply(&recv, &ba).unwrap().into_vec().unwrap(),
+            vec![other.clone()],
+        );
+        assert_deep_vec_eq(
+            intersect_apply(&recv, std::slice::from_ref(&ba))
+                .unwrap()
+                .into_vec()
+                .unwrap(),
+            vec![ab.clone(), ba.clone()],
+        );
+        assert_deep_vec_eq(
+            diff_apply(&recv, std::slice::from_ref(&ba))
+                .unwrap()
+                .into_vec()
+                .unwrap(),
+            vec![other.clone()],
+        );
+        assert_deep_vec_eq(
+            union_apply(&Val::arr(vec![ab.clone()]), &[ba, other.clone()])
+                .unwrap()
+                .into_vec()
+                .unwrap(),
+            vec![ab, other],
+        );
     }
 }

@@ -16,6 +16,13 @@ fn run(q: &str, doc: &Value) -> String {
         .to_string()
 }
 
+fn run_raw(q: &str, doc: &str) -> String {
+    let j = Jetro::from_bytes(doc.as_bytes().to_vec()).unwrap();
+    j.collect(q.to_string())
+        .unwrap_or_else(|e| panic!("{}\n  query: {}", e.0, q))
+        .to_string()
+}
+
 /// Asserts every spelling in `exprs` produces `expected` when run against `doc`.
 fn assert_all(label: &str, exprs: &[&str], doc: &Value, expected: &str) {
     for e in exprs {
@@ -1054,7 +1061,7 @@ fn diff_intersect_union() {
 
 #[test]
 fn structural_set_operations_ignore_object_insertion_order() {
-    let d = json!({
+    let d = r#"{
         "xs": [
             {"a": 1, "b": 2},
             {"b": 2, "a": 1},
@@ -1064,16 +1071,24 @@ fn structural_set_operations_ignore_object_insertion_order() {
             {"b": 2, "a": 1},
             {"z": 0}
         ]
-    });
-    assert_eq!(run("$.xs.unique().len()", &d), "2");
-    assert_eq!(run("$.xs.remove({\"b\": 2, \"a\": 1})", &d), r#"[{"a":2}]"#);
+    }"#;
+    assert_eq!(run_raw("$.xs.unique().len()", d), "2");
+    assert_eq!(run_raw("$.xs.unique_by(@).len()", d), "2");
     assert_eq!(
-        run("$.xs.intersect($.ys)", &d),
+        run_raw("$.xs.remove({\"b\": 2, \"a\": 1})", d),
+        r#"[{"a":2}]"#
+    );
+    assert_eq!(
+        run_raw("$.xs.remove({\"b\": 2, \"a\": 1}).last()", d),
+        r#"{"a":2}"#
+    );
+    assert_eq!(
+        run_raw("$.xs.intersect($.ys)", d),
         r#"[{"a":1,"b":2},{"a":1,"b":2}]"#
     );
-    assert_eq!(run("$.xs.diff($.ys)", &d), r#"[{"a":2}]"#);
+    assert_eq!(run_raw("$.xs.diff($.ys)", d), r#"[{"a":2}]"#);
     assert_eq!(
-        run("$.xs.union($.ys)", &d),
+        run_raw("$.xs.union($.ys)", d),
         r#"[{"a":1,"b":2},{"a":1,"b":2},{"a":2},{"z":0}]"#
     );
 }

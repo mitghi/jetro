@@ -299,11 +299,11 @@ where
     let items = recv
         .into_vec()
         .ok_or_else(|| EvalError("unique_by: expected array".into()))?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = crate::util::StructuralValueSet::with_capacity(items.len());
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let key = eval(&item)?;
-        if seen.insert(crate::util::val_to_key(&key)) {
+        if seen.insert(&key) {
             out.push(item);
         }
     }
