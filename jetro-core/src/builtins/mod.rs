@@ -1686,6 +1686,15 @@ impl BuiltinSinkAccumulator {
     pub(crate) const fn finishes_from_reducer_state(self) -> bool {
         matches!(self, Self::Count | Self::Numeric)
     }
+
+    /// Return the selected stream position for first/last-style sinks.
+    #[inline]
+    pub(crate) const fn selection_position(self) -> Option<BuiltinSelectionPosition> {
+        match self {
+            Self::SelectOne(position) => Some(position),
+            _ => None,
+        }
+    }
 }
 
 /// The keyed-reduction algorithm used by `group_by` / `count_by` / `index_by`.

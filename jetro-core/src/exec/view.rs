@@ -2481,16 +2481,13 @@ fn view_suffix_sink_for_demand(
 }
 
 fn view_sink_selects_last(sink: &pipeline::ViewSinkCapability) -> bool {
-    matches!(
-        sink,
-        pipeline::ViewSinkCapability::SelectMany { from_end: true, .. }
-            | pipeline::ViewSinkCapability::Builtin {
-                accumulator: crate::builtins::BuiltinSinkAccumulator::SelectOne(
-                    crate::builtins::BuiltinSelectionPosition::Last,
-                ),
-                ..
-            }
-    )
+    match sink {
+        pipeline::ViewSinkCapability::SelectMany { from_end, .. } => *from_end,
+        pipeline::ViewSinkCapability::Builtin { accumulator, .. } => accumulator
+            .selection_position()
+            .is_some_and(crate::builtins::BuiltinSelectionPosition::wants_last),
+        _ => false,
+    }
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
@@ -2788,7 +2785,10 @@ mod tests {
     use indexmap::IndexMap;
 
     use crate::builtins::registry::view_scalar_projection;
-    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
+    use crate::builtins::{
+        BuiltinMembershipSink, BuiltinPredicateSink, BuiltinSelectionPosition,
+        BuiltinSinkAccumulator,
+    };
     use crate::compile::compiler::Compiler;
     use crate::data::context::Env;
     use crate::data::value::Val;
@@ -4408,6 +4408,32 @@ mod tests {
                 source_reversed: true
             }
         ));
+    }
+
+    #[test]
+    fn view_sink_last_selection_uses_accumulator_metadata() {
+        let first = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: crate::builtins::BuiltinViewMaterialization::SinkFinalRow,
+        };
+        let last = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: crate::builtins::BuiltinViewMaterialization::SinkFinalRow,
+        };
+        let count = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::Count,
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: crate::builtins::BuiltinViewMaterialization::Never,
+        };
+
+        assert!(!super::view_sink_selects_last(&first));
+        assert!(super::view_sink_selects_last(&last));
+        assert!(!super::view_sink_selects_last(&count));
     }
 
     #[test]
