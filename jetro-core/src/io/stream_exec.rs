@@ -496,7 +496,7 @@ impl CompiledRowStreamStage {
             RowStreamStage::Numeric(reducer) => Self::Numeric {
                 acc: NumericAccumulator::from_reducer(*reducer),
             },
-            RowStreamStage::Any(_) | RowStreamStage::All(_) | RowStreamStage::FindOne(_) => {
+            RowStreamStage::PredicateSink { .. } => {
                 unreachable!("predicate sink stages are handled through builtin metadata")
             }
             RowStreamStage::Map(expr) => Self::Map {

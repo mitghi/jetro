@@ -80,9 +80,10 @@ pub(crate) enum RowStreamStage {
     Last,
     Count,
     Numeric(BuiltinNumericReducer),
-    Any(Expr),
-    All(Expr),
-    FindOne(Expr),
+    PredicateSink {
+        sink: BuiltinPredicateSink,
+        expr: Expr,
+    },
 }
 
 impl RowStreamStage {
@@ -95,9 +96,14 @@ impl RowStreamStage {
             RowStreamStage::Last => BuiltinRowStreamOp::Last,
             RowStreamStage::Count => BuiltinRowStreamOp::Count,
             RowStreamStage::Numeric(reducer) => reducer.row_stream_op(),
-            RowStreamStage::Any(_) => BuiltinRowStreamOp::Any,
-            RowStreamStage::All(_) => BuiltinRowStreamOp::All,
-            RowStreamStage::FindOne(_) => BuiltinRowStreamOp::FindOne,
+            RowStreamStage::PredicateSink { sink, .. } => match sink {
+                BuiltinPredicateSink::Any => BuiltinRowStreamOp::Any,
+                BuiltinPredicateSink::All => BuiltinRowStreamOp::All,
+                BuiltinPredicateSink::FindOne => BuiltinRowStreamOp::FindOne,
+                BuiltinPredicateSink::FindIndex | BuiltinPredicateSink::IndicesWhere => {
+                    unreachable!("unsupported row-stream predicate sink")
+                }
+            },
         }
     }
 
@@ -117,11 +123,8 @@ impl RowStreamStage {
     }
 
     pub(super) fn predicate_sink(&self) -> Option<(BuiltinPredicateSink, &Expr)> {
-        let sink = self.op().predicate_sink()?;
         match self {
-            RowStreamStage::Any(expr)
-            | RowStreamStage::All(expr)
-            | RowStreamStage::FindOne(expr) => Some((sink, expr)),
+            RowStreamStage::PredicateSink { sink, expr } => Some((*sink, expr)),
             _ => None,
         }
     }
@@ -320,11 +323,11 @@ pub(super) fn lower_root_rows_expr(
         };
         let arg = op.arg();
         let expr_arg = match arg {
-            BuiltinRowStreamArg::Expr => Some(
-                crate::compile::lambda_lower::normalize_pipeline_arg_expr(single_expr_arg(
-                    name, args,
-                )?),
-            ),
+            BuiltinRowStreamArg::Expr => {
+                Some(crate::compile::lambda_lower::normalize_pipeline_arg_expr(
+                    single_expr_arg(name, args)?,
+                ))
+            }
             BuiltinRowStreamArg::Usize | BuiltinRowStreamArg::None => None,
         };
         let usize_arg = match arg {
@@ -370,8 +373,7 @@ fn apply_row_stream_op(
             plan.stages.push(RowStreamStage::Take(1));
         }
         BuiltinRowStreamOp::FindOne => {
-            plan.stages
-                .push(RowStreamStage::FindOne(expect_expr_arg(name, expr_arg)?));
+            push_predicate_sink_stage(plan, name, op, expr_arg)?;
         }
         BuiltinRowStreamOp::DistinctBy => {
             plan.stages
@@ -402,18 +404,34 @@ fn apply_row_stream_op(
             plan.stages.push(RowStreamStage::Numeric(reducer));
         }
         BuiltinRowStreamOp::Any => {
-            plan.stages
-                .push(RowStreamStage::Any(expect_expr_arg(name, expr_arg)?));
+            push_predicate_sink_stage(plan, name, op, expr_arg)?;
         }
         BuiltinRowStreamOp::All => {
-            plan.stages
-                .push(RowStreamStage::All(expect_expr_arg(name, expr_arg)?));
+            push_predicate_sink_stage(plan, name, op, expr_arg)?;
         }
         BuiltinRowStreamOp::Map => {
             plan.stages
                 .push(RowStreamStage::Map(expect_expr_arg(name, expr_arg)?));
         }
     }
+    Ok(())
+}
+
+fn push_predicate_sink_stage(
+    plan: &mut RowStreamPlan,
+    name: &str,
+    op: BuiltinRowStreamOp,
+    expr_arg: Option<Expr>,
+) -> Result<(), RowStreamPlanError> {
+    let sink = op.predicate_sink().ok_or_else(|| {
+        RowStreamPlanError::new(format!(
+            "rows() stream method {name}() is missing predicate sink metadata"
+        ))
+    })?;
+    plan.stages.push(RowStreamStage::PredicateSink {
+        sink,
+        expr: expect_expr_arg(name, expr_arg)?,
+    });
     Ok(())
 }
 
@@ -491,16 +509,11 @@ fn classify_parallelism(
 }
 
 fn first_projector_is_after_row_selection(stages: &[RowStreamStage]) -> bool {
-    let Some(map_idx) = stages
-        .iter()
-        .position(RowStreamStage::is_projector)
-    else {
+    let Some(map_idx) = stages.iter().position(RowStreamStage::is_projector) else {
         return false;
     };
     stages[..map_idx].iter().any(|stage| {
-        stage.is_row_selection()
-            || stage.retained_limit().is_some()
-            || stage.scalar_sink()
+        stage.is_row_selection() || stage.retained_limit().is_some() || stage.scalar_sink()
     })
 }
 
@@ -617,9 +630,7 @@ fn expr_contains_root_rows_stream(expr: &Expr) -> bool {
         } => {
             expr_contains_root_rows_stream(expr)
                 || expr_contains_root_rows_stream(iter)
-                || cond
-                    .as_deref()
-                    .is_some_and(expr_contains_root_rows_stream)
+                || cond.as_deref().is_some_and(expr_contains_root_rows_stream)
         }
         Expr::DictComp {
             key,
@@ -631,9 +642,7 @@ fn expr_contains_root_rows_stream(expr: &Expr) -> bool {
             expr_contains_root_rows_stream(key)
                 || expr_contains_root_rows_stream(val)
                 || expr_contains_root_rows_stream(iter)
-                || cond
-                    .as_deref()
-                    .is_some_and(expr_contains_root_rows_stream)
+                || cond.as_deref().is_some_and(expr_contains_root_rows_stream)
         }
         Expr::Lambda { body, .. } => expr_contains_root_rows_stream(body),
         Expr::Let { init, body, .. } => {
@@ -701,8 +710,9 @@ fn arg_contains_root_rows_stream(arg: &Arg) -> bool {
 
 fn array_elem_contains_root_rows_stream(elem: &crate::parse::ast::ArrayElem) -> bool {
     match elem {
-        crate::parse::ast::ArrayElem::Expr(expr)
-        | crate::parse::ast::ArrayElem::Spread(expr) => expr_contains_root_rows_stream(expr),
+        crate::parse::ast::ArrayElem::Expr(expr) | crate::parse::ast::ArrayElem::Spread(expr) => {
+            expr_contains_root_rows_stream(expr)
+        }
     }
 }
 
@@ -710,9 +720,7 @@ fn obj_field_contains_root_rows_stream(field: &crate::parse::ast::ObjField) -> b
     match field {
         crate::parse::ast::ObjField::Kv { val, cond, .. } => {
             expr_contains_root_rows_stream(val)
-                || cond
-                    .as_ref()
-                    .is_some_and(expr_contains_root_rows_stream)
+                || cond.as_ref().is_some_and(expr_contains_root_rows_stream)
         }
         crate::parse::ast::ObjField::Dynamic { key, val } => {
             expr_contains_root_rows_stream(key) || expr_contains_root_rows_stream(val)
@@ -726,9 +734,7 @@ fn obj_field_contains_root_rows_stream(field: &crate::parse::ast::ObjField) -> b
 fn path_step_contains_root_rows_stream(step: &crate::parse::ast::PathStep) -> bool {
     match step {
         crate::parse::ast::PathStep::DynIndex(expr) => expr_contains_root_rows_stream(expr),
-        crate::parse::ast::PathStep::WildcardFilter(expr) => {
-            expr_contains_root_rows_stream(expr)
-        }
+        crate::parse::ast::PathStep::WildcardFilter(expr) => expr_contains_root_rows_stream(expr),
         _ => false,
     }
 }
@@ -1017,7 +1023,10 @@ mod tests {
         assert!(plan.demand.scalar_output);
         assert!(matches!(
             plan.stages.last(),
-            Some(RowStreamStage::FindOne(_))
+            Some(RowStreamStage::PredicateSink {
+                sink: BuiltinPredicateSink::FindOne,
+                ..
+            })
         ));
     }
 
@@ -1031,7 +1040,10 @@ mod tests {
         assert_eq!(any_plan.demand.predicate_count, 0);
         assert!(matches!(
             any_plan.stages.last(),
-            Some(RowStreamStage::Any(_))
+            Some(RowStreamStage::PredicateSink {
+                sink: BuiltinPredicateSink::Any,
+                ..
+            })
         ));
 
         let all = parse("$.rows().all($.active)").unwrap();
@@ -1041,7 +1053,10 @@ mod tests {
         assert!(all_plan.demand.scalar_output);
         assert!(matches!(
             all_plan.stages.last(),
-            Some(RowStreamStage::All(_))
+            Some(RowStreamStage::PredicateSink {
+                sink: BuiltinPredicateSink::All,
+                ..
+            })
         ));
     }
 
