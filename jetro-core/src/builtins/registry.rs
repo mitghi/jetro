@@ -3267,6 +3267,11 @@ mod tests {
             assert_eq!(spec.raw_json_scalar, Some(scalar), "{method:?}");
             assert!(raw_json_scalar_call(id, &BuiltinArgs::None), "{method:?}");
             assert_eq!(demand_law(id), scalar.demand_law(), "{method:?}");
+            assert_eq!(
+                scalar.writes_string(),
+                !matches!(scalar, BuiltinRawJsonScalar::Len),
+                "{method:?}"
+            );
             assert!(view_scalar_projection(id), "{method:?}");
             assert!(spec.view_native, "{method:?}");
             assert_eq!(

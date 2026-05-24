@@ -1033,7 +1033,7 @@ fn write_raw_string_case_call<W: Write>(
     if skip_json_ws(value, next) != trim_json_ws_end(value) || !s.is_ascii() {
         return Ok(false);
     }
-    if matches!(op, BuiltinRawJsonScalar::Len) {
+    if !op.writes_string() {
         return Ok(false);
     }
     writer.write_all(b"\"")?;

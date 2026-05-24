@@ -825,6 +825,12 @@ impl BuiltinRawJsonScalar {
             Self::AsciiUpper | Self::AsciiLower => BuiltinDemandLaw::MapLike,
         }
     }
+
+    /// Whether this raw operation writes a transformed JSON string.
+    #[inline]
+    pub(crate) const fn writes_string(self) -> bool {
+        matches!(self, Self::AsciiUpper | Self::AsciiLower)
+    }
 }
 
 /// Object-lambda operation behavior.
