@@ -170,7 +170,7 @@ impl Sink {
         };
         Some(Sink::SelectMany {
             n,
-            from_end: matches!(position, BuiltinSelectionPosition::Last),
+            from_end: position.wants_last(),
         })
     }
 

@@ -2388,12 +2388,14 @@ mod tests {
                     assert!(!demand.order, "{method:?}");
                 }
                 BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
+                    assert!(!BuiltinSelectionPosition::First.wants_last(), "{method:?}");
                     assert_eq!(demand_law(id), BuiltinDemandLaw::First, "{method:?}");
                     assert_eq!(demand.pull, PullDemand::FirstInput(1), "{method:?}");
                     assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");
                     assert!(!demand.order, "{method:?}");
                 }
                 BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
+                    assert!(BuiltinSelectionPosition::Last.wants_last(), "{method:?}");
                     assert_eq!(demand_law(id), BuiltinDemandLaw::Last, "{method:?}");
                     assert_eq!(demand.pull, PullDemand::LastInput(1), "{method:?}");
                     assert_eq!(demand.value, ValueNeed::Whole, "{method:?}");

@@ -1683,6 +1683,14 @@ pub enum BuiltinSelectionPosition {
     Last,
 }
 
+impl BuiltinSelectionPosition {
+    /// Whether this selection keeps the last retained row.
+    #[inline]
+    pub(crate) const fn wants_last(self) -> bool {
+        matches!(self, Self::Last)
+    }
+}
+
 /// How many rows a terminal sink must consume to produce its result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinSinkDemand {
