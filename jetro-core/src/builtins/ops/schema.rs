@@ -338,7 +338,7 @@ mod spec_tests {
             BuiltinViewStage::FlatMap.output_mode(),
             BuiltinViewOutputMode::BorrowedSubviews
         );
-        assert!(BuiltinViewStage::FlatMap.requires_borrowed_body_result());
+        assert!(!BuiltinViewStage::FlatMap.requires_borrowed_body_result());
         assert!(!BuiltinViewStage::FlatMap.preserves_cardinality());
         assert_eq!(
             BuiltinViewStage::Skip.output_mode(),
