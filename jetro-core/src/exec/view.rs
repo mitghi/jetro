@@ -258,15 +258,26 @@ where
 
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let result = if source_reversed {
-        let items = source.array_iter_rev()?;
-        drive_view_iter(
-            items,
+        if let Some(result) = drive_reversed_direct_position(
+            &source,
             &suffix.stages,
             &body.stage_kernels,
             source_demand,
             vm,
             |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
-        )?
+        ) {
+            result
+        } else {
+            let items = source.array_iter_rev()?;
+            drive_view_iter(
+                items,
+                &suffix.stages,
+                &body.stage_kernels,
+                source_demand,
+                vm,
+                |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+            )?
+        }
     } else {
         drive_view_frontier(
             source,
@@ -283,6 +294,39 @@ where
     }
 
     Some(sink_acc.finish_result(source_reversed))
+}
+
+fn drive_reversed_direct_position<'a, V, F>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    vm: &mut VM,
+    observe: F,
+) -> Option<Result<(), EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    if !pipeline::ViewStageCapability::all_preserve_cardinality(stages) {
+        return None;
+    }
+    let JsonView::ArrayLen(len) = source.scalar() else {
+        return None;
+    };
+    let idx = match source_demand {
+        PullDemand::FirstInput(1) => pipeline::index_from_end(len, 0)?,
+        PullDemand::NthInput(offset) => pipeline::index_from_end(len, offset)?,
+        PullDemand::LastInput(1) => {
+            if len == 0 {
+                return Some(Ok(()));
+            }
+            0
+        }
+        _ => return None,
+    };
+    let items = std::iter::once(source.index(idx as i64));
+    drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
 }
 
 /// Runs the complete pipeline entirely in the view domain when all stages and
@@ -3727,6 +3771,48 @@ mod tests {
         assert_eq!(out, Val::Int(1));
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_runner_seeks_leading_reverse_positional_selectors() {
+        let first_source = CountingView::root(&[1, 2, 3, 4]);
+        let first_body = PipelineBody {
+            stages: vec![Stage::reverse().unwrap()],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let first = super::run_with_env_and_vm(
+            first_source.clone(),
+            &first_body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(first, Val::Int(4));
+        assert_eq!(first_source.array_iter_reads(), 0);
+        assert_eq!(first_source.materialize_reads(), 0);
+
+        let nth_source = CountingView::root(&[1, 2, 3, 4]);
+        let nth_body = PipelineBody {
+            sink: Sink::Nth(2),
+            ..first_body
+        };
+        let nth =
+            super::run_with_env_and_vm(nth_source.clone(), &nth_body, None, &env, &mut vm)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(nth, Val::Int(2));
+        assert_eq!(nth_source.array_iter_reads(), 0);
+        assert_eq!(nth_source.materialize_reads(), 0);
     }
 
     #[test]
