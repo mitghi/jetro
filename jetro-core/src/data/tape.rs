@@ -456,6 +456,13 @@ impl TapeScratch {
         Some(children)
     }
 
+    #[inline]
+    pub(crate) fn array_child_indexed_starts(&self, first: usize) -> Option<&[usize]> {
+        self.array_child_index
+            .get(&first)
+            .map(|children| &**children)
+    }
+
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index.contains_key(&first)
@@ -516,6 +523,13 @@ mod tests {
             .expect("parse");
 
         assert!(scratch.has_array_child_index(1));
+        assert_eq!(
+            scratch
+                .array_child_indexed_starts(1)
+                .expect("indexed")
+                .len(),
+            40
+        );
         assert_eq!(scratch.array_child_start(1, 40, 39), Some(40));
         assert_eq!(scratch.array_child_indices(0).expect("indices").len(), 40);
     }

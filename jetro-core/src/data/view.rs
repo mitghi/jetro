@@ -1392,6 +1392,13 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             return None;
         };
         let tape: &'a crate::data::tape::TapeScratch = *tape;
+        if let Some(children) = tape.array_child_indexed_starts(*idx + 1) {
+            return Some(Box::new(TapeScratchArrayRevIndexedIter {
+                tape,
+                children,
+                next: children.len(),
+            }));
+        }
         let indices = tape.array_child_indices(*idx)?;
         Some(Box::new(
             indices
@@ -1482,6 +1489,28 @@ impl<'a> Iterator for TapeScratchArrayIter<'a> {
     }
 }
 
+struct TapeScratchArrayRevIndexedIter<'a> {
+    tape: &'a crate::data::tape::TapeScratch,
+    children: &'a [usize],
+    next: usize,
+}
+
+impl<'a> Iterator for TapeScratchArrayRevIndexedIter<'a> {
+    type Item = TapeScratchView<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            return None;
+        }
+        self.next -= 1;
+        Some(TapeScratchView::Node {
+            tape: self.tape,
+            idx: self.children[self.next],
+        })
+    }
+}
+
 #[inline]
 fn normalize_index(len: usize, idx: i64) -> Option<usize> {
     let idx = if idx < 0 {
@@ -1566,7 +1595,7 @@ mod tests {
 
     #[test]
     fn array_reverse_iter_matches_value_order_for_val_and_tape() {
-        use super::TapeView;
+        use super::{TapeScratchView, TapeView};
 
         let value = Val::from(&json!({"items": [1, {"id": 2}, [3]]}));
         let val_items = ValView::new(&value).field("items");
@@ -1590,6 +1619,23 @@ mod tests {
             json!([[3], {"id": 2}, 1]).as_array().unwrap().clone()
         );
         assert_eq!(tape_rows, val_rows);
+
+        let large = (0..40).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        let mut scratch = crate::data::tape::TapeScratch::with_capacity(large.len() + 2);
+        scratch
+            .parse_slice(format!("[{}]", large).as_bytes())
+            .expect("parse");
+        let scratch_rows = TapeScratchView::Node {
+            tape: &scratch,
+            idx: 0,
+        }
+        .array_iter_rev()
+        .unwrap()
+        .take(3)
+        .map(|item| serde_json::Value::from(item.materialize()))
+        .collect::<Vec<_>>();
+
+        assert_eq!(scratch_rows, vec![json!(39), json!(38), json!(37)]);
     }
 
     #[test]
