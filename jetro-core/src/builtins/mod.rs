@@ -831,6 +831,12 @@ impl BuiltinRawJsonScalar {
     pub(crate) const fn writes_string(self) -> bool {
         matches!(self, Self::AsciiUpper | Self::AsciiLower)
     }
+
+    /// Whether this raw operation writes the length of the current JSON view.
+    #[inline]
+    pub(crate) const fn writes_view_len(self) -> bool {
+        matches!(self, Self::Len)
+    }
 }
 
 /// Object-lambda operation behavior.

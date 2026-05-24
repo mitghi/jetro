@@ -874,7 +874,7 @@ fn write_raw_scalar_call<W: Write>(
             "unsupported raw scalar call".to_string(),
         )));
     };
-    if call.raw_json_scalar() == Some(BuiltinRawJsonScalar::Len) {
+    if call.raw_json_scalar().is_some_and(BuiltinRawJsonScalar::writes_view_len) {
         let Some(len) = raw_json_view_len(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw len call".to_string(),

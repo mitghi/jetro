@@ -3272,6 +3272,11 @@ mod tests {
                 !matches!(scalar, BuiltinRawJsonScalar::Len),
                 "{method:?}"
             );
+            assert_eq!(
+                scalar.writes_view_len(),
+                matches!(scalar, BuiltinRawJsonScalar::Len),
+                "{method:?}"
+            );
             assert!(view_scalar_projection(id), "{method:?}");
             assert!(spec.view_native, "{method:?}");
             assert_eq!(
