@@ -9,6 +9,7 @@ use crate::builtins::{
     BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
     BuiltinViewOutputMode, BuiltinViewStage,
 };
+pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
@@ -505,23 +506,6 @@ pub(crate) enum ViewOutputMode {
     EmitsOwnedValue,
 }
 
-/// When, if ever, a view-pipeline stage or sink must materialise elements into owned `Val`s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewMaterialization {
-    /// No materialisation is needed; the stage/sink can operate entirely on borrowed views.
-    Never,
-    /// The stage must materialise the final value it emits (e.g. keyed reduce output).
-    StageFinalValue,
-    /// The sink materialises each output row into the result array (e.g. `Collect`).
-    SinkOutputRows,
-    /// The sink materialises only the single selected row (e.g. `first` / `last`).
-    SinkFinalRow,
-    /// The sink materialises each element's numeric input for folding (e.g. `sum`).
-    SinkNumericInput,
-    /// The sink materialises input rows for its own comparison/state, not for output.
-    SinkInputRows,
-}
-
 /// Full capability descriptor for a `PipelineBody`: per-stage entries plus the sink capability.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPipelineCapabilities {
@@ -650,10 +634,7 @@ impl ViewStageCapability {
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
     pub(crate) fn materialization(&self) -> ViewMaterialization {
-        if matches!(self, Self::KeyedReduce { .. }) {
-            return ViewMaterialization::StageFinalValue;
-        }
-        ViewMaterialization::Never
+        self.view_stage().materialization()
     }
 
     /// Returns true when this view stage emits exactly one row for every input row.
@@ -731,7 +712,7 @@ impl ViewSinkCapability {
             accumulator: spec.accumulator,
             predicate_kernel,
             project_kernel,
-            materialization: sink_materialization(spec),
+            materialization: spec.view_materialization(),
         }
     }
 
@@ -795,17 +776,6 @@ fn target_is_scalar(value: &Val) -> bool {
         value,
         Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::StrSlice(_)
     )
-}
-
-// maps the builtin sink accumulator kind to the materialisation policy it requires
-fn sink_materialization(spec: BuiltinSinkSpec) -> ViewMaterialization {
-    match spec.accumulator {
-        BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::ApproxDistinct => {
-            ViewMaterialization::Never
-        }
-        BuiltinSinkAccumulator::Numeric => ViewMaterialization::SinkNumericInput,
-        BuiltinSinkAccumulator::SelectOne(_) => ViewMaterialization::SinkFinalRow,
-    }
 }
 
 // bridges the registry's BuiltinViewInputMode tag to the pipeline's enum

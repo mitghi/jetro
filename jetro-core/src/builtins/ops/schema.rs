@@ -230,7 +230,8 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
         BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural,
-        BuiltinViewInputMode, BuiltinViewOutputMode, BuiltinViewStage,
+        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
+        BuiltinViewStage,
     };
 
     fn id(method: BuiltinMethod) -> BuiltinId {
@@ -343,6 +344,14 @@ mod spec_tests {
             BuiltinViewStage::Compact.cardinality(),
             BuiltinCardinality::Filtering
         );
+        assert_eq!(
+            BuiltinViewStage::KeyedReduce.materialization(),
+            BuiltinViewMaterialization::StageFinalValue
+        );
+        assert_eq!(
+            BuiltinViewStage::Map.materialization(),
+            BuiltinViewMaterialization::Never
+        );
     }
 
     #[test]
@@ -352,12 +361,24 @@ mod spec_tests {
             BuiltinSinkAccumulator::Count
         );
         assert_eq!(
+            builtin_sink(id(BuiltinMethod::Count))
+                .unwrap()
+                .view_materialization(),
+            BuiltinViewMaterialization::Never
+        );
+        assert_eq!(
             builtin_sink(id(BuiltinMethod::Len)).unwrap().accumulator,
             BuiltinSinkAccumulator::Count
         );
         assert_eq!(
             builtin_sink(id(BuiltinMethod::Sum)).unwrap().accumulator,
             BuiltinSinkAccumulator::Numeric
+        );
+        assert_eq!(
+            builtin_sink(id(BuiltinMethod::Sum))
+                .unwrap()
+                .view_materialization(),
+            BuiltinViewMaterialization::SinkNumericInput
         );
         assert_eq!(
             numeric_reducer(id(BuiltinMethod::Sum)),
@@ -378,6 +399,12 @@ mod spec_tests {
         assert_eq!(
             builtin_sink(id(BuiltinMethod::First)).unwrap().accumulator,
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First)
+        );
+        assert_eq!(
+            builtin_sink(id(BuiltinMethod::First))
+                .unwrap()
+                .view_materialization(),
+            BuiltinViewMaterialization::SinkFinalRow
         );
         assert_eq!(
             builtin_sink(id(BuiltinMethod::First)).unwrap().demand,

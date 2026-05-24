@@ -1227,6 +1227,25 @@ pub enum BuiltinViewOutputMode {
     EmitsOwnedValue,
 }
 
+/// When, if ever, a view-stage or sink must materialise elements into owned
+/// values. This is builtin metadata; executors consume it instead of
+/// rediscovering materialization policy from builtin identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewMaterialization {
+    /// No materialisation is needed; the stage/sink can operate entirely on borrowed views.
+    Never,
+    /// The stage must materialise the final value it emits (e.g. keyed reduce output).
+    StageFinalValue,
+    /// The sink materialises each output row into the result array (e.g. collect).
+    SinkOutputRows,
+    /// The sink materialises only the single selected row (e.g. first / last).
+    SinkFinalRow,
+    /// The sink materialises each element's numeric input for folding (e.g. sum).
+    SinkNumericInput,
+    /// The sink materialises input rows for its own comparison/state, not for output.
+    SinkInputRows,
+}
+
 /// Describes how a terminal reducing builtin accumulates its final result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuiltinSinkSpec {
@@ -1236,6 +1255,21 @@ pub struct BuiltinSinkSpec {
     pub demand: BuiltinSinkDemand,
     /// Whether this sink accepts an optional predicate expression.
     pub accepts_predicate: bool,
+}
+
+impl BuiltinSinkSpec {
+    /// Returns when a borrowed-view executor must materialise input or result
+    /// rows to run this sink.
+    #[inline]
+    pub(crate) const fn view_materialization(self) -> BuiltinViewMaterialization {
+        match self.accumulator {
+            BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::ApproxDistinct => {
+                BuiltinViewMaterialization::Never
+            }
+            BuiltinSinkAccumulator::Numeric => BuiltinViewMaterialization::SinkNumericInput,
+            BuiltinSinkAccumulator::SelectOne(_) => BuiltinViewMaterialization::SinkFinalRow,
+        }
+    }
 }
 
 /// The accumulation strategy for a terminal reducing builtin.
@@ -1794,6 +1828,24 @@ impl BuiltinViewStage {
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
+        }
+    }
+
+    /// Returns when this view stage must materialise data while executing.
+    #[inline]
+    pub fn materialization(self) -> BuiltinViewMaterialization {
+        match self {
+            Self::KeyedReduce => BuiltinViewMaterialization::StageFinalValue,
+            Self::Filter
+            | Self::Compact
+            | Self::RemoveValue
+            | Self::Map
+            | Self::FlatMap
+            | Self::TakeWhile
+            | Self::DropWhile
+            | Self::Distinct
+            | Self::Take
+            | Self::Skip => BuiltinViewMaterialization::Never,
         }
     }
 
