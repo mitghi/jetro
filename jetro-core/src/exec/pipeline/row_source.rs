@@ -641,18 +641,7 @@ fn tape_walk_field_chain(tape: &crate::data::tape::TapeData, keys: &[Arc<str>]) 
 
 // Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
 fn tape_field(tape: &crate::data::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
-    let crate::data::tape::TapeNode::Object { len, .. } = *tape.nodes.get(idx)? else {
-        return None;
-    };
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        if tape.str_at(cur) == key {
-            return Some(cur + 1);
-        }
-        cur += 1;
-        cur += tape.span(cur);
-    }
-    None
+    tape.object_field_value(idx, key)
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ trait TapeLike {
     fn str_at(&self, i: usize) -> &str;
     fn span(&self, i: usize) -> usize;
     fn materialize_at(&self, idx: &mut usize) -> Val;
+    fn object_field_value(&self, idx: usize, key: &str) -> Option<usize>;
 
     fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
         if idx >= len {
@@ -70,6 +71,11 @@ impl TapeLike for crate::data::tape::TapeData {
     }
 
     #[inline]
+    fn object_field_value(&self, idx: usize, key: &str) -> Option<usize> {
+        crate::data::tape::TapeData::object_field_value(self, idx, key)
+    }
+
+    #[inline]
     fn materialize_at(&self, idx: &mut usize) -> Val {
         TapeView::materialize_at(self, idx)
     }
@@ -102,6 +108,11 @@ impl TapeLike for crate::data::tape::TapeScratch {
     }
 
     #[inline]
+    fn object_field_value(&self, idx: usize, key: &str) -> Option<usize> {
+        crate::data::tape::TapeScratch::object_field_value(self, idx, key)
+    }
+
+    #[inline]
     fn materialize_at(&self, idx: &mut usize) -> Val {
         TapeScratchView::materialize_at(self, idx)
     }
@@ -110,20 +121,10 @@ impl TapeLike for crate::data::tape::TapeScratch {
 fn tape_field_idx<T: TapeLike>(tape: &T, idx: usize, key: &str) -> Option<Option<usize>> {
     use crate::data::tape::TapeNode;
 
-    let TapeNode::Object { len, .. } = tape.nodes()[idx] else {
+    let TapeNode::Object { .. } = tape.nodes()[idx] else {
         return None;
     };
-
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        let current_key = tape.str_at(cur);
-        cur += 1;
-        if current_key == key {
-            return Some(Some(cur));
-        }
-        cur += tape.span(cur);
-    }
-    Some(None)
+    Some(tape.object_field_value(idx, key))
 }
 
 #[inline]

@@ -347,6 +347,22 @@ impl TapeData {
             .map(|children| &**children)
     }
 
+    #[inline]
+    pub(crate) fn object_field_value(&self, idx: usize, key: &str) -> Option<usize> {
+        let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
+            return None;
+        };
+        let mut cur = idx + 1;
+        for _ in 0..len {
+            if self.str_at(cur) == key {
+                return Some(cur + 1);
+            }
+            cur += 1;
+            cur += self.span(cur);
+        }
+        None
+    }
+
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index.contains_key(&first)
@@ -479,6 +495,22 @@ impl TapeScratch {
             .map(|children| &**children)
     }
 
+    #[inline]
+    pub(crate) fn object_field_value(&self, idx: usize, key: &str) -> Option<usize> {
+        let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
+            return None;
+        };
+        let mut cur = idx + 1;
+        for _ in 0..len {
+            if self.str_at(cur) == key {
+                return Some(cur + 1);
+            }
+            cur += 1;
+            cur += self.span(cur);
+        }
+        None
+    }
+
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index
@@ -495,7 +527,7 @@ impl TapeScratch {
 
 #[cfg(test)]
 mod tests {
-    use super::TapeData;
+    use super::{TapeData, TapeNode};
 
     #[test]
     fn array_child_navigation_returns_direct_child_tape_indices() {
@@ -523,6 +555,18 @@ mod tests {
             tape.nodes[children[2]],
             crate::data::tape::TapeNode::String(_)
         ));
+    }
+
+    #[test]
+    fn object_field_value_finds_value_slots() {
+        let tape = TapeData::parse(br#"{"book":{"title":"Dune","score":901}}"#.to_vec()).unwrap();
+        let book = tape.object_field_value(0, "book").expect("book");
+        let title = tape.object_field_value(book, "title").expect("title");
+        let score = tape.object_field_value(book, "score").expect("score");
+
+        assert_eq!(tape.str_at(title), "Dune");
+        assert!(matches!(tape.nodes[score], TapeNode::Static(_)));
+        assert_eq!(tape.object_field_value(book, "missing"), None);
     }
 
     #[test]
