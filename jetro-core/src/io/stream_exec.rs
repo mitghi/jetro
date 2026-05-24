@@ -9,6 +9,7 @@ use super::stream_direct::{direct_map_can_write, insert_direct_distinct_key, wri
 use super::stream_numeric::NumericAccumulator;
 use super::stream_plan::{RowStreamPlan, RowStreamStage};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
+use crate::builtins::BuiltinPredicateSink;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
 use crate::util::is_truthy;
@@ -149,9 +150,10 @@ impl CompiledRowStream {
                     acc.add_val(&value);
                     return Ok(RowStreamRowResult::Skip);
                 }
-                CompiledRowStreamStage::Any {
+                CompiledRowStreamStage::PredicateSink {
+                    sink,
                     program,
-                    matched,
+                    state,
                     direct,
                 } => {
                     let keep = eval_owned_row_predicate(
@@ -165,68 +167,37 @@ impl CompiledRowStream {
                         &mut vm,
                         &mut self.stats,
                     )?;
-                    if is_truthy(&keep) {
-                        *matched = true;
-                        self.exhausted = true;
-                        return Ok(RowStreamRowResult::Stop);
-                    }
-                    return Ok(RowStreamRowResult::Skip);
-                }
-                CompiledRowStreamStage::All {
-                    program,
-                    failed,
-                    direct,
-                } => {
-                    let keep = eval_owned_row_predicate(
-                        engine,
-                        line_no,
-                        program,
-                        direct.as_ref(),
-                        &mut row,
-                        &mut document,
-                        &mut value,
-                        &mut vm,
-                        &mut self.stats,
-                    )?;
-                    if !is_truthy(&keep) {
-                        *failed = true;
-                        self.exhausted = true;
-                        return Ok(RowStreamRowResult::Stop);
-                    }
-                    return Ok(RowStreamRowResult::Skip);
-                }
-                CompiledRowStreamStage::FindOne {
-                    program,
-                    value: matched,
-                    direct,
-                } => {
-                    let keep = eval_owned_row_predicate(
-                        engine,
-                        line_no,
-                        program,
-                        direct.as_ref(),
-                        &mut row,
-                        &mut document,
-                        &mut value,
-                        &mut vm,
-                        &mut self.stats,
-                    )?;
-                    if is_truthy(&keep) {
-                        if matched.is_some() {
-                            return Err(row_eval_error(
-                                line_no,
-                                EvalError(
-                                    "find_one: expected exactly one element, got multiple".into(),
-                                ),
-                            ));
+                    let keep = is_truthy(&keep);
+                    match sink {
+                        BuiltinPredicateSink::Any if keep => {
+                            state.matched = true;
+                            self.exhausted = true;
+                            return Ok(RowStreamRowResult::Stop);
                         }
-                        *matched = Some(ensure_row_stream_value(
-                            engine,
-                            line_no,
-                            &mut row,
-                            &mut document,
-                            &mut value,
-                        )?);
+                        BuiltinPredicateSink::All if !keep => {
+                            state.failed = true;
+                            self.exhausted = true;
+                            return Ok(RowStreamRowResult::Stop);
+                        }
+                        BuiltinPredicateSink::FindOne if keep => {
+                            if state.value.is_some() {
+                                return Err(row_eval_error(
+                                    line_no,
+                                    EvalError(
+                                        "find_one: expected exactly one element, got multiple"
+                                            .into(),
+                                    ),
+                                ));
+                            }
+                            state.value = Some(ensure_row_stream_value(
+                                engine,
+                                line_no,
+                                &mut row,
+                                &mut document,
+                                &mut value,
+                            )?);
+                        }
+                        _ => {}
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
@@ -315,44 +286,37 @@ impl CompiledRowStream {
                     acc.add_val(&value);
                     return Ok(RowStreamRowResult::Skip);
                 }
-                CompiledRowStreamStage::Any {
-                    program, matched, ..
-                } => {
-                    let keep = vm.execute_val_raw_fresh_root(program, value)?;
-                    self.stats.fallback_filter_rows += 1;
-                    if is_truthy(&keep) {
-                        *matched = true;
-                        self.exhausted = true;
-                        return Ok(RowStreamRowResult::Stop);
-                    }
-                    return Ok(RowStreamRowResult::Skip);
-                }
-                CompiledRowStreamStage::All {
-                    program, failed, ..
-                } => {
-                    let keep = vm.execute_val_raw_fresh_root(program, value)?;
-                    self.stats.fallback_filter_rows += 1;
-                    if !is_truthy(&keep) {
-                        *failed = true;
-                        self.exhausted = true;
-                        return Ok(RowStreamRowResult::Stop);
-                    }
-                    return Ok(RowStreamRowResult::Skip);
-                }
-                CompiledRowStreamStage::FindOne {
+                CompiledRowStreamStage::PredicateSink {
+                    sink,
                     program,
-                    value: matched,
+                    state,
                     ..
                 } => {
-                    let keep = vm.execute_val_raw_fresh_root(program, value.clone())?;
-                    self.stats.fallback_filter_rows += 1;
-                    if is_truthy(&keep) {
-                        if matched.is_some() {
-                            return Err(EvalError(
-                                "find_one: expected exactly one element, got multiple".into(),
-                            ));
+                    if matches!(sink, BuiltinPredicateSink::FindOne) {
+                        let keep = vm.execute_val_raw_fresh_root(program, value.clone())?;
+                        self.stats.fallback_filter_rows += 1;
+                        if is_truthy(&keep) {
+                            if state.value.is_some() {
+                                return Err(EvalError(
+                                    "find_one: expected exactly one element, got multiple".into(),
+                                ));
+                            }
+                            state.value = Some(value);
                         }
-                        *matched = Some(value);
+                    } else {
+                        let keep = vm.execute_val_raw_fresh_root(program, value)?;
+                        self.stats.fallback_filter_rows += 1;
+                        let keep = is_truthy(&keep);
+                        if matches!(sink, BuiltinPredicateSink::Any) && keep {
+                            state.matched = true;
+                            self.exhausted = true;
+                            return Ok(RowStreamRowResult::Stop);
+                        }
+                        if matches!(sink, BuiltinPredicateSink::All) && !keep {
+                            state.failed = true;
+                            self.exhausted = true;
+                            return Ok(RowStreamRowResult::Stop);
+                        }
                     }
                     return Ok(RowStreamRowResult::Skip);
                 }
@@ -372,13 +336,18 @@ impl CompiledRowStream {
                 CompiledRowStreamStage::Last { value } => value.clone().unwrap_or(Val::Null),
                 CompiledRowStreamStage::Count { count } => Val::Int(*count as i64),
                 CompiledRowStreamStage::Numeric { acc } => acc.value(),
-                CompiledRowStreamStage::Any { matched, .. } => Val::Bool(*matched),
-                CompiledRowStreamStage::All { failed, .. } => Val::Bool(!*failed),
-                CompiledRowStreamStage::FindOne { value, .. } => {
-                    return value.clone().map(Some).ok_or_else(|| {
-                        EvalError("find_one: expected exactly one element, got 0".into())
-                    });
-                }
+                CompiledRowStreamStage::PredicateSink { sink, state, .. } => match sink {
+                    BuiltinPredicateSink::Any => Val::Bool(state.matched),
+                    BuiltinPredicateSink::All => Val::Bool(!state.failed),
+                    BuiltinPredicateSink::FindOne => {
+                        return state.value.clone().map(Some).ok_or_else(|| {
+                            EvalError("find_one: expected exactly one element, got 0".into())
+                        });
+                    }
+                    BuiltinPredicateSink::FindIndex | BuiltinPredicateSink::IndicesWhere => {
+                        continue;
+                    }
+                },
                 _ => continue,
             };
             return Ok(Some(value));
@@ -455,6 +424,13 @@ fn ensure_row_stream_value(
     Ok(root)
 }
 
+#[derive(Default)]
+struct PredicateSinkState {
+    matched: bool,
+    failed: bool,
+    value: Option<Val>,
+}
+
 enum CompiledRowStreamStage {
     Filter {
         program: Program,
@@ -478,19 +454,10 @@ enum CompiledRowStreamStage {
     Numeric {
         acc: NumericAccumulator,
     },
-    Any {
+    PredicateSink {
+        sink: BuiltinPredicateSink,
         program: Program,
-        matched: bool,
-        direct: Option<NdjsonDirectPredicate>,
-    },
-    All {
-        program: Program,
-        failed: bool,
-        direct: Option<NdjsonDirectPredicate>,
-    },
-    FindOne {
-        program: Program,
-        value: Option<Val>,
+        state: PredicateSinkState,
         direct: Option<NdjsonDirectPredicate>,
     },
     Map {
@@ -501,6 +468,15 @@ enum CompiledRowStreamStage {
 
 impl CompiledRowStreamStage {
     fn new(stage: &RowStreamStage, is_last: bool) -> Self {
+        if let Some((sink, expr)) = stage.predicate_sink() {
+            return Self::PredicateSink {
+                sink,
+                program: Compiler::compile(expr, "<ndjson-rows-predicate-sink>"),
+                state: PredicateSinkState::default(),
+                direct: direct_tape_predicate_for_expr(expr),
+            };
+        }
+
         match stage {
             RowStreamStage::Filter(expr) => Self::Filter {
                 program: Compiler::compile(expr, "<ndjson-rows-filter>"),
@@ -520,21 +496,9 @@ impl CompiledRowStreamStage {
             RowStreamStage::Numeric(reducer) => Self::Numeric {
                 acc: NumericAccumulator::from_reducer(*reducer),
             },
-            RowStreamStage::Any(expr) => Self::Any {
-                program: Compiler::compile(expr, "<ndjson-rows-any>"),
-                matched: false,
-                direct: direct_tape_predicate_for_expr(expr),
-            },
-            RowStreamStage::All(expr) => Self::All {
-                program: Compiler::compile(expr, "<ndjson-rows-all>"),
-                failed: false,
-                direct: direct_tape_predicate_for_expr(expr),
-            },
-            RowStreamStage::FindOne(expr) => Self::FindOne {
-                program: Compiler::compile(expr, "<ndjson-rows-find-one>"),
-                value: None,
-                direct: direct_tape_predicate_for_expr(expr),
-            },
+            RowStreamStage::Any(_) | RowStreamStage::All(_) | RowStreamStage::FindOne(_) => {
+                unreachable!("predicate sink stages are handled through builtin metadata")
+            }
             RowStreamStage::Map(expr) => Self::Map {
                 program: Compiler::compile(expr, "<ndjson-rows-map>"),
                 direct: is_last
@@ -544,7 +508,6 @@ impl CompiledRowStreamStage {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
