@@ -7,10 +7,11 @@ use std::collections::VecDeque;
 
 use crate::{
     builtins::{
-        ops::approx_distinct::Hll, BuiltinMembershipSink, BuiltinPredicateSink, BuiltinSelectionPosition,
-        BuiltinSinkAccumulator,
+        ops::approx_distinct::Hll, registry::membership_sink_result_demand, BuiltinMembershipSink,
+        BuiltinPredicateSink, BuiltinSelectionPosition, BuiltinSinkAccumulator,
     },
     data::{context::EvalError, value::Val},
+    plan::demand::SinkResultDemand,
 };
 
 use super::{cmp_val_total, ReducerAccumulator, Sink};
@@ -339,31 +340,24 @@ impl<'a> SinkAccumulator<'a> {
         op: BuiltinMembershipSink,
         matched: bool,
     ) -> bool {
-        match op {
-            BuiltinMembershipSink::Includes => {
-                if matched {
-                    self.membership_matched = Some(self.membership_seen);
-                    true
-                } else {
-                    self.membership_seen += 1;
-                    false
-                }
+        match membership_sink_result_demand(op) {
+            SinkResultDemand::UntilMatch if matched => {
+                self.membership_matched = Some(self.membership_seen);
+                true
             }
-            BuiltinMembershipSink::Index => {
-                if matched {
-                    self.membership_matched = Some(self.membership_seen);
-                    true
-                } else {
-                    self.membership_seen += 1;
-                    false
-                }
+            SinkResultDemand::UntilMatch => {
+                self.membership_seen += 1;
+                false
             }
-            BuiltinMembershipSink::IndicesOf => {
+            SinkResultDemand::None => {
                 if matched {
                     self.membership_indices.push(self.membership_seen as i64);
                 }
                 self.membership_seen += 1;
                 false
+            }
+            SinkResultDemand::UntilFailure => {
+                unreachable!("membership sinks cannot stop on failure")
             }
         }
     }
@@ -455,11 +449,9 @@ impl<'a> SinkAccumulator<'a> {
             },
             Sink::ArgExtreme(_) => self.arg_extreme_value.unwrap_or(Val::Null),
             Sink::SelectMany { n: 0, .. } => Val::Null,
-            Sink::SelectMany { n, .. } if *n == 1 => self
-                .select_many
-                .into_iter()
-                .next()
-                .unwrap_or(Val::Null),
+            Sink::SelectMany { n, .. } if *n == 1 => {
+                self.select_many.into_iter().next().unwrap_or(Val::Null)
+            }
             Sink::SelectMany { .. } => Val::arr(self.select_many.into_iter().collect()),
             Sink::Nth(_) => self.nth.unwrap_or(Val::Null),
             Sink::Terminal(_) => Val::Null,
@@ -469,9 +461,9 @@ impl<'a> SinkAccumulator<'a> {
     /// Fallible finalisation for sinks whose terminal semantics can fail.
     pub(crate) fn finish_result(self, unwrap_single_collect_obj: bool) -> Result<Val, EvalError> {
         if matches!(self.sink, Sink::Predicate(spec) if spec.is_find_one()) {
-            return self.predicate_value.ok_or_else(|| {
-                EvalError("find_one: expected exactly one element, got 0".into())
-            });
+            return self
+                .predicate_value
+                .ok_or_else(|| EvalError("find_one: expected exactly one element, got 0".into()));
         }
         Ok(self.finish(unwrap_single_collect_obj))
     }
@@ -643,7 +635,10 @@ mod tests {
             .observe_predicate_lazy(BuiltinPredicateSink::All, false, || Val::Null)
             .unwrap());
 
-        for op in [BuiltinMembershipSink::Includes, BuiltinMembershipSink::Index] {
+        for op in [
+            BuiltinMembershipSink::Includes,
+            BuiltinMembershipSink::Index,
+        ] {
             let sink = membership_sink(op);
             assert_eq!(sink.demand().sink_result, SinkResultDemand::UntilMatch);
             let mut acc = SinkAccumulator::new(&sink);
