@@ -1,5 +1,5 @@
 use super::{
-    labels::predicate_sink_label,
+    labels::{numeric_reducer_label, predicate_sink_label},
     report::{DirectPlanInspection, NdjsonInspection, RowStreamInspection},
 };
 use crate::io::{
@@ -148,15 +148,6 @@ fn row_sink_label(stages: &[crate::io::RowStreamStage]) -> &'static str {
         Some(crate::io::RowStreamStage::Numeric(reducer)) => numeric_reducer_label(*reducer),
         Some(crate::io::RowStreamStage::PredicateSink { sink, .. }) => predicate_sink_label(*sink),
         _ => "collect",
-    }
-}
-
-fn numeric_reducer_label(reducer: crate::builtins::BuiltinNumericReducer) -> &'static str {
-    match reducer {
-        crate::builtins::BuiltinNumericReducer::Sum => "sum",
-        crate::builtins::BuiltinNumericReducer::Avg => "avg",
-        crate::builtins::BuiltinNumericReducer::Min => "min",
-        crate::builtins::BuiltinNumericReducer::Max => "max",
     }
 }
 

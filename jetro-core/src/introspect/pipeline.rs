@@ -78,17 +78,11 @@ pub(crate) fn sink_label(sink: &Sink) -> &'static str {
         Sink::Collect => "collect",
         Sink::Reducer(spec) => match spec.op {
             crate::exec::pipeline::ReducerOp::Count => "count",
-            crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Sum) => "sum",
-            crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Min) => "min",
-            crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Max) => "max",
-            crate::exec::pipeline::ReducerOp::Numeric(crate::exec::pipeline::NumOp::Avg) => "avg",
+            crate::exec::pipeline::ReducerOp::Numeric(op) => super::labels::num_op_label(op),
         },
         Sink::Predicate(spec) => super::labels::predicate_sink_label(spec.op),
         Sink::Membership(_) => "membership",
-        Sink::ArgExtreme(spec) => match spec.op {
-            crate::builtins::BuiltinArgExtremeSink::MaxBy => "max-by",
-            crate::builtins::BuiltinArgExtremeSink::MinBy => "min-by",
-        },
+        Sink::ArgExtreme(spec) => super::labels::arg_extreme_sink_label(spec.op),
         Sink::Terminal(_) => "terminal",
         Sink::SelectMany { from_end: true, .. } => "take-last",
         Sink::SelectMany {
