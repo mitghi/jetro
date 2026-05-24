@@ -646,6 +646,23 @@ impl StageShape {
         }
     }
 
+    /// Whether this stage preserves one output row per input row.
+    #[inline]
+    pub(crate) const fn is_one_to_one(self) -> bool {
+        matches!(self.cardinality, BuiltinCardinality::OneToOne)
+    }
+
+    /// Whether this stage reduces the stream to an aggregate value.
+    #[inline]
+    pub(crate) const fn is_reducing(self) -> bool {
+        matches!(self.cardinality, BuiltinCardinality::Reducing)
+    }
+
+    /// Whether this stage is a materialising barrier.
+    #[inline]
+    pub(crate) const fn is_barrier(self) -> bool {
+        matches!(self.cardinality, BuiltinCardinality::Barrier)
+    }
 }
 
 /// A unified descriptor for a `Stage`, providing the canonical method, body program,
@@ -1295,7 +1312,7 @@ impl Stage {
             Some(op) => op.propagate_demand(demand.chain),
             None => ChainDemand::RESULT,
         };
-        let positional = if matches!(self.shape().cardinality, BuiltinCardinality::OneToOne) {
+        let positional = if self.shape().is_one_to_one() {
             demand.positional
         } else {
             None

@@ -135,12 +135,7 @@ fn ordered_prefix_suffix_is_safe(
 }
 
 fn suffix_is_one_to_one(stages: &[Stage]) -> bool {
-    stages.iter().all(|stage| {
-        matches!(
-            stage.shape().cardinality,
-            crate::builtins::BuiltinCardinality::OneToOne
-        )
-    })
+    stages.iter().all(|stage| stage.shape().is_one_to_one())
 }
 
 // Returns `true` when `predicate` is a range comparison on the same key as `sort`, meaning
@@ -423,14 +418,10 @@ fn fold_merge_with_kernels(
 /// Chooses the top-level execution `Strategy` for a planned pipeline by inspecting cardinality,
 /// indexed support, and pull demand of the stages and sink.
 pub fn select_strategy(stages: &[Stage], sink: &Sink) -> Strategy {
-    use crate::builtins::BuiltinCardinality;
-
     let stages_can_indexed = stages.iter().all(|s| s.shape().can_indexed);
     let sink_positional =
         sink.demand().positional.is_some() || matches!(sink, Sink::SelectMany { .. });
-    let has_barrier = stages
-        .iter()
-        .any(|s| matches!(s.shape().cardinality, BuiltinCardinality::Barrier));
+    let has_barrier = stages.iter().any(|s| s.shape().is_barrier());
     let has_short_circuit = matches!(
         sink.demand().chain.pull,
         PullDemand::FirstInput(_) | PullDemand::LastInput(_) | PullDemand::NthInput(_)

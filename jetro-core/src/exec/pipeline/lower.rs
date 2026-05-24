@@ -13,9 +13,7 @@ use crate::builtins::registry::{
     by_name, expr_stage, pipeline_accepts_arity, pipeline_chain_operator, pipeline_lowering,
     sink_accumulator as builtin_sink_accumulator, terminal_expr_target, BuiltinId,
 };
-use crate::builtins::{
-    BuiltinCardinality, BuiltinExprStage, BuiltinPipelineLowering, BuiltinSinkAccumulator,
-};
+use crate::builtins::{BuiltinExprStage, BuiltinPipelineLowering, BuiltinSinkAccumulator};
 use crate::data::value::Val;
 use crate::parse::ast::Expr;
 use crate::plan::analysis;
@@ -236,7 +234,7 @@ fn decode_method_chain(
 }
 
 fn stage_is_value_reducer_boundary(stage: &Stage) -> bool {
-    stage.shape().cardinality == BuiltinCardinality::Reducing
+    stage.shape().is_reducing()
 }
 
 fn push_path_slice_stages(
