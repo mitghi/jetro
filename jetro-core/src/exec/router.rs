@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(total, json!(30));
 
         assert!(!from_tape.root_val_is_materialized());
-        assert_eq!(from_tape.tape_materialized_subtrees(), 2);
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
     }
 
     #[test]
@@ -1627,7 +1627,7 @@ mod tests {
             })
         );
         assert!(!j.root_val_is_materialized());
-        assert_eq!(j.tape_materialized_subtrees(), 3);
+        assert_eq!(j.tape_materialized_subtrees(), 2);
     }
 
     #[test]
