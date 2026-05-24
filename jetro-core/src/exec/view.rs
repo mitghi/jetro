@@ -1589,9 +1589,9 @@ where
                 _ => return None,
             };
             let take = count.min(len);
-            let mut suffix = source.array_iter_rev()?.take(take).collect::<Vec<_>>();
-            suffix.reverse();
-            let items = suffix.into_iter();
+            let start = len - take;
+            let indexed_source = source.clone();
+            let items = (start..len).map(move |idx| indexed_source.index(idx as i64));
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
         pipeline::SourceAccessMode::ForwardBounded(inputs) => {
@@ -2809,6 +2809,7 @@ mod tests {
         rows: Arc<[i64]>,
         idx: Option<usize>,
         scalar_reads: Rc<Cell<usize>>,
+        index_reads: Rc<Cell<usize>>,
         array_iter_reads: Rc<Cell<usize>>,
         array_iter_rev_reads: Rc<Cell<usize>>,
         materialize_reads: Rc<Cell<usize>>,
@@ -2820,6 +2821,7 @@ mod tests {
                 rows: rows.iter().copied().collect::<Vec<_>>().into(),
                 idx: None,
                 scalar_reads: Rc::new(Cell::new(0)),
+                index_reads: Rc::new(Cell::new(0)),
                 array_iter_reads: Rc::new(Cell::new(0)),
                 array_iter_rev_reads: Rc::new(Cell::new(0)),
                 materialize_reads: Rc::new(Cell::new(0)),
@@ -2828,6 +2830,10 @@ mod tests {
 
         fn scalar_reads(&self) -> usize {
             self.scalar_reads.get()
+        }
+
+        fn index_reads(&self) -> usize {
+            self.index_reads.get()
         }
 
         fn materialize_reads(&self) -> usize {
@@ -2862,6 +2868,7 @@ mod tests {
                 rows: Arc::clone(&self.rows),
                 idx: None,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                index_reads: Rc::clone(&self.index_reads),
                 array_iter_reads: Rc::clone(&self.array_iter_reads),
                 array_iter_rev_reads: Rc::clone(&self.array_iter_rev_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
@@ -2897,11 +2904,13 @@ mod tests {
         }
 
         fn index(&self, idx: i64) -> Self {
+            self.index_reads.set(self.index_reads.get() + 1);
             let idx = if idx >= 0 { Some(idx as usize) } else { None };
             Self {
                 rows: Arc::clone(&self.rows),
                 idx,
                 scalar_reads: Rc::clone(&self.scalar_reads),
+                index_reads: Rc::clone(&self.index_reads),
                 array_iter_reads: Rc::clone(&self.array_iter_reads),
                 array_iter_rev_reads: Rc::clone(&self.array_iter_rev_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
@@ -2915,6 +2924,7 @@ mod tests {
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
+            let index_reads = Rc::clone(&self.index_reads);
             let array_iter_reads = Rc::clone(&self.array_iter_reads);
             let array_iter_rev_reads = Rc::clone(&self.array_iter_rev_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
@@ -2922,6 +2932,7 @@ mod tests {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
+                index_reads: Rc::clone(&index_reads),
                 array_iter_reads: Rc::clone(&array_iter_reads),
                 array_iter_rev_reads: Rc::clone(&array_iter_rev_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
@@ -2937,6 +2948,7 @@ mod tests {
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
+            let index_reads = Rc::clone(&self.index_reads);
             let array_iter_reads = Rc::clone(&self.array_iter_reads);
             let array_iter_rev_reads = Rc::clone(&self.array_iter_rev_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
@@ -2944,6 +2956,7 @@ mod tests {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
+                index_reads: Rc::clone(&index_reads),
                 array_iter_reads: Rc::clone(&array_iter_reads),
                 array_iter_rev_reads: Rc::clone(&array_iter_rev_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
@@ -3597,8 +3610,9 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(*observed.borrow(), vec![Val::Int(3), Val::Int(4)]);
         assert_eq!(source.scalar_reads(), 1);
-        assert_eq!(source.array_iter_reads(), 1);
-        assert_eq!(source.array_iter_rev_reads(), 1);
+        assert_eq!(source.index_reads(), 2);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.array_iter_rev_reads(), 0);
     }
 
     #[test]
