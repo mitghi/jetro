@@ -92,7 +92,7 @@ impl NumericAccumulator {
                     *self = other.clone();
                     return;
                 }
-                if self.reducer == BuiltinNumericReducer::Min {
+                if self.reducer.selects_min() {
                     if other.min_f < self.min_f {
                         self.min_f = other.min_f;
                     }

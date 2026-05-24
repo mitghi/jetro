@@ -1790,6 +1790,12 @@ impl BuiltinNumericReducer {
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
         BuiltinDemandLaw::NumericReducer
     }
+
+    /// Whether this reducer tracks the lower extreme among observed values.
+    #[inline]
+    pub(crate) const fn selects_min(self) -> bool {
+        matches!(self, Self::Min)
+    }
 }
 
 /// Describes how two adjacent identical stages can be collapsed into one.
