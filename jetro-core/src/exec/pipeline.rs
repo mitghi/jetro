@@ -368,7 +368,7 @@ impl NumOp {
     }
 
     /// Returns the identity / empty-input value for this operation (`0` for Sum, `null` for others).
-    fn empty(self) -> Val {
+    pub(crate) fn empty(self) -> Val {
         match self {
             NumOp::Sum => Val::Int(0),
             NumOp::Avg => Val::Null,

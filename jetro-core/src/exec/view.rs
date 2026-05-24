@@ -239,7 +239,9 @@ where
     {
         return Some(Ok(result));
     }
-    if let Some(result) = direct_empty_cardinality_sink(&source, &capabilities.stages, &sink) {
+    if let Some(result) =
+        direct_empty_cardinality_sink(&source, &capabilities.stages, &sink, &body.sink)
+    {
         return Some(Ok(result));
     }
 
@@ -335,12 +337,16 @@ fn direct_empty_cardinality_sink<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
     sink: &pipeline::ViewSinkCapability,
+    body_sink: &pipeline::Sink,
 ) -> Option<Val>
 where
     V: ValueView<'a> + 'a,
 {
     if cardinality_after_deterministic_stages(source, stages)? != 0 {
         return None;
+    }
+    if let Some(op) = body_sink.reducer_spec().and_then(|spec| spec.numeric_op()) {
+        return Some(op.empty());
     }
     match sink {
         pipeline::ViewSinkCapability::Builtin {
@@ -1797,8 +1803,8 @@ mod tests {
     use crate::data::view::{ValView, ValueView};
     use crate::exec::pipeline::{
         eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget,
-        PipelineBody, PredicateSinkSpec, Sink, SourceCapabilities, Stage, ViewKernelValue,
-        ViewSinkCapability, ViewStageCapability,
+        NumOp, PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, SourceCapabilities,
+        Stage, ViewKernelValue, ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
@@ -2664,6 +2670,41 @@ mod tests {
         assert_eq!(distinct_source.scalar_reads(), 1);
         assert_eq!(distinct_source.array_iter_reads(), 0);
         assert_eq!(distinct_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_empty_cardinality_numeric_reducers_skip_row_evaluation() {
+        for (op, expected) in [
+            (NumOp::Sum, Val::Int(0)),
+            (NumOp::Avg, Val::Null),
+            (NumOp::Min, Val::Null),
+            (NumOp::Max, Val::Null),
+        ] {
+            let source = CountingView::root(&[1, 2, 3]);
+            let body = PipelineBody {
+                stages: vec![Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                }],
+                stage_exprs: Vec::new(),
+                sink: Sink::Reducer(ReducerSpec {
+                    op: ReducerOp::Numeric(op),
+                    predicate: None,
+                    projection: None,
+                    predicate_expr: None,
+                    projection_expr: None,
+                }),
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+            assert_eq!(out, expected, "{op:?}");
+            assert_eq!(source.scalar_reads(), 1, "{op:?}");
+            assert_eq!(source.array_iter_reads(), 0, "{op:?}");
+            assert_eq!(source.materialize_reads(), 0, "{op:?}");
+        }
     }
 
     #[test]
