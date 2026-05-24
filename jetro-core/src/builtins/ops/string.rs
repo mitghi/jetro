@@ -662,16 +662,19 @@ pub fn indent_apply(recv: &Val, n: usize) -> Option<Val> {
     indent_with_prefix_apply(recv, &prefix)
 }
 
+#[inline]
+pub fn indent_str(s: &str, prefix: &str) -> String {
+    s.lines()
+        .map(|l| format!("{}{}", prefix, l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Prepends `prefix` to each line of the string.
 #[inline]
 pub fn indent_with_prefix_apply(recv: &Val, prefix: &str) -> Option<Val> {
     let s = recv.as_str_ref()?;
-    let out = s
-        .lines()
-        .map(|l| format!("{}{}", prefix, l))
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(Val::Str(Arc::from(out)))
+    Some(Val::Str(Arc::from(indent_str(s, prefix))))
 }
 
 /// Finds every non-overlapping occurrence of `pat` and returns an array of the matched strings.

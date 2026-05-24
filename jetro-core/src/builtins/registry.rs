@@ -1190,6 +1190,19 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Indent => {
+            let prefix = match args {
+                BuiltinArgs::Usize(n) => Arc::<str>::from(" ".repeat(*n)),
+                BuiltinArgs::Str(prefix) => prefix.clone(),
+                _ => return None,
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => ViewProjectionResult::Owned(Val::Str(Arc::from(
+                    crate::builtins::indent_str(value, prefix.as_ref()),
+                ))),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -3950,6 +3963,7 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
             (
@@ -6017,6 +6031,7 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (BuiltinMethod::KebabCase, BuiltinViewValueProjection::KebabCase),
             (
                 BuiltinMethod::PascalCase,
@@ -6122,7 +6137,9 @@ mod tests {
                 "indent": "  a\n    b"
             }));
             let view = ValView::new(&doc).field(field);
-            match apply_view_projection(BuiltinId::from_method(method), &args, view).unwrap() {
+            match apply_view_projection(BuiltinId::from_method(method), &args, view)
+                .unwrap_or_else(|| panic!("{method:?} did not apply for args {args:?}"))
+            {
                 ViewProjectionResult::View(view) => view.materialize(),
                 ViewProjectionResult::Owned(value) => value,
             }
@@ -6304,6 +6321,18 @@ mod tests {
             apply_field(BuiltinMethod::Dedent, BuiltinArgs::None, "indent"),
             Val::Str(std::sync::Arc::from("a\n  b"))
         );
+        assert_eq!(
+            apply_field(BuiltinMethod::Indent, BuiltinArgs::Usize(2), "case"),
+            Val::Str(std::sync::Arc::from("  hello WORLD"))
+        );
+        assert_eq!(
+            apply_field(
+                BuiltinMethod::Indent,
+                BuiltinArgs::Str(std::sync::Arc::from("> ")),
+                "indent"
+            ),
+            Val::Str(std::sync::Arc::from(">   a\n>     b"))
+        );
         let sliced_non_string = apply(
             BuiltinMethod::Slice,
             BuiltinArgs::I64Opt {
@@ -6377,6 +6406,11 @@ mod tests {
                 "{method:?}"
             );
         }
+        let indented_non_string = apply(BuiltinMethod::Indent, BuiltinArgs::Usize(2));
+        assert_eq!(
+            serde_json::Value::from(indented_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
     }
 
     #[test]

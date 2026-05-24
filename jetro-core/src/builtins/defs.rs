@@ -4225,7 +4225,7 @@ impl Builtin for Indent {
     const METHOD: BuiltinMethod = BuiltinMethod::Indent;
     const NAME: &'static str = "indent";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::Indent)
     }
     #[inline]
     fn apply_args(

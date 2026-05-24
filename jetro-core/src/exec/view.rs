@@ -5814,6 +5814,39 @@ mod tests {
     }
 
     #[test]
+    fn view_indent_builtin_transforms_tape_strings_without_materializing_receivers() {
+        fn run(args: crate::builtins::BuiltinArgs) -> serde_json::Value {
+            let tape = crate::data::tape::TapeData::parse(br#"["a\nb",""]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Indent,
+                    args,
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tape.materialized_subtrees(), 0);
+            serde_json::Value::from(out)
+        }
+
+        assert_eq!(
+            run(crate::builtins::BuiltinArgs::Usize(2)),
+            serde_json::json!(["  a\n  b", ""])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinArgs::Str(Arc::from("> "))),
+            serde_json::json!(["> a\n> b", ""])
+        );
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {

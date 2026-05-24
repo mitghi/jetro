@@ -930,6 +930,8 @@ pub enum BuiltinViewValueProjection {
     HtmlUnescape,
     /// Escape HTML-sensitive characters.
     HtmlEscape,
+    /// Prepend a prefix to each line.
+    Indent,
     /// Center-pad a string value.
     Center,
     /// Left-pad a string value.
@@ -983,6 +985,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
+            | BuiltinViewValueProjection::Indent
             | BuiltinViewValueProjection::KebabCase
             | BuiltinViewValueProjection::PadLeft
             | BuiltinViewValueProjection::PadRight
