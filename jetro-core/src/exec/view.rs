@@ -1626,12 +1626,26 @@ where
         plan.descending
     };
     let source_reversed = ordered_descending != plan.descending;
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, source_reversed);
+    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, source_reversed);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
+    if let Some(0) =
+        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
+    {
+        return run_ordered_rows_view_suffix(
+            Vec::<FrontierRow<V>>::new(),
+            body,
+            plan.sort_stage + 1,
+            source_reversed,
+            &suffix,
+            sink,
+            source_demand,
+            vm,
+        );
+    }
     let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
 
     if let Err(err) = drive_view_frontier(
@@ -1650,18 +1664,42 @@ where
         return Some(Err(err));
     }
 
-    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
-
     let ordered: Vec<_> = sorter.finish().collect();
+    run_ordered_rows_view_suffix(
+        ordered,
+        body,
+        plan.sort_stage + 1,
+        source_reversed,
+        &suffix,
+        sink,
+        source_demand,
+        vm,
+    )
+}
+
+fn run_ordered_rows_view_suffix<'a, V>(
+    ordered: Vec<FrontierRow<V>>,
+    body: &pipeline::PipelineBody,
+    suffix_start: usize,
+    source_reversed: bool,
+    suffix: &ViewSuffixCapabilities,
+    sink: pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
     if let Some(out) = run_sorted_rows_terminal_select_projection_suffix(
         ordered.as_slice(),
         body,
-        plan.sort_stage + 1,
+        suffix_start,
         source_reversed,
         vm,
     ) {
         return Some(out);
     }
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
     if let Err(err) = drive_frontier_iter(
         ordered,
@@ -4070,6 +4108,42 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn ordered_sort_view_suffix_skips_empty_prefix_without_iterating_rows() {
+        let source = CountingView::root(&[3, 1, 2]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::Sort(crate::exec::pipeline::SortSpec::identity()),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let plan = super::SortBarrierPlan {
+            prefix: vec![ViewStageCapability::Take(0)],
+            sort_stage: 1,
+            key_program: None,
+            descending: false,
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out =
+            super::run_sort_prefix_then_view_suffix(source.clone(), &body, &plan, &env, &mut vm)
+                .unwrap()
+                .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
         assert_eq!(source.scalar_reads(), 1);
