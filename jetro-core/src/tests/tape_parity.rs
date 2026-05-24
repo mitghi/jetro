@@ -496,6 +496,9 @@ fn tape_matches_vm_across_conservative_stage_boundaries() {
         "$.orders.filter(status == \"open\").flat_map(items).filter(price > 10).map(sku).last()",
         "$.orders.flat_map(items).flat_map(tags).unique().last()",
         "$.orders.flat_map(items).map(tags.first()).unique().last()",
+        "$.orders.unique_by(status).map({id, hot_sku: items.filter(tags.has(\"hot\")).map(sku).last()}).last()",
+        "$.orders.take_while(status == \"open\").map({id, item: items.last().pick(\"sku\", \"price\")}).last()",
+        "$.orders.drop_while(score > 15).flat_map(items).map({sku, tag: tags.first()}).first()",
         "$.orders.sort_by(score).take(2).map({id, score}).last()",
         "$.orders.sort_by(score).drop(1).map(id).first()",
     ] {
