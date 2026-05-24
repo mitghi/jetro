@@ -2596,6 +2596,16 @@ mod tests {
                     "{method:?}"
                 );
                 assert_eq!(
+                    effective_pipeline_shape(id).map(|shape| shape.cardinality),
+                    Some(BuiltinCardinality::Reducing),
+                    "{method:?} keyed reducers must advertise reducing pipeline shape"
+                );
+                assert_eq!(
+                    effective_pipeline_shape(id).map(|shape| shape.can_indexed),
+                    Some(false),
+                    "{method:?} keyed reducers must not advertise indexed dispatch"
+                );
+                assert_eq!(
                     effective_pipeline_order_effect(id, true),
                     BuiltinPipelineOrderEffect::Blocks,
                     "{method:?}"

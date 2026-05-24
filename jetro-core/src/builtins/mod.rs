@@ -1800,7 +1800,7 @@ impl BuiltinViewStage {
     /// Returns whether this stage can participate in indexed (random-access) evaluation.
     #[inline]
     pub fn can_indexed(self) -> bool {
-        matches!(self, Self::Map | Self::KeyedReduce)
+        matches!(self, Self::Map)
     }
 
     /// Returns the relative per-row cost estimate used by the planner.
