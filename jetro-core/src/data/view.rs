@@ -92,6 +92,16 @@ impl TapeLike for crate::data::tape::TapeScratch {
     }
 
     #[inline]
+    fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
+        crate::data::tape::TapeScratch::array_child_start(self, first, len, idx)
+    }
+
+    #[inline]
+    fn array_child_indices(&self, array_idx: usize) -> Option<Vec<usize>> {
+        crate::data::tape::TapeScratch::array_child_indices(self, array_idx)
+    }
+
+    #[inline]
     fn materialize_at(&self, idx: &mut usize) -> Val {
         TapeScratchView::materialize_at(self, idx)
     }

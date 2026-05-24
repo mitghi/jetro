@@ -385,6 +385,7 @@ pub(crate) struct TapeScratch {
     bytes_buf: Vec<u8>,
     buffers: simd_json::Buffers,
     pub(crate) nodes: Vec<TapeNode>,
+    array_child_index: HashMap<usize, Box<[usize]>>,
 }
 impl TapeScratch {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
@@ -392,6 +393,7 @@ impl TapeScratch {
             bytes_buf: Vec::with_capacity(capacity),
             buffers: simd_json::Buffers::new(capacity),
             nodes: Vec::new(),
+            array_child_index: HashMap::new(),
         }
     }
 
@@ -402,6 +404,7 @@ impl TapeScratch {
             .map_err(|err| err.to_string())?;
         self.nodes =
             unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
+        self.array_child_index = build_array_child_index(&self.nodes);
         Ok(())
     }
 
@@ -419,6 +422,43 @@ impl TapeScratch {
             TapeNode::Object { count, .. } | TapeNode::Array { count, .. } => count + 1,
             _ => 1,
         }
+    }
+
+    #[inline]
+    pub(crate) fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
+        if idx >= len {
+            return None;
+        }
+        if let Some(children) = self.array_child_index.get(&first) {
+            return children.get(idx).copied();
+        }
+        let mut cur = first;
+        for _ in 0..idx {
+            cur += self.span(cur);
+        }
+        Some(cur)
+    }
+
+    pub(crate) fn array_child_indices(&self, array_idx: usize) -> Option<Vec<usize>> {
+        let TapeNode::Array { len, .. } = self.nodes[array_idx] else {
+            return None;
+        };
+        let first = array_idx + 1;
+        if let Some(children) = self.array_child_index.get(&first) {
+            return Some(children.to_vec());
+        }
+        let mut children = Vec::with_capacity(len);
+        let mut cur = first;
+        for _ in 0..len {
+            children.push(cur);
+            cur += self.span(cur);
+        }
+        Some(children)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
+        self.array_child_index.contains_key(&first)
     }
 }
 
@@ -465,5 +505,18 @@ mod tests {
         let nested_first = root_children[0] + 1;
         assert!(tape.has_array_child_index(nested_first));
         assert_eq!(tape.array_child_start(nested_first, 40, 39), Some(41));
+    }
+
+    #[test]
+    fn scratch_array_child_index_covers_large_arrays() {
+        let values = (0..40).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        let mut scratch = super::TapeScratch::with_capacity(values.len() + 2);
+        scratch
+            .parse_slice(format!("[{}]", values).as_bytes())
+            .expect("parse");
+
+        assert!(scratch.has_array_child_index(1));
+        assert_eq!(scratch.array_child_start(1, 40, 39), Some(40));
+        assert_eq!(scratch.array_child_indices(0).expect("indices").len(), 40);
     }
 }
