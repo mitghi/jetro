@@ -5289,6 +5289,51 @@ mod tests {
     }
 
     #[test]
+    fn view_parse_builtins_read_tape_strings_without_materializing_receivers() {
+        fn run(method: crate::builtins::BuiltinMethod) -> serde_json::Value {
+            let tape =
+                crate::data::tape::TapeData::parse(br#"["42","3.5","yes","false","bad"]"#.to_vec())
+                    .unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                )],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::BuiltinCall {
+                    receiver: Box::new(BodyKernel::Current),
+                    call: crate::builtins::BuiltinCall::new(
+                        method,
+                        crate::builtins::BuiltinArgs::None,
+                    ),
+                }],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+            serde_json::Value::from(out)
+        }
+
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ParseInt),
+            serde_json::json!([42, null, null, null, null])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ParseFloat),
+            serde_json::json!([42.0, 3.5, null, null, null])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ParseBool),
+            serde_json::json!([null, null, true, false, null])
+        );
+    }
+
+    #[test]
     fn view_value_string_builtins_traverse_tape_without_materializing_receivers() {
         let tape =
             crate::data::tape::TapeData::parse(br#"[{"a":1,"b":[true,null]},"plain"]"#.to_vec())

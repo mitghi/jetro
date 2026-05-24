@@ -549,29 +549,65 @@ pub fn try_abs_apply(recv: &Val) -> Result<Option<Val>, EvalError> {
 
 /// Parses the string as a base-10 `i64`; returns `Val::Null` on failure.
 #[inline]
+pub fn parse_int_str(s: &str) -> Val {
+    s.trim().parse::<i64>().map(Val::Int).unwrap_or(Val::Null)
+}
+
+#[inline]
+pub fn parse_int_radix_str(s: &str, radix: u32) -> Val {
+    let cleaned = match radix {
+        16 => s
+            .trim()
+            .strip_prefix("0x")
+            .or_else(|| s.trim().strip_prefix("0X"))
+            .unwrap_or(s.trim()),
+        2 => s
+            .trim()
+            .strip_prefix("0b")
+            .or_else(|| s.trim().strip_prefix("0B"))
+            .unwrap_or(s.trim()),
+        8 => s
+            .trim()
+            .strip_prefix("0o")
+            .or_else(|| s.trim().strip_prefix("0O"))
+            .unwrap_or(s.trim()),
+        _ => s.trim(),
+    };
+    i64::from_str_radix(cleaned, radix)
+        .map(Val::Int)
+        .unwrap_or(Val::Null)
+}
+
+#[inline]
 pub fn parse_int_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| {
-        s.trim().parse::<i64>().map(Val::Int).unwrap_or(Val::Null)
-    })
+    map_str_val(recv, parse_int_str)
 }
 
 /// Parses the string as an `f64`; returns `Val::Null` on failure.
 #[inline]
+pub fn parse_float_str(s: &str) -> Val {
+    s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null)
+}
+
+#[inline]
 pub fn parse_float_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| {
-        s.trim().parse::<f64>().map(Val::Float).unwrap_or(Val::Null)
-    })
+    map_str_val(recv, parse_float_str)
 }
 
 /// Parses common truthy/falsy string representations to `Val::Bool`; returns `Val::Null` otherwise.
 /// Recognises `true/yes/1/on` and `false/no/0/off` (case-insensitive).
 #[inline]
-pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| match s.trim().to_ascii_lowercase().as_str() {
+pub fn parse_bool_str(s: &str) -> Val {
+    match s.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "1" | "on" => Val::Bool(true),
         "false" | "no" | "0" | "off" => Val::Bool(false),
         _ => Val::Null,
-    })
+    }
+}
+
+#[inline]
+pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
+    map_str_val(recv, parse_bool_str)
 }
 
 /// Decodes a Base64 string to its UTF-8 representation; returns `Val::Null` for invalid input.

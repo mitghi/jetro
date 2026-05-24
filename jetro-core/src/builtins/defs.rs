@@ -3308,6 +3308,7 @@ macro_rules! scalar_native_element {
     ( $( $ty:ident => $variant:ident, $name:literal
          $( , aliases: [ $( $alias:literal ),* $(,)? ] )?
          $( , idempotent: $idempotent:literal )?
+         $( , view_op: $view_op:ident )?
          $( , view_value: $view_value:ident )?
          $( , apply: $apply:ident )? ; )* ) => {
         $(
@@ -3318,6 +3319,7 @@ macro_rules! scalar_native_element {
                 $( const ALIASES: &'static [&'static str] = &[ $( $alias ),* ]; )?
                 fn spec() -> BuiltinSpec {
                     let spec = scalar_native_element_spec()
+                        $( .view_scalar_op(BuiltinViewScalarOp::$view_op) )?
                         $( .view_value_projection(super::BuiltinViewValueProjection::$view_value) )?;
                     $( let spec = if $idempotent { spec.idempotent() } else { spec }; )?
                     spec
@@ -3396,8 +3398,8 @@ scalar_native_element! {
     KebabCase => KebabCase, "kebab_case", idempotent: true, view_value: KebabCase, apply: kebab_case_apply;
     CamelCase => CamelCase, "camel_case", idempotent: true, view_value: CamelCase, apply: camel_case_apply;
     PascalCase => PascalCase, "pascal_case", idempotent: true, view_value: PascalCase, apply: pascal_case_apply;
-    ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
-    ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
+    ParseFloat => ParseFloat, "parse_float", view_op: StringNoArg, apply: parse_float_apply;
+    ParseBool => ParseBool, "parse_bool", view_op: StringNoArg, apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
     Dedent => Dedent, "dedent", idempotent: true, view_value: Dedent, apply: dedent_apply;
 }
@@ -3450,7 +3452,7 @@ impl Builtin for ParseInt {
     const METHOD: BuiltinMethod = BuiltinMethod::ParseInt;
     const NAME: &'static str = "parse_int";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_native_element_spec().view_scalar_op(BuiltinViewScalarOp::StringNoArg)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3475,31 +3477,7 @@ impl Builtin for ParseInt {
         if !(2..=36).contains(&radix) {
             return Some(crate::data::value::Val::Null);
         }
-        super::ops::string::map_str_val(recv, |s| {
-            let cleaned = strip_radix_prefix(s.trim(), radix);
-            i64::from_str_radix(cleaned, radix)
-                .map(crate::data::value::Val::Int)
-                .unwrap_or(crate::data::value::Val::Null)
-        })
-    }
-}
-
-#[inline]
-fn strip_radix_prefix(s: &str, radix: u32) -> &str {
-    match radix {
-        16 => s
-            .strip_prefix("0x")
-            .or_else(|| s.strip_prefix("0X"))
-            .unwrap_or(s),
-        2 => s
-            .strip_prefix("0b")
-            .or_else(|| s.strip_prefix("0B"))
-            .unwrap_or(s),
-        8 => s
-            .strip_prefix("0o")
-            .or_else(|| s.strip_prefix("0O"))
-            .unwrap_or(s),
-        _ => s,
+        super::ops::string::map_str_val(recv, |s| super::parse_int_radix_str(s, radix))
     }
 }
 

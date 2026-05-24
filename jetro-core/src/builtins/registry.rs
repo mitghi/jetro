@@ -1012,8 +1012,10 @@ where
 {
     if let Some(method) = id.method() {
         if view_scalar_projection(id) {
-            return apply_json_view_scalar_hook(method, args, view.scalar())
-                .map(ViewProjectionResult::Owned);
+            return Some(match apply_json_view_scalar_hook(method, args, view.scalar()) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
         }
     }
     if let Some(projection) = view_value_projection(id) {
@@ -3603,6 +3605,9 @@ mod tests {
             BuiltinMethod::Len,
             BuiltinMethod::Lower,
             BuiltinMethod::Matches,
+            BuiltinMethod::ParseBool,
+            BuiltinMethod::ParseFloat,
+            BuiltinMethod::ParseInt,
             BuiltinMethod::Round,
             BuiltinMethod::StartsWith,
             BuiltinMethod::ToBool,
@@ -3678,6 +3683,9 @@ mod tests {
             (BuiltinMethod::IsAscii, BuiltinViewScalarOp::StringNoArg),
             (BuiltinMethod::ToNumber, BuiltinViewScalarOp::StringNoArg),
             (BuiltinMethod::ToBool, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ParseInt, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ParseFloat, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ParseBool, BuiltinViewScalarOp::StringNoArg),
         ] {
             assert_eq!(
                 view_scalar_op(BuiltinId::from_method(method)),

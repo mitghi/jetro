@@ -3747,6 +3747,9 @@ fn str_no_arg_scalar_apply(method: BuiltinMethod, value: &str) -> Option<Val> {
             "false" => Val::Bool(false),
             _ => Val::Null,
         }),
+        BuiltinMethod::ParseInt => Some(parse_int_str(value)),
+        BuiltinMethod::ParseFloat => Some(parse_float_str(value)),
+        BuiltinMethod::ParseBool => Some(parse_bool_str(value)),
         _ => None,
     }
 }
