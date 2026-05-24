@@ -197,7 +197,8 @@ fn keyed_reducer_value_need(body: &pipeline::PipelineBody, reducer_stage: usize)
 fn key_only_object_projection(method: BuiltinMethod, args: &BuiltinArgs) -> bool {
     matches!(
         (method, args),
-        (BuiltinMethod::Keys, BuiltinArgs::None)
+        (BuiltinMethod::Len, BuiltinArgs::None)
+            | (BuiltinMethod::Keys, BuiltinArgs::None)
             | (BuiltinMethod::HasKey, BuiltinArgs::Str(_))
             | (BuiltinMethod::Missing, BuiltinArgs::Str(_))
             | (BuiltinMethod::Missing, BuiltinArgs::StrVec(_))
