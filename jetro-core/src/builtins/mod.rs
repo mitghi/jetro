@@ -2667,6 +2667,13 @@ impl BuiltinCall {
         registry::builtin_cardinality(self.id())
     }
 
+    /// Returns true when this call preserves one output row for each input row.
+    #[inline]
+    pub(crate) fn preserves_cardinality(&self) -> bool {
+        self.cardinality()
+            .is_some_and(|cardinality| matches!(cardinality, BuiltinCardinality::OneToOne))
+    }
+
     /// Returns true when this view projection can be delayed by the planner.
     #[inline]
     pub(crate) fn is_stage_delayable_view_projection(&self) -> bool {

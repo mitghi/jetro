@@ -1929,8 +1929,7 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             kernel,
             downstream,
         ),
-        Stage::Builtin(call) if call.cardinality() == Some(BuiltinCardinality::OneToOne) =>
-        {
+        Stage::Builtin(call) if call.preserves_cardinality() => {
             if downstream.scan_need.is_none() && downstream.result_need.is_none() {
                 downstream
             } else {
