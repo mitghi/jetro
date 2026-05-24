@@ -6,10 +6,11 @@
 
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinCardinality, BuiltinKeyedReducer, BuiltinMembershipSink,
-    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewInputMode,
-    BuiltinViewOutputMode, BuiltinViewStage,
+    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
+pub(crate) use crate::builtins::BuiltinViewInputMode as ViewInputMode;
 pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
+pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
@@ -484,28 +485,6 @@ mod source_capability_tests {
     }
 }
 
-/// Describes whether a view-pipeline stage reads the input `ValueView` or only acts on position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewInputMode {
-    /// The stage examines the view's fields or scalar value.
-    ReadsView,
-    /// The stage ignores view content and acts on position alone.
-    SkipsViewRead,
-}
-
-/// Describes whether a view-pipeline stage's output is the same view, a sub-view, or an owned value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewOutputMode {
-    /// The stage passes the same input view through unchanged (e.g. `Filter`).
-    PreservesInputView,
-    /// The stage yields a single borrowed sub-view of the input (e.g. `Map` on a field).
-    BorrowedSubview,
-    /// The stage yields multiple borrowed sub-views (e.g. `FlatMap`).
-    BorrowedSubviews,
-    /// The stage produces a new owned `Val` that cannot be represented as a borrowed view.
-    EmitsOwnedValue,
-}
-
 /// Full capability descriptor for a `PipelineBody`: per-stage entries plus the sink capability.
 #[derive(Debug, Clone)]
 pub(crate) struct ViewPipelineCapabilities {
@@ -624,12 +603,12 @@ impl ViewStageCapability {
 
     /// Returns whether this stage reads the input view or only acts on position.
     pub(crate) fn input_mode(&self) -> ViewInputMode {
-        view_input_mode(self.view_stage().input_mode())
+        self.view_stage().input_mode()
     }
 
     /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
     pub(crate) fn output_mode(&self) -> ViewOutputMode {
-        view_output_mode(self.view_stage().output_mode())
+        self.view_stage().output_mode()
     }
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
@@ -776,24 +755,6 @@ fn target_is_scalar(value: &Val) -> bool {
         value,
         Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::StrSlice(_)
     )
-}
-
-// bridges the registry's BuiltinViewInputMode tag to the pipeline's enum
-fn view_input_mode(mode: BuiltinViewInputMode) -> ViewInputMode {
-    match mode {
-        BuiltinViewInputMode::ReadsView => ViewInputMode::ReadsView,
-        BuiltinViewInputMode::SkipsViewRead => ViewInputMode::SkipsViewRead,
-    }
-}
-
-// bridges the registry's BuiltinViewOutputMode tag to the pipeline's enum
-fn view_output_mode(mode: BuiltinViewOutputMode) -> ViewOutputMode {
-    match mode {
-        BuiltinViewOutputMode::PreservesInputView => ViewOutputMode::PreservesInputView,
-        BuiltinViewOutputMode::BorrowedSubview => ViewOutputMode::BorrowedSubview,
-        BuiltinViewOutputMode::BorrowedSubviews => ViewOutputMode::BorrowedSubviews,
-        BuiltinViewOutputMode::EmitsOwnedValue => ViewOutputMode::EmitsOwnedValue,
-    }
 }
 
 /// Computes `ViewPipelineCapabilities` for `body`; returns `None` when any stage or the sink is incompatible.
