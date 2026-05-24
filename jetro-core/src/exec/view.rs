@@ -343,6 +343,16 @@ where
         return None;
     }
     match sink {
+        pipeline::ViewSinkCapability::Collect => Some(Val::arr(Vec::new())),
+        pipeline::ViewSinkCapability::Nth { .. } => Some(Val::Null),
+        pipeline::ViewSinkCapability::ArgExtreme { .. } => Some(Val::Null),
+        pipeline::ViewSinkCapability::SelectMany { n, .. } => {
+            if *n <= 1 {
+                Some(Val::Null)
+            } else {
+                Some(Val::arr(Vec::new()))
+            }
+        }
         pipeline::ViewSinkCapability::Membership { op, target } if target.is_scalar_literal() => {
             match op {
                 crate::builtins::BuiltinMembershipSink::Includes => Some(Val::Bool(false)),
@@ -2560,6 +2570,79 @@ mod tests {
         assert_eq!(membership_source.scalar_reads(), 1);
         assert_eq!(membership_source.array_iter_reads(), 0);
         assert_eq!(membership_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_empty_cardinality_select_sinks_skip_row_evaluation() {
+        let collect_source = CountingView::root(&[1, 2, 3]);
+        let collect_body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let collect = super::run_full(collect_source.clone(), &collect_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(collect), serde_json::json!([]));
+        assert_eq!(collect_source.scalar_reads(), 1);
+        assert_eq!(collect_source.array_iter_reads(), 0);
+        assert_eq!(collect_source.materialize_reads(), 0);
+
+        let nth_source = CountingView::root(&[1, 2, 3]);
+        let nth_body = PipelineBody {
+            sink: Sink::Nth(1),
+            ..collect_body.clone()
+        };
+
+        let nth = super::run_full(nth_source.clone(), &nth_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(nth, Val::Null);
+        assert_eq!(nth_source.scalar_reads(), 1);
+        assert_eq!(nth_source.array_iter_reads(), 0);
+        assert_eq!(nth_source.materialize_reads(), 0);
+
+        let many_source = CountingView::root(&[1, 2, 3]);
+        let many_body = PipelineBody {
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: false,
+            },
+            ..nth_body
+        };
+
+        let many = super::run_full(many_source.clone(), &many_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(many), serde_json::json!([]));
+        assert_eq!(many_source.scalar_reads(), 1);
+        assert_eq!(many_source.array_iter_reads(), 0);
+        assert_eq!(many_source.materialize_reads(), 0);
+
+        let extreme_source = CountingView::root(&[1, 2, 3]);
+        let extreme_body = PipelineBody {
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
+            }),
+            sink_kernels: vec![BodyKernel::Current],
+            ..many_body
+        };
+
+        let extreme = super::run_full(extreme_source.clone(), &extreme_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(extreme, Val::Null);
+        assert_eq!(extreme_source.scalar_reads(), 1);
+        assert_eq!(extreme_source.array_iter_reads(), 0);
+        assert_eq!(extreme_source.materialize_reads(), 0);
     }
 
     #[test]
