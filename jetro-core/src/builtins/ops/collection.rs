@@ -76,16 +76,12 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
-    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
+    let mut seen = crate::util::StructuralValueSet::with_capacity(items_cow.len());
     let mut kept: Vec<Val> = Vec::with_capacity(items_cow.len());
     for item in items_cow.iter() {
-        let key = crate::util::val_to_structural_key(item);
-        let bucket = seen.entry(key).or_default();
-        if bucket.iter().any(|v| crate::util::vals_deep_eq(v, item)) {
-            continue;
+        if seen.insert(item) {
+            kept.push(item.clone());
         }
-        bucket.push(item.clone());
-        kept.push(item.clone());
     }
     Some(Val::arr(kept))
 }
@@ -606,22 +602,13 @@ pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
 #[inline]
 pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
-        let mut other_keys: std::collections::HashMap<String, Vec<&Val>> =
-            std::collections::HashMap::new();
+        let mut other_keys = crate::util::StructuralValueSet::with_capacity(other.len());
         for item in other {
-            other_keys
-                .entry(crate::util::val_to_structural_key(item))
-                .or_default()
-                .push(item);
+            other_keys.insert(item);
         }
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| {
-                other_keys
-                    .get(&crate::util::val_to_structural_key(v))
-                    .map(|bucket| bucket.iter().any(|item| crate::util::vals_deep_eq(v, item)))
-                    .unwrap_or(false)
-            })
+            .filter(|v| other_keys.contains(v))
             .cloned()
             .collect();
         Some(Val::arr(kept))
@@ -635,21 +622,14 @@ pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let mut out: Vec<Val> = a.as_ref().clone();
-        let mut seen: std::collections::HashMap<String, Vec<Val>> =
-            std::collections::HashMap::new();
+        let mut seen = crate::util::StructuralValueSet::with_capacity(a.len() + other.len());
         for item in a.iter() {
-            seen.entry(crate::util::val_to_structural_key(item))
-                .or_default()
-                .push(item.clone());
+            seen.insert(item);
         }
         for v in other {
-            let key = crate::util::val_to_structural_key(v);
-            let bucket = seen.entry(key).or_default();
-            if bucket.iter().any(|item| crate::util::vals_deep_eq(item, v)) {
-                continue;
+            if seen.insert(v) {
+                out.push(v.clone());
             }
-            bucket.push(v.clone());
-            out.push(v.clone());
         }
         Some(Val::arr(out))
     } else {
@@ -661,22 +641,13 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 #[inline]
 pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
-        let mut other_keys: std::collections::HashMap<String, Vec<&Val>> =
-            std::collections::HashMap::new();
+        let mut other_keys = crate::util::StructuralValueSet::with_capacity(other.len());
         for item in other {
-            other_keys
-                .entry(crate::util::val_to_structural_key(item))
-                .or_default()
-                .push(item);
+            other_keys.insert(item);
         }
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| {
-                !other_keys
-                    .get(&crate::util::val_to_structural_key(v))
-                    .map(|bucket| bucket.iter().any(|item| crate::util::vals_deep_eq(v, item)))
-                    .unwrap_or(false)
-            })
+            .filter(|v| !other_keys.contains(v))
             .cloned()
             .collect();
         Some(Val::arr(kept))

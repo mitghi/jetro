@@ -526,35 +526,13 @@ fn apply_adapter_materialized(
 }
 
 fn dedup_sorted_values(buf: &mut Vec<Val>) {
-    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
-    buf.retain(|item| {
-        let key = crate::util::val_to_structural_key(item);
-        let bucket = seen.entry(key).or_default();
-        if bucket
-            .iter()
-            .any(|seen| crate::util::vals_deep_eq(seen, item))
-        {
-            return false;
-        }
-        bucket.push(item.clone());
-        true
-    });
+    let mut seen = crate::util::StructuralValueSet::with_capacity(buf.len());
+    buf.retain(|item| seen.insert(item));
 }
 
 fn dedup_sorted_keyed_values(buf: &mut Vec<(Val, Val)>) {
-    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
-    buf.retain(|(key_value, _)| {
-        let key = crate::util::val_to_structural_key(key_value);
-        let bucket = seen.entry(key).or_default();
-        if bucket
-            .iter()
-            .any(|seen| crate::util::vals_deep_eq(seen, key_value))
-        {
-            return false;
-        }
-        bucket.push(key_value.clone());
-        true
-    });
+    let mut seen = crate::util::StructuralValueSet::with_capacity(buf.len());
+    buf.retain(|(key_value, _)| seen.insert(key_value));
 }
 
 /// Applies an element-wise stage (`Slice`, string pair builtins, `Builtin`) to a single `Val` row.

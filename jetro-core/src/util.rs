@@ -283,7 +283,7 @@ pub fn val_to_structural_key(v: &Val) -> String {
             }
             Val::Int(n) => {
                 out.push_str("n:");
-                out.push_str(&(n.to_owned() as f64).to_bits().to_string());
+                out.push_str(&(*n as f64).to_bits().to_string());
             }
             Val::Float(f) => {
                 out.push_str("n:");
@@ -397,6 +397,36 @@ pub fn val_to_structural_key(v: &Val) -> String {
     let mut out = String::new();
     write_key(&mut out, v);
     out
+}
+
+#[derive(Default)]
+pub struct StructuralValueSet {
+    buckets: std::collections::HashMap<String, Vec<Val>>,
+}
+
+impl StructuralValueSet {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: std::collections::HashMap::with_capacity(capacity),
+        }
+    }
+
+    pub fn insert(&mut self, value: &Val) -> bool {
+        let key = val_to_structural_key(value);
+        let bucket = self.buckets.entry(key).or_default();
+        if bucket.iter().any(|seen| vals_deep_eq(seen, value)) {
+            return false;
+        }
+        bucket.push(value.clone());
+        true
+    }
+
+    pub fn contains(&self, value: &Val) -> bool {
+        self.buckets
+            .get(&val_to_structural_key(value))
+            .map(|bucket| bucket.iter().any(|seen| vals_deep_eq(seen, value)))
+            .unwrap_or(false)
+    }
 }
 
 /// Render a `Val` as a `String`; compound types are serialised to JSON text.
