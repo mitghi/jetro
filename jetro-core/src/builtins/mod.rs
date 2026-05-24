@@ -1482,6 +1482,17 @@ impl BuiltinPredicateSink {
             Self::IndicesWhere | Self::FindOne => crate::plan::demand::SinkResultDemand::None,
         }
     }
+
+    /// Returns when a borrowed-view executor must materialise rows for this sink.
+    #[inline]
+    pub(crate) const fn view_materialization(self) -> BuiltinViewMaterialization {
+        match self {
+            Self::FindOne => BuiltinViewMaterialization::SinkFinalRow,
+            Self::Any | Self::All | Self::FindIndex | Self::IndicesWhere => {
+                BuiltinViewMaterialization::Never
+            }
+        }
+    }
 }
 
 /// Membership terminal sink behavior for builtins with a target value.

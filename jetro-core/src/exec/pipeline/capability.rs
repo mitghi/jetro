@@ -703,13 +703,7 @@ impl ViewSinkCapability {
                 materialization, ..
             } => *materialization,
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
-            Self::Predicate { op, .. } => {
-                if *op == BuiltinPredicateSink::FindOne {
-                    ViewMaterialization::SinkFinalRow
-                } else {
-                    ViewMaterialization::Never
-                }
-            }
+            Self::Predicate { op, .. } => op.view_materialization(),
             Self::Membership { target, .. } => {
                 if target.is_scalar_literal() {
                     ViewMaterialization::Never

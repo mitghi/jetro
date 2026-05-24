@@ -2467,6 +2467,11 @@ mod tests {
                         SinkResultDemand::None,
                         "{method:?}"
                     );
+                    assert_eq!(
+                        sink.view_materialization(),
+                        crate::builtins::BuiltinViewMaterialization::SinkFinalRow,
+                        "{method:?}"
+                    );
                 }
                 BuiltinPredicateSink::Any
                 | BuiltinPredicateSink::All
@@ -2475,6 +2480,11 @@ mod tests {
                     assert_eq!(
                         predicate_sink_value_need(sink),
                         ValueNeed::Predicate,
+                        "{method:?}"
+                    );
+                    assert_eq!(
+                        sink.view_materialization(),
+                        crate::builtins::BuiltinViewMaterialization::Never,
                         "{method:?}"
                     );
                 }
