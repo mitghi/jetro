@@ -5339,4 +5339,41 @@ mod tests {
         assert_eq!(source.scalar_reads(), 4);
         assert_eq!(source.materialize_reads(), 0);
     }
+
+    #[test]
+    fn reducing_group_by_key_predicate_avoids_group_value_materialization() {
+        let source = CountingView::root(&[1, 2, 1, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::ExprBuiltin {
+                    method: crate::builtins::BuiltinMethod::GroupBy,
+                    body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::HasKey,
+                    crate::builtins::BuiltinArgs::Str(Arc::from("2")),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 4);
+        assert_eq!(source.materialize_reads(), 0);
+    }
 }

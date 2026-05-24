@@ -186,10 +186,22 @@ pub(super) fn plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
 fn keyed_reducer_value_need(body: &pipeline::PipelineBody, reducer_stage: usize) -> KeyedValueNeed {
     match body.stages.get(reducer_stage + 1) {
         Some(pipeline::Stage::Builtin(call))
-            if call.method == BuiltinMethod::Keys && matches!(call.args, BuiltinArgs::None) =>
+            if key_only_object_projection(call.method, &call.args) =>
         {
             KeyedValueNeed::KeysOnly
         }
         _ => KeyedValueNeed::Full,
     }
+}
+
+fn key_only_object_projection(method: BuiltinMethod, args: &BuiltinArgs) -> bool {
+    matches!(
+        (method, args),
+        (BuiltinMethod::Keys, BuiltinArgs::None)
+            | (BuiltinMethod::HasKey, BuiltinArgs::Str(_))
+            | (BuiltinMethod::Missing, BuiltinArgs::Str(_))
+            | (BuiltinMethod::Missing, BuiltinArgs::StrVec(_))
+            | (BuiltinMethod::Has, BuiltinArgs::Str(_))
+            | (BuiltinMethod::HasAll, BuiltinArgs::StrVec(_))
+    )
 }
