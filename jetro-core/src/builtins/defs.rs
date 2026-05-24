@@ -3570,17 +3570,13 @@ impl Builtin for Slice {
     const METHOD: BuiltinMethod = BuiltinMethod::Slice;
     const NAME: &'static str = "slice";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
-            .indexed()
-            .view_native()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::Slice)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::OneToOne,
                 true,
                 1.0,
                 1.0,
             ))
-            .order_effect(BuiltinPipelineOrderEffect::Preserves)
-            .demand_law(BuiltinDemandLaw::Slice)
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
     #[inline]

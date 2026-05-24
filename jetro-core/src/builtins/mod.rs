@@ -918,6 +918,8 @@ pub enum BuiltinViewScalarOp {
 /// materialising the receiver by traversing borrowed child views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewValueProjection {
+    /// Slice a string value by character offsets.
+    Slice,
     /// Coerce the value to Jetro's human-readable string form.
     ToString,
     /// Serialize the value to compact JSON text.
@@ -928,7 +930,12 @@ impl BuiltinViewValueProjection {
     /// Demand law implied by this view-native whole-value operation.
     #[inline]
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
-        BuiltinDemandLaw::MapLike
+        match self {
+            BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
+            BuiltinViewValueProjection::ToString | BuiltinViewValueProjection::ToJson => {
+                BuiltinDemandLaw::MapLike
+            }
+        }
     }
 }
 

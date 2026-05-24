@@ -1069,6 +1069,18 @@ impl Stage {
                 });
             }
         }
+        if let Stage::IntRangeBuiltin { method, start, end } = self {
+            let id = BuiltinId::from_method(*method);
+            if crate::builtins::registry::view_projection(id) {
+                return Some(ViewStageCapability::BuiltinProjection {
+                    id,
+                    args: crate::builtins::BuiltinArgs::I64Opt {
+                        first: *start,
+                        second: *end,
+                    },
+                });
+            }
+        }
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
         match stage.capability_shape() {

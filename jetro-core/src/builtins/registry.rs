@@ -1017,8 +1017,8 @@ where
         }
     }
     if let Some(projection) = view_value_projection(id) {
-        if matches!(args, BuiltinArgs::None) {
-            return apply_view_value_projection(projection, &view).map(ViewProjectionResult::Owned);
+        if let Some(result) = apply_view_value_projection(projection, args, view.clone()) {
+            return Some(result);
         }
     }
     match (view_object_projection(id), args) {
@@ -1086,21 +1086,71 @@ where
 
 fn apply_view_value_projection<'a, V>(
     projection: BuiltinViewValueProjection,
-    view: &V,
-) -> Option<Val>
+    args: &BuiltinArgs,
+    view: V,
+) -> Option<ViewProjectionResult<V>>
 where
     V: ValueView<'a> + 'a,
 {
     let mut out = String::new();
     match projection {
+        BuiltinViewValueProjection::Slice => {
+            let BuiltinArgs::I64Opt { first, second } = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => {
+                    ViewProjectionResult::Owned(slice_view_string(value, *first, *second))
+                }
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::ToString => {
-            write_view_string_value(view, &mut out)?;
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            write_view_string_value(&view, &mut out)?;
         }
         BuiltinViewValueProjection::ToJson => {
-            write_json_view(view, &mut out)?;
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            write_json_view(&view, &mut out)?;
         }
     }
-    Some(Val::Str(Arc::from(out)))
+    Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn slice_view_string(value: &str, start: i64, end: Option<i64>) -> Val {
+    if value.is_ascii() {
+        let len = value.len();
+        let start = resolve_ascii_slice_index(start, len);
+        let end = end.map_or(len, |end| resolve_ascii_slice_index(end, len));
+        let start = start.min(end);
+        return Val::Str(Arc::from(&value[start..end]));
+    }
+
+    let chars: Vec<(usize, char)> = value.char_indices().collect();
+    let len = chars.len() as i64;
+    let resolve = |idx: i64| -> usize {
+        let resolved = if idx < 0 { len + idx } else { idx };
+        resolved.clamp(0, len) as usize
+    };
+    let start = resolve(start);
+    let end = end.map_or(chars.len(), resolve);
+    let start = start.min(end);
+    let start_byte = chars.get(start).map(|(idx, _)| *idx).unwrap_or(value.len());
+    let end_byte = chars.get(end).map(|(idx, _)| *idx).unwrap_or(value.len());
+    Val::Str(Arc::from(&value[start_byte..end_byte]))
+}
+
+#[inline]
+fn resolve_ascii_slice_index(idx: i64, len: usize) -> usize {
+    if idx < 0 {
+        len.saturating_sub((-idx) as usize)
+    } else {
+        (idx as usize).min(len)
+    }
 }
 
 fn write_view_string_value<'a, V>(view: &V, out: &mut String) -> Option<()>
@@ -3698,6 +3748,7 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
+            (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
             (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
             (
                 BuiltinMethod::ToString,
@@ -5708,6 +5759,10 @@ mod tests {
             Some(BuiltinViewValueProjection::ToString)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::Slice)),
+            Some(BuiltinViewValueProjection::Slice)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::ToJson)),
             Some(BuiltinViewValueProjection::ToJson)
         );
@@ -5858,6 +5913,17 @@ mod tests {
         assert_eq!(
             apply(BuiltinMethod::ToJson, BuiltinArgs::None),
             Val::Str(std::sync::Arc::from(r#"{"a":1,"b":null,"nested":{"x":7}}"#))
+        );
+        let sliced_non_string = apply(
+            BuiltinMethod::Slice,
+            BuiltinArgs::I64Opt {
+                first: 1,
+                second: Some(4),
+            },
+        );
+        assert_eq!(
+            serde_json::Value::from(sliced_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }
 
