@@ -15,8 +15,8 @@ use super::{
     BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinRuntimeHook, BuiltinSelectionRewrite, BuiltinSpec,
-    BuiltinStageMerge, BuiltinStructural, BuiltinStringPairStage, BuiltinViewObjectProjection,
-    BuiltinViewScalarOp, BuiltinViewStage,
+    BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStructural, BuiltinStringPairStage,
+    BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
 };
 
 
@@ -28,6 +28,7 @@ fn numeric_reducer_spec(reducer: BuiltinNumericReducer) -> BuiltinSpec {
         .numeric_sink(reducer)
         .cost(10.0)
         .demand_law(reducer.demand_law())
+        .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
         .logical_shape(reducer.logical_shape())
         .row_stream_op(reducer.row_stream_op())
         .lowering(BuiltinPipelineLowering::TerminalSink)
@@ -341,6 +342,7 @@ impl Builtin for FlatMap {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
             .expr_stage(BuiltinExprStage::FlatMap)
             .logical_shape(BuiltinLogicalShape::FlatMap)
             .runtime_hook(BuiltinRuntimeHook::Barrier)
@@ -386,6 +388,7 @@ impl Builtin for Take {
             .view_stage(BuiltinViewStage::Take)
             .stage_merge(BuiltinStageMerge::UsizeMin)
             .demand_law(BuiltinDemandLaw::Take)
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .logical_shape(BuiltinLogicalShape::Take)
             .row_stream_op(BuiltinRowStreamOp::Take)
@@ -444,6 +447,7 @@ impl Builtin for Skip {
             .view_stage(BuiltinViewStage::Skip)
             .stage_merge(BuiltinStageMerge::UsizeSaturatingAdd)
             .demand_law(BuiltinDemandLaw::Skip)
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .order_effect(BuiltinPipelineOrderEffect::Preserves)
             .logical_shape(BuiltinLogicalShape::Skip)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
@@ -505,6 +509,7 @@ impl Builtin for First {
             .array_selector(selector)
             .select_one_sink(selector.selection_position().expect("first selector position"))
             .demand_law(selector.demand_law())
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .logical_shape(BuiltinLogicalShape::First)
             .row_stream_op(selector.row_stream_op().expect("first row stream op"))
             .lowering(selector.pipeline_lowering())
@@ -531,6 +536,7 @@ impl Builtin for Last {
             .array_selector(selector)
             .select_one_sink(selector.selection_position().expect("last selector position"))
             .demand_law(selector.demand_law())
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .logical_shape(BuiltinLogicalShape::Last)
             .row_stream_op(selector.row_stream_op().expect("last row stream op"))
             .lowering(selector.pipeline_lowering())
@@ -558,6 +564,7 @@ impl Builtin for TakeWhile {
             .view_stage(BuiltinViewStage::TakeWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::TakeWhile)
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::TakeWhile)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
@@ -625,6 +632,7 @@ impl Builtin for DropWhile {
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -1181,6 +1189,7 @@ impl Builtin for Nth {
         positional_native_spec()
             .array_selector(selector)
             .demand_law(selector.demand_law())
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .lowering(selector.pipeline_lowering())
     }
     #[inline]
@@ -1210,6 +1219,7 @@ fn barrier_default_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
         .cost(20.0)
         .demand_law(BuiltinDemandLaw::OrderBarrier)
+        .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
 }
 
 /// `sort` — full-barrier comparison sort, optional key.
@@ -1302,6 +1312,7 @@ impl Builtin for Window {
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
                 false,
@@ -1334,6 +1345,7 @@ impl Builtin for Chunk {
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
                 false,
@@ -1451,6 +1463,7 @@ impl Builtin for GroupBy {
             .cost(20.0)
             .demand_law(BuiltinKeyedReducer::Group.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
             .logical_shape(BuiltinLogicalShape::GroupBy)
             .runtime_hook(BuiltinRuntimeHook::Barrier)
             .lowering(BuiltinPipelineLowering::ExprArg)
@@ -1495,6 +1508,7 @@ impl Builtin for CountBy {
             .cost(10.0)
             .demand_law(BuiltinKeyedReducer::Count.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Reducing,
                 false,
@@ -1543,6 +1557,7 @@ impl Builtin for IndexBy {
             .cost(10.0)
             .demand_law(BuiltinKeyedReducer::Index.demand_law())
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Reducing,
                 false,
@@ -1595,6 +1610,7 @@ fn unique_spec() -> BuiltinSpec {
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .runtime_hook(BuiltinRuntimeHook::Barrier)
         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+        .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
 }
 
 /// Shared barrier body for Unique / UniqueBy.
@@ -1692,6 +1708,7 @@ impl Builtin for Reverse {
             .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
             .order_only()
             .selection_rewrite(
                 BuiltinSelectionRewrite::new()
@@ -1725,6 +1742,7 @@ fn barrier_simple_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::OrderBarrier)
+        .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
 }
 
 /// `append(arr)` — concatenates barrier.
@@ -3057,6 +3075,7 @@ impl Builtin for Rows {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Object, BuiltinCardinality::OneToOne)
             .stream_source()
+            .streaming_boundary(BuiltinStreamingBoundary::SourceStream)
             .never_unwrap()
     }
     #[inline]

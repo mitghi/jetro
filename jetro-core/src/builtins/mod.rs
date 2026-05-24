@@ -659,6 +659,9 @@ pub struct BuiltinSpec {
     pub demand_law: BuiltinDemandLaw,
     /// Materialisation policy (default: `Streaming`).
     pub materialization: BuiltinPipelineMaterialization,
+    /// Semantic streaming boundary class. Executors use this to explain and
+    /// minimize ownership boundaries without rediscovering builtin behavior.
+    pub streaming_boundary: BuiltinStreamingBoundary,
     /// Cardinality/cost shape annotation for the pipeline cost estimator.
     pub pipeline_shape: Option<BuiltinPipelineShape>,
     /// How this builtin affects element ordering in the pipeline.
@@ -2067,6 +2070,29 @@ pub enum BuiltinPipelineMaterialization {
     LegacyMaterialized,
 }
 
+/// Semantic reason a builtin can or cannot stay in the borrowed streaming
+/// domain. This is intentionally separate from the concrete executor
+/// materialization policy: a full-input ordering boundary may still use a
+/// bounded top-k algorithm for a downstream limit, while a row-local stage
+/// should never force whole-row ownership by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinStreamingBoundary {
+    /// Row-local execution; no global state or ownership boundary is inherent.
+    RowLocal,
+    /// Source-lifting stream boundary such as `rows()`.
+    SourceStream,
+    /// Bounded positional/prefix state only, such as `take`, `skip`, `window`,
+    /// or `chunk` when downstream demand keeps it bounded.
+    BoundedState,
+    /// Full-input state keyed by values, without requiring output order sort.
+    FullInputState,
+    /// Full-input ordering boundary such as `sort` or `reverse`.
+    FullInputOrder,
+    /// The current implementation still requires legacy materialized
+    /// execution. This is the highest-priority target for future tape work.
+    LegacyMaterialized,
+}
+
 /// Describes how a pipeline stage interacts with the ordering of its input stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinPipelineOrderEffect {
@@ -2239,6 +2265,7 @@ impl BuiltinSpec {
             cost: 1.0,
             demand_law: BuiltinDemandLaw::Identity,
             materialization: BuiltinPipelineMaterialization::Streaming,
+            streaming_boundary: BuiltinStreamingBoundary::RowLocal,
             pipeline_shape: None,
             order_effect: None,
             lowering: None,
@@ -2525,6 +2552,12 @@ impl BuiltinSpec {
     /// Sets the materialization policy.
     fn materialization(mut self, m: BuiltinPipelineMaterialization) -> Self {
         self.materialization = m;
+        self
+    }
+
+    /// Sets the semantic streaming-boundary class for this builtin.
+    fn streaming_boundary(mut self, boundary: BuiltinStreamingBoundary) -> Self {
+        self.streaming_boundary = boundary;
         self
     }
 

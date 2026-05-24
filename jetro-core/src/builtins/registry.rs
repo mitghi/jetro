@@ -19,8 +19,8 @@ use crate::{
         BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
         BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
         BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
-        BuiltinStageMerge, BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection,
-        BuiltinViewScalarOp, BuiltinViewStage,
+        BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStringPairStage, BuiltinStructural,
+        BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
     },
     data::{context::EvalError, value::Val, view::ValueView},
     exec::pipeline::StageFlow,
@@ -627,6 +627,35 @@ pub(crate) fn pipeline_materialization(id: BuiltinId) -> BuiltinPipelineMaterial
     id.method()
         .map(|m| m.spec().materialization)
         .unwrap_or(BuiltinPipelineMaterialization::Streaming)
+}
+
+/// Return the semantic streaming-boundary class for builtin `id`.
+/// Unknown builtins are treated as legacy materialized boundaries so callers
+/// never accidentally keep unsupported behavior in the borrowed tape domain.
+#[inline]
+pub(crate) fn streaming_boundary(id: BuiltinId) -> BuiltinStreamingBoundary {
+    let Some(method) = id.method() else {
+        return BuiltinStreamingBoundary::LegacyMaterialized;
+    };
+    let spec = method.spec();
+    if spec.stream_source {
+        return BuiltinStreamingBoundary::SourceStream;
+    }
+    if !matches!(spec.streaming_boundary, BuiltinStreamingBoundary::RowLocal) {
+        return spec.streaming_boundary;
+    }
+    match spec.materialization {
+        BuiltinPipelineMaterialization::Streaming => BuiltinStreamingBoundary::RowLocal,
+        BuiltinPipelineMaterialization::LegacyMaterialized => {
+            BuiltinStreamingBoundary::LegacyMaterialized
+        }
+        BuiltinPipelineMaterialization::ComposedBarrier => match spec.demand_law {
+            BuiltinDemandLaw::OrderBarrier | BuiltinDemandLaw::Reverse => {
+                BuiltinStreamingBoundary::FullInputOrder
+            }
+            _ => BuiltinStreamingBoundary::FullInputState,
+        },
+    }
 }
 
 /// Return true when builtin `id` streams row-by-row without buffering.
@@ -1566,6 +1595,7 @@ mod tests {
     use crate::builtins::{
         BuiltinPipelineLowering, BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect,
         BuiltinRowStreamArg, BuiltinSelectionPosition, BuiltinSinkAccumulator,
+        BuiltinStreamingBoundary,
     };
 
     #[test]
@@ -4047,6 +4077,30 @@ mod tests {
             BuiltinMethod::Split
         )));
         assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::Map)),
+            BuiltinStreamingBoundary::RowLocal
+        );
+        assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::Rows)),
+            BuiltinStreamingBoundary::SourceStream
+        );
+        assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::Take)),
+            BuiltinStreamingBoundary::BoundedState
+        );
+        assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::Sort)),
+            BuiltinStreamingBoundary::FullInputOrder
+        );
+        assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::GroupBy)),
+            BuiltinStreamingBoundary::FullInputState
+        );
+        assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::FlatMap)),
+            BuiltinStreamingBoundary::LegacyMaterialized
+        );
+        assert_eq!(
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
                 .unwrap()
                 .can_indexed,
@@ -4145,6 +4199,69 @@ mod tests {
         assert!(!pipeline_chain_operator(BuiltinId::from_method(
             BuiltinMethod::Upper
         )));
+    }
+
+    #[test]
+    fn registry_streaming_boundaries_are_coherent_with_materialization() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let boundary = streaming_boundary(id);
+            let materialization = pipeline_materialization(id);
+            match boundary {
+                BuiltinStreamingBoundary::RowLocal | BuiltinStreamingBoundary::SourceStream => {
+                    assert_eq!(
+                        materialization,
+                        BuiltinPipelineMaterialization::Streaming,
+                        "{method:?} row-local/source boundaries must not force materialization"
+                    );
+                }
+                BuiltinStreamingBoundary::BoundedState => {
+                    assert!(
+                        matches!(
+                            demand_law(id),
+                            BuiltinDemandLaw::Take
+                                | BuiltinDemandLaw::Skip
+                                | BuiltinDemandLaw::TakeWhile
+                                | BuiltinDemandLaw::Window
+                                | BuiltinDemandLaw::Chunk
+                                | BuiltinDemandLaw::First
+                                | BuiltinDemandLaw::Last
+                                | BuiltinDemandLaw::Nth
+                        ),
+                        "{method:?} bounded-state boundaries must publish bounded demand"
+                    );
+                }
+                BuiltinStreamingBoundary::FullInputState => {
+                    assert!(
+                        matches!(
+                            demand_law(id),
+                            BuiltinDemandLaw::NumericReducer
+                                | BuiltinDemandLaw::KeyOnlyReducer
+                                | BuiltinDemandLaw::RowKeyedReducer
+                                | BuiltinDemandLaw::OrderBarrier
+                                | BuiltinDemandLaw::UniqueLike
+                        ),
+                        "{method:?} full-input state boundary must publish full-input demand"
+                    );
+                }
+                BuiltinStreamingBoundary::FullInputOrder => {
+                    assert!(
+                        matches!(
+                            demand_law(id),
+                            BuiltinDemandLaw::OrderBarrier | BuiltinDemandLaw::Reverse
+                        ),
+                        "{method:?} full-input order boundary must publish ordering demand"
+                    );
+                }
+                BuiltinStreamingBoundary::LegacyMaterialized => {
+                    assert_eq!(
+                        materialization,
+                        BuiltinPipelineMaterialization::LegacyMaterialized,
+                        "{method:?} legacy boundary must match legacy materialization policy"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

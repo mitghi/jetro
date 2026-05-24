@@ -19,13 +19,14 @@ use crate::builtins::registry::{
     pipeline_streams, sink_accumulator as builtin_sink_accumulator,
     sink_demand as builtin_sink_demand,
     stage_elidable_when_value_unused as builtin_stage_elidable_when_value_unused,
-    stage_merge as builtin_stage_merge, view_stage as builtin_view_stage, BuiltinId,
+    stage_merge as builtin_stage_merge, streaming_boundary as builtin_streaming_boundary,
+    view_stage as builtin_view_stage, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinCardinality, BuiltinExprPayload,
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinSinkValueNeed, BuiltinViewCapabilityShape, BuiltinViewStage,
+    BuiltinSinkValueNeed, BuiltinStreamingBoundary, BuiltinViewCapabilityShape, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -1036,7 +1037,13 @@ impl Stage {
             || self
                 .descriptor()
                 .and_then(StageDescriptor::builtin_id)
-                .is_some_and(pipeline_legacy_materialized)
+                .is_some_and(|id| {
+                    pipeline_legacy_materialized(id)
+                        || matches!(
+                            builtin_streaming_boundary(id),
+                            BuiltinStreamingBoundary::LegacyMaterialized
+                        )
+                })
     }
 
     /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,
