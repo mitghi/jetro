@@ -300,6 +300,9 @@ where
     else {
         return None;
     };
+    if deterministic_prefix_forces_empty(stages, stage_kernels) {
+        return Some(0);
+    }
     let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
     let Some(predicate_kernel) = predicate_kernel else {
         return Some(count);
@@ -325,8 +328,11 @@ where
     else {
         return None;
     };
-    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
-    if count == 0 {
+    if matches!(op, crate::builtins::BuiltinPredicateSink::FindOne) {
+        return None;
+    }
+    let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
+    if forced_empty {
         return match op {
             crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(false)),
             crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(true)),
@@ -340,6 +346,7 @@ where
         pipeline::BodyKernel::Const(value) => crate::util::is_truthy(value),
         _ => return None,
     };
+    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
     match op {
         crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(matched && count > 0)),
         crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(matched || count == 0)),
@@ -362,7 +369,7 @@ where
 }
 
 fn direct_empty_cardinality_sink<'a, V>(
-    source: &V,
+    _source: &V,
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
@@ -371,7 +378,7 @@ fn direct_empty_cardinality_sink<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    if cardinality_after_deterministic_stages(source, stages, stage_kernels)? != 0 {
+    if !deterministic_prefix_forces_empty(stages, stage_kernels) {
         return None;
     }
     if let Some(op) = body_sink.reducer_spec().and_then(|spec| spec.numeric_op()) {
@@ -419,6 +426,9 @@ fn cardinality_after_deterministic_stages<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
+    if !deterministic_cardinality_supported(stages, stage_kernels) {
+        return None;
+    }
     let JsonView::ArrayLen(mut count) = source.scalar() else {
         return None;
     };
@@ -458,15 +468,88 @@ where
     Some(count)
 }
 
+fn deterministic_cardinality_supported(
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> bool {
+    stages.iter().all(|stage| match stage {
+        pipeline::ViewStageCapability::BuiltinProjection { .. }
+        | pipeline::ViewStageCapability::Map { .. }
+        | pipeline::ViewStageCapability::Take(_)
+        | pipeline::ViewStageCapability::Skip(_) => true,
+        pipeline::ViewStageCapability::Filter { kernel }
+        | pipeline::ViewStageCapability::TakeWhile { kernel }
+        | pipeline::ViewStageCapability::DropWhile { kernel } => stage_kernels
+            .get(*kernel)
+            .and_then(constant_kernel_truthy)
+            .is_some(),
+        pipeline::ViewStageCapability::Compact
+        | pipeline::ViewStageCapability::RemoveValue(_)
+        | pipeline::ViewStageCapability::FlatMap { .. }
+        | pipeline::ViewStageCapability::Split { .. }
+        | pipeline::ViewStageCapability::Distinct { .. }
+        | pipeline::ViewStageCapability::KeyedReduce { .. } => false,
+    })
+}
+
 fn deterministic_prefix_is_empty<'a, V>(
-    source: &V,
+    _source: &V,
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> bool
 where
     V: ValueView<'a> + 'a,
 {
-    cardinality_after_deterministic_stages(source, stages, stage_kernels) == Some(0)
+    deterministic_prefix_forces_empty(stages, stage_kernels)
+}
+
+fn deterministic_prefix_forces_empty(
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> bool {
+    let mut upper_bound = None::<usize>;
+    for stage in stages {
+        match stage {
+            pipeline::ViewStageCapability::Take(n) => {
+                if *n == 0 {
+                    return true;
+                }
+                upper_bound = Some(upper_bound.map_or(*n, |bound| bound.min(*n)));
+            }
+            pipeline::ViewStageCapability::Skip(n) => {
+                if upper_bound.is_some_and(|bound| *n >= bound) {
+                    return true;
+                }
+                upper_bound = upper_bound.map(|bound| bound.saturating_sub(*n));
+            }
+            pipeline::ViewStageCapability::Filter { kernel }
+            | pipeline::ViewStageCapability::TakeWhile { kernel } => {
+                if matches!(
+                    stage_kernels.get(*kernel).and_then(constant_kernel_truthy),
+                    Some(false)
+                ) {
+                    return true;
+                }
+            }
+            pipeline::ViewStageCapability::DropWhile { kernel } => {
+                if matches!(
+                    stage_kernels.get(*kernel).and_then(constant_kernel_truthy),
+                    Some(true)
+                ) {
+                    return true;
+                }
+            }
+            pipeline::ViewStageCapability::BuiltinProjection { .. }
+            | pipeline::ViewStageCapability::Map { .. } => {}
+            pipeline::ViewStageCapability::Compact
+            | pipeline::ViewStageCapability::RemoveValue(_)
+            | pipeline::ViewStageCapability::FlatMap { .. }
+            | pipeline::ViewStageCapability::Split { .. }
+            | pipeline::ViewStageCapability::Distinct { .. }
+            | pipeline::ViewStageCapability::KeyedReduce { .. } => return false,
+        }
+    }
+    false
 }
 
 fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
@@ -2782,7 +2865,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(predicate, Val::Bool(false));
-        assert_eq!(predicate_source.scalar_reads(), 1);
+        assert_eq!(predicate_source.scalar_reads(), 0);
         assert_eq!(predicate_source.array_iter_reads(), 0);
         assert_eq!(predicate_source.materialize_reads(), 0);
 
@@ -2806,7 +2889,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(membership, Val::Bool(false));
-        assert_eq!(membership_source.scalar_reads(), 1);
+        assert_eq!(membership_source.scalar_reads(), 0);
         assert_eq!(membership_source.array_iter_reads(), 0);
         assert_eq!(membership_source.materialize_reads(), 0);
 
@@ -2834,7 +2917,7 @@ mod tests {
             serde_json::Value::from(compound_membership),
             serde_json::json!([])
         );
-        assert_eq!(compound_membership_source.scalar_reads(), 1);
+        assert_eq!(compound_membership_source.scalar_reads(), 0);
         assert_eq!(compound_membership_source.array_iter_reads(), 0);
         assert_eq!(compound_membership_source.materialize_reads(), 0);
     }
@@ -2857,7 +2940,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(serde_json::Value::from(collect), serde_json::json!([]));
-        assert_eq!(collect_source.scalar_reads(), 1);
+        assert_eq!(collect_source.scalar_reads(), 0);
         assert_eq!(collect_source.array_iter_reads(), 0);
         assert_eq!(collect_source.materialize_reads(), 0);
 
@@ -2871,7 +2954,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(nth, Val::Null);
-        assert_eq!(nth_source.scalar_reads(), 1);
+        assert_eq!(nth_source.scalar_reads(), 0);
         assert_eq!(nth_source.array_iter_reads(), 0);
         assert_eq!(nth_source.materialize_reads(), 0);
 
@@ -2888,7 +2971,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(serde_json::Value::from(many), serde_json::json!([]));
-        assert_eq!(many_source.scalar_reads(), 1);
+        assert_eq!(many_source.scalar_reads(), 0);
         assert_eq!(many_source.array_iter_reads(), 0);
         assert_eq!(many_source.materialize_reads(), 0);
 
@@ -2907,7 +2990,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(extreme, Val::Null);
-        assert_eq!(extreme_source.scalar_reads(), 1);
+        assert_eq!(extreme_source.scalar_reads(), 0);
         assert_eq!(extreme_source.array_iter_reads(), 0);
         assert_eq!(extreme_source.materialize_reads(), 0);
 
@@ -2922,7 +3005,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(distinct, Val::Int(0));
-        assert_eq!(distinct_source.scalar_reads(), 1);
+        assert_eq!(distinct_source.scalar_reads(), 0);
         assert_eq!(distinct_source.array_iter_reads(), 0);
         assert_eq!(distinct_source.materialize_reads(), 0);
     }
@@ -2948,7 +3031,7 @@ mod tests {
             let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
             assert_eq!(out, Val::Null);
-            assert_eq!(source.scalar_reads(), 1);
+            assert_eq!(source.scalar_reads(), 0);
             assert_eq!(source.array_iter_reads(), 0);
             assert_eq!(source.materialize_reads(), 0);
         }
@@ -2974,7 +3057,7 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(0));
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
@@ -3056,7 +3139,7 @@ mod tests {
             let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
             assert_eq!(out, expected, "{op:?}");
-            assert_eq!(source.scalar_reads(), 1, "{op:?}");
+            assert_eq!(source.scalar_reads(), 0, "{op:?}");
             assert_eq!(source.array_iter_reads(), 0, "{op:?}");
             assert_eq!(source.materialize_reads(), 0, "{op:?}");
         }
@@ -3106,7 +3189,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(serde_json::Value::from(empty), serde_json::json!([]));
-        assert_eq!(empty_source.scalar_reads(), 1);
+        assert_eq!(empty_source.scalar_reads(), 0);
         assert_eq!(empty_source.array_iter_reads(), 0);
         assert_eq!(empty_source.materialize_reads(), 0);
 
@@ -3132,7 +3215,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(dropped, Val::Int(0));
-        assert_eq!(drop_source.scalar_reads(), 1);
+        assert_eq!(drop_source.scalar_reads(), 0);
         assert_eq!(drop_source.array_iter_reads(), 0);
         assert_eq!(drop_source.materialize_reads(), 0);
     }
@@ -3527,7 +3610,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
@@ -3558,7 +3641,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, Val::Null);
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
@@ -4211,7 +4294,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(serde_json::Value::from(out), serde_json::json!({}));
-            assert_eq!(source.scalar_reads(), 1, "{method:?}");
+            assert_eq!(source.scalar_reads(), 0, "{method:?}");
             assert_eq!(source.array_iter_reads(), 0, "{method:?}");
             assert_eq!(source.materialize_reads(), 0, "{method:?}");
         }
@@ -4247,7 +4330,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
@@ -4283,7 +4366,7 @@ mod tests {
                 .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
@@ -4318,7 +4401,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
-        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
