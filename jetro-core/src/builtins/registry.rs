@@ -992,6 +992,12 @@ pub(crate) fn apply_view_projection<'a, V>(
 where
     V: ValueView<'a>,
 {
+    if let Some(method) = id.method() {
+        if view_scalar_projection(id) {
+            return apply_json_view_scalar_hook(method, args, view.scalar())
+                .map(ViewProjectionResult::Owned);
+        }
+    }
     match (view_object_projection(id), args) {
         (Some(BuiltinViewObjectProjection::Has), BuiltinArgs::Str(key)) => {
             view_has(&view, key.as_ref()).map(|found| ViewProjectionResult::Owned(Val::Bool(found)))

@@ -5035,6 +5035,37 @@ mod tests {
     }
 
     #[test]
+    fn view_scalar_builtin_call_runs_without_materializing_receiver() {
+        let source = CountingObjectValuesView::root(&[&[1, 2], &[3][..], &[4, 5, 6][..]]);
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Len,
+                    crate::builtins::BuiltinArgs::None,
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 1, 3]));
+        assert_eq!(source.object_value_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {
