@@ -1843,6 +1843,41 @@ mod tests {
     }
 
     #[test]
+    fn registry_runtime_hooks_match_materialization_policy() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            let Some(hook) = runtime_hook(id) else {
+                continue;
+            };
+
+            if hook.has_stream() && !pipeline_streams(id) {
+                assert!(
+                    hook.has_barrier(),
+                    "{method:?} exposes a non-streaming stream hook without a barrier fallback"
+                );
+            }
+
+            let stage_like_barrier = hook == BuiltinRuntimeHook::Barrier
+                && (view_stage(id).is_some()
+                    || matches!(
+                        pipeline_lowering(id),
+                        Some(
+                            BuiltinPipelineLowering::ExprArg
+                                | BuiltinPipelineLowering::Nullary
+                                | BuiltinPipelineLowering::Sort
+                                | BuiltinPipelineLowering::UsizeArg { .. }
+                        )
+                    ));
+            if stage_like_barrier {
+                assert!(
+                    !pipeline_streams(id),
+                    "{method:?} exposes a barrier stage hook but is marked streaming"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn registry_accessors_match_builtin_specs() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
