@@ -540,7 +540,7 @@ impl Sink {
             Some(idx) => Some(view_native_sink_kernel(sink_kernels, idx)?),
             None => None,
         };
-        if sink_spec.accumulator == BuiltinSinkAccumulator::Numeric {
+        if sink_spec.requires_numeric_reducer() {
             reducer.as_ref()?.numeric_op()?;
         }
 

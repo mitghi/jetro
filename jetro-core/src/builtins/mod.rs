@@ -1332,6 +1332,12 @@ impl BuiltinSinkSpec {
             BuiltinSinkAccumulator::SelectOne(_) => BuiltinViewMaterialization::SinkFinalRow,
         }
     }
+
+    /// Whether this sink requires a numeric reducer operation to execute.
+    #[inline]
+    pub(crate) const fn requires_numeric_reducer(self) -> bool {
+        matches!(self.accumulator, BuiltinSinkAccumulator::Numeric)
+    }
 }
 
 /// The accumulation strategy for a terminal reducing builtin.

@@ -2340,6 +2340,16 @@ mod tests {
             builtin_sink(BuiltinId::SUM).unwrap().value_need(),
             BuiltinSinkValueNeed::Numeric
         );
+        assert!(
+            builtin_sink(BuiltinId::SUM)
+                .unwrap()
+                .requires_numeric_reducer()
+        );
+        assert!(
+            !builtin_sink(BuiltinId::COUNT)
+                .unwrap()
+                .requires_numeric_reducer()
+        );
         assert_eq!(
             builtin_sink(BuiltinId::FIRST).unwrap().value_need(),
             BuiltinSinkValueNeed::Whole
