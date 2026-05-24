@@ -1588,8 +1588,10 @@ where
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
-            let start = len.saturating_sub(count);
-            let items = source.array_iter()?.skip(start).take(count.min(len));
+            let take = count.min(len);
+            let mut suffix = source.array_iter_rev()?.take(take).collect::<Vec<_>>();
+            suffix.reverse();
+            let items = suffix.into_iter();
             return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
         pipeline::SourceAccessMode::ForwardBounded(inputs) => {
@@ -2808,6 +2810,7 @@ mod tests {
         idx: Option<usize>,
         scalar_reads: Rc<Cell<usize>>,
         array_iter_reads: Rc<Cell<usize>>,
+        array_iter_rev_reads: Rc<Cell<usize>>,
         materialize_reads: Rc<Cell<usize>>,
     }
 
@@ -2818,6 +2821,7 @@ mod tests {
                 idx: None,
                 scalar_reads: Rc::new(Cell::new(0)),
                 array_iter_reads: Rc::new(Cell::new(0)),
+                array_iter_rev_reads: Rc::new(Cell::new(0)),
                 materialize_reads: Rc::new(Cell::new(0)),
             }
         }
@@ -2832,6 +2836,10 @@ mod tests {
 
         fn array_iter_reads(&self) -> usize {
             self.array_iter_reads.get()
+        }
+
+        fn array_iter_rev_reads(&self) -> usize {
+            self.array_iter_rev_reads.get()
         }
     }
 
@@ -2855,6 +2863,7 @@ mod tests {
                 idx: None,
                 scalar_reads: Rc::clone(&self.scalar_reads),
                 array_iter_reads: Rc::clone(&self.array_iter_reads),
+                array_iter_rev_reads: Rc::clone(&self.array_iter_rev_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
@@ -2894,6 +2903,7 @@ mod tests {
                 idx,
                 scalar_reads: Rc::clone(&self.scalar_reads),
                 array_iter_reads: Rc::clone(&self.array_iter_reads),
+                array_iter_rev_reads: Rc::clone(&self.array_iter_rev_reads),
                 materialize_reads: Rc::clone(&self.materialize_reads),
             }
         }
@@ -2906,30 +2916,36 @@ mod tests {
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
             let array_iter_reads = Rc::clone(&self.array_iter_reads);
+            let array_iter_rev_reads = Rc::clone(&self.array_iter_rev_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
             Some(Box::new((0..rows.len()).map(move |idx| Self {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
                 array_iter_reads: Rc::clone(&array_iter_reads),
+                array_iter_rev_reads: Rc::clone(&array_iter_rev_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
             })))
         }
 
         fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
             self.array_iter_reads.set(self.array_iter_reads.get() + 1);
+            self.array_iter_rev_reads
+                .set(self.array_iter_rev_reads.get() + 1);
             if self.idx.is_some() {
                 return None;
             }
             let rows = Arc::clone(&self.rows);
             let scalar_reads = Rc::clone(&self.scalar_reads);
             let array_iter_reads = Rc::clone(&self.array_iter_reads);
+            let array_iter_rev_reads = Rc::clone(&self.array_iter_rev_reads);
             let materialize_reads = Rc::clone(&self.materialize_reads);
             Some(Box::new((0..rows.len()).rev().map(move |idx| Self {
                 rows: Arc::clone(&rows),
                 idx: Some(idx),
                 scalar_reads: Rc::clone(&scalar_reads),
                 array_iter_reads: Rc::clone(&array_iter_reads),
+                array_iter_rev_reads: Rc::clone(&array_iter_rev_reads),
                 materialize_reads: Rc::clone(&materialize_reads),
             })))
         }
@@ -3582,6 +3598,7 @@ mod tests {
         assert_eq!(*observed.borrow(), vec![Val::Int(3), Val::Int(4)]);
         assert_eq!(source.scalar_reads(), 1);
         assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.array_iter_rev_reads(), 1);
     }
 
     #[test]
