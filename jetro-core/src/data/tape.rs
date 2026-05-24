@@ -355,6 +355,12 @@ impl TapeData {
 
 fn build_array_child_index(nodes: &[TapeNode]) -> HashMap<usize, Box<[usize]>> {
     let mut index = HashMap::new();
+    rebuild_array_child_index(nodes, &mut index);
+    index
+}
+
+fn rebuild_array_child_index(nodes: &[TapeNode], index: &mut HashMap<usize, Box<[usize]>>) {
+    index.clear();
     for (node_idx, node) in nodes.iter().enumerate() {
         let TapeNode::Array { len, .. } = *node else {
             continue;
@@ -371,7 +377,6 @@ fn build_array_child_index(nodes: &[TapeNode]) -> HashMap<usize, Box<[usize]>> {
         }
         index.insert(first, children.into_boxed_slice());
     }
-    index
 }
 
 #[inline]
@@ -404,7 +409,7 @@ impl TapeScratch {
             .map_err(|err| err.to_string())?;
         self.nodes =
             unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
-        self.array_child_index = build_array_child_index(&self.nodes);
+        rebuild_array_child_index(&self.nodes, &mut self.array_child_index);
         Ok(())
     }
 
@@ -532,5 +537,20 @@ mod tests {
         );
         assert_eq!(scratch.array_child_start(1, 40, 39), Some(40));
         assert_eq!(scratch.array_child_indices(0).expect("indices").len(), 40);
+    }
+
+    #[test]
+    fn scratch_array_child_index_is_rebuilt_between_rows() {
+        let values = (0..40).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        let mut scratch = super::TapeScratch::with_capacity(values.len() + 2);
+        scratch
+            .parse_slice(format!("[{}]", values).as_bytes())
+            .expect("parse large");
+        assert!(scratch.has_array_child_index(1));
+
+        scratch.parse_slice(br#"[1,2,3]"#).expect("parse small");
+
+        assert!(!scratch.has_array_child_index(1));
+        assert_eq!(scratch.array_child_start(1, 3, 2), Some(3));
     }
 }
