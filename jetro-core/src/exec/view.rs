@@ -231,6 +231,9 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
+    if let Some(count) = direct_count_from_source_len(&source, &capabilities.stages, &sink) {
+        return Some(Ok(Val::Int(count as i64)));
+    }
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -245,6 +248,50 @@ where
     }
 
     Some(sink_acc.finish_result(false))
+}
+
+fn direct_count_from_source_len<'a, V>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+) -> Option<usize>
+where
+    V: ValueView<'a> + 'a,
+{
+    let pipeline::ViewSinkCapability::Builtin {
+        accumulator: crate::builtins::BuiltinSinkAccumulator::Count,
+        predicate_kernel: None,
+        project_kernel: None,
+        ..
+    } = sink
+    else {
+        return None;
+    };
+    let JsonView::ArrayLen(mut count) = source.scalar() else {
+        return None;
+    };
+    for stage in stages {
+        match stage {
+            pipeline::ViewStageCapability::BuiltinProjection { .. }
+            | pipeline::ViewStageCapability::Map { .. } => {}
+            pipeline::ViewStageCapability::Take(n) => {
+                count = count.min(*n);
+            }
+            pipeline::ViewStageCapability::Skip(n) => {
+                count = count.saturating_sub(*n);
+            }
+            pipeline::ViewStageCapability::Filter { .. }
+            | pipeline::ViewStageCapability::Compact
+            | pipeline::ViewStageCapability::RemoveValue(_)
+            | pipeline::ViewStageCapability::FlatMap { .. }
+            | pipeline::ViewStageCapability::Split { .. }
+            | pipeline::ViewStageCapability::TakeWhile { .. }
+            | pipeline::ViewStageCapability::DropWhile { .. }
+            | pipeline::ViewStageCapability::Distinct { .. }
+            | pipeline::ViewStageCapability::KeyedReduce { .. } => return None,
+        }
+    }
+    Some(count)
 }
 
 fn resolve_view_sink(
@@ -3144,6 +3191,38 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(2));
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_count_uses_source_length_through_cardinality_preserving_stages() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Skip,
+                    value: 1,
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Const(Val::Int(1)), BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
 
