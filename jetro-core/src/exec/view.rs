@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{TapeScratchView, TapeView, ValView, ValueView};
+use crate::data::view::{scalar_view_to_owned_val, TapeScratchView, TapeView, ValView, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -569,7 +569,7 @@ where
 {
     match key_kernel {
         Some(kernel) => eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm),
-        None => Some(item.materialize()),
+        None => scalar_view_to_owned_val(item.scalar()).or_else(|| Some(item.materialize())),
     }
 }
 
@@ -2516,7 +2516,7 @@ where
             }
             pipeline::ViewKernelValue::Owned(value) => Some(value),
         },
-        None => Some(item.materialize()),
+        None => scalar_view_to_owned_val(item.scalar()).or_else(|| Some(item.materialize())),
     }
 }
 
@@ -5227,6 +5227,34 @@ mod tests {
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn natural_sort_uses_scalar_view_keys_without_materializing_rows() {
+        let source = CountingView::root(&[3, 1, 2]);
+        let body = PipelineBody {
+            stages: vec![Stage::Sort(crate::exec::pipeline::SortSpec::identity())],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.materialize_reads(), 0);
     }
 
