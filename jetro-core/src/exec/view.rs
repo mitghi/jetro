@@ -5703,6 +5703,64 @@ mod tests {
     }
 
     #[test]
+    fn view_string_codec_builtins_transform_tape_strings_without_materializing_receivers() {
+        fn run(method: crate::builtins::BuiltinMethod, input: &[u8]) -> serde_json::Value {
+            let tape = crate::data::tape::TapeData::parse(input.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::None,
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+            serde_json::Value::from(out)
+        }
+
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ToBase64, br#"["a b<&"]"#),
+            serde_json::json!(["YSBiPCY="])
+        );
+        assert_eq!(
+            run(
+                crate::builtins::BuiltinMethod::FromBase64,
+                br#"["aMOp","bad!"]"#
+            ),
+            serde_json::json!(["hé", null])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::UrlEncode, br#"["a b<&"]"#),
+            serde_json::json!(["a%20b%3C%26"])
+        );
+        assert_eq!(
+            run(
+                crate::builtins::BuiltinMethod::UrlDecode,
+                br#"["a%20b%2F"]"#
+            ),
+            serde_json::json!(["a b/"])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::HtmlEscape, br#"["a b<&"]"#),
+            serde_json::json!(["a b&lt;&amp;"])
+        );
+        assert_eq!(
+            run(
+                crate::builtins::BuiltinMethod::HtmlUnescape,
+                br#"["a &lt; b &amp; c"]"#
+            ),
+            serde_json::json!(["a < b & c"])
+        );
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {

@@ -1094,6 +1094,22 @@ where
 {
     let mut out = String::new();
     match projection {
+        BuiltinViewValueProjection::FromBase64
+        | BuiltinViewValueProjection::HtmlEscape
+        | BuiltinViewValueProjection::HtmlUnescape
+        | BuiltinViewValueProjection::ToBase64
+        | BuiltinViewValueProjection::UrlDecode
+        | BuiltinViewValueProjection::UrlEncode => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return Some(match view.scalar() {
+                JsonView::Str(value) => {
+                    ViewProjectionResult::Owned(apply_string_codec_projection(projection, value))
+                }
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Center
         | BuiltinViewValueProjection::PadLeft
         | BuiltinViewValueProjection::PadRight => {
@@ -1101,12 +1117,9 @@ where
                 return None;
             };
             return Some(match view.scalar() {
-                JsonView::Str(value) => ViewProjectionResult::Owned(pad_view_string(
-                    value,
-                    *width,
-                    *fill,
-                    projection,
-                )),
+                JsonView::Str(value) => {
+                    ViewProjectionResult::Owned(pad_view_string(value, *width, *fill, projection))
+                }
                 _ => ViewProjectionResult::View(view),
             });
         }
@@ -1129,9 +1142,9 @@ where
                 return None;
             };
             return Some(match view.scalar() {
-                JsonView::Str(value) => ViewProjectionResult::Owned(Val::Str(Arc::from(
-                    value.repeat(*n),
-                ))),
+                JsonView::Str(value) => {
+                    ViewProjectionResult::Owned(Val::Str(Arc::from(value.repeat(*n))))
+                }
                 _ => ViewProjectionResult::View(view),
             });
         }
@@ -1188,6 +1201,31 @@ where
 
 fn reverse_view_string(value: &str) -> String {
     value.chars().rev().collect()
+}
+
+fn apply_string_codec_projection(projection: BuiltinViewValueProjection, value: &str) -> Val {
+    match projection {
+        BuiltinViewValueProjection::FromBase64 => match crate::builtins::from_base64_str(value) {
+            Ok(decoded) => Val::Str(Arc::from(decoded)),
+            Err(()) => Val::Null,
+        },
+        BuiltinViewValueProjection::HtmlEscape => {
+            Val::Str(Arc::from(crate::builtins::html_escape_str(value)))
+        }
+        BuiltinViewValueProjection::HtmlUnescape => {
+            Val::Str(Arc::from(crate::builtins::html_unescape_str(value)))
+        }
+        BuiltinViewValueProjection::ToBase64 => {
+            Val::Str(Arc::from(crate::builtins::to_base64_str(value)))
+        }
+        BuiltinViewValueProjection::UrlDecode => {
+            Val::Str(Arc::from(crate::builtins::url_decode_str(value)))
+        }
+        BuiltinViewValueProjection::UrlEncode => {
+            Val::Str(Arc::from(crate::builtins::url_encode_str(value)))
+        }
+        _ => unreachable!("string codec projection expected"),
+    }
 }
 
 fn pad_view_string(
@@ -3866,8 +3904,23 @@ mod tests {
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
             (BuiltinMethod::Center, BuiltinViewValueProjection::Center),
+            (
+                BuiltinMethod::FromBase64,
+                BuiltinViewValueProjection::FromBase64,
+            ),
+            (
+                BuiltinMethod::HtmlEscape,
+                BuiltinViewValueProjection::HtmlEscape,
+            ),
+            (
+                BuiltinMethod::HtmlUnescape,
+                BuiltinViewValueProjection::HtmlUnescape,
+            ),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
-            (BuiltinMethod::PadRight, BuiltinViewValueProjection::PadRight),
+            (
+                BuiltinMethod::PadRight,
+                BuiltinViewValueProjection::PadRight,
+            ),
             (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
             (
@@ -3887,10 +3940,22 @@ mod tests {
                 BuiltinMethod::StripSuffix,
                 BuiltinViewValueProjection::StripSuffix,
             ),
+            (
+                BuiltinMethod::ToBase64,
+                BuiltinViewValueProjection::ToBase64,
+            ),
             (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
             (
                 BuiltinMethod::ToString,
                 BuiltinViewValueProjection::ToString,
+            ),
+            (
+                BuiltinMethod::UrlDecode,
+                BuiltinViewValueProjection::UrlDecode,
+            ),
+            (
+                BuiltinMethod::UrlEncode,
+                BuiltinViewValueProjection::UrlEncode,
             ),
         ];
 
@@ -5892,6 +5957,37 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None
         );
+        for (method, projection) in [
+            (
+                BuiltinMethod::FromBase64,
+                BuiltinViewValueProjection::FromBase64,
+            ),
+            (
+                BuiltinMethod::HtmlEscape,
+                BuiltinViewValueProjection::HtmlEscape,
+            ),
+            (
+                BuiltinMethod::HtmlUnescape,
+                BuiltinViewValueProjection::HtmlUnescape,
+            ),
+            (
+                BuiltinMethod::ToBase64,
+                BuiltinViewValueProjection::ToBase64,
+            ),
+            (
+                BuiltinMethod::UrlDecode,
+                BuiltinViewValueProjection::UrlDecode,
+            ),
+            (
+                BuiltinMethod::UrlEncode,
+                BuiltinViewValueProjection::UrlEncode,
+            ),
+        ] {
+            assert_eq!(
+                view_value_projection(BuiltinId::from_method(method)),
+                Some(projection)
+            );
+        }
         assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::ToString)),
             Some(BuiltinViewValueProjection::ToString)
@@ -5956,12 +6052,19 @@ mod tests {
         use crate::data::view::{ValView, ValueView};
 
         fn apply(method: BuiltinMethod, args: BuiltinArgs) -> Val {
+            apply_field(method, args, "obj")
+        }
+
+        fn apply_field(method: BuiltinMethod, args: BuiltinArgs, field: &str) -> Val {
             let doc = Val::from(&serde_json::json!({
                 "obj": {"a": 1, "b": null, "nested": {"x": 7}},
                 "arr": ["a", 2, true],
-                "text": "needle haystack"
+                "text": "a b<&",
+                "base64": "aMOp",
+                "url": "a%20b%2F",
+                "html": "a &lt; b &amp; c"
             }));
-            let view = ValView::new(&doc).field("obj");
+            let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view).unwrap() {
                 ViewProjectionResult::View(view) => view.materialize(),
                 ViewProjectionResult::Owned(value) => value,
@@ -6088,6 +6191,34 @@ mod tests {
             apply(BuiltinMethod::ToJson, BuiltinArgs::None),
             Val::Str(std::sync::Arc::from(r#"{"a":1,"b":null,"nested":{"x":7}}"#))
         );
+        assert_eq!(
+            apply_field(BuiltinMethod::ToBase64, BuiltinArgs::None, "text"),
+            Val::Str(std::sync::Arc::from("YSBiPCY="))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::FromBase64, BuiltinArgs::None, "base64"),
+            Val::Str(std::sync::Arc::from("hé"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::FromBase64, BuiltinArgs::None, "text"),
+            Val::Null
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::UrlEncode, BuiltinArgs::None, "text"),
+            Val::Str(std::sync::Arc::from("a%20b%3C%26"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::UrlDecode, BuiltinArgs::None, "url"),
+            Val::Str(std::sync::Arc::from("a b/"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::HtmlEscape, BuiltinArgs::None, "text"),
+            Val::Str(std::sync::Arc::from("a b&lt;&amp;"))
+        );
+        assert_eq!(
+            apply_field(BuiltinMethod::HtmlUnescape, BuiltinArgs::None, "html"),
+            Val::Str(std::sync::Arc::from("a < b & c"))
+        );
         let sliced_non_string = apply(
             BuiltinMethod::Slice,
             BuiltinArgs::I64Opt {
@@ -6139,6 +6270,21 @@ mod tests {
             serde_json::Value::from(reversed_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
+        for method in [
+            BuiltinMethod::FromBase64,
+            BuiltinMethod::HtmlEscape,
+            BuiltinMethod::HtmlUnescape,
+            BuiltinMethod::ToBase64,
+            BuiltinMethod::UrlDecode,
+            BuiltinMethod::UrlEncode,
+        ] {
+            let non_string = apply(method, BuiltinArgs::None);
+            assert_eq!(
+                serde_json::Value::from(non_string),
+                serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}}),
+                "{method:?}"
+            );
+        }
     }
 
     #[test]

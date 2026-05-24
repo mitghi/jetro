@@ -3833,7 +3833,7 @@ impl Builtin for ToBase64 {
     const METHOD: BuiltinMethod = BuiltinMethod::ToBase64;
     const NAME: &'static str = "to_base64";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::ToBase64)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3854,7 +3854,7 @@ impl Builtin for FromBase64 {
     const METHOD: BuiltinMethod = BuiltinMethod::FromBase64;
     const NAME: &'static str = "from_base64";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::FromBase64)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3875,7 +3875,7 @@ impl Builtin for UrlEncode {
     const METHOD: BuiltinMethod = BuiltinMethod::UrlEncode;
     const NAME: &'static str = "url_encode";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::UrlEncode)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3896,7 +3896,7 @@ impl Builtin for UrlDecode {
     const METHOD: BuiltinMethod = BuiltinMethod::UrlDecode;
     const NAME: &'static str = "url_decode";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::UrlDecode)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3917,7 +3917,7 @@ impl Builtin for HtmlEscape {
     const METHOD: BuiltinMethod = BuiltinMethod::HtmlEscape;
     const NAME: &'static str = "html_escape";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::HtmlEscape)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3938,7 +3938,7 @@ impl Builtin for HtmlUnescape {
     const METHOD: BuiltinMethod = BuiltinMethod::HtmlUnescape;
     const NAME: &'static str = "html_unescape";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::HtmlUnescape)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

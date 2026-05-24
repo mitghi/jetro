@@ -1,6 +1,6 @@
+use crate::builtins::BuiltinMethod;
 use crate::data::context::EvalError;
 use crate::data::value::Val;
-use crate::builtins::BuiltinMethod;
 use std::sync::Arc;
 
 /// Returns a substring by character indices, supporting negative indexing.
@@ -210,90 +210,112 @@ pub fn title_case_apply(recv: &Val) -> Option<Val> {
 
 /// Escapes `<`, `>`, `&`, `"`, and `'` to their HTML entity equivalents.
 #[inline]
-pub fn html_escape_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let mut out = String::with_capacity(s.len());
-        for c in s.chars() {
-            match c {
-                '<' => out.push_str("&lt;"),
-                '>' => out.push_str("&gt;"),
-                '&' => out.push_str("&amp;"),
-                '"' => out.push_str("&quot;"),
-                '\'' => out.push_str("&#39;"),
-                _ => out.push(c),
+pub fn html_escape_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+#[inline]
+pub fn html_unescape_str(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+#[inline]
+pub fn url_encode_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let b = *b;
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", b);
             }
         }
-        out
-    })
+    }
+    out
+}
+
+#[inline]
+pub fn url_decode_str(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h1 = char::from(bytes[i + 1]).to_digit(16);
+            let h2 = char::from(bytes[i + 2]).to_digit(16);
+            if let (Some(h1), Some(h2)) = (h1, h2) {
+                out.push((h1 * 16 + h2) as u8);
+                i += 3;
+                continue;
+            }
+        } else if bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[inline]
+pub fn to_base64_str(s: &str) -> String {
+    crate::builtins::helpers::base64_encode(s.as_bytes())
+}
+
+#[inline]
+pub fn from_base64_str(s: &str) -> Result<String, ()> {
+    crate::builtins::helpers::base64_decode(s)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|_| ())
+}
+
+#[inline]
+pub fn html_escape_apply(recv: &Val) -> Option<Val> {
+    map_str_owned(recv, html_escape_str)
 }
 
 /// Converts HTML entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;`) back to their characters.
 #[inline]
 pub fn html_unescape_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        s.replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-    })
+    map_str_owned(recv, html_unescape_str)
 }
 
 /// Percent-encodes a string using RFC 3986 unreserved characters (`A-Z a-z 0-9 - _ . ~`).
 #[inline]
 pub fn url_encode_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let mut out = String::with_capacity(s.len());
-        for b in s.as_bytes() {
-            let b = *b;
-            match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    out.push(b as char)
-                }
-                _ => {
-                    use std::fmt::Write;
-                    let _ = write!(out, "%{:02X}", b);
-                }
-            }
-        }
-        out
-    })
+    map_str_owned(recv, url_encode_str)
 }
 
 /// Decodes a percent-encoded URL string, also converting `+` to space.
 #[inline]
 pub fn url_decode_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        let bytes = s.as_bytes();
-        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' && i + 2 < bytes.len() {
-                let h1 = char::from(bytes[i + 1]).to_digit(16);
-                let h2 = char::from(bytes[i + 2]).to_digit(16);
-                if let (Some(h1), Some(h2)) = (h1, h2) {
-                    out.push((h1 * 16 + h2) as u8);
-                    i += 3;
-                    continue;
-                }
-            } else if bytes[i] == b'+' {
-                out.push(b' ');
-                i += 1;
-                continue;
-            }
-            out.push(bytes[i]);
-            i += 1;
-        }
-        String::from_utf8_lossy(&out).into_owned()
-    })
+    map_str_owned(recv, url_decode_str)
 }
 
-/// Encodes a string's bytes as standard (non-padded) Base64.
+/// Encodes a string's bytes as standard padded Base64.
 #[inline]
 pub fn to_base64_apply(recv: &Val) -> Option<Val> {
-    map_str_owned(recv, |s| {
-        crate::builtins::helpers::base64_encode(s.as_bytes())
-    })
+    map_str_owned(recv, to_base64_str)
 }
 
 /// Removes the common leading whitespace prefix from every non-blank line.
@@ -534,8 +556,8 @@ pub fn parse_bool_apply(recv: &Val) -> Option<Val> {
 /// Decodes a Base64 string to its UTF-8 representation; returns `Val::Null` for invalid input.
 #[inline]
 pub fn from_base64_apply(recv: &Val) -> Option<Val> {
-    map_str_val(recv, |s| match crate::builtins::helpers::base64_decode(s) {
-        Ok(bytes) => Val::Str(Arc::from(String::from_utf8_lossy(&bytes).as_ref())),
+    map_str_val(recv, |s| match from_base64_str(s) {
+        Ok(decoded) => Val::Str(Arc::from(decoded)),
         Err(_) => Val::Null,
     })
 }
@@ -802,4 +824,3 @@ fn numeric_aggregate_values(a: &[Val], method: BuiltinMethod) -> Val {
         _ => Val::Null,
     }
 }
-

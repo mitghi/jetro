@@ -918,6 +918,12 @@ pub enum BuiltinViewScalarOp {
 /// materialising the receiver by traversing borrowed child views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewValueProjection {
+    /// Decode Base64 text as UTF-8.
+    FromBase64,
+    /// Unescape HTML entities.
+    HtmlUnescape,
+    /// Escape HTML-sensitive characters.
+    HtmlEscape,
     /// Center-pad a string value.
     Center,
     /// Left-pad a string value.
@@ -942,6 +948,12 @@ pub enum BuiltinViewValueProjection {
     ToString,
     /// Serialize the value to compact JSON text.
     ToJson,
+    /// Encode string bytes as Base64 text.
+    ToBase64,
+    /// Percent-decode URL text.
+    UrlDecode,
+    /// Percent-encode URL text.
+    UrlEncode,
 }
 
 impl BuiltinViewValueProjection {
@@ -951,6 +963,9 @@ impl BuiltinViewValueProjection {
         match self {
             BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
             BuiltinViewValueProjection::Center
+            | BuiltinViewValueProjection::FromBase64
+            | BuiltinViewValueProjection::HtmlEscape
+            | BuiltinViewValueProjection::HtmlUnescape
             | BuiltinViewValueProjection::PadLeft
             | BuiltinViewValueProjection::PadRight
             | BuiltinViewValueProjection::Replace
@@ -959,10 +974,11 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::ReverseStr
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
+            | BuiltinViewValueProjection::ToBase64
             | BuiltinViewValueProjection::StripPrefix
-            | BuiltinViewValueProjection::StripSuffix => {
-                BuiltinDemandLaw::MapLike
-            }
+            | BuiltinViewValueProjection::StripSuffix
+            | BuiltinViewValueProjection::UrlDecode
+            | BuiltinViewValueProjection::UrlEncode => BuiltinDemandLaw::MapLike,
         }
     }
 }
