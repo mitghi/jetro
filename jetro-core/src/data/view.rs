@@ -285,16 +285,8 @@ fn tape_pick_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
     if keys.len() <= 4 {
         let mut out = indexmap::IndexMap::with_capacity(keys.len());
         for key in keys {
-            let mut cur = idx + 1;
-            for _ in 0..len {
-                let current_key = tape.str_at(cur);
-                cur += 1;
-                if current_key == key.as_ref() {
-                    let mut value_idx = cur;
-                    out.insert(Arc::clone(key), tape.materialize_at(&mut value_idx));
-                    break;
-                }
-                cur += tape.span(cur);
+            if let Some(mut value_idx) = tape.object_field_value(idx, key.as_ref()) {
+                out.insert(Arc::clone(key), tape.materialize_at(&mut value_idx));
             }
         }
         return Some(Val::obj(out));
@@ -1774,6 +1766,26 @@ mod tests {
             object_keys(book.pick_keys(&keys)),
             keys.iter().cloned().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn tape_pick_keys_uses_indexed_object_lookup_for_sparse_large_pick() {
+        use super::TapeView;
+
+        let fields = (0..12)
+            .map(|n| format!(r#""k{n}":{n}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let tape = crate::data::tape::TapeData::parse(format!("{{{fields}}}").into_bytes())
+            .expect("parse");
+
+        assert!(!tape.has_object_field_index(0));
+        let picked = TapeView::root(&tape)
+            .pick_keys(&[Arc::from("k11"), Arc::from("k2")])
+            .expect("pick");
+
+        assert!(tape.has_object_field_index(0));
+        assert_eq!(serde_json::Value::from(picked), json!({"k11": 11, "k2": 2}));
     }
 
     #[test]
