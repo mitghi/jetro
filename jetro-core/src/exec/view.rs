@@ -1550,6 +1550,171 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingNestedView {
+        rows: Arc<[Arc<[i64]>]>,
+        row_idx: Option<usize>,
+        child_idx: Option<usize>,
+        scalar_reads: Rc<Cell<usize>>,
+        array_iter_reads: Rc<Cell<usize>>,
+        materialize_reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingNestedView {
+        fn root(rows: &[&[i64]]) -> Self {
+            Self {
+                rows: rows
+                    .iter()
+                    .map(|row| row.iter().copied().collect::<Vec<_>>().into())
+                    .collect::<Vec<_>>()
+                    .into(),
+                row_idx: None,
+                child_idx: None,
+                scalar_reads: Rc::new(Cell::new(0)),
+                array_iter_reads: Rc::new(Cell::new(0)),
+                materialize_reads: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn materialize_reads(&self) -> usize {
+            self.materialize_reads.get()
+        }
+    }
+
+    impl<'a> ValueView<'a> for CountingNestedView {
+        fn scalar(&self) -> JsonView<'_> {
+            self.scalar_reads.set(self.scalar_reads.get() + 1);
+            match (self.row_idx, self.child_idx) {
+                (Some(row_idx), Some(child_idx)) => self
+                    .rows
+                    .get(row_idx)
+                    .and_then(|row| row.get(child_idx))
+                    .copied()
+                    .map(JsonView::Int)
+                    .unwrap_or(JsonView::Null),
+                (Some(row_idx), None) => self
+                    .rows
+                    .get(row_idx)
+                    .map(|row| JsonView::ArrayLen(row.len()))
+                    .unwrap_or(JsonView::Null),
+                (None, None) => JsonView::ArrayLen(self.rows.len()),
+                (None, Some(_)) => JsonView::Null,
+            }
+        }
+
+        fn field(&self, _key: &str) -> Self {
+            self.clone()
+        }
+
+        fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_pairs(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn index(&self, idx: i64) -> Self {
+            if idx < 0 {
+                return self.clone();
+            }
+            let idx = idx as usize;
+            match self.row_idx {
+                Some(row_idx) => Self {
+                    child_idx: Some(idx),
+                    ..self.with_row(row_idx)
+                },
+                None => self.with_row(idx),
+            }
+        }
+
+        fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads.set(self.array_iter_reads.get() + 1);
+            match (self.row_idx, self.child_idx) {
+                (None, None) => {
+                    let len = self.rows.len();
+                    let this = self.clone();
+                    Some(Box::new((0..len).map(move |idx| this.with_row(idx))))
+                }
+                (Some(row_idx), None) => {
+                    let len = self.rows.get(row_idx)?.len();
+                    let this = self.with_row(row_idx);
+                    Some(Box::new((0..len).map(move |idx| Self {
+                        child_idx: Some(idx),
+                        ..this.clone()
+                    })))
+                }
+                _ => None,
+            }
+        }
+
+        fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter().map(|iter| {
+                let mut items: Vec<Self> = iter.collect();
+                items.reverse();
+                Box::new(items.into_iter()) as Box<dyn Iterator<Item = Self> + 'a>
+            })
+        }
+
+        fn materialize(&self) -> Val {
+            self.materialize_reads.set(self.materialize_reads.get() + 1);
+            match (self.row_idx, self.child_idx) {
+                (Some(row_idx), Some(child_idx)) => self
+                    .rows
+                    .get(row_idx)
+                    .and_then(|row| row.get(child_idx))
+                    .copied()
+                    .map(Val::Int)
+                    .unwrap_or(Val::Null),
+                (Some(row_idx), None) => self
+                    .rows
+                    .get(row_idx)
+                    .map(|row| Val::arr(row.iter().copied().map(Val::Int).collect()))
+                    .unwrap_or(Val::Null),
+                (None, None) => Val::arr(
+                    self.rows
+                        .iter()
+                        .map(|row| Val::arr(row.iter().copied().map(Val::Int).collect()))
+                        .collect(),
+                ),
+                (None, Some(_)) => Val::Null,
+            }
+        }
+    }
+
+    impl CountingNestedView {
+        fn with_row(&self, row_idx: usize) -> Self {
+            Self {
+                rows: Arc::clone(&self.rows),
+                row_idx: Some(row_idx),
+                child_idx: None,
+                scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
+                materialize_reads: Rc::clone(&self.materialize_reads),
+            }
+        }
+    }
+
     #[test]
     fn view_frontier_zero_demand_skips_source_access() {
         let source = CountingView::root(&[1, 2, 3]);
@@ -2429,6 +2594,26 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn view_flat_map_count_stays_borrowed_without_materializing_rows() {
+        let source = CountingNestedView::root(&[&[1, 2, 3], &[4, 5]]);
+        let body = PipelineBody {
+            stages: vec![Stage::FlatMap(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::FlatMap,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(5));
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]

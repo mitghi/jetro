@@ -73,7 +73,7 @@ impl ViewStageState {
 
 /// Applies a single view-domain stage to `item`, returning the appropriate
 /// `ViewStageFlow`. Returns `None` when the stage requires materialisation
-/// (e.g. `KeyedReduce` or `FlatMap`) and cannot be handled here.
+/// or is handled by the recursive view frontier (`FlatMap` expansion).
 pub(super) fn apply_stage<'a, V>(
     item: V,
     stage: pipeline::ViewStageCapability,
@@ -219,6 +219,8 @@ where
             )?))
         }
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
+        // FlatMap expands one input into many borrowed child views and is
+        // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,
     }
 }
