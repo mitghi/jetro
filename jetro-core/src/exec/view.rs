@@ -170,6 +170,9 @@ pub(crate) fn run_with_env_and_vm<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
+    if let Some(result) = run_leading_reverse_view(source.clone(), body, Some(base_env), vm) {
+        return Some(result);
+    }
     if let Some(result) = run_terminal_collect(source.clone(), body, vm) {
         return Some(result);
     }
@@ -194,6 +197,92 @@ where
         return Some(result);
     }
     run_prefix_then_materialized_suffix(source, body, cache, base_env, vm)
+}
+
+fn run_leading_reverse_view<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    base_env: Option<&Env>,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let leading_reverses = body
+        .stages
+        .iter()
+        .take_while(|stage| matches!(stage, pipeline::Stage::Reverse(_)))
+        .count();
+    if leading_reverses == 0 {
+        return None;
+    }
+
+    let suffix = view_suffix_capabilities(body, leading_reverses)?;
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[leading_reverses..], &body.sink);
+    let source_reversed = leading_reverses % 2 == 1;
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, source_reversed);
+    let sink = match resolve_view_sink(sink, base_env, vm) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
+
+    if let Some(count) = direct_count_from_source_len(
+        &source,
+        &suffix.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink_kernels,
+    ) {
+        return Some(Ok(Val::Int(count as i64)));
+    }
+    if let Some(result) = direct_predicate_from_source_len(
+        &source,
+        &suffix.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink_kernels,
+    ) {
+        return Some(Ok(result));
+    }
+    if let Some(result) = direct_empty_cardinality_sink(
+        &source,
+        &suffix.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink,
+    ) {
+        return Some(Ok(result));
+    }
+
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
+    let result = if source_reversed {
+        let items = source.array_iter_rev()?;
+        drive_view_iter(
+            items,
+            &suffix.stages,
+            &body.stage_kernels,
+            source_demand,
+            vm,
+            |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+        )?
+    } else {
+        drive_view_frontier(
+            source,
+            pipeline::SourceCapabilities::VIEW_ARRAY,
+            &suffix.stages,
+            &body.stage_kernels,
+            source_demand,
+            vm,
+            |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+        )?
+    };
+    if let Err(err) = result {
+        return Some(Err(err));
+    }
+
+    Some(sink_acc.finish_result(source_reversed))
 }
 
 /// Runs the complete pipeline entirely in the view domain when all stages and
@@ -3588,6 +3677,56 @@ mod tests {
         assert_eq!(nth, Val::Int(3));
         assert_eq!(nth_source.scalar_reads(), 2);
         assert_eq!(nth_source.array_iter_reads(), 0);
+    }
+
+    #[test]
+    fn view_runner_streams_leading_reverse_without_materializing_source_rows() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::reverse().unwrap(),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 3]));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn view_runner_cancels_even_leading_reverses_for_source_access() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![Stage::reverse().unwrap(), Stage::reverse().unwrap()],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(1));
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
