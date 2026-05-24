@@ -207,17 +207,9 @@ where
                 Some(ViewStageFlow::Drop)
             }
         }
-        pipeline::ViewStageCapability::Map { kernel } => {
-            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
-            debug_assert_eq!(
-                stage.output_mode(),
-                pipeline::ViewOutputMode::BorrowedSubview
-            );
-            let kernel = stage_kernels.get(kernel)?;
-            Some(ViewStageFlow::Keep(super::eval_map_kernel_with_vm(
-                &item, kernel, vm,
-            )?))
-        }
+        // Map can emit either a borrowed subview or an owned value, so the
+        // frontier handles it before row-local stage flow dispatch.
+        pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.

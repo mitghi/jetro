@@ -825,6 +825,22 @@ where
         });
     };
 
+    if let pipeline::ViewStageCapability::Map { kernel } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        let kernel = stage_kernels.get(kernel)?;
+        return drive_view_item(
+            eval_frontier_map_kernel(&item, kernel, vm)?,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::FlatMap { kernel } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(
@@ -1498,13 +1514,17 @@ where
     }
 }
 
-fn eval_map_kernel_with_vm<'a, V>(item: &V, kernel: &pipeline::BodyKernel, vm: &mut VM) -> Option<V>
+fn eval_frontier_map_kernel<'a, V>(
+    item: &FrontierRow<V>,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<FrontierRow<V>>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
-        pipeline::ViewKernelValue::Owned(_) => None,
+        pipeline::ViewKernelValue::Owned(value) => Some(FrontierRow::Owned(value)),
     }
 }
 
@@ -2950,6 +2970,32 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(4));
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_map_streams_owned_rows_into_later_stages() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Const(Val::Str(Arc::from("owned"))), BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(2));
         assert_eq!(source.materialize_reads(), 0);
     }
 
