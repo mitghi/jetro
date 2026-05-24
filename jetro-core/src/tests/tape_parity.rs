@@ -152,6 +152,7 @@ fn tape_matches_vm_for_nullary_and_literal_view_filters() {
         "$.rows.compact().map(id).last()",
         "$.rows.compact().filter(tag == \"keep\").map(name.upper()).take(2)",
         "$.rows.compact().remove({\"id\": 2, \"name\": \"bob\", \"tag\": \"drop\"}).map(id)",
+        "$.rows.compact().remove({\"tag\": \"drop\", \"name\": \"bob\", \"id\": 2}).map(id)",
         "$.tags.compact().remove(\"drop\").last()",
         "$.tags.remove(null).take(3)",
         "$.tags.remove(\"skip\").compact().count()",

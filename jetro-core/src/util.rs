@@ -6,11 +6,10 @@ use indexmap::IndexMap;
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use crate::parse::ast::BinOp;
-use crate::parse::ast::KindType;
 use crate::data::context::EvalError;
 use crate::data::value::Val;
-
+use crate::parse::ast::BinOp;
+use crate::parse::ast::KindType;
 
 /// Borrowed scalar view — used by `ValueView` implementations so scalar
 /// reads return a stack value without allocating a `Val`.
@@ -168,7 +167,6 @@ pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
     }
 }
 
-
 /// Return `true` if `v` is considered truthy according to Jetro semantics.
 #[inline]
 pub fn is_truthy(v: &Val) -> bool {
@@ -256,7 +254,6 @@ pub fn cmp_vals_binop(a: &Val, op: BinOp, b: &Val) -> bool {
     json_cmp_binop(JsonView::from_val(a), op, JsonView::from_val(b))
 }
 
-
 /// Convert a `Val` to a string suitable for use as an object key or map key.
 #[inline]
 pub fn val_to_key(v: &Val) -> String {
@@ -269,6 +266,137 @@ pub fn val_to_key(v: &Val) -> String {
         Val::Null => "null".to_string(),
         other => val_to_string(other),
     }
+}
+
+/// Convert a `Val` into a canonical key for structural equality buckets.
+///
+/// Unlike `val_to_key`, this is not object-key coercion: scalar types are
+/// tagged, arrays are recursive, and object fields are sorted by key so
+/// insertion order does not affect equality-style set operations.
+pub fn val_to_structural_key(v: &Val) -> String {
+    fn write_key(out: &mut String, v: &Val) {
+        match v {
+            Val::Null => out.push_str("z:null"),
+            Val::Bool(b) => {
+                out.push_str("b:");
+                out.push_str(if *b { "1" } else { "0" });
+            }
+            Val::Int(n) => {
+                out.push_str("n:");
+                out.push_str(&(n.to_owned() as f64).to_bits().to_string());
+            }
+            Val::Float(f) => {
+                out.push_str("n:");
+                let n = if *f == 0.0 { 0.0 } else { *f };
+                out.push_str(&n.to_bits().to_string());
+            }
+            Val::Str(s) => {
+                out.push_str("s:");
+                out.push_str(&s.len().to_string());
+                out.push(':');
+                out.push_str(s);
+            }
+            Val::StrSlice(r) => {
+                let s = r.as_str();
+                out.push_str("s:");
+                out.push_str(&s.len().to_string());
+                out.push(':');
+                out.push_str(s);
+            }
+            Val::Arr(a) => {
+                out.push_str("a[");
+                for item in a.iter() {
+                    write_key(out, item);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            Val::IntVec(a) => {
+                out.push_str("a[");
+                for item in a.iter() {
+                    out.push_str("n:");
+                    out.push_str(&(*item as f64).to_bits().to_string());
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            Val::FloatVec(a) => {
+                out.push_str("a[");
+                for item in a.iter() {
+                    out.push_str("n:");
+                    let n = if *item == 0.0 { 0.0 } else { *item };
+                    out.push_str(&n.to_bits().to_string());
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            Val::StrVec(a) => {
+                out.push_str("a[");
+                for item in a.iter() {
+                    out.push_str("s:");
+                    out.push_str(&item.len().to_string());
+                    out.push(':');
+                    out.push_str(item);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            Val::StrSliceVec(a) => {
+                out.push_str("a[");
+                for item in a.iter() {
+                    let s = item.as_str();
+                    out.push_str("s:");
+                    out.push_str(&s.len().to_string());
+                    out.push(':');
+                    out.push_str(s);
+                    out.push(',');
+                }
+                out.push(']');
+            }
+            Val::Obj(m) => {
+                out.push_str("o{");
+                let mut fields: Vec<(&str, &Val)> =
+                    m.iter().map(|(k, v)| (k.as_ref(), v)).collect();
+                fields.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                for (key, value) in fields {
+                    out.push_str(&key.len().to_string());
+                    out.push(':');
+                    out.push_str(key);
+                    out.push('=');
+                    write_key(out, value);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            Val::ObjSmall(pairs) => {
+                out.push_str("o{");
+                let mut fields: Vec<(&str, &Val)> =
+                    pairs.iter().map(|(k, v)| (k.as_ref(), v)).collect();
+                fields.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                for (key, value) in fields {
+                    out.push_str(&key.len().to_string());
+                    out.push(':');
+                    out.push_str(key);
+                    out.push('=');
+                    write_key(out, value);
+                    out.push(',');
+                }
+                out.push('}');
+            }
+            Val::ObjVec(d) => {
+                out.push_str("a[");
+                for row in 0..d.nrows() {
+                    write_key(out, &d.row_val(row));
+                    out.push(',');
+                }
+                out.push(']');
+            }
+        }
+    }
+
+    let mut out = String::new();
+    write_key(&mut out, v);
+    out
 }
 
 /// Render a `Val` as a `String`; compound types are serialised to JSON text.
@@ -288,13 +416,11 @@ pub fn val_to_string(v: &Val) -> String {
     }
 }
 
-
 /// Intern a string slice into an `Arc<str>` suitable for use as an `IndexMap` key.
 #[inline]
 pub fn val_key(s: &str) -> Arc<str> {
     Arc::from(s)
 }
-
 
 /// Borrow a `&str` view of any string-like `Val`. Used to make `+` accept
 /// every cross-product of `Val::Str` and `Val::StrSlice` without
@@ -355,15 +481,13 @@ where
     }
 }
 
-
 /// Flatten nested arrays up to `depth` levels; homogeneous element types are
 /// collapsed to their optimised columnar representation (`IntVec`, `FloatVec`).
 pub fn flatten_val(v: Val, depth: usize) -> Val {
     match v {
         Val::Arr(a) if depth > 0 => {
             let items = Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone());
-            
-            
+
             let all_int_children = !items.is_empty()
                 && items
                     .iter()
@@ -409,8 +533,7 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                 }
                 return Val::float_vec(out);
             }
-            
-            
+
             let cap: usize = items
                 .iter()
                 .map(|it| match it {
@@ -440,7 +563,6 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
                         _ => {}
                     },
                     Val::IntVec(inner) => {
-                        
                         out.extend(inner.iter().map(|n| Val::Int(*n)));
                     }
                     Val::FloatVec(inner) => {
@@ -454,7 +576,7 @@ pub fn flatten_val(v: Val, depth: usize) -> Val {
             }
             Val::arr(out)
         }
-        
+
         Val::IntVec(_) | Val::FloatVec(_) | Val::StrVec(_) => v,
         other => other,
     }
@@ -501,7 +623,6 @@ pub fn cartesian(arrays: &[Vec<Val>]) -> Vec<Vec<Val>> {
     })
 }
 
-
 /// Return `true` if a dot-separated `path` resolves to a non-null value
 /// within `v`, traversing nested objects recursively.
 pub fn field_exists_nested(v: &Val, path: &str) -> bool {
@@ -514,7 +635,6 @@ pub fn field_exists_nested(v: &Val, path: &str) -> bool {
         (None, _) => false,
     }
 }
-
 
 /// Recursively merge `other` into `base` for object values; non-object
 /// values in `other` overwrite the corresponding entry in `base`.
@@ -537,7 +657,6 @@ pub fn deep_merge(base: Val, other: Val) -> Val {
         (_, other) => other,
     }
 }
-
 
 /// Like `deep_merge`, but array-typed values at the same key are concatenated
 /// rather than overwritten.
@@ -578,7 +697,6 @@ pub fn deep_merge_concat(base: Val, other: Val) -> Val {
         (_, other) => other,
     }
 }
-
 
 /// Construct a two-field object `{k1: v1, k2: v2}` with a pre-sized map.
 pub fn obj2(k1: &str, v1: Val, k2: &str, v2: Val) -> Val {

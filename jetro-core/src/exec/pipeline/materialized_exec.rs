@@ -500,7 +500,7 @@ fn apply_adapter_materialized(
             match opt_prog {
                 None => {
                     buf.sort_by(cmp_val_total);
-                    buf.dedup_by(|a, b| crate::util::vals_eq(a, b));
+                    dedup_sorted_values(buf);
                 }
                 Some(prog) => {
                     let mut keyed: Vec<(Val, Val)> = Vec::with_capacity(buf.len());
@@ -514,7 +514,7 @@ fn apply_adapter_materialized(
                         keyed.push((key, v.clone()));
                     }
                     keyed.sort_by(|a, b| cmp_val_total(&a.0, &b.0));
-                    keyed.dedup_by(|a, b| crate::util::vals_eq(&a.0, &b.0));
+                    dedup_sorted_keyed_values(&mut keyed);
                     *buf = keyed.into_iter().map(|(_, v)| v).collect();
                 }
             }
@@ -525,14 +525,42 @@ fn apply_adapter_materialized(
     }
 }
 
+fn dedup_sorted_values(buf: &mut Vec<Val>) {
+    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
+    buf.retain(|item| {
+        let key = crate::util::val_to_structural_key(item);
+        let bucket = seen.entry(key).or_default();
+        if bucket
+            .iter()
+            .any(|seen| crate::util::vals_deep_eq(seen, item))
+        {
+            return false;
+        }
+        bucket.push(item.clone());
+        true
+    });
+}
+
+fn dedup_sorted_keyed_values(buf: &mut Vec<(Val, Val)>) {
+    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
+    buf.retain(|(key_value, _)| {
+        let key = crate::util::val_to_structural_key(key_value);
+        let bucket = seen.entry(key).or_default();
+        if bucket
+            .iter()
+            .any(|seen| crate::util::vals_deep_eq(seen, key_value))
+        {
+            return false;
+        }
+        bucket.push(key_value.clone());
+        true
+    });
+}
+
 /// Applies an element-wise stage (`Slice`, string pair builtins, `Builtin`) to a single `Val` row.
 pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
     match stage {
-        Stage::IntRangeBuiltin {
-            method,
-            start,
-            end,
-        } => BuiltinCall::new(
+        Stage::IntRangeBuiltin { method, start, end } => BuiltinCall::new(
             *method,
             BuiltinArgs::I64Opt {
                 first: *start,
@@ -541,11 +569,7 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
         )
         .apply(&v)
         .unwrap_or(v),
-        Stage::StringPairBuiltin {
-            first,
-            second,
-            ..
-        } => match stage
+        Stage::StringPairBuiltin { first, second, .. } => match stage
             .descriptor()
             .and_then(|desc| desc.builtin_id())
             .and_then(builtin_string_pair_stage)
@@ -714,7 +738,7 @@ pub(crate) fn apply_lambda_obj(
         .descriptor()
         .and_then(|desc| desc.builtin_id())
         .and_then(builtin_object_lambda)
-    .expect("apply_lambda_obj called with non-Obj-lambda Stage");
+        .expect("apply_lambda_obj called with non-Obj-lambda Stage");
 
     for (k, v) in m.iter() {
         match operation {
@@ -761,10 +785,10 @@ mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
     use crate::data::context::Env;
     use crate::data::value::Val;
     use crate::parse::ast::BinOp;
-    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
 
     use super::super::{
         BodyKernel, MembershipSinkSpec, MembershipSinkTarget, PipelineBody, PredicateSinkSpec,

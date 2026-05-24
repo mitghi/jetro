@@ -76,12 +76,17 @@ pub fn reverse_any_apply(recv: &Val) -> Option<Val> {
 #[inline]
 pub fn unique_arr_apply(recv: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let kept: Vec<Val> = items_cow
-        .iter()
-        .filter(|v| seen.insert(crate::util::val_to_key(v)))
-        .cloned()
-        .collect();
+    let mut seen: std::collections::HashMap<String, Vec<Val>> = std::collections::HashMap::new();
+    let mut kept: Vec<Val> = Vec::with_capacity(items_cow.len());
+    for item in items_cow.iter() {
+        let key = crate::util::val_to_structural_key(item);
+        let bucket = seen.entry(key).or_default();
+        if bucket.iter().any(|v| crate::util::vals_deep_eq(v, item)) {
+            continue;
+        }
+        bucket.push(item.clone());
+        kept.push(item.clone());
+    }
     Some(Val::arr(kept))
 }
 
@@ -401,12 +406,10 @@ pub fn prepend_apply(recv: &Val, item: &Val) -> Option<Val> {
 /// Removes all elements from an array that are structurally equal to `target`.
 #[inline]
 pub fn remove_value_apply(recv: &Val, target: &Val) -> Option<Val> {
-    use crate::util::val_to_key;
     let items_cow = recv.as_vals()?;
-    let key = val_to_key(target);
     let out: Vec<Val> = items_cow
         .iter()
-        .filter(|v| val_to_key(v) != key)
+        .filter(|v| !crate::util::vals_deep_eq(v, target))
         .cloned()
         .collect();
     Some(Val::arr(out))
@@ -603,11 +606,22 @@ pub fn window_arr_apply(recv: &Val, n: usize) -> Option<Val> {
 #[inline]
 pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
-        let other_keys: std::collections::HashSet<String> =
-            other.iter().map(crate::util::val_to_key).collect();
+        let mut other_keys: std::collections::HashMap<String, Vec<&Val>> =
+            std::collections::HashMap::new();
+        for item in other {
+            other_keys
+                .entry(crate::util::val_to_structural_key(item))
+                .or_default()
+                .push(item);
+        }
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| other_keys.contains(&crate::util::val_to_key(v)))
+            .filter(|v| {
+                other_keys
+                    .get(&crate::util::val_to_structural_key(v))
+                    .map(|bucket| bucket.iter().any(|item| crate::util::vals_deep_eq(v, item)))
+                    .unwrap_or(false)
+            })
             .cloned()
             .collect();
         Some(Val::arr(kept))
@@ -621,12 +635,21 @@ pub fn intersect_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
         let mut out: Vec<Val> = a.as_ref().clone();
-        let a_keys: std::collections::HashSet<String> =
-            a.iter().map(crate::util::val_to_key).collect();
+        let mut seen: std::collections::HashMap<String, Vec<Val>> =
+            std::collections::HashMap::new();
+        for item in a.iter() {
+            seen.entry(crate::util::val_to_structural_key(item))
+                .or_default()
+                .push(item.clone());
+        }
         for v in other {
-            if !a_keys.contains(&crate::util::val_to_key(v)) {
-                out.push(v.clone());
+            let key = crate::util::val_to_structural_key(v);
+            let bucket = seen.entry(key).or_default();
+            if bucket.iter().any(|item| crate::util::vals_deep_eq(item, v)) {
+                continue;
             }
+            bucket.push(v.clone());
+            out.push(v.clone());
         }
         Some(Val::arr(out))
     } else {
@@ -638,11 +661,22 @@ pub fn union_apply(recv: &Val, other: &[Val]) -> Option<Val> {
 #[inline]
 pub fn diff_apply(recv: &Val, other: &[Val]) -> Option<Val> {
     if let Val::Arr(a) = recv {
-        let other_keys: std::collections::HashSet<String> =
-            other.iter().map(crate::util::val_to_key).collect();
+        let mut other_keys: std::collections::HashMap<String, Vec<&Val>> =
+            std::collections::HashMap::new();
+        for item in other {
+            other_keys
+                .entry(crate::util::val_to_structural_key(item))
+                .or_default()
+                .push(item);
+        }
         let kept: Vec<Val> = a
             .iter()
-            .filter(|v| !other_keys.contains(&crate::util::val_to_key(v)))
+            .filter(|v| {
+                !other_keys
+                    .get(&crate::util::val_to_structural_key(v))
+                    .map(|bucket| bucket.iter().any(|item| crate::util::vals_deep_eq(v, item)))
+                    .unwrap_or(false)
+            })
             .cloned()
             .collect();
         Some(Val::arr(kept))

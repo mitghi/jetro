@@ -525,7 +525,7 @@ fn transform_keys_all_forms() {
     assert_all(
         "transform_keys",
         &[
-            r#"$.o.transform_keys(@.upper())"#,  // wraps key name
+            r#"$.o.transform_keys(@.upper())"#, // wraps key name
         ],
         &json!({"o": {"a": 1, "b": 2, "c": 3}}),
         r#"{"A":1,"B":2,"C":3}"#,
@@ -665,7 +665,10 @@ fn fold_one_arg_forms() {
 fn pick_forms() {
     let d = json!({"u": {"id": 1, "name": "Ada", "age": 30}});
     assert_eq!(run("$.u.pick(id, name)", &d), r#"{"id":1,"name":"Ada"}"#);
-    assert_eq!(run("$.u.pick(uid: id, who: name)", &d), r#"{"uid":1,"who":"Ada"}"#);
+    assert_eq!(
+        run("$.u.pick(uid: id, who: name)", &d),
+        r#"{"uid":1,"who":"Ada"}"#
+    );
 }
 
 #[test]
@@ -748,7 +751,10 @@ fn deep_shape_forms() {
             {"id": 2}
         ]
     });
-    assert_eq!(run("$.deep_shape({id, name})", &d), r#"[{"id":1,"name":"a"}]"#);
+    assert_eq!(
+        run("$.deep_shape({id, name})", &d),
+        r#"[{"id":1,"name":"a"}]"#
+    );
 }
 
 #[test]
@@ -808,14 +814,8 @@ fn replace_args() {
 
 #[test]
 fn indent_overloads() {
-    assert_eq!(
-        run(r#""a\nb".indent(2)"#, &json!({})),
-        r#""  a\n  b""#,
-    );
-    assert_eq!(
-        run(r#""a\nb".indent("> ")"#, &json!({})),
-        r#""> a\n> b""#,
-    );
+    assert_eq!(run(r#""a\nb".indent(2)"#, &json!({})), r#""  a\n  b""#,);
+    assert_eq!(run(r#""a\nb".indent("> ")"#, &json!({})), r#""> a\n> b""#,);
 }
 
 #[test]
@@ -825,30 +825,15 @@ fn repeat_args() {
 
 #[test]
 fn pad_args() {
-    assert_eq!(
-        run(r#""abc".pad_left(6, "_")"#, &json!({})),
-        r#""___abc""#,
-    );
-    assert_eq!(
-        run(r#""abc".pad_right(6, "_")"#, &json!({})),
-        r#""abc___""#,
-    );
-    assert_eq!(
-        run(r#""abc".center(7, "_")"#, &json!({})),
-        r#""__abc__""#,
-    );
+    assert_eq!(run(r#""abc".pad_left(6, "_")"#, &json!({})), r#""___abc""#,);
+    assert_eq!(run(r#""abc".pad_right(6, "_")"#, &json!({})), r#""abc___""#,);
+    assert_eq!(run(r#""abc".center(7, "_")"#, &json!({})), r#""__abc__""#,);
 }
 
 #[test]
 fn split_join() {
-    assert_eq!(
-        run(r#""a,b,c".split(",")"#, &json!({})),
-        r#"["a","b","c"]"#,
-    );
-    assert_eq!(
-        run(r#"["a","b","c"].join(",")"#, &json!({})),
-        r#""a,b,c""#,
-    );
+    assert_eq!(run(r#""a,b,c".split(",")"#, &json!({})), r#"["a","b","c"]"#,);
+    assert_eq!(run(r#"["a","b","c"].join(",")"#, &json!({})), r#""a,b,c""#,);
 }
 
 #[test]
@@ -988,10 +973,7 @@ fn has_path_args() {
 #[test]
 fn set_chain() {
     let d = json!({"u": {"name": "Ada"}});
-    assert_eq!(
-        run(r#"$.u.name.set("Bob")"#, &d),
-        r#"{"u":{"name":"Bob"}}"#,
-    );
+    assert_eq!(run(r#"$.u.name.set("Bob")"#, &d), r#"{"u":{"name":"Bob"}}"#,);
 }
 
 #[test]
@@ -1071,6 +1053,32 @@ fn diff_intersect_union() {
 }
 
 #[test]
+fn structural_set_operations_ignore_object_insertion_order() {
+    let d = json!({
+        "xs": [
+            {"a": 1, "b": 2},
+            {"b": 2, "a": 1},
+            {"a": 2}
+        ],
+        "ys": [
+            {"b": 2, "a": 1},
+            {"z": 0}
+        ]
+    });
+    assert_eq!(run("$.xs.unique().len()", &d), "2");
+    assert_eq!(run("$.xs.remove({\"b\": 2, \"a\": 1})", &d), r#"[{"a":2}]"#);
+    assert_eq!(
+        run("$.xs.intersect($.ys)", &d),
+        r#"[{"a":1,"b":2},{"a":1,"b":2}]"#
+    );
+    assert_eq!(run("$.xs.diff($.ys)", &d), r#"[{"a":2}]"#);
+    assert_eq!(
+        run("$.xs.union($.ys)", &d),
+        r#"[{"a":1,"b":2},{"a":1,"b":2},{"a":2},{"z":0}]"#
+    );
+}
+
+#[test]
 fn zip_zip_longest() {
     // `.zip_longest` ignores any explicit fill argument in v0.5; missing
     // positions are emitted as `null`. Document the actual shape so the
@@ -1110,10 +1118,7 @@ fn merge_deep_merge() {
         run("$.a.merge($.b)", &d),
         r#"{"a":{"x":1,"y":9,"z":3},"b":{"y":9,"z":3}}"#,
     );
-    assert_eq!(
-        run("$.a | @.merge($.b)", &d),
-        r#"{"x":1,"y":9,"z":3}"#,
-    );
+    assert_eq!(run("$.a | @.merge($.b)", &d), r#"{"x":1,"y":9,"z":3}"#,);
     let n = json!({
         "a": {"x": {"p": 1}, "q": 2},
         "b": {"x": {"p": 9, "r": 3}}
