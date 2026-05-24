@@ -235,7 +235,13 @@ where
         None => return None,
     };
     if let Some(count) =
-        direct_count_from_source_len(&source, &capabilities.stages, &body.stage_kernels, &sink)
+        direct_count_from_source_len(
+            &source,
+            &capabilities.stages,
+            &body.stage_kernels,
+            &sink,
+            &body.sink_kernels,
+        )
     {
         return Some(Ok(Val::Int(count as i64)));
     }
@@ -280,13 +286,14 @@ fn direct_count_from_source_len<'a, V>(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
+    sink_kernels: &[pipeline::BodyKernel],
 ) -> Option<usize>
 where
     V: ValueView<'a> + 'a,
 {
     let pipeline::ViewSinkCapability::Builtin {
         accumulator: crate::builtins::BuiltinSinkAccumulator::Count,
-        predicate_kernel: None,
+        predicate_kernel,
         project_kernel: None,
         ..
     } = sink
@@ -294,7 +301,11 @@ where
         return None;
     };
     let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
-    Some(count)
+    let Some(predicate_kernel) = predicate_kernel else {
+        return Some(count);
+    };
+    let predicate = constant_kernel_truthy(sink_kernels.get(*predicate_kernel)?)?;
+    Some(if predicate { count } else { 0 })
 }
 
 fn direct_predicate_from_source_len<'a, V>(
@@ -2966,6 +2977,54 @@ mod tests {
         assert_eq!(source.scalar_reads(), 1);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_constant_predicate_count_uses_source_length_without_iterating_rows() {
+        let true_source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let true_body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Skip,
+                    value: 1,
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(ReducerSpec::count_with_predicate(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                None,
+            )),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: vec![BodyKernel::ConstBool(true)],
+        };
+
+        let true_count = super::run_full(true_source.clone(), &true_body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(true_count, Val::Int(3));
+        assert_eq!(true_source.scalar_reads(), 1);
+        assert_eq!(true_source.array_iter_reads(), 0);
+        assert_eq!(true_source.materialize_reads(), 0);
+
+        let false_source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let false_body = PipelineBody {
+            sink_kernels: vec![BodyKernel::ConstBool(false)],
+            ..true_body
+        };
+
+        let false_count = super::run_full(false_source.clone(), &false_body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(false_count, Val::Int(0));
+        assert_eq!(false_source.scalar_reads(), 1);
+        assert_eq!(false_source.array_iter_reads(), 0);
+        assert_eq!(false_source.materialize_reads(), 0);
     }
 
     #[test]
