@@ -231,16 +231,28 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if let Some(count) = direct_count_from_source_len(&source, &capabilities.stages, &sink) {
+    if let Some(count) =
+        direct_count_from_source_len(&source, &capabilities.stages, &body.stage_kernels, &sink)
+    {
         return Some(Ok(Val::Int(count as i64)));
     }
-    if let Some(result) =
-        direct_predicate_from_source_len(&source, &capabilities.stages, &sink, &body.sink_kernels)
+    if let Some(result) = direct_predicate_from_source_len(
+        &source,
+        &capabilities.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink_kernels,
+    )
     {
         return Some(Ok(result));
     }
-    if let Some(result) =
-        direct_empty_cardinality_sink(&source, &capabilities.stages, &sink, &body.sink)
+    if let Some(result) = direct_empty_cardinality_sink(
+        &source,
+        &capabilities.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink,
+    )
     {
         return Some(Ok(result));
     }
@@ -263,6 +275,7 @@ where
 fn direct_count_from_source_len<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
 ) -> Option<usize>
 where
@@ -277,13 +290,14 @@ where
     else {
         return None;
     };
-    let count = cardinality_after_deterministic_stages(source, stages)?;
+    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
     Some(count)
 }
 
 fn direct_predicate_from_source_len<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
     sink_kernels: &[pipeline::BodyKernel],
 ) -> Option<Val>
@@ -297,7 +311,7 @@ where
     else {
         return None;
     };
-    let count = cardinality_after_deterministic_stages(source, stages)?;
+    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
     if count == 0 {
         return match op {
             crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(false)),
@@ -336,13 +350,14 @@ where
 fn direct_empty_cardinality_sink<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
     body_sink: &pipeline::Sink,
 ) -> Option<Val>
 where
     V: ValueView<'a> + 'a,
 {
-    if cardinality_after_deterministic_stages(source, stages)? != 0 {
+    if cardinality_after_deterministic_stages(source, stages, stage_kernels)? != 0 {
         return None;
     }
     if let Some(op) = body_sink.reducer_spec().and_then(|spec| spec.numeric_op()) {
@@ -379,6 +394,7 @@ where
 fn cardinality_after_deterministic_stages<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
 ) -> Option<usize>
 where
     V: ValueView<'a> + 'a,
@@ -396,18 +412,38 @@ where
             pipeline::ViewStageCapability::Skip(n) => {
                 count = count.saturating_sub(*n);
             }
-            pipeline::ViewStageCapability::Filter { .. }
-            | pipeline::ViewStageCapability::Compact
+            pipeline::ViewStageCapability::Filter { kernel } => {
+                if !constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
+                    count = 0;
+                }
+            }
+            pipeline::ViewStageCapability::TakeWhile { kernel } => {
+                if !constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
+                    count = 0;
+                }
+            }
+            pipeline::ViewStageCapability::DropWhile { kernel } => {
+                if constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
+                    count = 0;
+                }
+            }
+            pipeline::ViewStageCapability::Compact
             | pipeline::ViewStageCapability::RemoveValue(_)
             | pipeline::ViewStageCapability::FlatMap { .. }
             | pipeline::ViewStageCapability::Split { .. }
-            | pipeline::ViewStageCapability::TakeWhile { .. }
-            | pipeline::ViewStageCapability::DropWhile { .. }
             | pipeline::ViewStageCapability::Distinct { .. }
             | pipeline::ViewStageCapability::KeyedReduce { .. } => return None,
         }
     }
     Some(count)
+}
+
+fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
+    match kernel {
+        pipeline::BodyKernel::ConstBool(value) => Some(*value),
+        pipeline::BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
+        _ => None,
+    }
 }
 
 fn resolve_view_sink(
@@ -2705,6 +2741,81 @@ mod tests {
             assert_eq!(source.array_iter_reads(), 0, "{op:?}");
             assert_eq!(source.materialize_reads(), 0, "{op:?}");
         }
+    }
+
+    #[test]
+    fn view_constant_cardinality_stages_use_source_length_without_iterating_rows() {
+        let count_source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let count_body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::ConstBool(true), BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let count = super::run_full(count_source.clone(), &count_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, Val::Int(2));
+        assert_eq!(count_source.scalar_reads(), 1);
+        assert_eq!(count_source.array_iter_reads(), 0);
+        assert_eq!(count_source.materialize_reads(), 0);
+
+        let empty_source = CountingView::root(&[1, 2, 3]);
+        let empty_body = PipelineBody {
+            stages: vec![Stage::Filter(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Filter,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::ConstBool(false)],
+            sink_kernels: Vec::new(),
+        };
+
+        let empty = super::run_full(empty_source.clone(), &empty_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::Value::from(empty), serde_json::json!([]));
+        assert_eq!(empty_source.scalar_reads(), 1);
+        assert_eq!(empty_source.array_iter_reads(), 0);
+        assert_eq!(empty_source.materialize_reads(), 0);
+
+        let drop_source = CountingView::root(&[1, 2, 3]);
+        let drop_body = PipelineBody {
+            stages: vec![Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::DropWhile,
+                body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(ReducerSpec {
+                op: ReducerOp::Numeric(NumOp::Sum),
+                predicate: None,
+                projection: None,
+                predicate_expr: None,
+                projection_expr: None,
+            }),
+            stage_kernels: vec![BodyKernel::ConstBool(true)],
+            sink_kernels: Vec::new(),
+        };
+
+        let dropped = super::run_full(drop_source.clone(), &drop_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(dropped, Val::Int(0));
+        assert_eq!(drop_source.scalar_reads(), 1);
+        assert_eq!(drop_source.array_iter_reads(), 0);
+        assert_eq!(drop_source.materialize_reads(), 0);
     }
 
     #[test]
