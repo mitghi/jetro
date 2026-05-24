@@ -12,17 +12,21 @@ use crate::{
         builtin::{BarrierCtx, Builtin, StreamCtx},
         defs, BuiltinArgExtremeSink, BuiltinArgs, BuiltinArraySelector, BuiltinCall,
         BuiltinCancellation, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage,
-        BuiltinDemandLaw,
-        BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
-        BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage, BuiltinNumericReducer,
-        BuiltinObjectLambda, BuiltinPipelineArity, BuiltinPipelineLowering, BuiltinPipelineMaterialization,
-        BuiltinPipelineOrderEffect, BuiltinPipelineShape, BuiltinPredicateSink,
-        BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook, BuiltinSelectionPosition,
-        BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec, BuiltinSinkValueNeed,
-        BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStringPairStage, BuiltinStructural,
-        BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
+        BuiltinDemandLaw, BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer,
+        BuiltinLogicalShape, BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
+        BuiltinNumericReducer, BuiltinObjectLambda, BuiltinPipelineArity, BuiltinPipelineLowering,
+        BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
+        BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkDemand, BuiltinSinkSpec,
+        BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStringPairStage,
+        BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
+        BuiltinViewValueProjection,
     },
-    data::{context::EvalError, value::Val, view::ValueView},
+    data::{
+        context::EvalError,
+        value::Val,
+        view::{write_json_view, ValueView},
+    },
     exec::pipeline::StageFlow,
     plan::demand::{
         Demand, FieldDemand, FieldPath, FieldSet, PullDemand, SinkResultDemand, ValueNeed,
@@ -80,7 +84,8 @@ pub(crate) fn row_stream_op(id: BuiltinId) -> Option<BuiltinRowStreamOp> {
 /// stream boundary such as `$.rows()`.
 #[inline]
 pub(crate) fn stream_source(id: BuiltinId) -> bool {
-    id.method().is_some_and(|method| method.spec().stream_source)
+    id.method()
+        .is_some_and(|method| method.spec().stream_source)
 }
 
 /// Return predicate terminal-sink behavior for builtin `id`, if it has one.
@@ -676,7 +681,10 @@ pub(crate) fn pipeline_composed_barrier(id: BuiltinId) -> bool {
 /// Return true when builtin `id` requires the legacy materialized executor.
 #[inline]
 pub(crate) fn pipeline_legacy_materialized(id: BuiltinId) -> bool {
-    matches!(streaming_boundary(id), BuiltinStreamingBoundary::LegacyMaterialized)
+    matches!(
+        streaming_boundary(id),
+        BuiltinStreamingBoundary::LegacyMaterialized
+    )
 }
 
 /// Return the cardinality/cost shape annotation for builtin `id`, used by
@@ -837,6 +845,13 @@ pub(crate) fn view_object_projection(id: BuiltinId) -> Option<BuiltinViewObjectP
         .and_then(|method| method.spec().view_object_projection)
 }
 
+/// Return concrete whole-value borrowed-view projection metadata for builtin `id`.
+#[inline]
+pub(crate) fn view_value_projection(id: BuiltinId) -> Option<BuiltinViewValueProjection> {
+    id.method()
+        .and_then(|method| method.spec().view_value_projection)
+}
+
 /// Return true when builtin `id` enumerates object keys, values, or entries in
 /// a view-native path.
 #[inline]
@@ -855,9 +870,7 @@ pub(crate) fn view_object_items_projection_call(
         return None;
     }
     let projection = view_object_projection(id)?;
-    projection
-        .is_item_projection()
-    .then_some(projection)
+    projection.is_item_projection().then_some(projection)
 }
 
 /// Return the direct borrowed-view call family for a concrete builtin call.
@@ -960,7 +973,9 @@ pub(crate) fn terminal_selection_position(id: BuiltinId) -> Option<BuiltinSelect
 /// kernel without materialising the receiver row.
 #[inline]
 pub(crate) fn view_projection(id: BuiltinId) -> bool {
-    view_scalar_projection(id) || view_object_projection(id).is_some()
+    view_scalar_projection(id)
+        || view_value_projection(id).is_some()
+        || view_object_projection(id).is_some()
 }
 
 /// Return true when applying builtin `id` with `args` to a borrowed view
@@ -968,6 +983,9 @@ pub(crate) fn view_projection(id: BuiltinId) -> bool {
 #[inline]
 pub(crate) fn view_projection_returns_owned(id: BuiltinId, _args: &BuiltinArgs) -> bool {
     if view_scalar_projection(id) {
+        return true;
+    }
+    if view_value_projection(id).is_some() {
         return true;
     }
     view_object_projection(id).is_some_and(BuiltinViewObjectProjection::returns_owned)
@@ -990,12 +1008,17 @@ pub(crate) fn apply_view_projection<'a, V>(
     view: V,
 ) -> Option<ViewProjectionResult<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     if let Some(method) = id.method() {
         if view_scalar_projection(id) {
             return apply_json_view_scalar_hook(method, args, view.scalar())
                 .map(ViewProjectionResult::Owned);
+        }
+    }
+    if let Some(projection) = view_value_projection(id) {
+        if matches!(args, BuiltinArgs::None) {
+            return apply_view_value_projection(projection, &view).map(ViewProjectionResult::Owned);
         }
     }
     match (view_object_projection(id), args) {
@@ -1059,6 +1082,41 @@ where
         _ => apply_json_view_scalar_hook(id.method()?, args, view.scalar())
             .map(ViewProjectionResult::Owned),
     }
+}
+
+fn apply_view_value_projection<'a, V>(
+    projection: BuiltinViewValueProjection,
+    view: &V,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut out = String::new();
+    match projection {
+        BuiltinViewValueProjection::ToString => {
+            write_view_string_value(view, &mut out)?;
+        }
+        BuiltinViewValueProjection::ToJson => {
+            write_json_view(view, &mut out)?;
+        }
+    }
+    Some(Val::Str(Arc::from(out)))
+}
+
+fn write_view_string_value<'a, V>(view: &V, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Null => out.push_str("null"),
+        JsonView::Bool(value) => out.push_str(if value { "true" } else { "false" }),
+        JsonView::Int(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::UInt(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
+        JsonView::Str(value) => out.push_str(value),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => write_json_view(view, out)?,
+    }
+    Some(())
 }
 
 fn walk_view_path<'a, V>(mut cur: V, segs: &[crate::builtins::PathSeg]) -> V
@@ -1278,8 +1336,7 @@ pub(crate) fn pipeline_element(id: BuiltinId) -> bool {
 /// pipeline `Stage::Builtin` stage.
 #[inline]
 pub(crate) fn pipeline_builtin_call_stage(id: BuiltinId) -> bool {
-    pipeline_element(id)
-        || composed_builtin_stage(id).is_some()
+    pipeline_element(id) || composed_builtin_stage(id).is_some()
 }
 
 /// Return the composed-stage implementation for metadata-backed builtin calls
@@ -1417,9 +1474,9 @@ pub(crate) fn apply_json_view_scalar_hook(
     }
     match (view_scalar_op(BuiltinId::from_method(method))?, args) {
         (BuiltinViewScalarOp::Len, BuiltinArgs::None) => super::json_view_len(recv).map(Val::Int),
-        (BuiltinViewScalarOp::TypeName, BuiltinArgs::None) => {
-            Some(Val::Str(std::sync::Arc::from(super::json_view_type_name(recv))))
-        }
+        (BuiltinViewScalarOp::TypeName, BuiltinArgs::None) => Some(Val::Str(std::sync::Arc::from(
+            super::json_view_type_name(recv),
+        ))),
         (BuiltinViewScalarOp::StringNoArg, BuiltinArgs::None) => {
             let value = super::json_view_str(recv)?;
             super::str_no_arg_scalar_apply(method, value)
@@ -1479,8 +1536,7 @@ pub(crate) fn apply_barrier_hook(
 impl BuiltinId {
     pub(crate) const ALL: Self = Self(BuiltinMethod::All as u16);
     pub(crate) const ANY: Self = Self(BuiltinMethod::Any as u16);
-    pub(crate) const APPROX_COUNT_DISTINCT: Self =
-        Self(BuiltinMethod::ApproxCountDistinct as u16);
+    pub(crate) const APPROX_COUNT_DISTINCT: Self = Self(BuiltinMethod::ApproxCountDistinct as u16);
     pub(crate) const AVG: Self = Self(BuiltinMethod::Avg as u16);
     pub(crate) const COUNT: Self = Self(BuiltinMethod::Count as u16);
     pub(crate) const COUNT_BY: Self = Self(BuiltinMethod::CountBy as u16);
@@ -1793,6 +1849,10 @@ mod tests {
                 "{method:?} object projection execution must be view-native"
             );
             assert!(
+                spec.view_value_projection.is_none() || spec.view_native,
+                "{method:?} value projection execution must be view-native"
+            );
+            assert!(
                 spec.view_stage.is_none() || spec.view_native,
                 "{method:?} view-stage lowering must be view-native"
             );
@@ -1826,8 +1886,14 @@ mod tests {
             (BuiltinMethod::Remove, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Take, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Skip, BuiltinRuntimeHook::StreamAndBarrier),
-            (BuiltinMethod::TakeWhile, BuiltinRuntimeHook::StreamAndBarrier),
-            (BuiltinMethod::DropWhile, BuiltinRuntimeHook::StreamAndBarrier),
+            (
+                BuiltinMethod::TakeWhile,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::DropWhile,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
             (BuiltinMethod::FindIndex, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndicesWhere, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::MaxBy, BuiltinRuntimeHook::Barrier),
@@ -1840,7 +1906,10 @@ mod tests {
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Split, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Unique, BuiltinRuntimeHook::StreamAndBarrier),
-            (BuiltinMethod::UniqueBy, BuiltinRuntimeHook::StreamAndBarrier),
+            (
+                BuiltinMethod::UniqueBy,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
             (BuiltinMethod::Reverse, BuiltinRuntimeHook::Barrier),
             (
                 BuiltinMethod::TransformKeys,
@@ -1860,10 +1929,7 @@ mod tests {
             ),
         ];
         expected.sort_by_key(|(method, _)| *method as u16);
-        assert_eq!(
-            registered,
-            expected
-        );
+        assert_eq!(registered, expected);
 
         for (method, hook) in registered {
             let id = BuiltinId::from_method(method);
@@ -1968,16 +2034,11 @@ mod tests {
             });
             assert_eq!(expr_stage(id), expected_expr_stage, "{method:?}");
             let expected_nullary_stage = spec.nullary_stage.or_else(|| {
-                (matches!(spec.lowering, Some(BuiltinPipelineLowering::Nullary))
-                    && spec.is_element)
+                (matches!(spec.lowering, Some(BuiltinPipelineLowering::Nullary)) && spec.is_element)
                     .then_some(BuiltinNullaryStage::Element)
             });
             assert_eq!(nullary_stage(id), expected_nullary_stage, "{method:?}");
-            assert_eq!(
-                string_pair_stage(id),
-                spec.string_pair_stage,
-                "{method:?}"
-            );
+            assert_eq!(string_pair_stage(id), spec.string_pair_stage, "{method:?}");
             assert_eq!(object_lambda(id), spec.object_lambda, "{method:?}");
             assert_eq!(
                 pipeline_materialization(id),
@@ -1985,11 +2046,7 @@ mod tests {
                 "{method:?}"
             );
             assert_eq!(pipeline_shape(id), spec.pipeline_shape, "{method:?}");
-            assert_eq!(
-                pipeline_order_effect(id),
-                spec.order_effect,
-                "{method:?}"
-            );
+            assert_eq!(pipeline_order_effect(id), spec.order_effect, "{method:?}");
             assert_eq!(pipeline_lowering(id), spec.lowering, "{method:?}");
             assert_eq!(columnar_stage(id), spec.columnar_stage, "{method:?}");
             assert_eq!(stage_merge(id), spec.stage_merge, "{method:?}");
@@ -2441,38 +2498,28 @@ mod tests {
             builtin_sink(BuiltinId::SUM).unwrap().value_need(),
             BuiltinSinkValueNeed::Numeric
         );
-        assert!(
-            builtin_sink(BuiltinId::SUM)
-                .unwrap()
-                .requires_numeric_reducer()
-        );
-        assert!(
-            builtin_sink(BuiltinId::SUM)
-                .unwrap()
-                .accumulator
-                .finishes_from_reducer_state()
-        );
-        assert!(
-            !builtin_sink(BuiltinId::COUNT)
-                .unwrap()
-                .requires_numeric_reducer()
-        );
-        assert!(
-            builtin_sink(BuiltinId::COUNT)
-                .unwrap()
-                .accumulator
-                .finishes_from_reducer_state()
-        );
+        assert!(builtin_sink(BuiltinId::SUM)
+            .unwrap()
+            .requires_numeric_reducer());
+        assert!(builtin_sink(BuiltinId::SUM)
+            .unwrap()
+            .accumulator
+            .finishes_from_reducer_state());
+        assert!(!builtin_sink(BuiltinId::COUNT)
+            .unwrap()
+            .requires_numeric_reducer());
+        assert!(builtin_sink(BuiltinId::COUNT)
+            .unwrap()
+            .accumulator
+            .finishes_from_reducer_state());
         assert_eq!(
             builtin_sink(BuiltinId::FIRST).unwrap().value_need(),
             BuiltinSinkValueNeed::Whole
         );
-        assert!(
-            !builtin_sink(BuiltinId::FIRST)
-                .unwrap()
-                .accumulator
-                .finishes_from_reducer_state()
-        );
+        assert!(!builtin_sink(BuiltinId::FIRST)
+            .unwrap()
+            .accumulator
+            .finishes_from_reducer_state());
         assert_eq!(
             builtin_sink(BuiltinId::APPROX_COUNT_DISTINCT)
                 .unwrap()
@@ -2541,9 +2588,8 @@ mod tests {
             let Some(reducer) = numeric_reducer(id) else {
                 continue;
             };
-            let sink = builtin_sink(id).unwrap_or_else(|| {
-                panic!("{method:?} numeric reducer must expose sink metadata")
-            });
+            let sink = builtin_sink(id)
+                .unwrap_or_else(|| panic!("{method:?} numeric reducer must expose sink metadata"));
 
             assert_eq!(reducer.method(), method, "{method:?}");
             assert!(
@@ -2556,13 +2602,21 @@ mod tests {
                 matches!(reducer, BuiltinNumericReducer::Min),
                 "{method:?}"
             );
-            assert_eq!(logical_shape(id), Some(reducer.logical_shape()), "{method:?}");
+            assert_eq!(
+                logical_shape(id),
+                Some(reducer.logical_shape()),
+                "{method:?}"
+            );
             assert_eq!(
                 pipeline_lowering(id),
                 Some(BuiltinPipelineLowering::TerminalSink),
                 "{method:?}"
             );
-            assert_eq!(row_stream_op(id), Some(reducer.row_stream_op()), "{method:?}");
+            assert_eq!(
+                row_stream_op(id),
+                Some(reducer.row_stream_op()),
+                "{method:?}"
+            );
             assert_eq!(
                 row_stream_op(id).map(BuiltinRowStreamOp::arg),
                 Some(BuiltinRowStreamArg::None),
@@ -2584,11 +2638,7 @@ mod tests {
                 Some(BuiltinPipelineLowering::TerminalSink),
                 "{method:?}"
             );
-            assert_eq!(
-                demand_law(id),
-                sink.demand_law(),
-                "{method:?}"
-            );
+            assert_eq!(demand_law(id), sink.demand_law(), "{method:?}");
             assert_eq!(
                 sink_accumulator(id),
                 None,
@@ -2601,7 +2651,11 @@ mod tests {
             match sink {
                 BuiltinPredicateSink::FindOne => {
                     assert!(sink.returns_matching_row(), "{method:?}");
-                    assert_eq!(predicate_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
+                    assert_eq!(
+                        predicate_sink_value_need(sink),
+                        ValueNeed::Whole,
+                        "{method:?}"
+                    );
                     assert_eq!(
                         predicate_sink_result_demand(sink),
                         SinkResultDemand::None,
@@ -2668,7 +2722,11 @@ mod tests {
                 !accepts_lambda_arg(id),
                 "{method:?} membership sink expects a target value, not a predicate expression"
             );
-            assert_eq!(membership_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
+            assert_eq!(
+                membership_sink_value_need(sink),
+                ValueNeed::Whole,
+                "{method:?}"
+            );
             match sink {
                 BuiltinMembershipSink::Includes => {
                     assert!(sink.returns_bool(), "{method:?}");
@@ -3121,6 +3179,7 @@ mod tests {
                     assert!(
                         spec.nullary_stage.is_some()
                             || spec.view_object_projection.is_some()
+                            || spec.view_value_projection.is_some()
                             || spec.view_scalar,
                         "{method:?} has Nullary lowering but no nullary/view execution metadata"
                     );
@@ -3339,7 +3398,8 @@ mod tests {
                 "{method:?}"
             );
             assert!(
-                pipeline_element(id) || matches!(method, BuiltinMethod::Len | BuiltinMethod::Includes),
+                pipeline_element(id)
+                    || matches!(method, BuiltinMethod::Len | BuiltinMethod::Includes),
                 "{method:?}"
             );
         }
@@ -3347,7 +3407,10 @@ mod tests {
         for (method, op) in [
             (BuiltinMethod::Len, BuiltinViewScalarOp::Len),
             (BuiltinMethod::Type, BuiltinViewScalarOp::TypeName),
-            (BuiltinMethod::Includes, BuiltinViewScalarOp::StringContainsArg),
+            (
+                BuiltinMethod::Includes,
+                BuiltinViewScalarOp::StringContainsArg,
+            ),
             (BuiltinMethod::StartsWith, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::EndsWith, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::Matches, BuiltinViewScalarOp::StringArg),
@@ -3571,19 +3634,30 @@ mod tests {
             let spec = method.spec();
             assert_eq!(
                 view_projection(id),
-                spec.view_scalar || spec.view_object_projection.is_some(),
+                spec.view_scalar
+                    || spec.view_value_projection.is_some()
+                    || spec.view_object_projection.is_some(),
                 "{method:?}"
             );
             if spec.view_scalar {
-                assert!(spec.view_native, "{method:?} view_scalar must be view_native");
+                assert!(
+                    spec.view_native,
+                    "{method:?} view_scalar must be view_native"
+                );
                 assert!(
                     spec.view_scalar_op.is_some(),
                     "{method:?} view_scalar must declare a dispatch op"
                 );
             }
             if spec.view_scalar_op.is_some() {
-                assert!(spec.view_scalar, "{method:?} view_scalar_op implies view_scalar");
-                assert!(spec.view_native, "{method:?} view_scalar_op implies view_native");
+                assert!(
+                    spec.view_scalar,
+                    "{method:?} view_scalar_op implies view_scalar"
+                );
+                assert!(
+                    spec.view_native,
+                    "{method:?} view_scalar_op implies view_native"
+                );
             }
             if spec.view_object_projection.is_some() {
                 assert!(
@@ -3591,12 +3665,21 @@ mod tests {
                     "{method:?} view_object_projection must be view_native"
                 );
             }
+            if spec.view_value_projection.is_some() {
+                assert!(
+                    spec.view_native,
+                    "{method:?} view_value_projection must be view_native"
+                );
+            }
             if spec.raw_json_scalar.is_some() {
                 assert!(
                     spec.view_scalar,
                     "{method:?} raw_json_scalar must also be a view scalar"
                 );
-                assert!(spec.view_native, "{method:?} raw_json_scalar must be view_native");
+                assert!(
+                    spec.view_native,
+                    "{method:?} raw_json_scalar must be view_native"
+                );
             }
         }
     }
@@ -3609,6 +3692,45 @@ mod tests {
                 continue;
             };
             assert_eq!(demand_law(id), projection.demand_law(), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_view_value_projection_contracts_are_exhaustive() {
+        let expected = [
+            (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
+            (
+                BuiltinMethod::ToString,
+                BuiltinViewValueProjection::ToString,
+            ),
+        ];
+
+        let registered: Vec<_> = all_method_entries()
+            .into_iter()
+            .filter_map(|(method, _, _)| {
+                view_value_projection(BuiltinId::from_method(method))
+                    .map(|projection| (method, projection))
+            })
+            .collect();
+        assert_eq!(registered, expected);
+
+        for (method, projection) in expected {
+            let id = BuiltinId::from_method(method);
+            let spec = method.spec();
+            assert!(spec.view_native, "{method:?}");
+            assert!(!spec.view_scalar, "{method:?}");
+            assert_eq!(view_value_projection(id), Some(projection), "{method:?}");
+            assert!(view_projection(id), "{method:?}");
+            assert!(
+                view_projection_returns_owned(id, &BuiltinArgs::None),
+                "{method:?}"
+            );
+            assert_eq!(demand_law(id), projection.demand_law(), "{method:?}");
+            assert_eq!(
+                effective_pipeline_order_effect(id, true),
+                BuiltinPipelineOrderEffect::Preserves,
+                "{method:?}"
+            );
         }
     }
 
@@ -3663,7 +3785,10 @@ mod tests {
                         projection.returns_owned(),
                         "{method:?}"
                     );
-                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                    assert!(
+                        view_projection_field_demand(id, &args).is_some(),
+                        "{method:?}"
+                    );
                 }
                 BuiltinViewObjectProjection::HasPath => {
                     let args = BuiltinArgs::Str(Arc::from("nested.x"));
@@ -3672,7 +3797,10 @@ mod tests {
                         projection.returns_owned(),
                         "{method:?}"
                     );
-                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                    assert!(
+                        view_projection_field_demand(id, &args).is_some(),
+                        "{method:?}"
+                    );
                 }
                 BuiltinViewObjectProjection::HasKey => {
                     let args = BuiltinArgs::Str(Arc::from("isbn"));
@@ -3681,7 +3809,10 @@ mod tests {
                         projection.returns_owned(),
                         "{method:?}"
                     );
-                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                    assert!(
+                        view_projection_field_demand(id, &args).is_some(),
+                        "{method:?}"
+                    );
                 }
                 BuiltinViewObjectProjection::Missing => {
                     let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
@@ -3690,7 +3821,10 @@ mod tests {
                         projection.returns_owned(),
                         "{method:?}"
                     );
-                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                    assert!(
+                        view_projection_field_demand(id, &args).is_some(),
+                        "{method:?}"
+                    );
                 }
                 BuiltinViewObjectProjection::Pick => {
                     let args = BuiltinArgs::StrVec(vec![Arc::from("isbn"), Arc::from("title")]);
@@ -3699,7 +3833,10 @@ mod tests {
                         projection.returns_owned(),
                         "{method:?}"
                     );
-                    assert!(view_projection_field_demand(id, &args).is_some(), "{method:?}");
+                    assert!(
+                        view_projection_field_demand(id, &args).is_some(),
+                        "{method:?}"
+                    );
                 }
                 BuiltinViewObjectProjection::Has
                 | BuiltinViewObjectProjection::HasAll
@@ -3722,8 +3859,8 @@ mod tests {
     fn registry_view_object_item_projection_calls_are_nullary_only() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
-            let item_projection = view_object_projection(id)
-                .filter(|projection| projection.is_item_projection());
+            let item_projection =
+                view_object_projection(id).filter(|projection| projection.is_item_projection());
 
             assert_eq!(
                 view_object_items_projection_call(id, &BuiltinArgs::None),
@@ -3805,13 +3942,11 @@ mod tests {
             )),
             vec!["items"]
         );
-        assert!(
-            view_projection_field_demand(
-                BuiltinId::from_method(BuiltinMethod::Has),
-                &BuiltinArgs::Str(Arc::from("isbn"))
-            )
-            .is_none()
-        );
+        assert!(view_projection_field_demand(
+            BuiltinId::from_method(BuiltinMethod::Has),
+            &BuiltinArgs::Str(Arc::from("isbn"))
+        )
+        .is_none());
         assert_eq!(
             field_paths(view_projection_receiver_field_demand(
                 BuiltinId::from_method(BuiltinMethod::HasKey),
@@ -4070,7 +4205,11 @@ mod tests {
             );
         }
 
-        for method in [BuiltinMethod::Map, BuiltinMethod::Sort, BuiltinMethod::FlatMap] {
+        for method in [
+            BuiltinMethod::Map,
+            BuiltinMethod::Sort,
+            BuiltinMethod::FlatMap,
+        ] {
             assert!(
                 !preserves_order_filtering(BuiltinId::from_method(method)),
                 "{method:?}"
@@ -4113,7 +4252,9 @@ mod tests {
         assert!(pipeline_composed_barrier(BuiltinId::from_method(
             BuiltinMethod::Sort
         )));
-        assert!(pipeline_streams(BuiltinId::from_method(BuiltinMethod::Split)));
+        assert!(pipeline_streams(BuiltinId::from_method(
+            BuiltinMethod::Split
+        )));
         assert_eq!(
             streaming_boundary(BuiltinId::from_method(BuiltinMethod::Map)),
             BuiltinStreamingBoundary::RowLocal
@@ -4629,13 +4770,19 @@ mod tests {
     #[test]
     fn registry_drives_object_lambda_classification() {
         for (method, lambda) in [
-            (BuiltinMethod::TransformKeys, BuiltinObjectLambda::TransformKeys),
+            (
+                BuiltinMethod::TransformKeys,
+                BuiltinObjectLambda::TransformKeys,
+            ),
             (
                 BuiltinMethod::TransformValues,
                 BuiltinObjectLambda::TransformValues,
             ),
             (BuiltinMethod::FilterKeys, BuiltinObjectLambda::FilterKeys),
-            (BuiltinMethod::FilterValues, BuiltinObjectLambda::FilterValues),
+            (
+                BuiltinMethod::FilterValues,
+                BuiltinObjectLambda::FilterValues,
+            ),
         ] {
             let id = BuiltinId::from_method(method);
             assert_eq!(object_lambda(id), Some(lambda), "{method:?}");
@@ -4803,9 +4950,7 @@ mod tests {
 
     #[test]
     fn registry_terminal_sink_specs_report_registered_methods() {
-        use crate::exec::pipeline::{
-            MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec,
-        };
+        use crate::exec::pipeline::{MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
         use crate::vm::Program;
         use std::sync::Arc;
 
@@ -4832,11 +4977,9 @@ mod tests {
             BuiltinMethod::Index,
             BuiltinMethod::IndicesOf,
         ] {
-            let spec = MembershipSinkSpec::from_method(
-                method,
-                MembershipSinkTarget::Literal(Val::Int(1)),
-            )
-            .unwrap_or_else(|| panic!("{method:?} should be a membership sink"));
+            let spec =
+                MembershipSinkSpec::from_method(method, MembershipSinkTarget::Literal(Val::Int(1)))
+                    .unwrap_or_else(|| panic!("{method:?} should be a membership sink"));
             assert_eq!(spec.method(), method, "{method:?}");
             assert_eq!(
                 membership_sink(BuiltinId::from_method(spec.method())),
@@ -4881,7 +5024,9 @@ mod tests {
     #[test]
     fn registry_drives_row_stream_ops() {
         assert!(stream_source(BuiltinId::from_method(BuiltinMethod::Rows)));
-        assert!(!stream_source(BuiltinId::from_method(BuiltinMethod::Reverse)));
+        assert!(!stream_source(BuiltinId::from_method(
+            BuiltinMethod::Reverse
+        )));
         assert_eq!(
             row_stream_op(BuiltinId::from_method(BuiltinMethod::Rows)),
             None
@@ -4968,10 +5113,7 @@ mod tests {
             BuiltinRowStreamOp::Max.numeric_reducer(),
             Some(BuiltinNumericReducer::Max)
         );
-        assert_eq!(
-            BuiltinRowStreamOp::Count.numeric_reducer(),
-            None
-        );
+        assert_eq!(BuiltinRowStreamOp::Count.numeric_reducer(), None);
         assert_eq!(
             BuiltinRowStreamOp::Any.predicate_sink(),
             Some(BuiltinPredicateSink::Any)
@@ -4984,11 +5126,11 @@ mod tests {
             BuiltinRowStreamOp::FindOne.predicate_sink(),
             Some(BuiltinPredicateSink::FindOne)
         );
+        assert_eq!(BuiltinRowStreamOp::Filter.predicate_sink(), None);
         assert_eq!(
-            BuiltinRowStreamOp::Filter.predicate_sink(),
+            numeric_reducer(BuiltinId::from_method(BuiltinMethod::Map)),
             None
         );
-        assert_eq!(numeric_reducer(BuiltinId::from_method(BuiltinMethod::Map)), None);
         assert!(!BuiltinRowStreamOp::FindFirst.is_terminal());
         assert!(!BuiltinRowStreamOp::Map.is_terminal());
     }
@@ -5061,9 +5203,9 @@ mod tests {
                 BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst => {
                     BuiltinDemandLaw::FilterLike
                 }
-                BuiltinRowStreamOp::FindOne
-                | BuiltinRowStreamOp::Any
-                | BuiltinRowStreamOp::All => BuiltinDemandLaw::PredicateMapLike,
+                BuiltinRowStreamOp::FindOne | BuiltinRowStreamOp::Any | BuiltinRowStreamOp::All => {
+                    BuiltinDemandLaw::PredicateMapLike
+                }
                 BuiltinRowStreamOp::DistinctBy => BuiltinDemandLaw::UniqueLike,
                 BuiltinRowStreamOp::Take => BuiltinDemandLaw::Take,
                 BuiltinRowStreamOp::First => BuiltinDemandLaw::First,
@@ -5178,7 +5320,10 @@ mod tests {
             );
             assert_eq!(
                 op.is_filter_like(),
-                matches!(op, BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst),
+                matches!(
+                    op,
+                    BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst
+                ),
                 "{op:?}"
             );
             assert_eq!(
@@ -5205,7 +5350,9 @@ mod tests {
                 op.preserves_order_before_limit(),
                 matches!(
                     op,
-                    BuiltinRowStreamOp::Filter | BuiltinRowStreamOp::FindFirst | BuiltinRowStreamOp::Map
+                    BuiltinRowStreamOp::Filter
+                        | BuiltinRowStreamOp::FindFirst
+                        | BuiltinRowStreamOp::Map
                 ),
                 "{op:?}"
             );
@@ -5406,11 +5553,7 @@ mod tests {
             None
         );
 
-        for method in [
-            BuiltinMethod::Has,
-            BuiltinMethod::Len,
-            BuiltinMethod::Sort,
-        ] {
+        for method in [BuiltinMethod::Has, BuiltinMethod::Len, BuiltinMethod::Sort] {
             assert!(
                 !pipeline_builtin_call_stage(BuiltinId::from_method(method)),
                 "{method:?} should not be accepted as a builtin-call stage"
@@ -5560,6 +5703,14 @@ mod tests {
             view_object_projection(BuiltinId::from_method(BuiltinMethod::Upper)),
             None
         );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::ToString)),
+            Some(BuiltinViewValueProjection::ToString)
+        );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::ToJson)),
+            Some(BuiltinViewValueProjection::ToJson)
+        );
         assert!(view_projection_returns_owned(
             BuiltinId::from_method(BuiltinMethod::Upper),
             &BuiltinArgs::None
@@ -5700,6 +5851,14 @@ mod tests {
             BuiltinArgs::StrVec(vec![std::sync::Arc::from("b")]),
             serde_json::json!({"a": 1, "nested": {"x": 7}}),
         );
+        assert_eq!(
+            apply(BuiltinMethod::ToString, BuiltinArgs::None),
+            Val::Str(std::sync::Arc::from(r#"{"a":1,"b":null,"nested":{"x":7}}"#))
+        );
+        assert_eq!(
+            apply(BuiltinMethod::ToJson, BuiltinArgs::None),
+            Val::Str(std::sync::Arc::from(r#"{"a":1,"b":null,"nested":{"x":7}}"#))
+        );
     }
 
     #[test]
@@ -5725,7 +5884,10 @@ mod tests {
     #[test]
     fn registry_array_selector_contracts_are_exhaustive() {
         let expected = [
-            (BuiltinArraySelector::First.id(), BuiltinArraySelector::First),
+            (
+                BuiltinArraySelector::First.id(),
+                BuiltinArraySelector::First,
+            ),
             (BuiltinArraySelector::Last.id(), BuiltinArraySelector::Last),
             (BuiltinArraySelector::Nth.id(), BuiltinArraySelector::Nth),
         ];
@@ -5777,10 +5939,18 @@ mod tests {
         let nth = nth_selector.id();
         assert_eq!(demand_law(nth), nth_selector.demand_law());
         assert_eq!(
-            propagate_demand(nth, BuiltinDemandArg::Usize(2), Demand::all(ValueNeed::Whole)).pull,
+            propagate_demand(
+                nth,
+                BuiltinDemandArg::Usize(2),
+                Demand::all(ValueNeed::Whole)
+            )
+            .pull,
             PullDemand::NthInput(2)
         );
-        assert_eq!(terminal_selection_position(nth), nth_selector.selection_position());
+        assert_eq!(
+            terminal_selection_position(nth),
+            nth_selector.selection_position()
+        );
         assert_eq!(
             pipeline_lowering(nth),
             Some(nth_selector.pipeline_lowering())

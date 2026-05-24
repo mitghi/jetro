@@ -405,29 +405,192 @@ pub enum BuiltinMethod {
 #[macro_export]
 macro_rules! for_each_builtin {
     ($macro:ident) => {
-        $macro! (
-            Abs, Accumulate, All, Any, Append, ApproxCountDistinct, Avg, ByteLen, Bytes,
-            CamelCase, Capitalize, Ceil, Center, Chars, CharsOf, Chunk, Collect, Compact,
-            ContainsAll, ContainsAny, Count, CountBy, CumMax, CumMin, Dedent, DeepFind,
-            DeepLike, DeepMerge, DeepShape, Defaults, DelPath, DelPaths, Diff, DiffWindow,
-            DropWhile, EndsWith, Entries, Enumerate, EquiJoin, Explode, Fanout, Filter,
-            FilterKeys, FilterValues, Find, FindAll, FindFirst, FindIndex, FindOne, First,
-            FlatMap, Flatten, FlattenKeys, Floor, Fold, FromBase64, FromJson, FromPairs, GetPath,
-            GroupBy, GroupShape, Has, HasAll, HasKey, HasPath, HtmlEscape, HtmlUnescape, Implode,
-            Includes, Indent, Index, IndexBy, IndexOf, IndicesOf, IndicesWhere, Intersect, Invert,
-            IsAlpha, IsAscii, IsBlank, IsNumeric, Join, KebabCase, Keys, Lag, Last,
-            LastIndexOf, Lead, Len, Lines, Lower, Map, Matches, Max, MaxBy, Merge, Min,
-            MinBy, Missing, Nth, Omit, Or, PadLeft, PadRight, Pairwise, ParseBool,
-            ParseFloat, ParseInt, Partition, PascalCase, PctChange, Pick, Pivot, Prepend,
-            Rec, ReCaptures, ReCapturesAll, ReMatch, ReMatchAll, ReMatchFirst, Remove,
-            Rename, Repeat, Replace, ReplaceAll, ReReplace, ReReplaceAll, ReSplit, Reverse,
-            ReverseStr, RollingAvg, RollingMax, RollingMin, RollingSum, Round, Rows, Scan, Schema,
-            Set, SetPath, Skip, Slice, SnakeCase, Sort, Split, StartsWith, StripPrefix,
-            StripSuffix, Sum, Take, TakeWhile, TitleCase, ToBase64, ToBool, ToCsv, ToJson,
-            ToNumber, ToPairs, ToString, ToTsv, TracePath, TransformKeys, TransformValues,
-            Trim, TrimLeft, TrimRight, Type, UnflattenKeys, Union, Unique, UniqueBy, Unknown,
-            Update, Upper, UrlDecode, UrlEncode, Values, Walk, WalkPre, Window, Words, Zip,
-            ZipLongest, ZipShape, Zscore
+        $macro!(
+            Abs,
+            Accumulate,
+            All,
+            Any,
+            Append,
+            ApproxCountDistinct,
+            Avg,
+            ByteLen,
+            Bytes,
+            CamelCase,
+            Capitalize,
+            Ceil,
+            Center,
+            Chars,
+            CharsOf,
+            Chunk,
+            Collect,
+            Compact,
+            ContainsAll,
+            ContainsAny,
+            Count,
+            CountBy,
+            CumMax,
+            CumMin,
+            Dedent,
+            DeepFind,
+            DeepLike,
+            DeepMerge,
+            DeepShape,
+            Defaults,
+            DelPath,
+            DelPaths,
+            Diff,
+            DiffWindow,
+            DropWhile,
+            EndsWith,
+            Entries,
+            Enumerate,
+            EquiJoin,
+            Explode,
+            Fanout,
+            Filter,
+            FilterKeys,
+            FilterValues,
+            Find,
+            FindAll,
+            FindFirst,
+            FindIndex,
+            FindOne,
+            First,
+            FlatMap,
+            Flatten,
+            FlattenKeys,
+            Floor,
+            Fold,
+            FromBase64,
+            FromJson,
+            FromPairs,
+            GetPath,
+            GroupBy,
+            GroupShape,
+            Has,
+            HasAll,
+            HasKey,
+            HasPath,
+            HtmlEscape,
+            HtmlUnescape,
+            Implode,
+            Includes,
+            Indent,
+            Index,
+            IndexBy,
+            IndexOf,
+            IndicesOf,
+            IndicesWhere,
+            Intersect,
+            Invert,
+            IsAlpha,
+            IsAscii,
+            IsBlank,
+            IsNumeric,
+            Join,
+            KebabCase,
+            Keys,
+            Lag,
+            Last,
+            LastIndexOf,
+            Lead,
+            Len,
+            Lines,
+            Lower,
+            Map,
+            Matches,
+            Max,
+            MaxBy,
+            Merge,
+            Min,
+            MinBy,
+            Missing,
+            Nth,
+            Omit,
+            Or,
+            PadLeft,
+            PadRight,
+            Pairwise,
+            ParseBool,
+            ParseFloat,
+            ParseInt,
+            Partition,
+            PascalCase,
+            PctChange,
+            Pick,
+            Pivot,
+            Prepend,
+            Rec,
+            ReCaptures,
+            ReCapturesAll,
+            ReMatch,
+            ReMatchAll,
+            ReMatchFirst,
+            Remove,
+            Rename,
+            Repeat,
+            Replace,
+            ReplaceAll,
+            ReReplace,
+            ReReplaceAll,
+            ReSplit,
+            Reverse,
+            ReverseStr,
+            RollingAvg,
+            RollingMax,
+            RollingMin,
+            RollingSum,
+            Round,
+            Rows,
+            Scan,
+            Schema,
+            Set,
+            SetPath,
+            Skip,
+            Slice,
+            SnakeCase,
+            Sort,
+            Split,
+            StartsWith,
+            StripPrefix,
+            StripSuffix,
+            Sum,
+            Take,
+            TakeWhile,
+            TitleCase,
+            ToBase64,
+            ToBool,
+            ToCsv,
+            ToJson,
+            ToNumber,
+            ToPairs,
+            ToString,
+            ToTsv,
+            TracePath,
+            TransformKeys,
+            TransformValues,
+            Trim,
+            TrimLeft,
+            TrimRight,
+            Type,
+            UnflattenKeys,
+            Union,
+            Unique,
+            UniqueBy,
+            Unknown,
+            Update,
+            Upper,
+            UrlDecode,
+            UrlEncode,
+            Values,
+            Walk,
+            WalkPre,
+            Window,
+            Words,
+            Zip,
+            ZipLongest,
+            ZipShape,
+            Zscore
         )
     };
 }
@@ -599,6 +762,8 @@ pub struct BuiltinSpec {
     pub view_scalar: bool,
     /// Concrete borrowed-view scalar dispatch family, if any.
     pub view_scalar_op: Option<BuiltinViewScalarOp>,
+    /// View-native whole-value projection operation, if any.
+    pub view_value_projection: Option<BuiltinViewValueProjection>,
     /// View-native object/path projection operation, if any.
     pub view_object_projection: Option<BuiltinViewObjectProjection>,
     /// Raw-byte JSON scalar operation, if any.
@@ -749,6 +914,24 @@ pub enum BuiltinViewScalarOp {
     StringContainsArg,
 }
 
+/// View-native projection that needs the whole value but can still avoid
+/// materialising the receiver by traversing borrowed child views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewValueProjection {
+    /// Coerce the value to Jetro's human-readable string form.
+    ToString,
+    /// Serialize the value to compact JSON text.
+    ToJson,
+}
+
+impl BuiltinViewValueProjection {
+    /// Demand law implied by this view-native whole-value operation.
+    #[inline]
+    pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
+        BuiltinDemandLaw::MapLike
+    }
+}
+
 /// View-native object/path projection operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewObjectProjection {
@@ -799,7 +982,10 @@ impl BuiltinViewObjectProjection {
     /// Whether the projection enumerates object keys, values, or entries.
     #[inline]
     pub(crate) const fn is_item_projection(self) -> bool {
-        matches!(self, Self::Keys | Self::Values | Self::Entries | Self::ToPairs)
+        matches!(
+            self,
+            Self::Keys | Self::Values | Self::Entries | Self::ToPairs
+        )
     }
 
     /// Whether applying this projection yields an owned value instead of a borrowed child view.
@@ -960,7 +1146,10 @@ impl BuiltinRuntimeHook {
     /// Whether this hook can run against a materialized barrier buffer.
     #[inline]
     pub(crate) const fn has_barrier(self) -> bool {
-        matches!(self, Self::SharedFilter | Self::Barrier | Self::StreamAndBarrier)
+        matches!(
+            self,
+            Self::SharedFilter | Self::Barrier | Self::StreamAndBarrier
+        )
     }
 }
 
@@ -2057,7 +2246,11 @@ impl BuiltinViewStage {
     #[inline]
     pub fn selectivity(self) -> f64 {
         match self {
-            Self::Filter | Self::Compact | Self::RemoveValue | Self::TakeWhile | Self::DropWhile => 0.5,
+            Self::Filter
+            | Self::Compact
+            | Self::RemoveValue
+            | Self::TakeWhile
+            | Self::DropWhile => 0.5,
             Self::Distinct => 1.0,
             Self::Map | Self::FlatMap | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,
@@ -2258,6 +2451,7 @@ impl BuiltinSpec {
             view_native: false,
             view_scalar: false,
             view_scalar_op: None,
+            view_value_projection: None,
             view_object_projection: None,
             raw_json_scalar: None,
             object_lambda: None,
@@ -2342,6 +2536,13 @@ impl BuiltinSpec {
     fn view_scalar_op(mut self, op: BuiltinViewScalarOp) -> Self {
         self.view_scalar_op = Some(op);
         self.view_scalar()
+    }
+
+    /// Attaches a view-native whole-value projection operation.
+    fn view_value_projection(mut self, projection: BuiltinViewValueProjection) -> Self {
+        self.view_value_projection = Some(projection);
+        self.view_native = true;
+        self
     }
 
     /// Attaches a view-native object/path projection operation.
@@ -3157,7 +3358,10 @@ impl BuiltinCall {
             }
             BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
                 let path = args.str(0)?;
-                Self::new(method, BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()))
+                Self::new(
+                    method,
+                    BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()),
+                )
             }
             BuiltinMethod::HasAll => Self::new(method, BuiltinArgs::Val(args.val(0)?)),
             BuiltinMethod::Has
@@ -3321,9 +3525,7 @@ impl BuiltinCall {
 
         if method == BuiltinMethod::Remove {
             return match args {
-                [Arg::Pos(expr)] => {
-                    Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?)))
-                }
+                [Arg::Pos(expr)] => Some(Self::new(method, BuiltinArgs::Val(literal_val(expr)?))),
                 _ => None,
             };
         }
@@ -3868,9 +4070,9 @@ where
             // parallel-array interleave.
             if args.len() == 1 {
                 if let Arg::Pos(Expr::Object(fields)) = &args[0] {
-                    let all_short = fields.iter().all(|f| {
-                        matches!(f, crate::parse::ast::ObjField::Short(_))
-                    });
+                    let all_short = fields
+                        .iter()
+                        .all(|f| matches!(f, crate::parse::ast::ObjField::Short(_)));
                     if all_short {
                         let obj = eval_arg(&args[0])?;
                         return zip_shape_obj_apply(&obj).ok_or_else(|| {
@@ -3892,9 +4094,7 @@ where
                 };
                 names.push(name);
             }
-            return zip_shape_apply(&recv, &names, |value, idx| {
-                eval_item(value, &args[idx])
-            });
+            return zip_shape_apply(&recv, &names, |value, idx| eval_item(value, &args[idx]));
         }
         BuiltinMethod::GroupShape => {
             // No-arg form: group an array of objects by their
@@ -4121,12 +4321,10 @@ where
                 .collect::<Result<Vec<_>, _>>()?;
             BuiltinCall::new(method, BuiltinArgs::StrVec(keys))
         }
-        BuiltinMethod::GetPath | BuiltinMethod::HasPath => {
-            BuiltinCall::new(
-                method,
-                BuiltinArgs::Path(parse_path_segs(str_arg!(0)?.as_ref()).into()),
-            )
-        }
+        BuiltinMethod::GetPath | BuiltinMethod::HasPath => BuiltinCall::new(
+            method,
+            BuiltinArgs::Path(parse_path_segs(str_arg!(0)?.as_ref()).into()),
+        ),
         BuiltinMethod::HasAll => BuiltinCall::new(method, BuiltinArgs::Val(arg_val!(0)?)),
         BuiltinMethod::Has
         | BuiltinMethod::HasKey

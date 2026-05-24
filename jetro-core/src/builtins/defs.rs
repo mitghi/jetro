@@ -6,19 +6,17 @@
 //! match into this file (or category-split children).
 
 use super::{
-    builtin::Builtin, BuiltinCancelGroup, BuiltinCancelSide, BuiltinCancellation,
-    BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinDemandLaw,
-    BuiltinExprPayload, BuiltinExprStage, BuiltinKeyedReducer, BuiltinLogicalShape,
-    BuiltinMembershipSink, BuiltinMethod, BuiltinNullaryStage,
-    BuiltinNumericReducer,
-    BuiltinObjectLambda,
-    BuiltinPipelineLowering, BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp,
+    builtin::Builtin, BuiltinArgExtremeSink, BuiltinArraySelector, BuiltinCancelGroup,
+    BuiltinCancelSide, BuiltinCancellation, BuiltinCardinality, BuiltinCategory,
+    BuiltinColumnarStage, BuiltinDemandLaw, BuiltinExprPayload, BuiltinExprStage,
+    BuiltinKeyedReducer, BuiltinLogicalShape, BuiltinMembershipSink, BuiltinMethod,
+    BuiltinNullaryStage, BuiltinNumericReducer, BuiltinObjectLambda, BuiltinPipelineLowering,
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
-    BuiltinRuntimeHook, BuiltinSelectionRewrite, BuiltinSpec,
-    BuiltinStageMerge, BuiltinStreamingBoundary, BuiltinStructural, BuiltinStringPairStage,
-    BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage,
+    BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
+    BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
+    BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp,
+    BuiltinViewStage,
 };
-
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
 #[inline]
@@ -56,25 +54,27 @@ fn predicate_terminal_sink_spec(sink: BuiltinPredicateSink) -> BuiltinSpec {
         .lowering(BuiltinPipelineLowering::TerminalSink)
 }
 
-
 /// Helper: shared spec body for streaming predicate filters (`filter` and `find_all`).
 /// `find` has first-match terminal semantics and declares its own filter + first lowering.
 #[inline]
 fn filter_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-        .view_native()
-        .view_stage(BuiltinViewStage::Filter)
-        .columnar_stage(BuiltinColumnarStage::Filter)
-        .cost(10.0)
-        .demand_law(BuiltinDemandLaw::FilterLike)
-        .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-        .expr_stage(BuiltinExprStage::Filter)
-        .expr_payload(BuiltinExprPayload::PredicateScan)
-        .logical_shape(BuiltinLogicalShape::Filter)
-        .row_stream_op(BuiltinRowStreamOp::Filter)
-        .runtime_hook(BuiltinRuntimeHook::SharedFilter)
-        .output_cap_receiver()
-        .lowering(BuiltinPipelineLowering::ExprArg)
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingFilter,
+        BuiltinCardinality::Filtering,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::Filter)
+    .columnar_stage(BuiltinColumnarStage::Filter)
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::FilterLike)
+    .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+    .expr_stage(BuiltinExprStage::Filter)
+    .expr_payload(BuiltinExprPayload::PredicateScan)
+    .logical_shape(BuiltinLogicalShape::Filter)
+    .row_stream_op(BuiltinRowStreamOp::Filter)
+    .runtime_hook(BuiltinRuntimeHook::SharedFilter)
+    .output_cap_receiver()
+    .lowering(BuiltinPipelineLowering::ExprArg)
 }
 
 /// Predicate filter: keeps elements for which the lambda yields a truthy value.
@@ -92,7 +92,10 @@ impl Builtin for Filter {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let prog = body.expect("filter body");
         let keep = super::filter_one(&item, |v| {
             crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
@@ -105,7 +108,7 @@ impl Builtin for Filter {
             crate::exec::pipeline::StageFlow::SkipRow
         })
     }
-#[inline]
+    #[inline]
     fn apply_barrier(
         ctx: &mut super::builtin::BarrierCtx<'_>,
         buf: &mut Vec<crate::data::value::Val>,
@@ -118,7 +121,10 @@ impl Builtin for Filter {
             })
         });
         match result {
-            Ok(out) => { *buf = out; Some(Ok(())) }
+            Ok(out) => {
+                *buf = out;
+                Some(Ok(()))
+            }
             Err(err) => Some(Err(err)),
         }
     }
@@ -134,16 +140,19 @@ impl Builtin for Find {
     const NAME: &'static str = "find";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FilterLike)
-            .expr_stage(BuiltinExprStage::Filter)
-            .logical_shape(BuiltinLogicalShape::FilterThenFirst)
-            .row_stream_op(BuiltinRowStreamOp::FindFirst)
-            .runtime_hook(BuiltinRuntimeHook::SharedFilter)
-            .lowering(BuiltinPipelineLowering::TerminalExprArg {
-                terminal: BuiltinMethod::First,
-            })
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FilterLike)
+        .expr_stage(BuiltinExprStage::Filter)
+        .logical_shape(BuiltinLogicalShape::FilterThenFirst)
+        .row_stream_op(BuiltinRowStreamOp::FindFirst)
+        .runtime_hook(BuiltinRuntimeHook::SharedFilter)
+        .lowering(BuiltinPipelineLowering::TerminalExprArg {
+            terminal: BuiltinMethod::First,
+        })
     }
 }
 
@@ -165,13 +174,16 @@ impl Builtin for Compact {
     const NAME: &'static str = "compact";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .view_native()
-            .view_stage(BuiltinViewStage::Compact)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FilterLike)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .view_native()
+        .view_stage(BuiltinViewStage::Compact)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FilterLike)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -183,7 +195,10 @@ impl Builtin for Compact {
         _ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         Ok(if matches!(item, crate::data::value::Val::Null) {
             crate::exec::pipeline::StageFlow::SkipRow
         } else {
@@ -209,18 +224,26 @@ impl Builtin for Remove {
     const NAME: &'static str = "remove";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .view_native()
-            .view_stage(BuiltinViewStage::RemoveValue)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FilterLike)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .view_native()
+        .view_stage(BuiltinViewStage::RemoveValue)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FilterLike)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => Some(super::remove_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Val(item) => {
+                Some(super::remove_value_apply(recv, item).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -230,7 +253,10 @@ impl Builtin for Remove {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let crate::exec::pipeline::Stage::Builtin(call) = ctx.stage else {
             return Ok(crate::exec::pipeline::StageFlow::Continue(item));
         };
@@ -258,7 +284,6 @@ impl Builtin for Remove {
     }
 }
 
-
 /// Per-element projection via lambda; preserves cardinality and order.
 pub(crate) struct Map;
 impl Builtin for Map {
@@ -266,22 +291,25 @@ impl Builtin for Map {
     const NAME: &'static str = "map";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-            .indexed()
-            .view_native()
-            .view_stage(BuiltinViewStage::Map)
-            .columnar_stage(BuiltinColumnarStage::Map)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::MapLike)
-            .order_effect(BuiltinPipelineOrderEffect::Preserves)
-            .expr_stage(BuiltinExprStage::Map)
-            .expr_payload(BuiltinExprPayload::Projection)
-            .logical_shape(BuiltinLogicalShape::Map)
-            .row_stream_op(BuiltinRowStreamOp::Map)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .lowering(BuiltinPipelineLowering::ExprArg)
-            .output_cap_receiver()
-            .element()
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingOneToOne,
+            BuiltinCardinality::OneToOne,
+        )
+        .indexed()
+        .view_native()
+        .view_stage(BuiltinViewStage::Map)
+        .columnar_stage(BuiltinColumnarStage::Map)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .expr_stage(BuiltinExprStage::Map)
+        .expr_payload(BuiltinExprPayload::Projection)
+        .logical_shape(BuiltinLogicalShape::Map)
+        .row_stream_op(BuiltinRowStreamOp::Map)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .lowering(BuiltinPipelineLowering::ExprArg)
+        .output_cap_receiver()
+        .element()
     }
 
     #[inline]
@@ -289,7 +317,10 @@ impl Builtin for Map {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let prog = body.expect("map body");
         // Terminal-map collector short-circuit (avoid allocating intermediate Val).
         if Some(ctx.stage_idx) == ctx.terminal_map_idx {
@@ -322,7 +353,10 @@ impl Builtin for Map {
             })
         });
         match result {
-            Ok(out) => { *buf = out; Some(Ok(())) }
+            Ok(out) => {
+                *buf = out;
+                Some(Ok(()))
+            }
             Err(err) => Some(Err(err)),
         }
     }
@@ -335,17 +369,20 @@ impl Builtin for FlatMap {
     const NAME: &'static str = "flat_map";
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
-            .view_native()
-            .view_stage(BuiltinViewStage::FlatMap)
-            .columnar_stage(BuiltinColumnarStage::FlatMap)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FlatMapLike)
-            .streaming_boundary(BuiltinStreamingBoundary::Expanding)
-            .expr_stage(BuiltinExprStage::FlatMap)
-            .logical_shape(BuiltinLogicalShape::FlatMap)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .lowering(BuiltinPipelineLowering::ExprArg)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingExpand,
+            BuiltinCardinality::Expanding,
+        )
+        .view_native()
+        .view_stage(BuiltinViewStage::FlatMap)
+        .columnar_stage(BuiltinColumnarStage::FlatMap)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
+        .streaming_boundary(BuiltinStreamingBoundary::Expanding)
+        .expr_stage(BuiltinExprStage::FlatMap)
+        .logical_shape(BuiltinLogicalShape::FlatMap)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
     #[inline]
@@ -360,9 +397,10 @@ impl Builtin for FlatMap {
         let Some(prog) = body else {
             return Ok(crate::exec::pipeline::StageFlow::Continue(item));
         };
-        let inner = crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &item, ctx.vm, |row, vm| {
-            crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog)
-        })?;
+        let inner =
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &item, ctx.vm, |row, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog)
+            })?;
         if let Some(arr) = inner.as_vals() {
             Ok(crate::exec::pipeline::StageFlow::Expand(
                 arr.iter().cloned().collect(),
@@ -381,9 +419,12 @@ impl Builtin for FlatMap {
         let prog = body?;
         let mut out: Vec<crate::data::value::Val> = Vec::new();
         for v in buf.iter() {
-            let inner = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
-                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
-            }) {
+            let inner = match crate::exec::pipeline::eval_kernel_with_vm(
+                ctx.kernel,
+                v,
+                ctx.vm,
+                |item, vm| crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog),
+            ) {
                 Ok(inner) => inner,
                 Err(err) => return Some(Err(err)),
             };
@@ -397,7 +438,6 @@ impl Builtin for FlatMap {
         Some(Ok(()))
     }
 }
-
 
 /// Take first N elements; bounded positional slice.
 pub(crate) struct Take;
@@ -424,7 +464,10 @@ impl Builtin for Take {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
@@ -449,7 +492,10 @@ impl Builtin for Take {
     }
 
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => super::take_apply(recv, *n),
             _ => None,
@@ -482,7 +528,10 @@ impl Builtin for Skip {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         _body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let n = match ctx.stage.descriptor().and_then(|d| d.usize_arg) {
             Some(n) => n,
             None => return Ok(crate::exec::pipeline::StageFlow::Continue(item)),
@@ -511,7 +560,10 @@ impl Builtin for Skip {
     }
 
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Usize(n) => super::skip_apply(recv, *n),
             _ => None,
@@ -530,7 +582,11 @@ impl Builtin for First {
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
             .array_selector(selector)
-            .select_one_sink(selector.selection_position().expect("first selector position"))
+            .select_one_sink(
+                selector
+                    .selection_position()
+                    .expect("first selector position"),
+            )
             .demand_law(selector.demand_law())
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .logical_shape(BuiltinLogicalShape::First)
@@ -538,9 +594,12 @@ impl Builtin for First {
             .lowering(selector.pipeline_lowering())
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::I64(n) => { super::first_apply(recv, *n) }
+            super::BuiltinArgs::I64(n) => super::first_apply(recv, *n),
             _ => None,
         }
     }
@@ -557,7 +616,11 @@ impl Builtin for Last {
         BuiltinSpec::new(BuiltinCategory::Positional, BuiltinCardinality::Bounded)
             .view_native()
             .array_selector(selector)
-            .select_one_sink(selector.selection_position().expect("last selector position"))
+            .select_one_sink(
+                selector
+                    .selection_position()
+                    .expect("last selector position"),
+            )
             .demand_law(selector.demand_law())
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .logical_shape(BuiltinLogicalShape::Last)
@@ -565,14 +628,16 @@ impl Builtin for Last {
             .lowering(selector.pipeline_lowering())
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::I64(n) => { super::last_apply(recv, *n) }
+            super::BuiltinArgs::I64(n) => super::last_apply(recv, *n),
             _ => None,
         }
     }
 }
-
 
 /// Take elements while predicate holds; stops at first failure.
 pub(crate) struct TakeWhile;
@@ -582,23 +647,26 @@ impl Builtin for TakeWhile {
     const ALIASES: &'static [&'static str] = &["takewhile"];
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .view_native()
-            .view_stage(BuiltinViewStage::TakeWhile)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::TakeWhile)
-            .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
-            .expr_payload(BuiltinExprPayload::PredicateScan)
-            .logical_shape(BuiltinLogicalShape::TakeWhile)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .pipeline_shape(BuiltinPipelineShape::new(
-                BuiltinCardinality::Filtering,
-                false,
-                10.0,
-                0.5,
-            ))
-            .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
-            .lowering(BuiltinPipelineLowering::ExprArg)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .view_native()
+        .view_stage(BuiltinViewStage::TakeWhile)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::TakeWhile)
+        .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
+        .expr_payload(BuiltinExprPayload::PredicateScan)
+        .logical_shape(BuiltinLogicalShape::TakeWhile)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::Filtering,
+            false,
+            10.0,
+            0.5,
+        ))
+        .order_effect(BuiltinPipelineOrderEffect::PredicatePrefix)
+        .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
     #[inline]
@@ -606,7 +674,10 @@ impl Builtin for TakeWhile {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         let prog = body.expect("take_while body");
         let pass = super::take_while_one(&item, |v| {
             crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
@@ -633,7 +704,10 @@ impl Builtin for TakeWhile {
             })
         });
         match result {
-            Ok(out) => { *buf = out; Some(Ok(())) }
+            Ok(out) => {
+                *buf = out;
+                Some(Ok(()))
+            }
             Err(err) => Some(Err(err)),
         }
     }
@@ -647,23 +721,26 @@ impl Builtin for DropWhile {
     const ALIASES: &'static [&'static str] = &["dropwhile"];
 
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .view_native()
-            .view_stage(BuiltinViewStage::DropWhile)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::DropWhile)
-            .expr_payload(BuiltinExprPayload::PredicateScan)
-            .logical_shape(BuiltinLogicalShape::DropWhile)
-            .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .pipeline_shape(BuiltinPipelineShape::new(
-                BuiltinCardinality::Filtering,
-                false,
-                10.0,
-                0.5,
-            ))
-            .order_effect(BuiltinPipelineOrderEffect::Blocks)
-            .lowering(BuiltinPipelineLowering::ExprArg)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .view_native()
+        .view_stage(BuiltinViewStage::DropWhile)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::DropWhile)
+        .expr_payload(BuiltinExprPayload::PredicateScan)
+        .logical_shape(BuiltinLogicalShape::DropWhile)
+        .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::Filtering,
+            false,
+            10.0,
+            0.5,
+        ))
+        .order_effect(BuiltinPipelineOrderEffect::Blocks)
+        .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
     #[inline]
@@ -671,7 +748,10 @@ impl Builtin for DropWhile {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         if ctx.stage_taken[ctx.stage_idx] != 0 {
             return Ok(crate::exec::pipeline::StageFlow::Continue(item));
         }
@@ -703,12 +783,14 @@ impl Builtin for DropWhile {
             })
         });
         match result {
-            Ok(out) => { *buf = out; Some(Ok(())) }
+            Ok(out) => {
+                *buf = out;
+                Some(Ok(()))
+            }
             Err(err) => Some(Err(err)),
         }
     }
 }
-
 
 /// Element count via scalar view sink; degenerate non-numeric reducer.
 pub(crate) struct Len;
@@ -816,7 +898,9 @@ impl Builtin for ApproxCountDistinct {
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         let items = recv.as_vals()?;
-        Some(crate::data::value::Val::Int(super::hll_count_distinct(&items) as i64))
+        Some(crate::data::value::Val::Int(
+            super::hll_count_distinct(&items) as i64,
+        ))
     }
 }
 
@@ -932,16 +1016,20 @@ fn arg_extreme_apply_barrier(
         return Some(Ok(()));
     }
     let mut best_idx = 0usize;
-    let mut best_key = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &buf[0], ctx.vm, |item, vm| {
-        crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
-    }) {
-        Ok(key) => key,
-        Err(err) => return Some(Err(err)),
-    };
-    for i in 1..buf.len() {
-        let key = match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &buf[i], ctx.vm, |item, vm| {
+    let mut best_key =
+        match crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &buf[0], ctx.vm, |item, vm| {
             crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
         }) {
+            Ok(key) => key,
+            Err(err) => return Some(Err(err)),
+        };
+    for i in 1..buf.len() {
+        let key = match crate::exec::pipeline::eval_kernel_with_vm(
+            ctx.kernel,
+            &buf[i],
+            ctx.vm,
+            |item, vm| crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog),
+        ) {
             Ok(key) => key,
             Err(err) => return Some(Err(err)),
         };
@@ -1003,7 +1091,6 @@ impl Builtin for MinBy {
     }
 }
 
-
 /// `enumerate` — pairs each element with its index. Operates on the
 /// whole receiver array as one unit; NOT marked `.element()` because the
 /// streaming pipeline would otherwise treat the receiver as a 1-element
@@ -1014,8 +1101,11 @@ impl Builtin for Enumerate {
     const METHOD: BuiltinMethod = BuiltinMethod::Enumerate;
     const NAME: &'static str = "enumerate";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-            .cost(10.0)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingOneToOne,
+            BuiltinCardinality::OneToOne,
+        )
+        .cost(10.0)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -1032,8 +1122,11 @@ impl Builtin for Pairwise {
     const METHOD: BuiltinMethod = BuiltinMethod::Pairwise;
     const NAME: &'static str = "pairwise";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-            .cost(10.0)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingOneToOne,
+            BuiltinCardinality::OneToOne,
+        )
+        .cost(10.0)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -1041,12 +1134,14 @@ impl Builtin for Pairwise {
     }
 }
 
-
 #[inline]
 fn expand_simple_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
-        .cost(10.0)
-        .demand_law(BuiltinDemandLaw::FlatMapLike)
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingExpand,
+        BuiltinCardinality::Expanding,
+    )
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::FlatMapLike)
 }
 
 /// `flatten` — concatenates nested arrays.
@@ -1054,11 +1149,16 @@ pub(crate) struct Flatten;
 impl Builtin for Flatten {
     const METHOD: BuiltinMethod = BuiltinMethod::Flatten;
     const NAME: &'static str = "flatten";
-    fn spec() -> BuiltinSpec { expand_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(depth) => { super::flatten_depth_apply(recv, *depth) }
+            super::BuiltinArgs::Usize(depth) => super::flatten_depth_apply(recv, *depth),
             _ => None,
         }
     }
@@ -1069,11 +1169,16 @@ pub(crate) struct Explode;
 impl Builtin for Explode {
     const METHOD: BuiltinMethod = BuiltinMethod::Explode;
     const NAME: &'static str = "explode";
-    fn spec() -> BuiltinSpec { expand_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(field) => { super::explode_apply(recv, field) }
+            super::BuiltinArgs::Str(field) => super::explode_apply(recv, field),
             _ => None,
         }
     }
@@ -1085,23 +1190,29 @@ impl Builtin for Split {
     const METHOD: BuiltinMethod = BuiltinMethod::Split;
     const NAME: &'static str = "split";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FlatMapLike)
-            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-            .streaming_boundary(BuiltinStreamingBoundary::Expanding)
-            .pipeline_shape(BuiltinPipelineShape::new(
-                BuiltinCardinality::Expanding,
-                false,
-                2.0,
-                1.0,
-            ))
-            .lowering(BuiltinPipelineLowering::StringArg)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingExpand,
+            BuiltinCardinality::Expanding,
+        )
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FlatMapLike)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .streaming_boundary(BuiltinStreamingBoundary::Expanding)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::Expanding,
+            false,
+            2.0,
+            1.0,
+        ))
+        .lowering(BuiltinPipelineLowering::StringArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::split_apply(recv, p) }
+            super::BuiltinArgs::Str(p) => super::split_apply(recv, p),
             _ => None,
         }
     }
@@ -1129,10 +1240,13 @@ impl Builtin for Split {
 
 #[inline]
 fn expand_element_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingExpand, BuiltinCardinality::Expanding)
-        .cost(10.0)
-        .demand_law(BuiltinDemandLaw::FlatMapLike)
-        .element()
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingExpand,
+        BuiltinCardinality::Expanding,
+    )
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::FlatMapLike)
+    .element()
 }
 
 /// `lines` — split string on newlines.
@@ -1140,7 +1254,9 @@ pub(crate) struct Lines;
 impl Builtin for Lines {
     const METHOD: BuiltinMethod = BuiltinMethod::Lines;
     const NAME: &'static str = "lines";
-    fn spec() -> BuiltinSpec { expand_element_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::lines_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -1152,7 +1268,9 @@ pub(crate) struct Words;
 impl Builtin for Words {
     const METHOD: BuiltinMethod = BuiltinMethod::Words;
     const NAME: &'static str = "words";
-    fn spec() -> BuiltinSpec { expand_element_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::words_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -1164,7 +1282,9 @@ pub(crate) struct Chars;
 impl Builtin for Chars {
     const METHOD: BuiltinMethod = BuiltinMethod::Chars;
     const NAME: &'static str = "chars";
-    fn spec() -> BuiltinSpec { expand_element_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::chars_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -1176,7 +1296,9 @@ pub(crate) struct CharsOf;
 impl Builtin for CharsOf {
     const METHOD: BuiltinMethod = BuiltinMethod::CharsOf;
     const NAME: &'static str = "chars_of";
-    fn spec() -> BuiltinSpec { expand_element_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::chars_of_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -1188,13 +1310,14 @@ pub(crate) struct Bytes;
 impl Builtin for Bytes {
     const METHOD: BuiltinMethod = BuiltinMethod::Bytes;
     const NAME: &'static str = "bytes";
-    fn spec() -> BuiltinSpec { expand_element_spec() }
+    fn spec() -> BuiltinSpec {
+        expand_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::bytes_of_apply(recv).unwrap_or_else(|| recv.clone()))
     }
 }
-
 
 /// `find_first(pred)` — terminal expr-arg returning first match with First demand.
 pub(crate) struct FindFirst;
@@ -1202,14 +1325,17 @@ impl Builtin for FindFirst {
     const METHOD: BuiltinMethod = BuiltinMethod::FindFirst;
     const NAME: &'static str = "find_first";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::FilterLike)
-            .expr_stage(BuiltinExprStage::Filter)
-            .logical_shape(BuiltinLogicalShape::FilterThenFirst)
-            .lowering(BuiltinPipelineLowering::TerminalExprArg {
-                terminal: BuiltinMethod::First,
-            })
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::FilterLike)
+        .expr_stage(BuiltinExprStage::Filter)
+        .logical_shape(BuiltinLogicalShape::FilterThenFirst)
+        .lowering(BuiltinPipelineLowering::TerminalExprArg {
+            terminal: BuiltinMethod::First,
+        })
     }
 }
 
@@ -1219,15 +1345,17 @@ impl Builtin for FindOne {
     const METHOD: BuiltinMethod = BuiltinMethod::FindOne;
     const NAME: &'static str = "find_one";
     fn spec() -> BuiltinSpec {
-        BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-            .predicate_sink(BuiltinPredicateSink::FindOne)
-            .cost(10.0)
-            .demand_law(BuiltinDemandLaw::PredicateMapLike)
-            .row_stream_op(BuiltinRowStreamOp::FindOne)
-            .lowering(BuiltinPipelineLowering::TerminalSink)
+        BuiltinSpec::new(
+            BuiltinCategory::StreamingFilter,
+            BuiltinCardinality::Filtering,
+        )
+        .predicate_sink(BuiltinPredicateSink::FindOne)
+        .cost(10.0)
+        .demand_law(BuiltinDemandLaw::PredicateMapLike)
+        .row_stream_op(BuiltinRowStreamOp::FindOne)
+        .lowering(BuiltinPipelineLowering::TerminalSink)
     }
 }
-
 
 #[inline]
 fn positional_native_spec() -> BuiltinSpec {
@@ -1248,9 +1376,12 @@ impl Builtin for Nth {
             .lowering(selector.pipeline_lowering())
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::I64(n) => { super::nth_any_apply(recv, *n) }
+            super::BuiltinArgs::I64(n) => super::nth_any_apply(recv, *n),
             _ => None,
         }
     }
@@ -1261,13 +1392,14 @@ pub(crate) struct Collect;
 impl Builtin for Collect {
     const METHOD: BuiltinMethod = BuiltinMethod::Collect;
     const NAME: &'static str = "collect";
-    fn spec() -> BuiltinSpec { positional_native_spec() }
+    fn spec() -> BuiltinSpec {
+        positional_native_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::collect_apply(recv))
     }
 }
-
 
 #[inline]
 fn barrier_default_spec() -> BuiltinSpec {
@@ -1315,21 +1447,38 @@ impl Builtin for Sort {
         let strategy = ctx.strategy;
         let result = match &spec.key {
             None => crate::exec::pipeline::bounded_sort_by_key(
-                std::mem::take(buf), descending, strategy, |v| Ok(v.clone()),
+                std::mem::take(buf),
+                descending,
+                strategy,
+                |v| Ok(v.clone()),
             ),
             Some(prog) => {
                 let key_prog = prog.clone();
                 crate::exec::pipeline::bounded_sort_by_key(
-                    std::mem::take(buf), descending, strategy, |v| {
-                        Ok(crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
-                            crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, &key_prog)
-                        }).unwrap_or(crate::data::value::Val::Null))
+                    std::mem::take(buf),
+                    descending,
+                    strategy,
+                    |v| {
+                        Ok(crate::exec::pipeline::eval_kernel_with_vm(
+                            ctx.kernel,
+                            v,
+                            ctx.vm,
+                            |item, vm| {
+                                crate::exec::pipeline::apply_item_in_env(
+                                    vm, ctx.env, item, &key_prog,
+                                )
+                            },
+                        )
+                        .unwrap_or(crate::data::value::Val::Null))
                     },
                 )
             }
         };
         match result {
-            Ok(sorted) => { *buf = sorted; Some(Ok(())) }
+            Ok(sorted) => {
+                *buf = sorted;
+                Some(Ok(()))
+            }
             Err(err) => Some(Err(err)),
         }
     }
@@ -1344,7 +1493,9 @@ pub(crate) struct GroupShape;
 impl Builtin for GroupShape {
     const METHOD: BuiltinMethod = BuiltinMethod::GroupShape;
     const NAME: &'static str = "group_shape";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         super::group_shape_by_keys_apply(recv.clone())
@@ -1356,7 +1507,9 @@ pub(crate) struct Partition;
 impl Builtin for Partition {
     const METHOD: BuiltinMethod = BuiltinMethod::Partition;
     const NAME: &'static str = "partition";
-    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec().lambda_arg()
+    }
 }
 
 /// `window(n)` — sliding window barrier.
@@ -1491,11 +1644,16 @@ pub(crate) struct RollingSum;
 impl Builtin for RollingSum {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingSum;
     const NAME: &'static str = "rolling_sum";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::rolling_sum_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::rolling_sum_apply(recv, *n),
             _ => None,
         }
     }
@@ -1506,11 +1664,16 @@ pub(crate) struct RollingAvg;
 impl Builtin for RollingAvg {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingAvg;
     const NAME: &'static str = "rolling_avg";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::rolling_avg_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::rolling_avg_apply(recv, *n),
             _ => None,
         }
     }
@@ -1521,11 +1684,16 @@ pub(crate) struct RollingMin;
 impl Builtin for RollingMin {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMin;
     const NAME: &'static str = "rolling_min";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::rolling_min_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::rolling_min_apply(recv, *n),
             _ => None,
         }
     }
@@ -1536,11 +1704,16 @@ pub(crate) struct RollingMax;
 impl Builtin for RollingMax {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMax;
     const NAME: &'static str = "rolling_max";
-    fn spec() -> BuiltinSpec { barrier_default_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::rolling_max_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::rolling_max_apply(recv, *n),
             _ => None,
         }
     }
@@ -1551,7 +1724,9 @@ pub(crate) struct Accumulate;
 impl Builtin for Accumulate {
     const METHOD: BuiltinMethod = BuiltinMethod::Accumulate;
     const NAME: &'static str = "accumulate";
-    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec().lambda_arg()
+    }
 }
 
 /// `fold(init, fn)` / `fold(fn)` — like `accumulate(...).last()` but
@@ -1562,9 +1737,10 @@ impl Builtin for Fold {
     const METHOD: BuiltinMethod = BuiltinMethod::Fold;
     const NAME: &'static str = "fold";
     const ALIASES: &'static [&'static str] = &["reduce"];
-    fn spec() -> BuiltinSpec { barrier_default_spec().lambda_arg() }
+    fn spec() -> BuiltinSpec {
+        barrier_default_spec().lambda_arg()
+    }
 }
-
 
 /// `group_by(key)` — keyed reducer collecting elements per key.
 pub(crate) struct GroupBy;
@@ -1710,23 +1886,25 @@ impl Builtin for IndexBy {
     }
 }
 
-
 #[inline]
 fn unique_spec() -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::StreamingFilter, BuiltinCardinality::Filtering)
-        .view_native()
-        .view_stage(BuiltinViewStage::Distinct)
-        .cost(10.0)
-        .demand_law(BuiltinDemandLaw::UniqueLike)
-        .pipeline_shape(BuiltinPipelineShape::new(
-            BuiltinCardinality::Filtering,
-            false,
-            10.0,
-            1.0,
-        ))
-        .order_effect(BuiltinPipelineOrderEffect::Preserves)
-        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
-        .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingFilter,
+        BuiltinCardinality::Filtering,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::Distinct)
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::UniqueLike)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::Filtering,
+        false,
+        10.0,
+        1.0,
+    ))
+    .order_effect(BuiltinPipelineOrderEffect::Preserves)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
 }
 
 #[inline]
@@ -1740,13 +1918,12 @@ fn unique_apply_stream(
 > {
     let key = match body {
         None => item.clone(),
-        Some(prog) => crate::exec::pipeline::eval_kernel_with_vm(
-            ctx.kernel,
-            &item,
-            ctx.vm,
-            |row, vm| crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog),
-        )
-        .unwrap_or(crate::data::value::Val::Null),
+        Some(prog) => {
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, &item, ctx.vm, |row, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog)
+            })
+            .unwrap_or(crate::data::value::Val::Null)
+        }
     };
     if ctx.stage_unique_seen[ctx.stage_idx].insert(&key) {
         Ok(crate::exec::pipeline::StageFlow::Continue(item))
@@ -1771,9 +1948,12 @@ fn unique_apply_barrier(
             let mut seen = crate::util::StructuralValueSet::with_capacity(buf.len());
             let mut keep: Vec<bool> = Vec::with_capacity(buf.len());
             for v in buf.iter() {
-                let key = crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |item, vm| {
-                    crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog)
-                })
+                let key = crate::exec::pipeline::eval_kernel_with_vm(
+                    ctx.kernel,
+                    v,
+                    ctx.vm,
+                    |item, vm| crate::exec::pipeline::apply_item_in_env(vm, ctx.env, item, prog),
+                )
                 .unwrap_or(crate::data::value::Val::Null);
                 keep.push(seen.insert(&key));
             }
@@ -1834,7 +2014,8 @@ impl Builtin for UniqueBy {
     const NAME: &'static str = "unique_by";
     const ALIASES: &'static [&'static str] = &["distinct_by"];
     fn spec() -> BuiltinSpec {
-        unique_spec().lowering(BuiltinPipelineLowering::ExprArg)
+        unique_spec()
+            .lowering(BuiltinPipelineLowering::ExprArg)
             .expr_stage(BuiltinExprStage::UniqueBy)
             .logical_shape(BuiltinLogicalShape::UniqueBy)
             .row_stream_op(BuiltinRowStreamOp::DistinctBy)
@@ -1860,7 +2041,6 @@ impl Builtin for UniqueBy {
     }
 }
 
-
 /// `reverse` — full-barrier order reversal; cancels with adjacent reverse.
 pub(crate) struct Reverse;
 impl Builtin for Reverse {
@@ -1869,7 +2049,9 @@ impl Builtin for Reverse {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Barrier, BuiltinCardinality::Barrier)
             .cost(10.0)
-            .cancellation(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
+            .cancellation(BuiltinCancellation::SelfInverse(
+                BuiltinCancelGroup::Reverse,
+            ))
             .demand_law(BuiltinDemandLaw::Reverse)
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
@@ -1914,11 +2096,18 @@ pub(crate) struct Append;
 impl Builtin for Append {
     const METHOD: BuiltinMethod = BuiltinMethod::Append;
     const NAME: &'static str = "append";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => Some(super::append_apply(recv, item).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Val(item) => {
+                Some(super::append_apply(recv, item).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -1929,11 +2118,18 @@ pub(crate) struct Prepend;
 impl Builtin for Prepend {
     const METHOD: BuiltinMethod = BuiltinMethod::Prepend;
     const NAME: &'static str = "prepend";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => Some(super::prepend_apply(recv, item).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Val(item) => {
+                Some(super::prepend_apply(recv, item).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -1944,11 +2140,19 @@ pub(crate) struct Diff;
 impl Builtin for Diff {
     const METHOD: BuiltinMethod = BuiltinMethod::Diff;
     const NAME: &'static str = "diff";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::diff_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => {
+                let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?;
+                super::diff_apply(&arr_recv, other)
+            }
             _ => None,
         }
     }
@@ -1959,11 +2163,19 @@ pub(crate) struct Intersect;
 impl Builtin for Intersect {
     const METHOD: BuiltinMethod = BuiltinMethod::Intersect;
     const NAME: &'static str = "intersect";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::intersect_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => {
+                let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?;
+                super::intersect_apply(&arr_recv, other)
+            }
             _ => None,
         }
     }
@@ -1974,11 +2186,19 @@ pub(crate) struct Union;
 impl Builtin for Union {
     const METHOD: BuiltinMethod = BuiltinMethod::Union;
     const NAME: &'static str = "union";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::ValVec(other) => { let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?; super::union_apply(&arr_recv, other) }
+            super::BuiltinArgs::ValVec(other) => {
+                let arr_recv = recv.clone().into_vec().map(crate::data::value::Val::arr)?;
+                super::union_apply(&arr_recv, other)
+            }
             _ => None,
         }
     }
@@ -1989,11 +2209,18 @@ pub(crate) struct Join;
 impl Builtin for Join {
     const METHOD: BuiltinMethod = BuiltinMethod::Join;
     const NAME: &'static str = "join";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(sep) => Some(super::join_apply(recv, sep).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Str(sep) => {
+                Some(super::join_apply(recv, sep).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -2004,7 +2231,9 @@ pub(crate) struct Zip;
 impl Builtin for Zip {
     const METHOD: BuiltinMethod = BuiltinMethod::Zip;
     const NAME: &'static str = "zip";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
 }
 
 /// `zip_longest(arr)` — pad-shorter zip.
@@ -2012,7 +2241,9 @@ pub(crate) struct ZipLongest;
 impl Builtin for ZipLongest {
     const METHOD: BuiltinMethod = BuiltinMethod::ZipLongest;
     const NAME: &'static str = "zip_longest";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
 }
 
 /// `fanout(...)` — multi-projection.
@@ -2020,7 +2251,9 @@ pub(crate) struct Fanout;
 impl Builtin for Fanout {
     const METHOD: BuiltinMethod = BuiltinMethod::Fanout;
     const NAME: &'static str = "fanout";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
 }
 
 /// `zip_shape(...)` — two callable shapes:
@@ -2035,13 +2268,14 @@ pub(crate) struct ZipShape;
 impl Builtin for ZipShape {
     const METHOD: BuiltinMethod = BuiltinMethod::ZipShape;
     const NAME: &'static str = "zip_shape";
-    fn spec() -> BuiltinSpec { barrier_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        barrier_simple_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         super::zip_shape_obj_apply(recv)
     }
 }
-
 
 #[inline]
 fn object_element_spec() -> BuiltinSpec {
@@ -2128,7 +2362,9 @@ pub(crate) struct FromPairs;
 impl Builtin for FromPairs {
     const METHOD: BuiltinMethod = BuiltinMethod::FromPairs;
     const NAME: &'static str = "from_pairs";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_pairs_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -2140,7 +2376,9 @@ pub(crate) struct Invert;
 impl Builtin for Invert {
     const METHOD: BuiltinMethod = BuiltinMethod::Invert;
     const NAME: &'static str = "invert";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::invert_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -2162,9 +2400,12 @@ impl Builtin for Pick {
             .element()
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::StrVec(keys) => { super::pick_apply(recv, keys) }
+            super::BuiltinArgs::StrVec(keys) => super::pick_apply(recv, keys),
             _ => None,
         }
     }
@@ -2185,9 +2426,12 @@ impl Builtin for Omit {
             .element()
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::StrVec(keys) => { super::omit_apply(recv, keys) }
+            super::BuiltinArgs::StrVec(keys) => super::omit_apply(recv, keys),
             _ => None,
         }
     }
@@ -2198,11 +2442,16 @@ pub(crate) struct Merge;
 impl Builtin for Merge {
     const METHOD: BuiltinMethod = BuiltinMethod::Merge;
     const NAME: &'static str = "merge";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(other) => { super::merge_apply(recv, other) }
+            super::BuiltinArgs::Val(other) => super::merge_apply(recv, other),
             _ => None,
         }
     }
@@ -2213,11 +2462,16 @@ pub(crate) struct DeepMerge;
 impl Builtin for DeepMerge {
     const METHOD: BuiltinMethod = BuiltinMethod::DeepMerge;
     const NAME: &'static str = "deep_merge";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(other) => { super::deep_merge_apply(recv, other) }
+            super::BuiltinArgs::Val(other) => super::deep_merge_apply(recv, other),
             _ => None,
         }
     }
@@ -2228,11 +2482,16 @@ pub(crate) struct Defaults;
 impl Builtin for Defaults {
     const METHOD: BuiltinMethod = BuiltinMethod::Defaults;
     const NAME: &'static str = "defaults";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(other) => { super::defaults_apply(recv, other) }
+            super::BuiltinArgs::Val(other) => super::defaults_apply(recv, other),
             _ => None,
         }
     }
@@ -2243,11 +2502,16 @@ pub(crate) struct Rename;
 impl Builtin for Rename {
     const METHOD: BuiltinMethod = BuiltinMethod::Rename;
     const NAME: &'static str = "rename";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(other) => { super::rename_apply(recv, other) }
+            super::BuiltinArgs::Val(other) => super::rename_apply(recv, other),
             _ => None,
         }
     }
@@ -2258,7 +2522,9 @@ pub(crate) struct Pivot;
 impl Builtin for Pivot {
     const METHOD: BuiltinMethod = BuiltinMethod::Pivot;
     const NAME: &'static str = "pivot";
-    fn spec() -> BuiltinSpec { object_simple_spec().lambda_arg() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec().lambda_arg()
+    }
 }
 
 /// `implode(sep)` — array-to-string with separator.
@@ -2266,11 +2532,16 @@ pub(crate) struct Implode;
 impl Builtin for Implode {
     const METHOD: BuiltinMethod = BuiltinMethod::Implode;
     const NAME: &'static str = "implode";
-    fn spec() -> BuiltinSpec { object_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        object_simple_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(field) => { super::implode_apply(recv, field) }
+            super::BuiltinArgs::Str(field) => super::implode_apply(recv, field),
             _ => None,
         }
     }
@@ -2308,7 +2579,10 @@ impl Builtin for TransformKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -2329,7 +2603,10 @@ fn object_lambda_apply_stream(
     ctx: &mut super::builtin::StreamCtx<'_, '_>,
     item: crate::data::value::Val,
     body: Option<&crate::vm::Program>,
-) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+) -> Result<
+    crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+    crate::data::context::EvalError,
+> {
     let prog = body.expect("object lambda body");
     let result = crate::exec::pipeline::materialized_exec::apply_lambda_obj(
         ctx.stage, &item, ctx.vm, ctx.env, ctx.kernel, prog,
@@ -2379,7 +2656,10 @@ impl Builtin for TransformValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -2411,7 +2691,10 @@ impl Builtin for FilterKeys {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -2443,7 +2726,10 @@ impl Builtin for FilterValues {
         ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
         body: Option<&crate::vm::Program>,
-    ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
         object_lambda_apply_stream(ctx, item, body)
     }
 
@@ -2456,7 +2742,6 @@ impl Builtin for FilterValues {
         object_lambda_apply_barrier(ctx, buf, body)
     }
 }
-
 
 #[inline]
 fn path_element_spec() -> BuiltinSpec {
@@ -2476,9 +2761,12 @@ impl Builtin for GetPath {
         path_element_spec().view_object_projection(BuiltinViewObjectProjection::GetPath)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::get_path_apply(recv, p) }
+            super::BuiltinArgs::Str(p) => super::get_path_apply(recv, p),
             super::BuiltinArgs::Path(path) => Some(super::get_path_impl(recv, path)),
             _ => None,
         }
@@ -2490,11 +2778,16 @@ pub(crate) struct DelPath;
 impl Builtin for DelPath {
     const METHOD: BuiltinMethod = BuiltinMethod::DelPath;
     const NAME: &'static str = "del_path";
-    fn spec() -> BuiltinSpec { path_element_spec() }
+    fn spec() -> BuiltinSpec {
+        path_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::del_path_apply(recv, p) }
+            super::BuiltinArgs::Str(p) => super::del_path_apply(recv, p),
             _ => None,
         }
     }
@@ -2512,10 +2805,15 @@ impl Builtin for HasPath {
             .demand_law(projection.demand_law())
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::has_path_apply(recv, p) }
-            super::BuiltinArgs::Path(path) => Some(crate::data::value::Val::Bool(!super::get_path_impl(recv, path).is_null())),
+            super::BuiltinArgs::Str(p) => super::has_path_apply(recv, p),
+            super::BuiltinArgs::Path(path) => Some(crate::data::value::Val::Bool(
+                !super::get_path_impl(recv, path).is_null(),
+            )),
             _ => None,
         }
     }
@@ -2534,7 +2832,9 @@ pub(crate) struct SetPath;
 impl Builtin for SetPath {
     const METHOD: BuiltinMethod = BuiltinMethod::SetPath;
     const NAME: &'static str = "set_path";
-    fn spec() -> BuiltinSpec { path_indexed_spec() }
+    fn spec() -> BuiltinSpec {
+        path_indexed_spec()
+    }
 }
 
 /// `del_paths([...])` — bulk path removal.
@@ -2542,7 +2842,9 @@ pub(crate) struct DelPaths;
 impl Builtin for DelPaths {
     const METHOD: BuiltinMethod = BuiltinMethod::DelPaths;
     const NAME: &'static str = "del_paths";
-    fn spec() -> BuiltinSpec { path_indexed_spec() }
+    fn spec() -> BuiltinSpec {
+        path_indexed_spec()
+    }
 }
 
 /// `flatten_keys` — flatten nested object into dotted keys.
@@ -2550,11 +2852,16 @@ pub(crate) struct FlattenKeys;
 impl Builtin for FlattenKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::FlattenKeys;
     const NAME: &'static str = "flatten_keys";
-    fn spec() -> BuiltinSpec { path_indexed_spec() }
+    fn spec() -> BuiltinSpec {
+        path_indexed_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::flatten_keys_apply(recv, p) }
+            super::BuiltinArgs::Str(p) => super::flatten_keys_apply(recv, p),
             _ => None,
         }
     }
@@ -2565,16 +2872,20 @@ pub(crate) struct UnflattenKeys;
 impl Builtin for UnflattenKeys {
     const METHOD: BuiltinMethod = BuiltinMethod::UnflattenKeys;
     const NAME: &'static str = "unflatten_keys";
-    fn spec() -> BuiltinSpec { path_indexed_spec() }
+    fn spec() -> BuiltinSpec {
+        path_indexed_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Str(p) => { super::unflatten_keys_apply(recv, p) }
+            super::BuiltinArgs::Str(p) => super::unflatten_keys_apply(recv, p),
             _ => None,
         }
     }
 }
-
 
 #[inline]
 fn deep_simple_spec() -> BuiltinSpec {
@@ -2589,7 +2900,9 @@ pub(crate) struct Walk;
 impl Builtin for Walk {
     const METHOD: BuiltinMethod = BuiltinMethod::Walk;
     const NAME: &'static str = "walk";
-    fn spec() -> BuiltinSpec { deep_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        deep_simple_spec()
+    }
 }
 
 /// `walk_pre(fn)` — pre-order walk.
@@ -2597,7 +2910,9 @@ pub(crate) struct WalkPre;
 impl Builtin for WalkPre {
     const METHOD: BuiltinMethod = BuiltinMethod::WalkPre;
     const NAME: &'static str = "walk_pre";
-    fn spec() -> BuiltinSpec { deep_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        deep_simple_spec()
+    }
 }
 
 /// `rec(fn)` — recursive descent map.
@@ -2605,7 +2920,9 @@ pub(crate) struct Rec;
 impl Builtin for Rec {
     const METHOD: BuiltinMethod = BuiltinMethod::Rec;
     const NAME: &'static str = "rec";
-    fn spec() -> BuiltinSpec { deep_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        deep_simple_spec()
+    }
 }
 
 /// `trace_path()` — collect all paths.
@@ -2613,7 +2930,9 @@ pub(crate) struct TracePath;
 impl Builtin for TracePath {
     const METHOD: BuiltinMethod = BuiltinMethod::TracePath;
     const NAME: &'static str = "trace_path";
-    fn spec() -> BuiltinSpec { deep_simple_spec() }
+    fn spec() -> BuiltinSpec {
+        deep_simple_spec()
+    }
 }
 
 /// `deep_find(pred)` — descend and collect all matches.
@@ -2658,7 +2977,6 @@ impl Builtin for DeepLike {
     }
 }
 
-
 #[inline]
 fn serialization_spec() -> BuiltinSpec {
     BuiltinSpec::new(BuiltinCategory::Serialization, BuiltinCardinality::OneToOne)
@@ -2674,7 +2992,9 @@ pub(crate) struct ToCsv;
 impl Builtin for ToCsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToCsv;
     const NAME: &'static str = "to_csv";
-    fn spec() -> BuiltinSpec { serialization_spec() }
+    fn spec() -> BuiltinSpec {
+        serialization_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_csv_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -2696,7 +3016,9 @@ pub(crate) struct ToTsv;
 impl Builtin for ToTsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToTsv;
     const NAME: &'static str = "to_tsv";
-    fn spec() -> BuiltinSpec { serialization_spec() }
+    fn spec() -> BuiltinSpec {
+        serialization_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_tsv_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -2737,7 +3059,10 @@ impl Builtin for Set {
             .element()
     }
     #[inline]
-    fn apply_args(_recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        _recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(item.clone()),
             _ => None,
@@ -2765,9 +3090,12 @@ fn streaming_one_to_one_element_spec() -> BuiltinSpec {
     // them `.element()` made the streaming pipeline treat the receiver
     // as a 1-element stream and discard the structural shift, returning
     // the bare input. Same fix pattern as `enumerate`/`pairwise`.
-    BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-        .cost(10.0)
-        .demand_law(BuiltinDemandLaw::OrderBarrier)
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
 /// `lag(n)` — element shifted by N positions.
@@ -2775,11 +3103,16 @@ pub(crate) struct Lag;
 impl Builtin for Lag {
     const METHOD: BuiltinMethod = BuiltinMethod::Lag;
     const NAME: &'static str = "lag";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::lag_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::lag_apply(recv, *n),
             _ => None,
         }
     }
@@ -2790,11 +3123,16 @@ pub(crate) struct Lead;
 impl Builtin for Lead {
     const METHOD: BuiltinMethod = BuiltinMethod::Lead;
     const NAME: &'static str = "lead";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Usize(n) => { super::lead_apply(recv, *n) }
+            super::BuiltinArgs::Usize(n) => super::lead_apply(recv, *n),
             _ => None,
         }
     }
@@ -2805,11 +3143,18 @@ pub(crate) struct DiffWindow;
 impl Builtin for DiffWindow {
     const METHOD: BuiltinMethod = BuiltinMethod::DiffWindow;
     const NAME: &'static str = "diff_window";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::None => { Some(super::diff_window_apply(recv).unwrap_or_else(|| recv.clone())) }
+            super::BuiltinArgs::None => {
+                Some(super::diff_window_apply(recv).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -2820,11 +3165,18 @@ pub(crate) struct PctChange;
 impl Builtin for PctChange {
     const METHOD: BuiltinMethod = BuiltinMethod::PctChange;
     const NAME: &'static str = "pct_change";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::None => { Some(super::pct_change_apply(recv).unwrap_or_else(|| recv.clone())) }
+            super::BuiltinArgs::None => {
+                Some(super::pct_change_apply(recv).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -2835,11 +3187,18 @@ pub(crate) struct CumMax;
 impl Builtin for CumMax {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMax;
     const NAME: &'static str = "cummax";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::None => { Some(super::cummax_apply(recv).unwrap_or_else(|| recv.clone())) }
+            super::BuiltinArgs::None => {
+                Some(super::cummax_apply(recv).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -2850,11 +3209,18 @@ pub(crate) struct CumMin;
 impl Builtin for CumMin {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMin;
     const NAME: &'static str = "cummin";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::None => { Some(super::cummin_apply(recv).unwrap_or_else(|| recv.clone())) }
+            super::BuiltinArgs::None => {
+                Some(super::cummin_apply(recv).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -2865,16 +3231,22 @@ pub(crate) struct Zscore;
 impl Builtin for Zscore {
     const METHOD: BuiltinMethod = BuiltinMethod::Zscore;
     const NAME: &'static str = "zscore";
-    fn spec() -> BuiltinSpec { streaming_one_to_one_element_spec() }
+    fn spec() -> BuiltinSpec {
+        streaming_one_to_one_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::None => { Some(super::zscore_apply(recv).unwrap_or_else(|| recv.clone())) }
+            super::BuiltinArgs::None => {
+                Some(super::zscore_apply(recv).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
 }
-
 
 #[inline]
 fn scalar_native_element_spec() -> BuiltinSpec {
@@ -2914,6 +3286,17 @@ fn scalar_view_predicate_element_spec() -> BuiltinSpec {
         .view_native()
         .view_scalar()
         .demand_law(BuiltinDemandLaw::PredicateMapLike)
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+        .element()
+}
+
+#[inline]
+fn scalar_view_value_element_spec(projection: super::BuiltinViewValueProjection) -> BuiltinSpec {
+    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
+        .indexed()
+        .view_native()
+        .view_value_projection(projection)
+        .demand_law(projection.demand_law())
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .element()
 }
@@ -3014,8 +3397,6 @@ scalar_native_element! {
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
-    ToString => ToString, "to_string", apply: to_string_apply;
-    ToJson => ToJson, "to_json", apply: to_json_apply;
     Dedent => Dedent, "dedent", idempotent: true, apply: dedent_apply;
 }
 
@@ -3032,6 +3413,32 @@ impl Builtin for Type {
     }
 }
 
+pub(crate) struct ToString;
+impl Builtin for ToString {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToString;
+    const NAME: &'static str = "to_string";
+    fn spec() -> BuiltinSpec {
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::ToString)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        super::to_string_apply(recv)
+    }
+}
+
+pub(crate) struct ToJson;
+impl Builtin for ToJson {
+    const METHOD: BuiltinMethod = BuiltinMethod::ToJson;
+    const NAME: &'static str = "to_json";
+    fn spec() -> BuiltinSpec {
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::ToJson)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        super::to_json_apply(recv)
+    }
+}
+
 /// `parse_int(radix)` — string → integer with optional radix (2–36).
 /// Strips a leading `0b` / `0x` for binary / hex when the radix matches,
 /// so both `"0xff".parse_int(16)` and `"ff".parse_int(16)` produce 255.
@@ -3040,7 +3447,9 @@ pub(crate) struct ParseInt;
 impl Builtin for ParseInt {
     const METHOD: BuiltinMethod = BuiltinMethod::ParseInt;
     const NAME: &'static str = "parse_int";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::parse_int_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3076,9 +3485,18 @@ impl Builtin for ParseInt {
 #[inline]
 fn strip_radix_prefix(s: &str, radix: u32) -> &str {
     match radix {
-        16 => s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s),
-        2 => s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")).unwrap_or(s),
-        8 => s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")).unwrap_or(s),
+        16 => s
+            .strip_prefix("0x")
+            .or_else(|| s.strip_prefix("0X"))
+            .unwrap_or(s),
+        2 => s
+            .strip_prefix("0b")
+            .or_else(|| s.strip_prefix("0B"))
+            .unwrap_or(s),
+        8 => s
+            .strip_prefix("0o")
+            .or_else(|| s.strip_prefix("0O"))
+            .unwrap_or(s),
         _ => s,
     }
 }
@@ -3146,7 +3564,6 @@ scalar_view_predicate_element! {
     Matches => Matches, "matches", view_op: StringArg;
 }
 
-
 /// `slice(start, end?)` — int-range scalar element with pipeline lowering.
 pub(crate) struct Slice;
 impl Builtin for Slice {
@@ -3167,9 +3584,14 @@ impl Builtin for Slice {
             .lowering(BuiltinPipelineLowering::IntRangeArg)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::I64Opt { first, second } => { Some(super::slice_apply(recv.clone(), *first, *second)) }
+            super::BuiltinArgs::I64Opt { first, second } => {
+                Some(super::slice_apply(recv.clone(), *first, *second))
+            }
             _ => None,
         }
     }
@@ -3201,9 +3623,14 @@ impl Builtin for Replace {
         scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: false })
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, false) }
+            super::BuiltinArgs::StrPair { first, second } => {
+                super::replace_apply(recv.clone(), first, second, false)
+            }
             _ => None,
         }
     }
@@ -3218,9 +3645,14 @@ impl Builtin for ReplaceAll {
         scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: true })
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::StrPair { first, second } => { super::replace_apply(recv.clone(), first, second, true) }
+            super::BuiltinArgs::StrPair { first, second } => {
+                super::replace_apply(recv.clone(), first, second, true)
+            }
             _ => None,
         }
     }
@@ -3267,7 +3699,9 @@ pub(crate) struct FromJson;
 impl Builtin for FromJson {
     const METHOD: BuiltinMethod = BuiltinMethod::FromJson;
     const NAME: &'static str = "from_json";
-    fn spec() -> BuiltinSpec { default_scalar_spec(BuiltinMethod::FromJson) }
+    fn spec() -> BuiltinSpec {
+        default_scalar_spec(BuiltinMethod::FromJson)
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_json_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3288,7 +3722,10 @@ impl Builtin for Includes {
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(item) => Some(super::includes_apply(recv, item)),
             _ => None,
@@ -3308,9 +3745,14 @@ impl Builtin for Index {
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => Some(super::index_value_apply(recv, item).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Val(item) => {
+                Some(super::index_value_apply(recv, item).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -3328,9 +3770,14 @@ impl Builtin for IndicesOf {
             .lowering(BuiltinPipelineLowering::TerminalSink)
     }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
-            super::BuiltinArgs::Val(item) => Some(super::indices_of_apply(recv, item).unwrap_or_else(|| recv.clone())),
+            super::BuiltinArgs::Val(item) => {
+                Some(super::indices_of_apply(recv, item).unwrap_or_else(|| recv.clone()))
+            }
             _ => None,
         }
     }
@@ -3384,7 +3831,9 @@ pub(crate) struct ToBase64;
 impl Builtin for ToBase64 {
     const METHOD: BuiltinMethod = BuiltinMethod::ToBase64;
     const NAME: &'static str = "to_base64";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::to_base64_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3403,7 +3852,9 @@ pub(crate) struct FromBase64;
 impl Builtin for FromBase64 {
     const METHOD: BuiltinMethod = BuiltinMethod::FromBase64;
     const NAME: &'static str = "from_base64";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::from_base64_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3422,7 +3873,9 @@ pub(crate) struct UrlEncode;
 impl Builtin for UrlEncode {
     const METHOD: BuiltinMethod = BuiltinMethod::UrlEncode;
     const NAME: &'static str = "url_encode";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::url_encode_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3441,7 +3894,9 @@ pub(crate) struct UrlDecode;
 impl Builtin for UrlDecode {
     const METHOD: BuiltinMethod = BuiltinMethod::UrlDecode;
     const NAME: &'static str = "url_decode";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::url_decode_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3460,7 +3915,9 @@ pub(crate) struct HtmlEscape;
 impl Builtin for HtmlEscape {
     const METHOD: BuiltinMethod = BuiltinMethod::HtmlEscape;
     const NAME: &'static str = "html_escape";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::html_escape_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3479,7 +3936,9 @@ pub(crate) struct HtmlUnescape;
 impl Builtin for HtmlUnescape {
     const METHOD: BuiltinMethod = BuiltinMethod::HtmlUnescape;
     const NAME: &'static str = "html_unescape";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::html_unescape_apply(recv).unwrap_or_else(|| recv.clone()))
@@ -3498,14 +3957,18 @@ pub(crate) struct ReverseStr;
 impl Builtin for ReverseStr {
     const METHOD: BuiltinMethod = BuiltinMethod::ReverseStr;
     const NAME: &'static str = "reverse_str";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
         Some(super::reverse_str_apply(recv).unwrap_or_else(|| recv.clone()))
     }
     #[inline]
     fn cancellation() -> Option<BuiltinCancellation> {
-        Some(BuiltinCancellation::SelfInverse(BuiltinCancelGroup::Reverse))
+        Some(BuiltinCancellation::SelfInverse(
+            BuiltinCancelGroup::Reverse,
+        ))
     }
 }
 
@@ -3516,9 +3979,14 @@ pub(crate) struct Or;
 impl Builtin for Or {
     const METHOD: BuiltinMethod = BuiltinMethod::Or;
     const NAME: &'static str = "or";
-    fn spec() -> BuiltinSpec { scalar_native_element_spec() }
+    fn spec() -> BuiltinSpec {
+        scalar_native_element_spec()
+    }
     #[inline]
-    fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
         match args {
             super::BuiltinArgs::Val(default) => Some(super::or_apply(recv, default)),
             _ => None,

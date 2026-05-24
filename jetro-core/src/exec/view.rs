@@ -116,9 +116,7 @@ where
 
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
         match self {
-            Self::Borrowed(view) => {
-                Some(Box::new(view.array_iter()?.map(Self::Borrowed)))
-            }
+            Self::Borrowed(view) => Some(Box::new(view.array_iter()?.map(Self::Borrowed))),
             Self::Owned(value) => {
                 let items = value.as_vals()?.into_owned();
                 Some(Box::new(items.into_iter().map(Self::Owned)))
@@ -128,9 +126,7 @@ where
 
     fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
         match self {
-            Self::Borrowed(view) => {
-                Some(Box::new(view.array_iter_rev()?.map(Self::Borrowed)))
-            }
+            Self::Borrowed(view) => Some(Box::new(view.array_iter_rev()?.map(Self::Borrowed))),
             Self::Owned(value) => {
                 let mut items = value.as_vals()?.into_owned();
                 items.reverse();
@@ -677,8 +673,7 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
-    let access_stages =
-        source_access_stages(&capabilities.stages, &body.stage_kernels);
+    let access_stages = source_access_stages(&capabilities.stages, &body.stage_kernels);
     let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
         .choose_view_access(source_demand, access_stages.as_ref());
     let sink = view_suffix_sink_for_demand(
@@ -691,15 +686,13 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if let Some(count) =
-        direct_count_from_source_len(
-            &source,
-            &capabilities.stages,
-            &body.stage_kernels,
-            &sink,
-            &body.sink_kernels,
-        )
-    {
+    if let Some(count) = direct_count_from_source_len(
+        &source,
+        &capabilities.stages,
+        &body.stage_kernels,
+        &sink,
+        &body.sink_kernels,
+    ) {
         return Some(Ok(Val::Int(count as i64)));
     }
     if let Some(result) = direct_predicate_from_source_len(
@@ -708,8 +701,7 @@ where
         &body.stage_kernels,
         &sink,
         &body.sink_kernels,
-    )
-    {
+    ) {
         return Some(Ok(result));
     }
     if let Some(result) = direct_empty_cardinality_sink(
@@ -718,8 +710,7 @@ where
         &body.stage_kernels,
         &sink,
         &body.sink,
-    )
-    {
+    ) {
         return Some(Ok(result));
     }
 
@@ -3020,7 +3011,11 @@ mod tests {
     impl CountingStringView {
         fn root(rows: &[&str]) -> Self {
             Self {
-                rows: rows.iter().map(|row| Arc::from(*row)).collect::<Vec<_>>().into(),
+                rows: rows
+                    .iter()
+                    .map(|row| Arc::from(*row))
+                    .collect::<Vec<_>>()
+                    .into(),
                 idx: None,
                 materialize_reads: Rc::new(Cell::new(0)),
             }
@@ -3668,10 +3663,12 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        let compound_membership =
-            super::run_full(compound_membership_source.clone(), &compound_membership_body)
-                .unwrap()
-                .unwrap();
+        let compound_membership = super::run_full(
+            compound_membership_source.clone(),
+            &compound_membership_body,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(
             serde_json::Value::from(compound_membership),
@@ -4413,15 +4410,10 @@ mod tests {
         let env = Env::new(Val::Null);
         let mut vm = crate::vm::VM::new();
 
-        let first = super::run_with_env_and_vm(
-            first_source.clone(),
-            &first_body,
-            None,
-            &env,
-            &mut vm,
-        )
-        .unwrap()
-        .unwrap();
+        let first =
+            super::run_with_env_and_vm(first_source.clone(), &first_body, None, &env, &mut vm)
+                .unwrap()
+                .unwrap();
 
         assert_eq!(first, Val::Int(4));
         assert_eq!(first_source.array_iter_reads(), 0);
@@ -4432,10 +4424,9 @@ mod tests {
             sink: Sink::Nth(2),
             ..first_body
         };
-        let nth =
-            super::run_with_env_and_vm(nth_source.clone(), &nth_body, None, &env, &mut vm)
-                .unwrap()
-                .unwrap();
+        let nth = super::run_with_env_and_vm(nth_source.clone(), &nth_body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(nth, Val::Int(2));
         assert_eq!(nth_source.array_iter_reads(), 0);
@@ -4583,10 +4574,7 @@ mod tests {
         let source = CountingKeyedObjectView::root(&[(2, 20), (1, 10), (2, 21), (3, 30)]);
         let body = PipelineBody {
             stages: vec![
-                Stage::SortedDedup(Some(Arc::new(crate::vm::Program::new(
-                    Vec::new(),
-                    "",
-                )))),
+                Stage::SortedDedup(Some(Arc::new(crate::vm::Program::new(Vec::new(), "")))),
                 Stage::UsizeBuiltin {
                     method: crate::builtins::BuiltinMethod::Take,
                     value: 2,
@@ -5151,7 +5139,10 @@ mod tests {
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
-            stage_kernels: vec![BodyKernel::Const(Val::Str(Arc::from("owned"))), BodyKernel::Generic],
+            stage_kernels: vec![
+                BodyKernel::Const(Val::Str(Arc::from("owned"))),
+                BodyKernel::Generic,
+            ],
             sink_kernels: Vec::new(),
         };
 
@@ -5181,7 +5172,11 @@ mod tests {
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
-            stage_kernels: vec![BodyKernel::Const(Val::Int(1)), BodyKernel::Generic, BodyKernel::Generic],
+            stage_kernels: vec![
+                BodyKernel::Const(Val::Int(1)),
+                BodyKernel::Generic,
+                BodyKernel::Generic,
+            ],
             sink_kernels: Vec::new(),
         };
 
@@ -5213,7 +5208,11 @@ mod tests {
             ],
             stage_exprs: Vec::new(),
             sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
-            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Current, BodyKernel::Generic],
+            stage_kernels: vec![
+                BodyKernel::Generic,
+                BodyKernel::Current,
+                BodyKernel::Generic,
+            ],
             sink_kernels: Vec::new(),
         };
 
@@ -5257,10 +5256,9 @@ mod tests {
 
     #[test]
     fn view_type_builtin_reads_tape_tags_without_materializing_receivers() {
-        let tape = crate::data::tape::TapeData::parse(
-            br#"[{"a":1},[1,2],"s",3,true,null]"#.to_vec(),
-        )
-        .unwrap();
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[{"a":1},[1,2],"s",3,true,null]"#.to_vec())
+                .unwrap();
         let body = PipelineBody {
             stages: vec![Stage::Map(
                 Arc::new(crate::vm::Program::new(Vec::new(), "")),
@@ -5279,13 +5277,58 @@ mod tests {
         };
 
         tape.reset_materialized_subtrees();
-        let out = super::run_full(TapeView::root(&tape), &body).unwrap().unwrap();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!(["object", "array", "string", "number", "bool", "null"])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_value_string_builtins_traverse_tape_without_materializing_receivers() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[{"a":1,"b":[true,null]},"plain"]"#.to_vec())
+                .unwrap();
+
+        for (method, expected) in [
+            (
+                crate::builtins::BuiltinMethod::ToString,
+                serde_json::json!(["{\"a\":1,\"b\":[true,null]}", "plain"]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::ToJson,
+                serde_json::json!(["{\"a\":1,\"b\":[true,null]}", "\"plain\""]),
+            ),
+        ] {
+            let body = PipelineBody {
+                stages: vec![Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                )],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::BuiltinCall {
+                    receiver: Box::new(BodyKernel::Current),
+                    call: crate::builtins::BuiltinCall::new(
+                        method,
+                        crate::builtins::BuiltinArgs::None,
+                    ),
+                }],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected);
+            assert_eq!(tape.materialized_subtrees(), 0);
+        }
     }
 
     #[test]
@@ -5349,7 +5392,9 @@ mod tests {
         };
 
         tape.reset_materialized_subtrees();
-        let out = super::run_full(TapeView::root(&tape), &body).unwrap().unwrap();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([1, 4]));
         assert_eq!(tape.materialized_subtrees(), 0);
@@ -5590,15 +5635,10 @@ mod tests {
 
         let env = Env::new(Val::Null);
         let mut vm = crate::vm::VM::new();
-        let out = super::run_prefix_then_materialized_suffix(
-            source.clone(),
-            &body,
-            None,
-            &env,
-            &mut vm,
-        )
-        .unwrap()
-        .unwrap();
+        let out =
+            super::run_prefix_then_materialized_suffix(source.clone(), &body, None, &env, &mut vm)
+                .unwrap()
+                .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
         assert_eq!(source.scalar_reads(), 0);
