@@ -7,6 +7,7 @@
 //! planner selects the `View` backend preference.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
@@ -335,8 +336,18 @@ where
             vm,
         );
     }
+    if source_demand.is_zero() {
+        return run_reversed_rows_view_suffix(
+            Vec::<FrontierRow<V>>::new(),
+            body,
+            &suffix,
+            sink,
+            source_demand,
+            vm,
+        );
+    }
 
-    let mut rows = Vec::new();
+    let mut rows = ReverseRows::new(source_demand);
     if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
@@ -351,8 +362,57 @@ where
     )? {
         return Some(Err(err));
     }
-    rows.reverse();
-    run_reversed_rows_view_suffix(rows, body, &suffix, sink, source_demand, vm)
+    run_reversed_rows_view_suffix(rows.into_reversed(), body, &suffix, sink, source_demand, vm)
+}
+
+struct ReverseRows<V> {
+    rows: Vec<FrontierRow<V>>,
+    tail: Option<VecDeque<FrontierRow<V>>>,
+    limit: usize,
+}
+
+impl<V> ReverseRows<V> {
+    fn new(demand: PullDemand) -> Self {
+        let limit = match demand {
+            PullDemand::FirstInput(n) => Some(n),
+            PullDemand::NthInput(index) => Some(index.saturating_add(1)),
+            _ => None,
+        };
+        let Some(limit) = limit else {
+            return Self {
+                rows: Vec::new(),
+                tail: None,
+                limit: 0,
+            };
+        };
+        Self {
+            rows: Vec::new(),
+            tail: Some(VecDeque::with_capacity(limit)),
+            limit,
+        }
+    }
+
+    fn push(&mut self, row: FrontierRow<V>) {
+        let Some(tail) = self.tail.as_mut() else {
+            self.rows.push(row);
+            return;
+        };
+        if self.limit == 0 {
+            return;
+        }
+        if tail.len() == self.limit {
+            tail.pop_front();
+        }
+        tail.push_back(row);
+    }
+
+    fn into_reversed(mut self) -> Vec<FrontierRow<V>> {
+        if let Some(tail) = self.tail {
+            return tail.into_iter().rev().collect();
+        }
+        self.rows.reverse();
+        self.rows
+    }
 }
 
 fn reverse_barrier_plan(body: &pipeline::PipelineBody) -> Option<ReverseBarrierPlan> {
@@ -3965,6 +4025,42 @@ mod tests {
             stage_exprs: Vec::new(),
             sink: Sink::Collect,
             stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_runner_skips_zero_demand_reverse_suffix_without_touching_source() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::reverse().unwrap(),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1)),
+                BodyKernel::Generic,
+                BodyKernel::Generic,
+            ],
             sink_kernels: Vec::new(),
         };
         let env = Env::new(Val::Null);
