@@ -36,6 +36,9 @@
   and `nth`, including late projection and NDJSON direct element selection.
 - Centralized direct count/scalar sink projection metadata so direct byte/tape
   planners no longer rematch sink builtins locally.
+- Centralized view projection field-demand prefixing so nested object/path
+  helper demand is computed by the registry instead of duplicated in pipeline
+  kernels.
 
 ### Demand, tape, and view execution
 
@@ -78,6 +81,11 @@
   equivalence checks for byte-writable tape output.
 - Preserved row-stream direct execution while keeping unsupported expressions
   on the correctness fallback path.
+- Guarded direct row-stream fanout prefixes so `take(...).filter(...).count()`
+  preserves semantic order instead of being rewritten as a filter-before-take
+  count.
+- Added registry-driven raw JSON scalar planning coverage so NDJSON byte/tape
+  direct scalar calls follow builtin metadata for every registered raw scalar.
 
 ### Correctness and validation
 
@@ -90,6 +98,13 @@
 - Added demand and metadata tests for borrowed object helpers, direct path view
   projection, map-like demand, object transforms, predicate scalar sinks,
   membership scalar sinks, and indexed suffix planning.
+- Added structural equality coverage for `unique`, `unique_by`, `remove`,
+  `intersect`, `union`, and `diff` so compound values with different object
+  insertion order compare consistently across VM, composed, and tape-backed
+  paths.
+- Added tape/VM parity coverage for materialized relational and reshaping
+  boundaries after borrowed prefixes, including `zip`, `zip_longest`, `fanout`,
+  `zip_shape`, and `equi_join`.
 - Validation completed on this branch with:
   `cargo check --workspace`, `cargo test -p jetro-core --release`,
   `cargo test --workspace --release`, and
