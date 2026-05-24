@@ -845,13 +845,7 @@ where
     }
     let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
     if forced_empty {
-        return match op {
-            crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(false)),
-            crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(true)),
-            crate::builtins::BuiltinPredicateSink::FindIndex => Some(Val::Null),
-            crate::builtins::BuiltinPredicateSink::IndicesWhere => Some(Val::arr(Vec::new())),
-            crate::builtins::BuiltinPredicateSink::FindOne => None,
-        };
+        return op.empty_stream_result();
     }
     let matched = match sink_kernels.get(*predicate_kernel)? {
         pipeline::BodyKernel::ConstBool(value) => *value,
@@ -921,11 +915,7 @@ where
                 Some(Val::arr(Vec::new()))
             }
         }
-        pipeline::ViewSinkCapability::Membership { op, .. } => match op {
-            crate::builtins::BuiltinMembershipSink::Includes => Some(Val::Bool(false)),
-            crate::builtins::BuiltinMembershipSink::Index => Some(Val::Null),
-            crate::builtins::BuiltinMembershipSink::IndicesOf => Some(Val::arr(Vec::new())),
-        },
+        pipeline::ViewSinkCapability::Membership { op, .. } => Some(op.empty_stream_result()),
         _ => None,
     }
 }

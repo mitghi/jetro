@@ -1860,6 +1860,19 @@ impl BuiltinPredicateSink {
     pub(crate) const fn returns_matching_row(self) -> bool {
         matches!(self, Self::FindOne)
     }
+
+    /// Result for an empty input stream, when the sink can complete without
+    /// observing any rows.
+    #[inline]
+    pub(crate) fn empty_stream_result(self) -> Option<Val> {
+        match self {
+            Self::Any => Some(Val::Bool(false)),
+            Self::All => Some(Val::Bool(true)),
+            Self::FindIndex => Some(Val::Null),
+            Self::IndicesWhere => Some(Val::arr(Vec::new())),
+            Self::FindOne => None,
+        }
+    }
 }
 
 /// Membership terminal sink behavior for builtins with a target value.
@@ -1919,6 +1932,16 @@ impl BuiltinMembershipSink {
     #[inline]
     pub(crate) const fn returns_bool(self) -> bool {
         matches!(self, Self::Includes)
+    }
+
+    /// Result for an empty input stream.
+    #[inline]
+    pub(crate) fn empty_stream_result(self) -> Val {
+        match self {
+            Self::Includes => Val::Bool(false),
+            Self::Index => Val::Null,
+            Self::IndicesOf => Val::arr(Vec::new()),
+        }
     }
 }
 
