@@ -173,6 +173,33 @@ fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Op
     view_projection_receiver_field_demand(call.id(), &call.args, &receiver_path)
 }
 
+fn nested_array_child_field_demand(source: &BodyKernel, child: &BodyKernel) -> FieldDemand {
+    match child.field_demand() {
+        FieldDemand::None => FieldDemand::None,
+        FieldDemand::Whole => source.field_demand(),
+        FieldDemand::Fields(fields) => match source.field_path_keys() {
+            Some(keys) => FieldDemand::Fields(fields.prefixed(&keys)),
+            None => source.field_demand(),
+        },
+    }
+}
+
+fn nested_array_field_demand(
+    source: &BodyKernel,
+    predicate: Option<&BodyKernel>,
+    map: Option<&BodyKernel>,
+) -> FieldDemand {
+    let need = source.field_demand();
+    let need = match predicate {
+        Some(predicate) => need.merge(nested_array_child_field_demand(source, predicate)),
+        None => need,
+    };
+    match map {
+        Some(map) => need.merge(nested_array_child_field_demand(source, map)),
+        None => need,
+    }
+}
+
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
 #[derive(Debug, Clone)]
 pub struct FStringKernel {
@@ -801,23 +828,9 @@ impl BodyKernel {
                 predicate,
                 map,
                 ..
-            } => {
-                let need = source.field_demand();
-                let need = match predicate {
-                    Some(predicate) => need.merge(predicate.field_demand()),
-                    None => need,
-                };
-                match map {
-                    Some(map) => need.merge(map.field_demand()),
-                    None => need,
-                }
-            }
+            } => nested_array_field_demand(source, predicate.as_deref(), map.as_deref()),
             Self::NestedArrayCount { source, predicate } => {
-                let need = source.field_demand();
-                match predicate {
-                    Some(predicate) => need.merge(predicate.field_demand()),
-                    None => need,
-                }
+                nested_array_field_demand(source, predicate.as_deref(), None)
             }
             Self::NestedPlan(plan) => plan.parent_field_demand(),
             Self::ConstBool(_) | Self::Const(_) => FieldDemand::None,
@@ -3214,6 +3227,29 @@ mod tests {
 
         assert!(matches!(kernel, BodyKernel::NestedPlan(_)), "{kernel:#?}");
         assert_eq!(field_paths(&kernel), vec!["items.price", "items.isbn"]);
+    }
+
+    #[test]
+    fn nested_array_reducer_field_demand_prefixes_child_payload() {
+        let kernel = BodyKernel::classify_expr(
+            &parse("items.filter(price > 6).map(qty * price).sum()")
+                .expect("parse nested reducer"),
+        );
+
+        assert!(
+            matches!(kernel, BodyKernel::NestedArrayReducer { .. }),
+            "{kernel:#?}"
+        );
+        assert_eq!(field_paths(&kernel), vec!["items", "items.price", "items.qty"]);
+
+        let count = BodyKernel::classify_expr(
+            &parse("items.filter(price > 6).count()").expect("parse nested count"),
+        );
+        assert!(
+            matches!(count, BodyKernel::NestedArrayCount { .. }),
+            "{count:#?}"
+        );
+        assert_eq!(field_paths(&count), vec!["items", "items.price"]);
     }
 
     #[test]
