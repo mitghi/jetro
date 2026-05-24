@@ -845,6 +845,24 @@ mod tests {
     }
 
     #[test]
+    fn view_owned_object_projection_scalar_followup_stays_late() {
+        let data = br#"{"books":[{"meta":{"isbn":"x","price":10,"debug":1}},{"meta":{"isbn":"y","price":20,"debug":2}},{"meta":{"title":"missing","debug":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
+        let from_tape = Jetro::from_bytes(data.clone()).unwrap();
+        let from_value = Jetro::from_bytes(data).unwrap();
+        from_tape.reset_tape_materialized_subtrees();
+
+        let query =
+            r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "price").len()).last()"#;
+        let tape_out = from_tape.collect(query).unwrap();
+        let value_out = from_value.collect(query).unwrap();
+
+        assert_eq!(tape_out, value_out);
+        assert_eq!(tape_out, json!(2));
+        assert!(!from_tape.root_val_is_materialized());
+        assert_eq!(from_tape.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_owned_object_helper_chains_keep_tape_input_borrowed() {
         let data = br#"{"books":[{"meta":{"author":{"name":"ada"},"isbn":"x","price":10,"debug":1}},{"meta":{"author":{"name":"bob"},"isbn":"y","price":20,"debug":2}},{"meta":{"author":{"name":"cat"},"debug":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec();
         let from_tape = Jetro::from_bytes(data.clone()).unwrap();
