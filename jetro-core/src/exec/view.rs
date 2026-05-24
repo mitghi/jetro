@@ -6,6 +6,7 @@
 //! method call), calls `materialize()`. Used by `physical_eval` when the
 //! planner selects the `View` backend preference.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
@@ -219,8 +220,10 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
+    let access_stages =
+        source_access_stages(&capabilities.stages, &body.stage_kernels);
     let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
-        .choose_view_access(source_demand, &capabilities.stages);
+        .choose_view_access(source_demand, access_stages.as_ref());
     let sink = view_suffix_sink_for_demand(
         capabilities.sink,
         source_demand,
@@ -443,6 +446,69 @@ fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
         pipeline::BodyKernel::ConstBool(value) => Some(*value),
         pipeline::BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
         _ => None,
+    }
+}
+
+fn source_access_stages<'a>(
+    stages: &'a [pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> Cow<'a, [pipeline::ViewStageCapability]> {
+    let mut rewritten: Option<Vec<pipeline::ViewStageCapability>> = None;
+    for (idx, stage) in stages.iter().enumerate() {
+        match constant_stage_access_effect(stage, stage_kernels) {
+            ConstantStageAccessEffect::Keep => {
+                if let Some(out) = rewritten.as_mut() {
+                    out.push(stage.clone());
+                }
+            }
+            ConstantStageAccessEffect::NoOp => {
+                if rewritten.is_none() {
+                    let mut out = Vec::with_capacity(stages.len());
+                    out.extend_from_slice(&stages[..idx]);
+                    rewritten = Some(out);
+                }
+            }
+            ConstantStageAccessEffect::Empty => {
+                let mut out = rewritten.unwrap_or_else(|| {
+                    let mut out = Vec::with_capacity(idx + 1);
+                    out.extend_from_slice(&stages[..idx]);
+                    out
+                });
+                out.push(pipeline::ViewStageCapability::Take(0));
+                return Cow::Owned(out);
+            }
+        }
+    }
+    rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
+}
+
+enum ConstantStageAccessEffect {
+    Keep,
+    NoOp,
+    Empty,
+}
+
+fn constant_stage_access_effect(
+    stage: &pipeline::ViewStageCapability,
+    stage_kernels: &[pipeline::BodyKernel],
+) -> ConstantStageAccessEffect {
+    match stage {
+        pipeline::ViewStageCapability::Filter { kernel }
+        | pipeline::ViewStageCapability::TakeWhile { kernel } => {
+            match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                Some(true) => ConstantStageAccessEffect::NoOp,
+                Some(false) => ConstantStageAccessEffect::Empty,
+                None => ConstantStageAccessEffect::Keep,
+            }
+        }
+        pipeline::ViewStageCapability::DropWhile { kernel } => {
+            match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                Some(true) => ConstantStageAccessEffect::Empty,
+                Some(false) => ConstantStageAccessEffect::NoOp,
+                None => ConstantStageAccessEffect::Keep,
+            }
+        }
+        _ => ConstantStageAccessEffect::Keep,
     }
 }
 
@@ -852,7 +918,8 @@ where
     if source_demand.is_zero() {
         return Some(Ok(()));
     }
-    let access = source_capabilities.choose_view_access(source_demand, stages);
+    let access_stages = source_access_stages(stages, stage_kernels);
+    let access = source_capabilities.choose_view_access(source_demand, access_stages.as_ref());
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
             let items = source.array_iter_rev()?;
@@ -2816,6 +2883,27 @@ mod tests {
         assert_eq!(drop_source.scalar_reads(), 1);
         assert_eq!(drop_source.array_iter_reads(), 0);
         assert_eq!(drop_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_source_access_ignores_constant_true_predicate_stages() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![Stage::Filter(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Filter,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::Last),
+            stage_kernels: vec![BodyKernel::ConstBool(true)],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(5));
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
