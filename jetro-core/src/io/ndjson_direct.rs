@@ -1,8 +1,7 @@
 use crate::builtins::registry::{
     array_selector as builtin_array_selector, by_name as builtin_by_name, logical_shape,
-    view_object_items_projection_call,
 };
-use crate::builtins::{BuiltinArgs, BuiltinLogicalShape, BuiltinViewObjectProjection};
+use crate::builtins::{BuiltinLogicalShape, BuiltinViewObjectProjection};
 use crate::data::value::Val;
 use crate::ir::physical::{PhysicalPathStep, PlanNode, QueryPlan};
 use crate::parse::ast::{Arg, BinOp, Expr, Step};
@@ -297,7 +296,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             optional,
         } if !*optional && call.is_direct_object_items_call() =>
         {
-            let projection = view_object_items_projection_call(call.id(), &BuiltinArgs::None)?;
+            let projection = call.direct_object_items_projection()?;
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
                 .then_some(())
@@ -712,7 +711,7 @@ fn direct_tape_plan_for_node(
             optional,
         } if !*optional && call.is_direct_object_items_call() =>
         {
-            let projection = view_object_items_projection_call(call.id(), &BuiltinArgs::None)?;
+            let projection = call.direct_object_items_projection()?;
             Some(NdjsonDirectTapePlan::ObjectItems {
                 steps: node_path_steps(plan, *receiver)?,
                 projection,

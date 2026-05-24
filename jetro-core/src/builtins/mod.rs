@@ -2691,7 +2691,14 @@ impl BuiltinCall {
     /// Returns true when this call projects object items from a borrowed view.
     #[inline]
     pub(crate) fn is_direct_object_items_call(&self) -> bool {
-        registry::view_object_items_projection_call(self.id(), &self.args).is_some()
+        self.direct_object_items_projection().is_some()
+    }
+
+    /// Returns object-items projection metadata for this call, if it can be
+    /// executed directly over a borrowed view.
+    #[inline]
+    pub(crate) fn direct_object_items_projection(&self) -> Option<BuiltinViewObjectProjection> {
+        registry::view_object_items_projection_call(self.id(), &self.args)
     }
 
     /// Returns true if applying this builtin twice is equivalent to applying it once.
