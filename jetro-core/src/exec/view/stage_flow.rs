@@ -207,8 +207,9 @@ where
                 Some(ViewStageFlow::Drop)
             }
         }
-        // Map can emit either a borrowed subview or an owned value, so the
-        // frontier handles it before row-local stage flow dispatch.
+        // Builtin projections and map can emit either a borrowed subview or an
+        // owned value, so the frontier handles them before row-local dispatch.
+        pipeline::ViewStageCapability::BuiltinProjection { .. } => None,
         pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         // FlatMap expands one input into many borrowed child views and is

@@ -1060,6 +1060,14 @@ impl Stage {
                 });
             }
         }
+        if let Stage::Builtin(call) = self {
+            if call.is_view_projection() {
+                return Some(ViewStageCapability::BuiltinProjection {
+                    id: call.id(),
+                    args: call.args.clone(),
+                });
+            }
+        }
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
         match stage.capability_shape() {

@@ -5,9 +5,10 @@
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
 use crate::builtins::{
-    BuiltinArgExtremeSink, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinPredicateSink,
-    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
+    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
+use crate::builtins::registry::BuiltinId;
 pub(crate) use crate::builtins::BuiltinViewInputMode as ViewInputMode;
 pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
 pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
@@ -506,6 +507,13 @@ pub(crate) struct ViewPrefixCapabilities {
 /// Per-stage capability for the view execution path; each variant carries a kernel index into `stage_kernels`.
 #[derive(Debug, Clone)]
 pub(crate) enum ViewStageCapability {
+    /// Direct registry-declared borrowed-view builtin projection.
+    BuiltinProjection {
+        /// Builtin registry id.
+        id: BuiltinId,
+        /// Decoded static builtin arguments.
+        args: BuiltinArgs,
+    },
     /// Filter stage: evaluates the view-native predicate at `kernel`, keeping matching views.
     Filter {
         /// Index into `stage_kernels` for the predicate kernel.
@@ -592,6 +600,7 @@ impl ViewStageCapability {
     /// Returns the `BuiltinViewStage` tag that corresponds to this capability variant.
     pub(crate) fn view_stage(&self) -> BuiltinViewStage {
         match self {
+            Self::BuiltinProjection { .. } => BuiltinViewStage::Map,
             Self::Filter { .. } => BuiltinViewStage::Filter,
             Self::Compact => BuiltinViewStage::Compact,
             Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,

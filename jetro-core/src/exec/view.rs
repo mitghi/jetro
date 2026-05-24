@@ -825,6 +825,26 @@ where
         });
     };
 
+    if let pipeline::ViewStageCapability::BuiltinProjection { id, args } = stage {
+        let next = match crate::builtins::registry::apply_view_projection(id, &args, item)? {
+            crate::builtins::registry::ViewProjectionResult::View(view) => view,
+            crate::builtins::registry::ViewProjectionResult::Owned(value) => {
+                FrontierRow::Owned(value)
+            }
+        };
+        return drive_view_item(
+            next,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Map { kernel } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         let kernel = stage_kernels.get(kernel)?;
@@ -2046,6 +2066,134 @@ mod tests {
 
     impl<'a> super::FrontierBaseView<'a> for CountingStringView {}
 
+    #[derive(Clone)]
+    struct CountingObjectValuesView {
+        rows: Arc<[Arc<[i64]>]>,
+        idx: Option<usize>,
+        materialize_reads: Rc<Cell<usize>>,
+        object_value_reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingObjectValuesView {
+        fn root(rows: &[&[i64]]) -> Self {
+            Self {
+                rows: rows
+                    .iter()
+                    .map(|row| Arc::<[i64]>::from(*row))
+                    .collect::<Vec<_>>()
+                    .into(),
+                idx: None,
+                materialize_reads: Rc::new(Cell::new(0)),
+                object_value_reads: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn materialize_reads(&self) -> usize {
+            self.materialize_reads.get()
+        }
+
+        fn object_value_reads(&self) -> usize {
+            self.object_value_reads.get()
+        }
+    }
+
+    impl<'a> ValueView<'a> for CountingObjectValuesView {
+        fn scalar(&self) -> JsonView<'_> {
+            match self.idx {
+                Some(idx) => self
+                    .rows
+                    .get(idx)
+                    .map(|row| JsonView::ObjectLen(row.len()))
+                    .unwrap_or(JsonView::Null),
+                None => JsonView::ArrayLen(self.rows.len()),
+            }
+        }
+
+        fn field(&self, _key: &str) -> Self {
+            self.clone()
+        }
+
+        fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            self.object_value_reads
+                .set(self.object_value_reads.get() + 1);
+            let row = self.rows.get(self.idx?)?;
+            Some(Val::arr(row.iter().copied().map(Val::Int).collect()))
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_pairs(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn index(&self, idx: i64) -> Self {
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx: (idx >= 0).then_some(idx as usize),
+                materialize_reads: Rc::clone(&self.materialize_reads),
+                object_value_reads: Rc::clone(&self.object_value_reads),
+            }
+        }
+
+        fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            let object_value_reads = Rc::clone(&self.object_value_reads);
+            Some(Box::new((0..rows.len()).map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                materialize_reads: Rc::clone(&materialize_reads),
+                object_value_reads: Rc::clone(&object_value_reads),
+            })))
+        }
+
+        fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            let object_value_reads = Rc::clone(&self.object_value_reads);
+            Some(Box::new((0..rows.len()).rev().map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                materialize_reads: Rc::clone(&materialize_reads),
+                object_value_reads: Rc::clone(&object_value_reads),
+            })))
+        }
+
+        fn materialize(&self) -> Val {
+            self.materialize_reads.set(self.materialize_reads.get() + 1);
+            self.idx
+                .and_then(|idx| self.rows.get(idx))
+                .map(|row| Val::arr(row.iter().copied().map(Val::Int).collect()))
+                .unwrap_or(Val::Null)
+        }
+    }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingObjectValuesView {}
+
     #[test]
     fn view_frontier_zero_demand_skips_source_access() {
         let source = CountingView::root(&[1, 2, 3]);
@@ -2996,6 +3144,37 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(2));
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_builtin_projection_streams_owned_rows_into_later_stages() {
+        let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Values,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+                Stage::FlatMap(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::FlatMap,
+                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 4,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(4));
+        assert_eq!(source.object_value_reads(), 2);
         assert_eq!(source.materialize_reads(), 0);
     }
 
