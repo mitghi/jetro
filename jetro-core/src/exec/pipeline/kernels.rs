@@ -42,16 +42,6 @@ impl NestedPlanKernel {
         self.prepared.run(seed)
     }
 
-    pub(crate) fn run_view<'a, V>(
-        &self,
-        seed: &V,
-        vm: &mut crate::vm::VM,
-    ) -> Option<Result<Val, EvalError>>
-    where
-        V: ValueView<'a>,
-    {
-        super::nested::run_plan_view(&self.plan, seed, vm)
-    }
 }
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
@@ -308,7 +298,7 @@ impl ObjectKernel {
         vm: &mut crate::vm::VM,
     ) -> Option<bool>
     where
-        V: ValueView<'a>,
+        V: ValueView<'a> + 'a,
     {
         let start = cells.len();
         for entry in self.entries.iter() {
@@ -1954,7 +1944,7 @@ fn append_json_view_to_string<'a, V>(
     scalar: JsonView<'_>,
 ) -> Result<(), EvalError>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match scalar {
         JsonView::Null => out.push_str("null"),
@@ -1973,7 +1963,7 @@ where
 
 pub(crate) fn view_kernel_value_to_owned<'a, V>(value: ViewKernelValue<V>) -> Val
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match value {
         ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
@@ -1983,7 +1973,7 @@ where
 
 pub(crate) fn view_kernel_view_to_owned<'a, V>(view: V) -> Val
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
 }
@@ -2040,7 +2030,7 @@ fn eval_array_select_native(array: &Val, selector: ArraySelector) -> Val {
 
 fn eval_array_select_view<'a, V>(array: V, selector: ArraySelector) -> V
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let idx = match selector {
         ArraySelector::First => Some(0),
@@ -2063,7 +2053,7 @@ fn eval_nested_array_reducer_view<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let source = match eval_view_kernel_inner(source, item, vm)? {
         ViewKernelValue::View(view) => view,
@@ -2154,7 +2144,7 @@ fn eval_nested_array_count_view<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let source = match eval_view_kernel_inner(source, item, vm)? {
         ViewKernelValue::View(view) => view,
@@ -2186,7 +2176,7 @@ fn view_predicate_matches<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<bool>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match predicate {
         Some(predicate) => match eval_view_kernel_inner(predicate, item, vm)? {
@@ -2203,7 +2193,7 @@ fn eval_view_numeric_kernel<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<NumericKernelValue>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match kernel {
         BodyKernel::Current => numeric_from_json_view(item.scalar()),
@@ -2498,7 +2488,7 @@ pub(crate) enum ViewKernelValue<V> {
 #[inline]
 pub(crate) fn eval_view_kernel<'a, V>(kernel: &BodyKernel, item: &V) -> Option<ViewKernelValue<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let mut vm = crate::vm::VM::new();
     eval_view_kernel_inner(kernel, item, &mut vm)
@@ -2513,7 +2503,7 @@ pub(crate) fn eval_view_kernel_with_vm<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<ViewKernelValue<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     eval_view_kernel_inner(kernel, item, vm)
 }
@@ -2524,7 +2514,7 @@ fn eval_view_kernel_inner<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<ViewKernelValue<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match kernel {
         BodyKernel::Current => Some(ViewKernelValue::View(item.clone())),
@@ -2598,9 +2588,7 @@ where
                 .map(ViewKernelValue::Owned)
         }
         BodyKernel::NestedPlan(plan) => {
-            let result = plan
-                .run_view(item, vm)
-                .unwrap_or_else(|| plan.run(item.materialize()));
+            let result = plan.run(item.materialize());
             result.ok().map(ViewKernelValue::Owned)
         }
         BodyKernel::BuiltinCall { receiver, call } => {
@@ -2736,7 +2724,7 @@ where
 #[inline]
 fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     for key in keys {
         cur = cur.field(key.as_ref());

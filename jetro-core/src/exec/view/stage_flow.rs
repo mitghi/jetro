@@ -83,7 +83,7 @@ pub(super) fn apply_stage<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<ViewStageFlow<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     if !matches!(
         stage.materialization(),
@@ -222,5 +222,6 @@ where
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,
+        pipeline::ViewStageCapability::Split { .. } => None,
     }
 }

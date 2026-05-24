@@ -69,7 +69,7 @@ impl ViewStageReducer {
         vm: &mut crate::vm::VM,
     ) -> Option<()>
     where
-        V: ValueView<'a>,
+        V: ValueView<'a> + 'a,
     {
         match self {
             Self::Keyed {

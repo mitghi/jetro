@@ -1053,6 +1053,13 @@ impl Stage {
         idx: usize,
         kernel: Option<&BodyKernel>,
     ) -> Option<ViewStageCapability> {
+        if let Stage::StringBuiltin { method, value } = self {
+            if *method == crate::builtins::BuiltinMethod::Split {
+                return Some(ViewStageCapability::Split {
+                    sep: Arc::clone(value),
+                });
+            }
+        }
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
         match stage.capability_shape() {

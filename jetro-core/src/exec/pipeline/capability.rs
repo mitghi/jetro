@@ -525,6 +525,11 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the body kernel.
         kernel: usize,
     },
+    /// Split a string row into owned string rows.
+    Split {
+        /// Separator string.
+        sep: std::sync::Arc<str>,
+    },
     /// TakeWhile stage: passes views while the predicate at `kernel` is truthy.
     TakeWhile {
         /// Index into `stage_kernels` for the predicate kernel.
@@ -592,6 +597,7 @@ impl ViewStageCapability {
             Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
+            Self::Split { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
@@ -618,7 +624,7 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        self.view_stage().preserves_cardinality()
+        !matches!(self, Self::Split { .. }) && self.view_stage().preserves_cardinality()
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.

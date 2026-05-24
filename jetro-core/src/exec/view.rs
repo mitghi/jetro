@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::ValueView;
+use crate::data::view::{TapeScratchView, TapeView, ValView, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -23,12 +23,133 @@ mod stage_flow;
 use key::ViewKey;
 use stage_flow::{ViewStageFlow, ViewStageState};
 
+#[derive(Clone)]
+enum FrontierRow<V> {
+    Borrowed(V),
+    Owned(Val),
+}
+
+pub(crate) trait FrontierBaseView<'a>: ValueView<'a> + 'a {}
+
+impl<'a> FrontierBaseView<'a> for ValView<'a> {}
+impl<'a> FrontierBaseView<'a> for TapeView<'a> {}
+impl<'a> FrontierBaseView<'a> for TapeScratchView<'a> {}
+
+impl<'a, V> ValueView<'a> for FrontierRow<V>
+where
+    V: FrontierBaseView<'a>,
+{
+    fn scalar(&self) -> JsonView<'_> {
+        match self {
+            Self::Borrowed(view) => view.scalar(),
+            Self::Owned(value) => JsonView::from_val(value),
+        }
+    }
+
+    fn field(&self, key: &str) -> Self {
+        match self {
+            Self::Borrowed(view) => Self::Borrowed(view.field(key)),
+            Self::Owned(value) => Self::Owned(value.get_field(key)),
+        }
+    }
+
+    fn has_key(&self, key: &str) -> Option<bool> {
+        match self {
+            Self::Borrowed(view) => view.has_key(key),
+            Self::Owned(Val::Obj(map)) => Some(map.contains_key(key)),
+            Self::Owned(Val::ObjSmall(pairs)) => Some(pairs.iter().any(|(k, _)| k.as_ref() == key)),
+            Self::Owned(_) => None,
+        }
+    }
+
+    fn object_keys(&self) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.object_keys(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).object_keys(),
+        }
+    }
+
+    fn object_values(&self) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.object_values(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).object_values(),
+        }
+    }
+
+    fn object_entries(&self) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.object_entries(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).object_entries(),
+        }
+    }
+
+    fn object_pairs(&self) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.object_pairs(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).object_pairs(),
+        }
+    }
+
+    fn pick_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.pick_keys(keys),
+            Self::Owned(value) => crate::data::view::ValView::new(value).pick_keys(keys),
+        }
+    }
+
+    fn omit_keys(&self, keys: &[Arc<str>]) -> Option<Val> {
+        match self {
+            Self::Borrowed(view) => view.omit_keys(keys),
+            Self::Owned(value) => crate::data::view::ValView::new(value).omit_keys(keys),
+        }
+    }
+
+    fn index(&self, idx: i64) -> Self {
+        match self {
+            Self::Borrowed(view) => Self::Borrowed(view.index(idx)),
+            Self::Owned(value) => Self::Owned(value.get_index(idx)),
+        }
+    }
+
+    fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        match self {
+            Self::Borrowed(view) => {
+                Some(Box::new(view.array_iter()?.map(Self::Borrowed)))
+            }
+            Self::Owned(value) => {
+                let items = value.as_vals()?.into_owned();
+                Some(Box::new(items.into_iter().map(Self::Owned)))
+            }
+        }
+    }
+
+    fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+        match self {
+            Self::Borrowed(view) => {
+                Some(Box::new(view.array_iter_rev()?.map(Self::Borrowed)))
+            }
+            Self::Owned(value) => {
+                let mut items = value.as_vals()?.into_owned();
+                items.reverse();
+                Some(Box::new(items.into_iter().map(Self::Owned)))
+            }
+        }
+    }
+
+    fn materialize(&self) -> Val {
+        match self {
+            Self::Borrowed(view) => view.materialize(),
+            Self::Owned(value) => value.clone(),
+        }
+    }
+}
+
 /// Navigates a field-key sequence on `cur`, calling `ValueView::field` for each
 /// key and returning the deepest resolved view. If a step returns a null-like
 /// view, traversal continues with that null view.
 pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     for key in keys {
         cur = cur.field(key.as_ref());
@@ -46,7 +167,7 @@ pub(crate) fn run_with_env_and_vm<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     if let Some(result) = run_terminal_collect(source.clone(), body, vm) {
         return Some(result);
@@ -80,7 +201,7 @@ where
 #[cfg(test)]
 fn run_full<'a, V>(source: V, body: &pipeline::PipelineBody) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let mut vm = VM::new();
     run_full_with_env(source, body, None, &mut vm)
@@ -93,7 +214,7 @@ fn run_full_with_env<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
@@ -159,7 +280,7 @@ fn observe_view_sink<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<ViewRowAction, EvalError>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match sink {
         pipeline::ViewSinkCapability::Collect => {
@@ -265,14 +386,14 @@ where
 
 fn view_membership_matches<'a, V>(item: &V, target: &Val) -> bool
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     view_matches_value(item, target)
 }
 
 fn view_matches_value<'a, V>(item: &V, target: &Val) -> bool
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let target_view = JsonView::from_val(target);
     if !matches!(target_view, JsonView::ArrayLen(_) | JsonView::ObjectLen(_)) {
@@ -287,7 +408,7 @@ fn view_arg_extreme_key_with_vm<'a, V>(
     vm: &mut VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
@@ -305,7 +426,7 @@ fn view_sink_predicate_matches<'a, V>(
     vm: &mut VM,
 ) -> Option<bool>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     let Some(kernel_idx) = predicate_kernel else {
         return Some(true);
@@ -325,7 +446,7 @@ fn run_prefix_then_materialized_suffix<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let prefix = pipeline::view_prefix_capabilities(body)?;
     if prefix.consumed_stages >= body.stages.len()
@@ -374,7 +495,7 @@ fn run_terminal_collect<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
@@ -405,7 +526,7 @@ fn run_terminal_select_projection<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let (prefix_len, project_kernel) = terminal_projection_run(body, 0)?;
     let position = match &body.sink {
@@ -502,8 +623,32 @@ fn drive_view_frontier<'a, V, F>(
     observe: F,
 ) -> Option<Result<(), EvalError>>
 where
-    V: ValueView<'a>,
-    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    drive_view_frontier_rows(
+        source,
+        source_capabilities,
+        stages,
+        stage_kernels,
+        source_demand,
+        vm,
+        observe,
+    )
+}
+
+fn drive_view_frontier_rows<'a, V, F>(
+    source: V,
+    source_capabilities: pipeline::SourceCapabilities,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    vm: &mut VM,
+    observe: F,
+) -> Option<Result<(), EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     if source_demand.is_zero() {
         return Some(Ok(()));
@@ -579,12 +724,35 @@ fn drive_view_iter<'a, V, I, F>(
     stage_kernels: &[pipeline::BodyKernel],
     source_demand: PullDemand,
     vm: &mut VM,
+    observe: F,
+) -> Option<Result<(), EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    I: IntoIterator<Item = V>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    drive_frontier_iter(
+        items.into_iter().map(FrontierRow::Borrowed),
+        stages,
+        stage_kernels,
+        source_demand,
+        vm,
+        observe,
+    )
+}
+
+fn drive_frontier_iter<'a, V, I, F>(
+    items: I,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    vm: &mut VM,
     mut observe: F,
 ) -> Option<Result<(), EvalError>>
 where
-    V: ValueView<'a>,
-    I: IntoIterator<Item = V>,
-    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+    V: FrontierBaseView<'a>,
+    I: IntoIterator<Item = FrontierRow<V>>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     let mut op_state: Vec<ViewStageState> = (0..stages.len())
         .map(|_| ViewStageState::default())
@@ -627,7 +795,7 @@ where
 /// When all stages have been applied it calls `observe`. `FlatMap` stages expand
 /// into child views, each of which is recursed independently.
 fn drive_view_item<'a, V, F>(
-    item: V,
+    item: FrontierRow<V>,
     stage_idx: usize,
     stages: &[pipeline::ViewStageCapability],
     op_state: &mut [ViewStageState],
@@ -638,8 +806,8 @@ fn drive_view_item<'a, V, F>(
     observe: &mut F,
 ) -> Option<Result<ViewDriveFlow, EvalError>>
 where
-    V: ValueView<'a>,
-    F: FnMut(&V, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     let Some(stage) = stages.get(stage_idx).cloned() else {
         return Some(match observe(&item, vm)? {
@@ -667,6 +835,32 @@ where
         for child in eval_flat_map_kernel(&item, kernel, vm)? {
             let flow = match drive_view_item(
                 child,
+                stage_idx + 1,
+                stages,
+                op_state,
+                stage_kernels,
+                source_demand,
+                emitted_outputs,
+                vm,
+                observe,
+            )? {
+                Ok(flow) => flow,
+                Err(err) => return Some(Err(err)),
+            };
+            if matches!(flow, ViewDriveFlow::Stop) {
+                return Some(Ok(ViewDriveFlow::Stop));
+            }
+        }
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+
+    if let pipeline::ViewStageCapability::Split { sep } = stage {
+        let JsonView::Str(value) = item.scalar() else {
+            return Some(Ok(ViewDriveFlow::Continue));
+        };
+        for part in value.split(sep.as_ref()) {
+            let flow = match drive_view_item(
+                FrontierRow::Owned(Val::Str(Arc::from(part))),
                 stage_idx + 1,
                 stages,
                 op_state,
@@ -787,7 +981,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let mut plan = reducer_stage::plan(body)?;
     if !body.suffix_can_run_with_materialized_source_env(plan.consumed_stages) {
@@ -832,7 +1026,7 @@ fn run_sort_prefix_then_materialized_suffix<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let plan = sort_barrier_plan(body)?;
     let strategies =
@@ -911,16 +1105,16 @@ where
 /// applying any remaining prefix stages and the fused projection kernel without
 /// a separate materialisation step.
 fn run_sorted_rows_terminal_collect_suffix<'a, V>(
-    rows: Vec<V>,
+    rows: Vec<FrontierRow<V>>,
     plan: &TerminalCollectPlan,
     stage_kernels: &[pipeline::BodyKernel],
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
-    if let Err(err) = drive_view_iter(
+    if let Err(err) = drive_frontier_iter(
         rows,
         &plan.prefix,
         stage_kernels,
@@ -940,14 +1134,14 @@ where
 /// Applies a trailing view-native projection only to the selected sorted row
 /// for bounded-sort suffixes such as `.sort_by(k).map(f).last()`.
 fn run_sorted_rows_terminal_select_projection_suffix<'a, V>(
-    rows: &[V],
+    rows: &[FrontierRow<V>],
     body: &pipeline::PipelineBody,
     suffix_start: usize,
     source_reversed: bool,
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let (relative_prefix_len, project_kernel) = terminal_projection_run(body, suffix_start)?;
     let prefix_end = suffix_start + relative_prefix_len;
@@ -957,7 +1151,7 @@ where
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..prefix_end], &body.sink);
     if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
         let mut selected = Vec::new();
-        if let Err(err) = drive_view_iter(
+        if let Err(err) = drive_frontier_iter(
             rows.iter().cloned(),
             &prefix,
             &body.stage_kernels,
@@ -991,7 +1185,7 @@ where
     let mut seen = false;
     let mut selected_index = 0usize;
 
-    if let Err(err) = drive_view_iter(
+    if let Err(err) = drive_frontier_iter(
         rows.iter().cloned(),
         &prefix,
         &body.stage_kernels,
@@ -1021,14 +1215,14 @@ where
 /// Feeds pre-sorted view rows through a fully view-native suffix and sink,
 /// avoiding the materialized boundary for bounded sort winners.
 fn run_sorted_rows_view_suffix<'a, V>(
-    rows: &[V],
+    rows: &[FrontierRow<V>],
     body: &pipeline::PipelineBody,
     suffix_start: usize,
     base_env: &Env,
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let suffix = view_suffix_capabilities(body, suffix_start)?;
     let source_demand =
@@ -1041,7 +1235,7 @@ where
     };
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
 
-    if let Err(err) = drive_view_iter(
+    if let Err(err) = drive_frontier_iter(
         rows.iter().cloned(),
         &suffix.stages,
         &body.stage_kernels,
@@ -1066,7 +1260,7 @@ fn run_sort_prefix_then_view_suffix<'a, V>(
     vm: &mut VM,
 ) -> Option<Result<Val, EvalError>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     let suffix = view_suffix_capabilities(body, plan.sort_stage + 1)?;
     let source_demand =
@@ -1114,7 +1308,7 @@ where
         return Some(out);
     }
 
-    if let Err(err) = drive_view_iter(
+    if let Err(err) = drive_frontier_iter(
         ordered,
         &suffix.stages,
         &body.stage_kernels,
@@ -1268,7 +1462,7 @@ fn apply_view_stage<'a, V>(
     vm: &mut VM,
 ) -> Option<ViewStageFlow<V>>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels, vm)
 }
@@ -1296,7 +1490,7 @@ fn eval_filter_kernel_with_vm<'a, V>(
     vm: &mut VM,
 ) -> Option<bool>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
@@ -1306,7 +1500,7 @@ where
 
 fn eval_map_kernel_with_vm<'a, V>(item: &V, kernel: &pipeline::BodyKernel, vm: &mut VM) -> Option<V>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
@@ -1318,16 +1512,19 @@ where
 /// iterator of child views. Returns `None` when the kernel produces an owned
 /// `Val` (not array-iterable in the view domain).
 fn eval_flat_map_kernel<'a, V>(
-    item: &V,
+    item: &FrontierRow<V>,
     kernel: &pipeline::BodyKernel,
     vm: &mut VM,
-) -> Option<Box<dyn Iterator<Item = V> + 'a>>
+) -> Option<Box<dyn Iterator<Item = FrontierRow<V>> + 'a>>
 where
-    V: ValueView<'a>,
+    V: FrontierBaseView<'a>,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => view.array_iter(),
-        pipeline::ViewKernelValue::Owned(_) => None,
+        pipeline::ViewKernelValue::Owned(value) => {
+            let items = value.as_vals()?.into_owned();
+            Some(Box::new(items.into_iter().map(FrontierRow::Owned)))
+        }
     }
 }
 
@@ -1337,7 +1534,7 @@ fn eval_owned_scalar_or_value_kernel_with_vm<'a, V>(
     vm: &mut VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
@@ -1351,7 +1548,7 @@ fn eval_view_key_with_vm<'a, V>(
     vm: &mut VM,
 ) -> Option<ViewKey>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match kernel {
         Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
@@ -1365,7 +1562,7 @@ where
 
 fn eval_view_key_scalar<'a, V>(item: &V) -> Option<ViewKey>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     ViewKey::from_view(item.scalar()).or_else(|| Some(ViewKey::from_owned(item.materialize())))
 }
@@ -1374,7 +1571,7 @@ where
 /// Falls back to `item.materialize()` when no key program is specified.
 fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>, vm: &mut VM) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match key {
         Some(program) => match program.eval_view_with_vm(item, vm)? {
@@ -1550,6 +1747,8 @@ mod tests {
         }
     }
 
+    impl<'a> super::FrontierBaseView<'a> for CountingView {}
+
     #[derive(Clone)]
     struct CountingNestedView {
         rows: Arc<[Arc<[i64]>]>,
@@ -1702,6 +1901,8 @@ mod tests {
         }
     }
 
+    impl<'a> super::FrontierBaseView<'a> for CountingNestedView {}
+
     impl CountingNestedView {
         fn with_row(&self, row_idx: usize) -> Self {
             Self {
@@ -1714,6 +1915,116 @@ mod tests {
             }
         }
     }
+
+    #[derive(Clone)]
+    struct CountingStringView {
+        rows: Arc<[Arc<str>]>,
+        idx: Option<usize>,
+        materialize_reads: Rc<Cell<usize>>,
+    }
+
+    impl CountingStringView {
+        fn root(rows: &[&str]) -> Self {
+            Self {
+                rows: rows.iter().map(|row| Arc::from(*row)).collect::<Vec<_>>().into(),
+                idx: None,
+                materialize_reads: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn materialize_reads(&self) -> usize {
+            self.materialize_reads.get()
+        }
+    }
+
+    impl<'a> ValueView<'a> for CountingStringView {
+        fn scalar(&self) -> JsonView<'_> {
+            match self.idx {
+                Some(idx) => self
+                    .rows
+                    .get(idx)
+                    .map(|row| JsonView::Str(row.as_ref()))
+                    .unwrap_or(JsonView::Null),
+                None => JsonView::ArrayLen(self.rows.len()),
+            }
+        }
+
+        fn field(&self, _key: &str) -> Self {
+            self.clone()
+        }
+
+        fn has_key(&self, _key: &str) -> Option<bool> {
+            None
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_pairs(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn index(&self, idx: i64) -> Self {
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx: (idx >= 0).then_some(idx as usize),
+                materialize_reads: Rc::clone(&self.materialize_reads),
+            }
+        }
+
+        fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            Some(Box::new((0..rows.len()).map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                materialize_reads: Rc::clone(&materialize_reads),
+            })))
+        }
+
+        fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            Some(Box::new((0..rows.len()).rev().map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                materialize_reads: Rc::clone(&materialize_reads),
+            })))
+        }
+
+        fn materialize(&self) -> Val {
+            self.materialize_reads.set(self.materialize_reads.get() + 1);
+            self.idx
+                .and_then(|idx| self.rows.get(idx).cloned())
+                .map(Val::Str)
+                .unwrap_or(Val::Null)
+        }
+    }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingStringView {}
 
     #[test]
     fn view_frontier_zero_demand_skips_source_access() {
@@ -2613,6 +2924,32 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(5));
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_split_streams_owned_tokens_without_materializing_source_rows() {
+        let source = CountingStringView::root(&["a:b", "c:d:e"]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::StringBuiltin {
+                    method: crate::builtins::BuiltinMethod::Split,
+                    value: Arc::from(":"),
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 4,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(4));
         assert_eq!(source.materialize_reads(), 0);
     }
 

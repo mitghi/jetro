@@ -4,9 +4,8 @@
 //! the current row without depending back on the lowering module.
 
 use crate::{
-    data::context::{Env, EvalError},
+    data::context::EvalError,
     data::value::Val,
-    data::view::ValueView,
 };
 
 use super::{Pipeline, PipelineBody, Plan, Source};
@@ -51,27 +50,4 @@ fn body_from_plan(plan: &Plan) -> PipelineBody {
         stage_kernels: plan.stage_kernels.clone(),
         sink_kernels: plan.sink_kernels.clone(),
     }
-}
-
-/// Runs a nested plan against a borrowed row view when the plan can be evaluated
-/// without reading the materialised outer root. Returns `None` when a fallback
-/// path would need root/current VM semantics that require ownership.
-pub(super) fn run_plan_view<'a, V>(
-    plan: &Plan,
-    seed: &V,
-    vm: &mut crate::vm::VM,
-) -> Option<Result<Val, EvalError>>
-where
-    V: ValueView<'a>,
-{
-    let body = body_from_plan(plan);
-    if !body.can_run_with_materialized_receiver() {
-        return None;
-    }
-    let source = match &plan.source {
-        Source::Receiver(_) => seed.clone(),
-        Source::FieldChain { keys } => crate::exec::view::walk_fields(seed.clone(), keys),
-    };
-    let env = Env::new(Val::Null);
-    crate::exec::view::run_with_env_and_vm(source, &body, None, &env, vm)
 }

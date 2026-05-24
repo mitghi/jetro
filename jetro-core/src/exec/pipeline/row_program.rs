@@ -65,7 +65,7 @@ impl RowProgram {
         vm: &mut crate::vm::VM,
     ) -> Option<ViewKernelValue<V>>
     where
-        V: ValueView<'a>,
+        V: ValueView<'a> + 'a,
     {
         eval_view_kernel_with_vm(&self.kernel, row, vm)
     }

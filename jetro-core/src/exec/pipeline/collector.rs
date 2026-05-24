@@ -53,7 +53,7 @@ impl<'a> TerminalCollector<'a> {
         vm: &mut crate::vm::VM,
     ) -> Option<()>
     where
-        V: ValueView<'v>,
+        V: ValueView<'v> + 'v,
     {
         match self {
             Self::Values(values) => values.push(eval_view_program_value_with_vm(item, program, vm)?),
@@ -97,7 +97,7 @@ pub(crate) type TerminalMapCollector<'a> = TerminalCollector<'a>;
 impl<'a> UniformObjectCollector<'a> {
     fn push_view_row_with_vm<'v, V>(&mut self, item: &V, vm: &mut crate::vm::VM) -> Option<()>
     where
-        V: ValueView<'v>,
+        V: ValueView<'v> + 'v,
     {
         if let Some(rows) = self.rows.as_mut() {
             rows.push(eval_view_object_value_with_vm(item, self.object, vm)?);
@@ -157,7 +157,7 @@ fn eval_view_program_value_with_vm<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match program.eval_view_with_vm(item, vm)? {
         ViewKernelValue::View(view) => Some(super::view_kernel_view_to_owned(view)),
@@ -171,7 +171,7 @@ fn eval_view_object_value_with_vm<'a, V>(
     vm: &mut crate::vm::VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a>,
+    V: ValueView<'a> + 'a,
 {
     match super::eval_view_kernel_with_vm(&BodyKernel::Object(object.clone()), item, vm)? {
         ViewKernelValue::View(view) => Some(super::view_kernel_view_to_owned(view)),
