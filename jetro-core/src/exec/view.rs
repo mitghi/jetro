@@ -274,7 +274,17 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[leading_reverses..], &body.sink);
     let source_reversed = leading_reverses % 2 == 1;
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, source_reversed);
+    let selective_reversed_suffix_last = source_reversed
+        && matches!(source_demand, PullDemand::LastInput(_))
+        && view_sink_selects_last(&suffix.sink)
+        && !pipeline::ViewStageCapability::all_preserve_cardinality(&suffix.stages);
+    let drive_demand = if selective_reversed_suffix_last {
+        PullDemand::All
+    } else {
+        source_demand
+    };
+    let sink_source_reversed = source_reversed && !selective_reversed_suffix_last;
+    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, sink_source_reversed);
     let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -315,7 +325,7 @@ where
             &source,
             &suffix.stages,
             &body.stage_kernels,
-            source_demand,
+            drive_demand,
             vm,
             |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
         ) {
@@ -326,7 +336,7 @@ where
                 items,
                 &suffix.stages,
                 &body.stage_kernels,
-                source_demand,
+                drive_demand,
                 vm,
                 |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
             )?
@@ -2466,6 +2476,19 @@ fn view_suffix_sink_for_demand(
         },
         (_, sink) => sink,
     }
+}
+
+fn view_sink_selects_last(sink: &pipeline::ViewSinkCapability) -> bool {
+    matches!(
+        sink,
+        pipeline::ViewSinkCapability::SelectMany { from_end: true, .. }
+            | pipeline::ViewSinkCapability::Builtin {
+                accumulator: crate::builtins::BuiltinSinkAccumulator::SelectOne(
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                ),
+                ..
+            }
+    )
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
