@@ -2566,8 +2566,7 @@ where
 {
     match kernel {
         Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
-            pipeline::ViewKernelValue::View(view) => ViewKey::from_view(view.scalar())
-                .or_else(|| Some(ViewKey::from_owned(view.materialize()))),
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
             pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
         },
         None => eval_view_key_scalar(item),
@@ -2578,7 +2577,7 @@ fn eval_view_key_scalar<'a, V>(item: &V) -> Option<ViewKey>
 where
     V: ValueView<'a> + 'a,
 {
-    ViewKey::from_view(item.scalar()).or_else(|| Some(ViewKey::from_owned(item.materialize())))
+    ViewKey::from_value_view(item)
 }
 
 /// Extracts a sort key `Val` from `item`, optionally applying a row program.
@@ -5194,6 +5193,29 @@ mod tests {
         assert_eq!(out, Val::Int(3));
         assert_eq!(source.scalar_reads(), 6);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_distinct_stage_keys_compound_tape_rows_without_materializing() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"tags":["a"]},{"id":1,"tags":["a"]},{"id":2,"tags":["b"]},{"id":1,"tags":["a"]}]"#
+                .to_vec(),
+        )
+        .unwrap();
+        let source = TapeView::root(&tape);
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: vec![Stage::UniqueBy(None)],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source, &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(2));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
