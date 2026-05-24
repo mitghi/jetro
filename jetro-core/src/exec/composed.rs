@@ -120,7 +120,7 @@ impl RemoveValueFilterStage {
 impl Stage for RemoveValueFilterStage {
     #[inline]
     fn apply<'a>(&self, x: &'a Val) -> StageOutput<'a> {
-        if crate::util::vals_eq(x, &self.target) {
+        if crate::util::vals_deep_eq(x, &self.target) {
             StageOutput::Filtered
         } else {
             StageOutput::Pass(Cow::Borrowed(x))
