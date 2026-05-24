@@ -232,6 +232,9 @@ where
     let mut emitted_outputs: usize = 0;
     let mut stage_taken: Vec<usize> = vec![0; pipeline.stages.len()];
     let mut stage_skipped: Vec<usize> = vec![0; pipeline.stages.len()];
+    let mut stage_unique_seen: Vec<crate::util::StructuralValueSet> = (0..pipeline.stages.len())
+        .map(|_| crate::util::StructuralValueSet::default())
+        .collect();
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
         Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
@@ -298,6 +301,7 @@ where
                     kernel,
                     &mut stage_taken,
                     &mut stage_skipped,
+                    &mut stage_unique_seen,
                     terminal_map_idx,
                     &mut terminal_map_collect,
                 )? {

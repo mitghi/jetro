@@ -1619,9 +1619,34 @@ fn unique_spec() -> BuiltinSpec {
             1.0,
         ))
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
-        .runtime_hook(BuiltinRuntimeHook::Barrier)
-        .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
         .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
+}
+
+#[inline]
+fn unique_apply_stream(
+    ctx: &mut super::builtin::StreamCtx<'_, '_>,
+    item: crate::data::value::Val,
+    body: Option<&crate::vm::Program>,
+) -> Result<
+    crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+    crate::data::context::EvalError,
+> {
+    let key = match body {
+        None => item.clone(),
+        Some(prog) => crate::exec::pipeline::eval_kernel_with_vm(
+            ctx.kernel,
+            &item,
+            ctx.vm,
+            |row, vm| crate::exec::pipeline::apply_item_in_env(vm, ctx.env, row, prog),
+        )
+        .unwrap_or(crate::data::value::Val::Null),
+    };
+    if ctx.stage_unique_seen[ctx.stage_idx].insert(&key) {
+        Ok(crate::exec::pipeline::StageFlow::Continue(item))
+    } else {
+        Ok(crate::exec::pipeline::StageFlow::SkipRow)
+    }
 }
 
 /// Shared barrier body for Unique / UniqueBy.
@@ -1683,6 +1708,17 @@ impl Builtin for Unique {
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
     }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        unique_apply_stream(ctx, item, body)
+    }
 }
 
 /// `unique_by(key)` — distinct by projected key.
@@ -1704,6 +1740,17 @@ impl Builtin for UniqueBy {
         body: Option<&crate::vm::Program>,
     ) -> Option<Result<(), crate::data::context::EvalError>> {
         unique_apply_barrier(ctx, buf, body)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        unique_apply_stream(ctx, item, body)
     }
 }
 

@@ -1843,11 +1843,8 @@ mod tests {
         assert!(!p.can_apply_late_projection_from(2));
 
         let p = lower_query("$.books.unique().map(isbn).last()").unwrap();
-        assert!(matches!(
-            p.fallback_boundary,
-            FallbackBoundary::LegacyStage { index: 0 }
-        ));
-        assert!(!p.can_apply_late_projection_from(0));
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert!(p.can_apply_late_projection_from(0));
     }
 
     #[test]
@@ -1931,6 +1928,22 @@ mod tests {
             p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
             Some(crate::builtins::BuiltinStreamingBoundary::PrefixState)
         );
+    }
+
+    #[test]
+    fn unique_stays_in_streaming_full_input_state_path() {
+        for query in [
+            "$.books.unique().map(isbn).last()",
+            "$.books.unique_by(author.id).map(isbn).count()",
+        ] {
+            let p = lower_query(query).unwrap();
+            assert_eq!(p.fallback_boundary, FallbackBoundary::None, "{query}");
+            assert_eq!(
+                p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+                Some(crate::builtins::BuiltinStreamingBoundary::FullInputState),
+                "{query}"
+            );
+        }
     }
 
     #[test]

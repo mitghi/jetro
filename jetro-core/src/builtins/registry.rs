@@ -1808,8 +1808,8 @@ mod tests {
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
-            (BuiltinMethod::Unique, BuiltinRuntimeHook::Barrier),
-            (BuiltinMethod::UniqueBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Unique, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::UniqueBy, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Reverse, BuiltinRuntimeHook::Barrier),
             (
                 BuiltinMethod::TransformKeys,
@@ -2925,7 +2925,7 @@ mod tests {
         assert_eq!(view_stage(drop_while), Some(BuiltinViewStage::DropWhile));
         assert_eq!(
             pipeline_materialization(drop_while),
-            BuiltinPipelineMaterialization::LegacyMaterialized
+            BuiltinPipelineMaterialization::Streaming
         );
         assert_eq!(
             pipeline_order_effect(drop_while),
@@ -2968,7 +2968,7 @@ mod tests {
             );
             assert_eq!(
                 pipeline_materialization(id),
-                BuiltinPipelineMaterialization::LegacyMaterialized,
+                BuiltinPipelineMaterialization::Streaming,
                 "{method:?}"
             );
             assert_eq!(

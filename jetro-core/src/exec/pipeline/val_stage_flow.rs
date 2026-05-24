@@ -19,6 +19,7 @@ pub(super) fn apply_adapter_streaming<'a>(
     kernel: &BodyKernel,
     stage_taken: &mut [usize],
     stage_skipped: &mut [usize],
+    stage_unique_seen: &mut [crate::util::StructuralValueSet],
     terminal_map_idx: Option<usize>,
     terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
 ) -> Result<StageFlow<Val>, EvalError> {
@@ -33,6 +34,7 @@ pub(super) fn apply_adapter_streaming<'a>(
             stage_idx,
             stage_taken,
             stage_skipped,
+            stage_unique_seen,
             terminal_map_idx,
             terminal_map_collect,
         };

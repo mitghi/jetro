@@ -32,6 +32,7 @@ pub(crate) struct StreamCtx<'a, 'b> {
     pub stage_idx: usize,
     pub stage_taken: &'a mut [usize],
     pub stage_skipped: &'a mut [usize],
+    pub stage_unique_seen: &'a mut [crate::util::StructuralValueSet],
     pub terminal_map_idx: Option<usize>,
     pub terminal_map_collect: &'a mut Option<crate::exec::pipeline::TerminalMapCollector<'b>>,
 }
