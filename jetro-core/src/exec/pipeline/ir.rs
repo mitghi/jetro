@@ -25,7 +25,7 @@ use crate::builtins::{
     BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinCardinality, BuiltinExprPayload,
     BuiltinExprStage, BuiltinMethod, BuiltinNullaryStage, BuiltinPipelineLowering,
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinSinkValueNeed, BuiltinViewStage,
+    BuiltinSinkValueNeed, BuiltinViewCapabilityShape, BuiltinViewStage,
 };
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
@@ -1057,34 +1057,37 @@ impl Stage {
     ) -> Option<ViewStageCapability> {
         let desc = self.descriptor()?;
         let stage = desc.view_stage()?;
-        if stage == BuiltinViewStage::RemoveValue {
-            return match self {
-                Stage::Builtin(call) => match &call.args {
-                    crate::builtins::BuiltinArgs::Val(target) => {
-                        Some(ViewStageCapability::RemoveValue(target.clone()))
+        match stage.capability_shape() {
+            BuiltinViewCapabilityShape::RemoveValueTarget => {
+                return match self {
+                    Stage::Builtin(call) => match &call.args {
+                        crate::builtins::BuiltinArgs::Val(target) => {
+                            Some(ViewStageCapability::RemoveValue(target.clone()))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
+            BuiltinViewCapabilityShape::OptionalKeyBody => {
+                return match desc.body {
+                    Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {
+                        Some(ViewStageCapability::Distinct { kernel: Some(idx) })
+                    }
+                    Some(_) => None,
+                    None => Some(ViewStageCapability::Distinct { kernel: None }),
+                };
+            }
+            BuiltinViewCapabilityShape::KeyedReducer => {
+                return match (desc.builtin_id(), desc.body) {
+                    (Some(id), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
+                        let kind = builtin_keyed_reducer(id)?;
+                        Some(ViewStageCapability::KeyedReduce { kind, kernel: idx })
                     }
                     _ => None,
-                },
-                _ => None,
-            };
-        }
-        if stage == BuiltinViewStage::Distinct {
-            return match desc.body {
-                Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {
-                    Some(ViewStageCapability::Distinct { kernel: Some(idx) })
-                }
-                Some(_) => None,
-                None => Some(ViewStageCapability::Distinct { kernel: None }),
-            };
-        }
-        if stage == BuiltinViewStage::KeyedReduce {
-            return match (desc.builtin_id(), desc.body) {
-                (Some(id), Some(_)) if kernel.is_some_and(BodyKernel::is_view_native) => {
-                    let kind = builtin_keyed_reducer(id)?;
-                    Some(ViewStageCapability::KeyedReduce { kind, kernel: idx })
-                }
-                _ => None,
-            };
+                };
+            }
+            BuiltinViewCapabilityShape::Generic => {}
         }
         let kernel_is_borrowed_view_output =
             kernel.is_some_and(|kernel| kernel.is_view_native() && !kernel.view_result_owned());

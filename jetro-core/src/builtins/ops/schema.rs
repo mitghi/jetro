@@ -230,8 +230,8 @@ mod spec_tests {
         BuiltinCardinality, BuiltinCategory, BuiltinColumnarStage, BuiltinKeyedReducer,
         BuiltinMethod, BuiltinNumericReducer, BuiltinSelectionPosition, BuiltinSinkAccumulator,
         BuiltinSinkDemand, BuiltinSinkValueNeed, BuiltinStageMerge, BuiltinStructural,
-        BuiltinViewInputMode, BuiltinViewMaterialization, BuiltinViewOutputMode,
-        BuiltinViewStage,
+        BuiltinViewCapabilityShape, BuiltinViewInputMode, BuiltinViewMaterialization,
+        BuiltinViewOutputMode, BuiltinViewStage,
     };
 
     fn id(method: BuiltinMethod) -> BuiltinId {
@@ -351,6 +351,22 @@ mod spec_tests {
         assert_eq!(
             BuiltinViewStage::KeyedReduce.materialization(),
             BuiltinViewMaterialization::StageFinalValue
+        );
+        assert_eq!(
+            BuiltinViewStage::KeyedReduce.capability_shape(),
+            BuiltinViewCapabilityShape::KeyedReducer
+        );
+        assert_eq!(
+            BuiltinViewStage::Distinct.capability_shape(),
+            BuiltinViewCapabilityShape::OptionalKeyBody
+        );
+        assert_eq!(
+            BuiltinViewStage::RemoveValue.capability_shape(),
+            BuiltinViewCapabilityShape::RemoveValueTarget
+        );
+        assert_eq!(
+            BuiltinViewStage::Map.capability_shape(),
+            BuiltinViewCapabilityShape::Generic
         );
         assert_eq!(
             BuiltinViewStage::Map.materialization(),

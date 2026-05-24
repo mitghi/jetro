@@ -1239,6 +1239,19 @@ pub enum BuiltinViewOutputMode {
     EmitsOwnedValue,
 }
 
+/// Extra executor data required to construct a borrowed-view stage capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewCapabilityShape {
+    /// Standard stage capability; body/native compatibility is enough.
+    Generic,
+    /// Stage removes rows matching a literal target value.
+    RemoveValueTarget,
+    /// Stage may carry an optional distinct key body.
+    OptionalKeyBody,
+    /// Stage requires keyed-reducer metadata plus a key body.
+    KeyedReducer,
+}
+
 /// When, if ever, a view-stage or sink must materialise elements into owned
 /// values. This is builtin metadata; executors consume it instead of
 /// rediscovering materialization policy from builtin identity.
@@ -1935,6 +1948,17 @@ impl BuiltinViewStage {
     #[inline]
     pub fn requires_borrowed_body_result(self) -> bool {
         matches!(self.output_mode(), BuiltinViewOutputMode::BorrowedSubviews)
+    }
+
+    /// Returns the executor capability construction shape for this stage.
+    #[inline]
+    pub fn capability_shape(self) -> BuiltinViewCapabilityShape {
+        match self {
+            Self::RemoveValue => BuiltinViewCapabilityShape::RemoveValueTarget,
+            Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
+            Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
+            _ => BuiltinViewCapabilityShape::Generic,
+        }
     }
 
     /// Returns the output row-count relationship of this stage.
