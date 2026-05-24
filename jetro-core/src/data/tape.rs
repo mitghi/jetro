@@ -5,10 +5,11 @@
 //! allocation. Used by the simd-json tape path so that string values returned
 //! from `Val::StrSlice` / `Val::StrSliceVec` never allocate.
 
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::{cell::OnceCell, collections::HashMap};
 
 /// Borrowed string slice into a parent `Arc<str>`. See module doc.
 #[derive(Clone, Debug)]
@@ -445,20 +446,31 @@ fn rebuild_object_field_index(
         if len < OBJECT_FIELD_INDEX_MIN_LEN {
             continue;
         }
-        let mut fields = Vec::with_capacity(len);
-        let mut cur = node_idx + 1;
-        for _ in 0..len {
-            let key_idx = cur;
-            let value_idx = cur + 1;
-            fields.push(ObjectFieldEntry {
-                hash: tape_string_hash(nodes, key_idx),
-                key_idx,
-                value_idx,
-            });
-            cur = value_idx + tape_node_span(nodes, value_idx);
-        }
-        index.insert(node_idx, fields.into_boxed_slice());
+        index.insert(
+            node_idx,
+            build_object_field_entries(nodes, node_idx + 1, len),
+        );
     }
+}
+
+fn build_object_field_entries(
+    nodes: &[TapeNode],
+    first: usize,
+    len: usize,
+) -> Box<[ObjectFieldEntry]> {
+    let mut fields = Vec::with_capacity(len);
+    let mut cur = first;
+    for _ in 0..len {
+        let key_idx = cur;
+        let value_idx = cur + 1;
+        fields.push(ObjectFieldEntry {
+            hash: tape_string_hash(nodes, key_idx),
+            key_idx,
+            value_idx,
+        });
+        cur = value_idx + tape_node_span(nodes, value_idx);
+    }
+    fields.into_boxed_slice()
 }
 
 #[inline]
@@ -508,7 +520,7 @@ pub(crate) struct TapeScratch {
     buffers: simd_json::Buffers,
     pub(crate) nodes: Vec<TapeNode>,
     array_child_index: OnceCell<HashMap<usize, Box<[usize]>>>,
-    object_field_index: OnceCell<HashMap<usize, Box<[ObjectFieldEntry]>>>,
+    object_field_index: RefCell<HashMap<usize, Box<[ObjectFieldEntry]>>>,
 }
 impl TapeScratch {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
@@ -517,7 +529,7 @@ impl TapeScratch {
             buffers: simd_json::Buffers::new(capacity),
             nodes: Vec::new(),
             array_child_index: OnceCell::new(),
-            object_field_index: OnceCell::new(),
+            object_field_index: RefCell::new(HashMap::new()),
         }
     }
 
@@ -529,7 +541,7 @@ impl TapeScratch {
         self.nodes =
             unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
         self.array_child_index = OnceCell::new();
-        self.object_field_index = OnceCell::new();
+        self.object_field_index.get_mut().clear();
         Ok(())
     }
 
@@ -605,9 +617,7 @@ impl TapeScratch {
             return None;
         };
         if len >= OBJECT_FIELD_INDEX_MIN_LEN {
-            if let Some(value_idx) =
-                indexed_object_field_value(|i| self.str_at(i), self.object_field_index(), idx, key)
-            {
+            if let Some(value_idx) = self.indexed_object_field_value(idx, len, key) {
                 return Some(value_idx);
             }
         }
@@ -631,9 +641,7 @@ impl TapeScratch {
 
     #[cfg(test)]
     pub(crate) fn has_object_field_index(&self, object_idx: usize) -> bool {
-        self.object_field_index
-            .get()
-            .is_some_and(|index| index.contains_key(&object_idx))
+        self.object_field_index.borrow().contains_key(&object_idx)
     }
 
     #[inline]
@@ -642,10 +650,16 @@ impl TapeScratch {
             .get_or_init(|| build_array_child_index(&self.nodes))
     }
 
-    #[inline]
-    fn object_field_index(&self) -> &HashMap<usize, Box<[ObjectFieldEntry]>> {
-        self.object_field_index
-            .get_or_init(|| build_object_field_index(&self.nodes))
+    fn indexed_object_field_value(&self, idx: usize, len: usize, key: &str) -> Option<usize> {
+        let mut index = self.object_field_index.borrow_mut();
+        let fields = index
+            .entry(idx)
+            .or_insert_with(|| build_object_field_entries(&self.nodes, idx + 1, len));
+        let needle_hash = str_hash(key);
+        fields.iter().find_map(|field| {
+            (field.hash == needle_hash && self.str_at(field.key_idx) == key)
+                .then_some(field.value_idx)
+        })
     }
 }
 
@@ -731,6 +745,31 @@ mod tests {
         assert!(!scratch.has_object_field_index(0));
         assert!(scratch.object_field_value(0, "k11").is_some());
         assert!(!scratch.has_object_field_index(0));
+    }
+
+    #[test]
+    fn scratch_object_field_index_builds_only_requested_object() {
+        let left = (0..12)
+            .map(|n| format!(r#""l{n}":{n}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let right = (0..12)
+            .map(|n| format!(r#""r{n}":{n}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(r#"{{"left":{{{left}}},"right":{{{right}}}}}"#);
+        let mut scratch = super::TapeScratch::with_capacity(json.len());
+        scratch.parse_slice(json.as_bytes()).expect("parse");
+
+        let left_idx = scratch.object_field_value(0, "left").expect("left");
+        let right_idx = scratch.object_field_value(0, "right").expect("right");
+        assert!(!scratch.has_object_field_index(left_idx));
+        assert!(!scratch.has_object_field_index(right_idx));
+
+        assert!(scratch.object_field_value(left_idx, "l11").is_some());
+
+        assert!(scratch.has_object_field_index(left_idx));
+        assert!(!scratch.has_object_field_index(right_idx));
     }
 
     #[test]
