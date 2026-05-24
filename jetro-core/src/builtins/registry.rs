@@ -1119,6 +1119,19 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::StripPrefix | BuiltinViewValueProjection::StripSuffix => {
+            let BuiltinArgs::Str(affix) = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => ViewProjectionResult::Owned(strip_view_string_affix(
+                    value,
+                    affix,
+                    matches!(projection, BuiltinViewValueProjection::StripPrefix),
+                )),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1145,6 +1158,15 @@ fn replace_view_string(value: &str, needle: &str, replacement: &str, all: bool) 
         value.replacen(needle, replacement, 1)
     };
     Val::Str(Arc::from(out))
+}
+
+fn strip_view_string_affix(value: &str, affix: &str, prefix: bool) -> Val {
+    let stripped = if prefix {
+        value.strip_prefix(affix)
+    } else {
+        value.strip_suffix(affix)
+    };
+    Val::Str(Arc::from(stripped.unwrap_or(value)))
 }
 
 fn slice_view_string(value: &str, start: i64, end: Option<i64>) -> Val {
@@ -3780,6 +3802,14 @@ mod tests {
                 BuiltinViewValueProjection::ReplaceAll,
             ),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
+            (
+                BuiltinMethod::StripPrefix,
+                BuiltinViewValueProjection::StripPrefix,
+            ),
+            (
+                BuiltinMethod::StripSuffix,
+                BuiltinViewValueProjection::StripSuffix,
+            ),
             (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
             (
                 BuiltinMethod::ToString,
@@ -5802,6 +5832,14 @@ mod tests {
             Some(BuiltinViewValueProjection::Slice)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::StripPrefix)),
+            Some(BuiltinViewValueProjection::StripPrefix)
+        );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::StripSuffix)),
+            Some(BuiltinViewValueProjection::StripSuffix)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::ToJson)),
             Some(BuiltinViewValueProjection::ToJson)
         );
@@ -5973,6 +6011,14 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::from(replaced_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
+        let stripped_non_string = apply(
+            BuiltinMethod::StripPrefix,
+            BuiltinArgs::Str(std::sync::Arc::from("pre")),
+        );
+        assert_eq!(
+            serde_json::Value::from(stripped_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }

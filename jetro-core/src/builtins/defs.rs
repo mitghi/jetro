@@ -4020,9 +4020,49 @@ macro_rules! str_arg_scalar_native {
     };
 }
 
+pub(crate) struct StripPrefix;
+impl Builtin for StripPrefix {
+    const METHOD: BuiltinMethod = BuiltinMethod::StripPrefix;
+    const NAME: &'static str = "strip_prefix";
+    fn spec() -> BuiltinSpec {
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::StripPrefix)
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(prefix) => {
+                Some(super::strip_prefix_apply(recv, prefix).unwrap_or_else(|| recv.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(crate) struct StripSuffix;
+impl Builtin for StripSuffix {
+    const METHOD: BuiltinMethod = BuiltinMethod::StripSuffix;
+    const NAME: &'static str = "strip_suffix";
+    fn spec() -> BuiltinSpec {
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::StripSuffix)
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::Str(suffix) => {
+                Some(super::strip_suffix_apply(recv, suffix).unwrap_or_else(|| recv.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
 str_arg_scalar_native! {
-    StripPrefix, "strip_prefix", strip_prefix_apply;
-    StripSuffix, "strip_suffix", strip_suffix_apply;
     Scan, "scan", scan_apply;
     ReMatch, "re_match", re_match_apply;
     ReMatchFirst, "match_first", re_match_first_apply;

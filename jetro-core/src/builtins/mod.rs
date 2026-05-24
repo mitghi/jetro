@@ -924,6 +924,10 @@ pub enum BuiltinViewValueProjection {
     ReplaceAll,
     /// Slice a string value by character offsets.
     Slice,
+    /// Remove a matching string prefix.
+    StripPrefix,
+    /// Remove a matching string suffix.
+    StripSuffix,
     /// Coerce the value to Jetro's human-readable string form.
     ToString,
     /// Serialize the value to compact JSON text.
@@ -939,7 +943,9 @@ impl BuiltinViewValueProjection {
             BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
             | BuiltinViewValueProjection::ToString
-            | BuiltinViewValueProjection::ToJson => {
+            | BuiltinViewValueProjection::ToJson
+            | BuiltinViewValueProjection::StripPrefix
+            | BuiltinViewValueProjection::StripSuffix => {
                 BuiltinDemandLaw::MapLike
             }
         }
