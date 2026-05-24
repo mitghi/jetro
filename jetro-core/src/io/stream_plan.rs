@@ -111,6 +111,10 @@ impl RowStreamStage {
         self.op().is_terminal()
     }
 
+    pub(crate) fn streaming_boundary(&self) -> crate::builtins::BuiltinStreamingBoundary {
+        self.op().streaming_boundary()
+    }
+
     fn retained_limit(&self) -> Option<usize> {
         match self {
             RowStreamStage::Take(n) => Some(*n),

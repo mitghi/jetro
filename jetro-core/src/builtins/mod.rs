@@ -1105,6 +1105,24 @@ impl BuiltinRowStreamOp {
         )
     }
 
+    /// Semantic streaming boundary for this source-level row operation.
+    #[inline]
+    pub(crate) const fn streaming_boundary(self) -> BuiltinStreamingBoundary {
+        match self {
+            Self::Reverse => BuiltinStreamingBoundary::FullInputOrder,
+            Self::DistinctBy => BuiltinStreamingBoundary::FullInputState,
+            Self::Take | Self::First | Self::Last | Self::FindFirst => {
+                BuiltinStreamingBoundary::BoundedState
+            }
+            Self::Count | Self::Sum | Self::Avg | Self::Min | Self::Max => {
+                BuiltinStreamingBoundary::FullInputState
+            }
+            Self::Filter | Self::FindOne | Self::Any | Self::All | Self::Map => {
+                BuiltinStreamingBoundary::RowLocal
+            }
+        }
+    }
+
     /// Fixed number of rows retained by this operation, independent of user
     /// arguments. Argument-bearing operations such as `take(n)` report their
     /// dynamic limit from the lowered stage.

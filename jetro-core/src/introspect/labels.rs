@@ -34,3 +34,16 @@ pub(crate) fn arg_extreme_sink_label(sink: crate::builtins::BuiltinArgExtremeSin
         crate::builtins::BuiltinArgExtremeSink::MinBy => "min-by",
     }
 }
+
+pub(crate) fn streaming_boundary_label(
+    boundary: crate::builtins::BuiltinStreamingBoundary,
+) -> &'static str {
+    match boundary {
+        crate::builtins::BuiltinStreamingBoundary::RowLocal => "row-local",
+        crate::builtins::BuiltinStreamingBoundary::SourceStream => "source-stream",
+        crate::builtins::BuiltinStreamingBoundary::BoundedState => "bounded-state",
+        crate::builtins::BuiltinStreamingBoundary::FullInputState => "full-input-state",
+        crate::builtins::BuiltinStreamingBoundary::FullInputOrder => "full-input-order",
+        crate::builtins::BuiltinStreamingBoundary::LegacyMaterialized => "legacy-materialized",
+    }
+}

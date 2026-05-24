@@ -1,4 +1,5 @@
 use super::report::{PipelineInspection, PipelineStageInspection};
+use crate::builtins::registry::streaming_boundary;
 use crate::data::value::Val;
 use crate::exec::pipeline::{
     FallbackBoundary, PhysicalExecPath, PipelineBody, Sink, Source, Stage,
@@ -70,6 +71,11 @@ pub(crate) fn inspect_stage(index: usize, stage: &Stage) -> PipelineStageInspect
         index,
         kind: kind.to_string(),
         detail,
+        streaming_boundary: stage
+            .builtin_id()
+            .map(streaming_boundary)
+            .map(super::labels::streaming_boundary_label)
+            .map(str::to_string),
     }
 }
 
@@ -170,5 +176,13 @@ mod tests {
         assert!(!pipeline.payload_demand.is_empty());
         assert!(!pipeline.source_access.is_empty());
         assert!(!pipeline.source_capabilities.is_empty());
+        assert_eq!(
+            pipeline.stages[0].streaming_boundary.as_deref(),
+            Some("row-local")
+        );
+        assert_eq!(
+            pipeline.stages[1].streaming_boundary.as_deref(),
+            Some("bounded-state")
+        );
     }
 }

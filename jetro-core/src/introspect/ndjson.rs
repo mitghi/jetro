@@ -80,6 +80,9 @@ fn row_stage_inspection(
         index,
         kind: kind.to_string(),
         detail,
+        streaming_boundary: Some(
+            super::labels::streaming_boundary_label(stage.streaming_boundary()).to_string(),
+        ),
     }
 }
 

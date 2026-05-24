@@ -169,6 +169,7 @@ pub struct PipelineStageInspection {
     pub index: usize,
     pub kind: String,
     pub detail: Option<String>,
+    pub streaming_boundary: Option<String>,
 }
 
 /// NDJSON-specific static route and row-stream details.
