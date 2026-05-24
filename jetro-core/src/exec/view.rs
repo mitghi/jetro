@@ -1958,7 +1958,7 @@ fn run_reducing_stage_prefix_then_materialized_suffix<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
-    let mut plan = reducer_stage::plan(body)?;
+    let mut plan: reducer_stage::ReducingStagePlan<FrontierRow<V>> = reducer_stage::plan(body)?;
     if !body.suffix_starts_with_direct_view_projection(plan.consumed_stages)
         && !body.suffix_can_run_with_materialized_source_env(plan.consumed_stages)
     {
@@ -5546,8 +5546,45 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!({"1": 1, "2": 2, "3": 3}));
-        assert_eq!(source.scalar_reads(), 4);
-        assert_eq!(source.materialize_reads(), 4);
+        assert_eq!(source.scalar_reads(), 7);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn reducing_index_by_keeps_replacements_borrowed_until_finish() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"score":1},{"id":1,"score":2},{"id":1,"score":3}]"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: vec![Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::IndexBy,
+                body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("id"))],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"1": {"id": 1, "score": 3}})
+        );
+        assert_eq!(tape.materialized_subtrees(), 1);
     }
 
     #[test]

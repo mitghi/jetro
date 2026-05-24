@@ -16,18 +16,18 @@ use super::key::ViewKey;
 /// Execution plan for a keyed-reduce barrier stage detected in the view pipeline.
 /// Carries the view-domain prefix, the reducer accumulator, and the stage count
 /// consumed so the caller knows where to resume materialised execution.
-pub(super) struct ReducingStagePlan {
+pub(super) struct ReducingStagePlan<Row> {
     /// View-domain stages that precede the keyed-reduce barrier.
     pub(super) prefix: Vec<pipeline::ViewStageCapability>,
     /// Accumulator that aggregates keyed observations from the view frontier.
-    pub(super) reducer: ViewStageReducer,
+    pub(super) reducer: ViewStageReducer<Row>,
     /// Number of pipeline stages consumed by this plan (prefix + barrier).
     pub(super) consumed_stages: usize,
 }
 
 /// State machine for view-level keyed aggregation. Currently the only variant
 /// is `Keyed`, which handles `group_by`, `count_by`, and `index_by`.
-pub(super) enum ViewStageReducer {
+pub(super) enum ViewStageReducer<Row> {
     /// A keyed reducer accumulating entries into an `IndexMap` keyed by `ViewKey`.
     Keyed {
         /// The specific keyed aggregation kind to perform.
@@ -37,7 +37,7 @@ pub(super) enum ViewStageReducer {
         /// Whether downstream suffixes need full values or only the object key set.
         value_need: KeyedValueNeed,
         /// Accumulated entries, one per distinct key observed so far.
-        entries: IndexMap<ViewKey, KeyedEntry>,
+        entries: IndexMap<ViewKey, KeyedEntry<Row>>,
     },
 }
 
@@ -48,18 +48,21 @@ pub(super) enum KeyedValueNeed {
 }
 
 /// The per-key accumulated value for a `ViewStageReducer::Keyed` operation.
-pub(super) enum KeyedEntry {
+pub(super) enum KeyedEntry<Row> {
     /// Key presence only; enough for suffixes such as `.keys()`.
     KeyOnly,
     /// Running count for `count_by`.
     Count(i64),
-    /// Last-seen materialised value for `index_by`.
-    Value(Val),
-    /// Accumulating list of materialised values for `group_by`.
-    Group(Vec<Val>),
+    /// Last-seen borrowed value for `index_by`.
+    Value(Row),
+    /// Accumulating list of borrowed values for `group_by`.
+    Group(Vec<Row>),
 }
 
-impl ViewStageReducer {
+impl<Row> ViewStageReducer<Row>
+where
+    Row: Clone,
+{
     // Constructs a `ViewStageReducer` from a `KeyedReduce` capability; returns `None` for all other variants.
     fn from_capability(
         capability: pipeline::ViewStageCapability,
@@ -86,7 +89,7 @@ impl ViewStageReducer {
         vm: &mut crate::vm::VM,
     ) -> Option<()>
     where
-        V: ValueView<'a> + 'a,
+        V: ValueView<'a> + Clone + Into<Row> + 'a,
     {
         match self {
             Self::Keyed {
@@ -112,7 +115,7 @@ impl ViewStageReducer {
                         if matches!(value_need, KeyedValueNeed::KeysOnly) {
                             entries.entry(key).or_insert(KeyedEntry::KeyOnly);
                         } else {
-                            entries.insert(key, KeyedEntry::Value(item.materialize()));
+                            entries.insert(key, KeyedEntry::Value(item.clone().into()));
                         }
                     }
                     BuiltinKeyedReducer::Group => {
@@ -122,11 +125,11 @@ impl ViewStageReducer {
                             match entries.entry(key) {
                                 indexmap::map::Entry::Occupied(mut entry) => {
                                     if let KeyedEntry::Group(items) = entry.get_mut() {
-                                        items.push(item.materialize());
+                                        items.push(item.clone().into());
                                     }
                                 }
                                 indexmap::map::Entry::Vacant(entry) => {
-                                    entry.insert(KeyedEntry::Group(vec![item.materialize()]));
+                                    entry.insert(KeyedEntry::Group(vec![item.clone().into()]));
                                 }
                             }
                         }
@@ -139,7 +142,10 @@ impl ViewStageReducer {
 
     /// Converts the accumulated `KeyedEntry` map into a final `Val::Obj`,
     /// where each key maps to its count, indexed value, or grouped array.
-    pub(super) fn finish(self) -> Val {
+    pub(super) fn finish<'a>(self) -> Val
+    where
+        Row: ValueView<'a> + 'a,
+    {
         match self {
             Self::Keyed { entries, .. } => Val::obj(
                 entries
@@ -148,8 +154,13 @@ impl ViewStageReducer {
                         let value = match entry {
                             KeyedEntry::KeyOnly => Val::Null,
                             KeyedEntry::Count(count) => Val::Int(count),
-                            KeyedEntry::Value(value) => value,
-                            KeyedEntry::Group(items) => Val::arr(items),
+                            KeyedEntry::Value(value) => pipeline::view_kernel_view_to_owned(value),
+                            KeyedEntry::Group(items) => Val::arr(
+                                items
+                                    .into_iter()
+                                    .map(pipeline::view_kernel_view_to_owned)
+                                    .collect(),
+                            ),
                         };
                         (key.object_key(), value)
                     })
@@ -163,7 +174,10 @@ impl ViewStageReducer {
 /// (`KeyedReduce` with `StageFinalValue` materialisation) preceded only by
 /// view-native `Never`-materialisation stages. Returns a `ReducingStagePlan`
 /// on success, or `None` when no qualifying barrier is found.
-pub(super) fn plan(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan> {
+pub(super) fn plan<Row>(body: &pipeline::PipelineBody) -> Option<ReducingStagePlan<Row>>
+where
+    Row: Clone,
+{
     let mut prefix = Vec::new();
     for (idx, stage) in body.stages.iter().enumerate() {
         let capability = stage.view_capability(idx, body.stage_kernels.get(idx))?;
