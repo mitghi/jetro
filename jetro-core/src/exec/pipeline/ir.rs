@@ -1007,6 +1007,9 @@ impl Stage {
     /// Returns `true` when this stage requires a composed-barrier materialisation pass before
     /// the next stage can begin.
     pub(crate) fn is_composed_barrier(&self) -> bool {
+        if matches!(self, Stage::SortedDedup(_)) {
+            return true;
+        }
         self.descriptor()
             .and_then(StageDescriptor::builtin_id)
             .is_some_and(pipeline_composed_barrier)
@@ -1033,17 +1036,15 @@ impl Stage {
     /// Returns `true` when the stage cannot use a composed/view barrier and must fall back to the
     /// legacy full-materialisation executor.
     pub(crate) fn requires_legacy_fallback(&self) -> bool {
-        matches!(self, Stage::SortedDedup(_))
-            || self
-                .descriptor()
-                .and_then(StageDescriptor::builtin_id)
-                .is_some_and(|id| {
-                    pipeline_legacy_materialized(id)
-                        || matches!(
-                            builtin_streaming_boundary(id),
-                            BuiltinStreamingBoundary::LegacyMaterialized
-                        )
-                })
+        self.descriptor()
+            .and_then(StageDescriptor::builtin_id)
+            .is_some_and(|id| {
+                pipeline_legacy_materialized(id)
+                    || matches!(
+                        builtin_streaming_boundary(id),
+                        BuiltinStreamingBoundary::LegacyMaterialized
+                    )
+            })
     }
 
     /// Returns the `ViewStageCapability` for this stage at position `idx` in the kernel list,

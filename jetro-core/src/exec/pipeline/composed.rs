@@ -327,6 +327,15 @@ fn run_barrier(
             let key = key_from_kernel(kernel)?;
             cmp::barrier_unique_by(buf, &key)
         }
+        Stage::SortedDedup(None) => {
+            let sorted = cmp::barrier_sort(buf, &cmp::KeySource::None);
+            cmp::barrier_unique_by(sorted, &cmp::KeySource::None)
+        }
+        Stage::SortedDedup(Some(_)) => {
+            let key = key_from_kernel(kernel)?;
+            let sorted = cmp::barrier_sort(buf, &key);
+            cmp::barrier_unique_by(sorted, &key)
+        }
         Stage::ExprBuiltin { .. } if stage
             .descriptor()
             .and_then(|desc| desc.builtin_id())

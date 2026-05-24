@@ -1950,6 +1950,20 @@ mod tests {
     }
 
     #[test]
+    fn sorted_dedup_uses_composed_barrier_not_legacy_fallback() {
+        use serde_json::json;
+
+        let p = lower_query("$.xs.unique().sort().take(3)").unwrap();
+        assert!(matches!(p.stages[0], Stage::SortedDedup(None)));
+        assert!(p.stages[0].is_composed_barrier());
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert_pipeline_matches_vm(
+            "$.xs.unique().sort().take(3)",
+            json!({"xs": [3, 1, 2, 3, 1, 4]}),
+        );
+    }
+
+    #[test]
     fn demand_optimizer_computed_map_filter_count_matches_vm() {
         use serde_json::json;
         assert_pipeline_matches_vm(

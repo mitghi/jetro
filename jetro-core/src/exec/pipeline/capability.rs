@@ -1204,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn view_prefix_stops_at_first_non_view_stage() {
+    fn view_prefix_includes_registry_scalar_stage() {
         let body = PipelineBody {
             stages: vec![
                 Stage::Filter(
@@ -1230,17 +1230,16 @@ mod tests {
             sink_kernels: Vec::new(),
         };
 
-        assert!(view_capabilities(&body).is_none());
+        assert!(view_capabilities(&body).is_some());
         let prefix = view_prefix_capabilities(&body).unwrap();
-        assert_eq!(prefix.consumed_stages, 2);
-        assert_eq!(prefix.stages.len(), 2);
+        assert_eq!(prefix.consumed_stages, 3);
+        assert_eq!(prefix.stages.len(), 3);
         assert_eq!(
-            view_never_materializing_stage_range(&body, 0, 2)
-                .expect("first two stages are view-native")
+            view_never_materializing_stage_range(&body, 0, 3)
+                .expect("all stages are view-native")
                 .len(),
-            2
+            3
         );
-        assert!(view_never_materializing_stage_range(&body, 0, 3).is_none());
     }
 
     #[test]
@@ -1267,7 +1266,7 @@ mod tests {
         };
 
         let prefix = view_prefix_capabilities(&body).unwrap();
-        assert_eq!(prefix.consumed_stages, 2);
+        assert_eq!(prefix.consumed_stages, 3);
         assert!(matches!(
             prefix.stages[0],
             ViewStageCapability::Map { kernel: 0 }

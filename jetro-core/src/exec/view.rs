@@ -3077,6 +3077,185 @@ mod tests {
 
     impl<'a> super::FrontierBaseView<'a> for CountingObjectValuesView {}
 
+    #[derive(Clone)]
+    struct CountingKeyedObjectView {
+        rows: Arc<[(i64, i64)]>,
+        idx: Option<usize>,
+        field: Option<KeyedObjectField>,
+        scalar_reads: Rc<Cell<usize>>,
+        array_iter_reads: Rc<Cell<usize>>,
+        materialize_reads: Rc<Cell<usize>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum KeyedObjectField {
+        Key,
+        Value,
+    }
+
+    impl CountingKeyedObjectView {
+        fn root(rows: &[(i64, i64)]) -> Self {
+            Self {
+                rows: rows.iter().copied().collect::<Vec<_>>().into(),
+                idx: None,
+                field: None,
+                scalar_reads: Rc::new(Cell::new(0)),
+                array_iter_reads: Rc::new(Cell::new(0)),
+                materialize_reads: Rc::new(Cell::new(0)),
+            }
+        }
+
+        fn array_iter_reads(&self) -> usize {
+            self.array_iter_reads.get()
+        }
+
+        fn materialize_reads(&self) -> usize {
+            self.materialize_reads.get()
+        }
+    }
+
+    impl<'a> ValueView<'a> for CountingKeyedObjectView {
+        fn scalar(&self) -> JsonView<'_> {
+            self.scalar_reads.set(self.scalar_reads.get() + 1);
+            match (self.idx, self.field) {
+                (None, _) => JsonView::ArrayLen(self.rows.len()),
+                (Some(_), None) => JsonView::ObjectLen(2),
+                (Some(idx), Some(KeyedObjectField::Key)) => self
+                    .rows
+                    .get(idx)
+                    .map(|(key, _)| JsonView::Int(*key))
+                    .unwrap_or(JsonView::Null),
+                (Some(idx), Some(KeyedObjectField::Value)) => self
+                    .rows
+                    .get(idx)
+                    .map(|(_, value)| JsonView::Int(*value))
+                    .unwrap_or(JsonView::Null),
+            }
+        }
+
+        fn field(&self, key: &str) -> Self {
+            let field = match key {
+                "k" => Some(KeyedObjectField::Key),
+                "v" => Some(KeyedObjectField::Value),
+                _ => None,
+            };
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx: self.idx,
+                field,
+                scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
+                materialize_reads: Rc::clone(&self.materialize_reads),
+            }
+        }
+
+        fn has_key(&self, key: &str) -> Option<bool> {
+            Some(matches!(key, "k" | "v") && self.idx.is_some())
+        }
+
+        fn object_keys(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_values(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_entries(&self) -> Option<Val> {
+            None
+        }
+
+        fn object_pairs(&self) -> Option<Val> {
+            None
+        }
+
+        fn pick_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn omit_keys(&self, _keys: &[Arc<str>]) -> Option<Val> {
+            None
+        }
+
+        fn index(&self, idx: i64) -> Self {
+            Self {
+                rows: Arc::clone(&self.rows),
+                idx: (idx >= 0).then_some(idx as usize),
+                field: None,
+                scalar_reads: Rc::clone(&self.scalar_reads),
+                array_iter_reads: Rc::clone(&self.array_iter_reads),
+                materialize_reads: Rc::clone(&self.materialize_reads),
+            }
+        }
+
+        fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads.set(self.array_iter_reads.get() + 1);
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let scalar_reads = Rc::clone(&self.scalar_reads);
+            let array_iter_reads = Rc::clone(&self.array_iter_reads);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            Some(Box::new((0..rows.len()).map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                field: None,
+                scalar_reads: Rc::clone(&scalar_reads),
+                array_iter_reads: Rc::clone(&array_iter_reads),
+                materialize_reads: Rc::clone(&materialize_reads),
+            })))
+        }
+
+        fn array_iter_rev(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
+            self.array_iter_reads.set(self.array_iter_reads.get() + 1);
+            if self.idx.is_some() {
+                return None;
+            }
+            let rows = Arc::clone(&self.rows);
+            let scalar_reads = Rc::clone(&self.scalar_reads);
+            let array_iter_reads = Rc::clone(&self.array_iter_reads);
+            let materialize_reads = Rc::clone(&self.materialize_reads);
+            Some(Box::new((0..rows.len()).rev().map(move |idx| Self {
+                rows: Arc::clone(&rows),
+                idx: Some(idx),
+                field: None,
+                scalar_reads: Rc::clone(&scalar_reads),
+                array_iter_reads: Rc::clone(&array_iter_reads),
+                materialize_reads: Rc::clone(&materialize_reads),
+            })))
+        }
+
+        fn materialize(&self) -> Val {
+            self.materialize_reads.set(self.materialize_reads.get() + 1);
+            match (self.idx, self.field) {
+                (Some(idx), Some(KeyedObjectField::Key)) => self
+                    .rows
+                    .get(idx)
+                    .map(|(key, _)| Val::Int(*key))
+                    .unwrap_or(Val::Null),
+                (Some(idx), Some(KeyedObjectField::Value)) => self
+                    .rows
+                    .get(idx)
+                    .map(|(_, value)| Val::Int(*value))
+                    .unwrap_or(Val::Null),
+                (Some(idx), None) => self
+                    .rows
+                    .get(idx)
+                    .map(|(key, value)| {
+                        Val::ObjSmall(Arc::new([
+                            (Arc::from("k"), Val::Int(*key)),
+                            (Arc::from("v"), Val::Int(*value)),
+                        ]))
+                    })
+                    .unwrap_or(Val::Null),
+                (None, _) => Val::Null,
+            }
+        }
+    }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingKeyedObjectView {}
+
     #[test]
     fn view_frontier_zero_demand_skips_source_access() {
         let source = CountingView::root(&[1, 2, 3]);
@@ -4224,6 +4403,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 3]));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn view_runner_uses_view_key_for_keyed_sorted_dedup() {
+        let source = CountingKeyedObjectView::root(&[(2, 20), (1, 10), (2, 21), (3, 30)]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::SortedDedup(Some(Arc::new(crate::vm::Program::new(
+                    Vec::new(),
+                    "",
+                )))),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::FieldRead(Arc::from("k")), BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"k": 1, "v": 10}, {"k": 2, "v": 20}])
+        );
         assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.materialize_reads(), 2);
     }
