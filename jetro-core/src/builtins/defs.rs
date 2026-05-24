@@ -3959,7 +3959,7 @@ impl Builtin for ReverseStr {
     const METHOD: BuiltinMethod = BuiltinMethod::ReverseStr;
     const NAME: &'static str = "reverse_str";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec()
+        scalar_view_value_element_spec(super::BuiltinViewValueProjection::ReverseStr)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

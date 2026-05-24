@@ -930,6 +930,8 @@ pub enum BuiltinViewValueProjection {
     ReplaceAll,
     /// Repeat a string value N times.
     Repeat,
+    /// Reverse a string value by Unicode scalar values.
+    ReverseStr,
     /// Slice a string value by character offsets.
     Slice,
     /// Remove a matching string prefix.
@@ -954,6 +956,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
             | BuiltinViewValueProjection::Repeat
+            | BuiltinViewValueProjection::ReverseStr
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
             | BuiltinViewValueProjection::StripPrefix

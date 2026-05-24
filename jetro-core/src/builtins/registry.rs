@@ -1135,6 +1135,17 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::ReverseStr => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return Some(match view.scalar() {
+                JsonView::Str(value) => {
+                    ViewProjectionResult::Owned(Val::Str(Arc::from(reverse_view_string(value))))
+                }
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Slice => {
             let BuiltinArgs::I64Opt { first, second } = args else {
                 return None;
@@ -1173,6 +1184,10 @@ where
         }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn reverse_view_string(value: &str) -> String {
+    value.chars().rev().collect()
 }
 
 fn pad_view_string(
@@ -3859,6 +3874,10 @@ mod tests {
                 BuiltinMethod::ReplaceAll,
                 BuiltinViewValueProjection::ReplaceAll,
             ),
+            (
+                BuiltinMethod::ReverseStr,
+                BuiltinViewValueProjection::ReverseStr,
+            ),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
             (
                 BuiltinMethod::StripPrefix,
@@ -5902,6 +5921,10 @@ mod tests {
             Some(BuiltinViewValueProjection::ReplaceAll)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::ReverseStr)),
+            Some(BuiltinViewValueProjection::ReverseStr)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::Slice)),
             Some(BuiltinViewValueProjection::Slice)
         );
@@ -6109,6 +6132,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::from(padded_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
+        let reversed_non_string = apply(BuiltinMethod::ReverseStr, BuiltinArgs::None);
+        assert_eq!(
+            serde_json::Value::from(reversed_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }
