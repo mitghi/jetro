@@ -2531,16 +2531,30 @@ mod tests {
             );
             assert_eq!(membership_sink_value_need(sink), ValueNeed::Whole, "{method:?}");
             match sink {
-                BuiltinMembershipSink::Includes | BuiltinMembershipSink::Index => assert_eq!(
-                    membership_sink_result_demand(sink),
-                    SinkResultDemand::UntilMatch,
-                    "{method:?}"
-                ),
-                BuiltinMembershipSink::IndicesOf => assert_eq!(
-                    membership_sink_result_demand(sink),
-                    SinkResultDemand::None,
-                    "{method:?}"
-                ),
+                BuiltinMembershipSink::Includes => {
+                    assert!(sink.returns_bool(), "{method:?}");
+                    assert_eq!(
+                        membership_sink_result_demand(sink),
+                        SinkResultDemand::UntilMatch,
+                        "{method:?}"
+                    );
+                }
+                BuiltinMembershipSink::Index => {
+                    assert!(!sink.returns_bool(), "{method:?}");
+                    assert_eq!(
+                        membership_sink_result_demand(sink),
+                        SinkResultDemand::UntilMatch,
+                        "{method:?}"
+                    );
+                }
+                BuiltinMembershipSink::IndicesOf => {
+                    assert!(!sink.returns_bool(), "{method:?}");
+                    assert_eq!(
+                        membership_sink_result_demand(sink),
+                        SinkResultDemand::None,
+                        "{method:?}"
+                    );
+                }
             }
         }
     }

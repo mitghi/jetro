@@ -1552,6 +1552,12 @@ impl BuiltinMembershipSink {
             Self::IndicesOf => crate::plan::demand::SinkResultDemand::None,
         }
     }
+
+    /// Whether this membership sink returns only a boolean answer.
+    #[inline]
+    pub(crate) const fn returns_bool(self) -> bool {
+        matches!(self, Self::Includes)
+    }
 }
 
 /// Builtin array-child selector behavior.

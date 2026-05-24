@@ -166,7 +166,7 @@ impl MembershipSinkSpec {
 
     /// Returns true for the boolean membership sink.
     pub(crate) fn is_includes(&self) -> bool {
-        self.op == BuiltinMembershipSink::Includes
+        self.op.returns_bool()
     }
 
     /// Returns the builtin method represented by this membership sink.
