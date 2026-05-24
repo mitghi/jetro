@@ -1951,6 +1951,12 @@ impl BuiltinViewStage {
         }
     }
 
+    /// Whether this view stage emits exactly one row for each input row.
+    #[inline]
+    pub fn preserves_cardinality(self) -> bool {
+        matches!(self.cardinality(), BuiltinCardinality::OneToOne)
+    }
+
     /// Returns when this view stage must materialise data while executing.
     #[inline]
     pub fn materialization(self) -> BuiltinViewMaterialization {

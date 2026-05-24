@@ -5,8 +5,8 @@
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
 use crate::builtins::{
-    BuiltinArgExtremeSink, BuiltinCardinality, BuiltinKeyedReducer, BuiltinMembershipSink,
-    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
+    BuiltinArgExtremeSink, BuiltinKeyedReducer, BuiltinMembershipSink, BuiltinPredicateSink,
+    BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
 };
 pub(crate) use crate::builtins::BuiltinViewInputMode as ViewInputMode;
 pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
@@ -215,7 +215,7 @@ pub(crate) fn index_from_end(len: usize, offset: usize) -> Option<usize> {
 
 impl Stage {
     fn preserves_cardinality(&self) -> bool {
-        self.shape().cardinality == BuiltinCardinality::OneToOne
+        self.shape().is_one_to_one()
     }
 }
 
@@ -618,7 +618,7 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        self.view_stage().cardinality() == BuiltinCardinality::OneToOne
+        self.view_stage().preserves_cardinality()
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.
