@@ -2573,6 +2573,9 @@ fn run_materialized_suffix(
     base_env: &Env,
     vm: &mut VM,
 ) -> Result<Val, EvalError> {
+    if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
+        return Ok(Val::arr(boundary_rows));
+    }
     let suffix = suffix_body(body, consumed_stages)
         .with_source(pipeline::Source::Receiver(Val::arr(boundary_rows)));
     let root = Val::Null;
