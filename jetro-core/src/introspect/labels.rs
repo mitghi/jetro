@@ -42,6 +42,8 @@ pub(crate) fn streaming_boundary_label(
         crate::builtins::BuiltinStreamingBoundary::RowLocal => "row-local",
         crate::builtins::BuiltinStreamingBoundary::SourceStream => "source-stream",
         crate::builtins::BuiltinStreamingBoundary::BoundedState => "bounded-state",
+        crate::builtins::BuiltinStreamingBoundary::PrefixState => "prefix-state",
+        crate::builtins::BuiltinStreamingBoundary::Expanding => "expanding",
         crate::builtins::BuiltinStreamingBoundary::FullInputState => "full-input-state",
         crate::builtins::BuiltinStreamingBoundary::FullInputOrder => "full-input-order",
         crate::builtins::BuiltinStreamingBoundary::LegacyMaterialized => "legacy-materialized",

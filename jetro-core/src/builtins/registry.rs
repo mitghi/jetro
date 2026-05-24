@@ -4089,6 +4089,10 @@ mod tests {
             BuiltinStreamingBoundary::BoundedState
         );
         assert_eq!(
+            streaming_boundary(BuiltinId::from_method(BuiltinMethod::DropWhile)),
+            BuiltinStreamingBoundary::PrefixState
+        );
+        assert_eq!(
             streaming_boundary(BuiltinId::from_method(BuiltinMethod::Sort)),
             BuiltinStreamingBoundary::FullInputOrder
         );
@@ -4098,7 +4102,7 @@ mod tests {
         );
         assert_eq!(
             streaming_boundary(BuiltinId::from_method(BuiltinMethod::FlatMap)),
-            BuiltinStreamingBoundary::LegacyMaterialized
+            BuiltinStreamingBoundary::Expanding
         );
         assert_eq!(
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
@@ -4229,6 +4233,22 @@ mod tests {
                                 | BuiltinDemandLaw::Nth
                         ),
                         "{method:?} bounded-state boundaries must publish bounded demand"
+                    );
+                }
+                BuiltinStreamingBoundary::PrefixState => {
+                    assert!(
+                        matches!(
+                            demand_law(id),
+                            BuiltinDemandLaw::TakeWhile | BuiltinDemandLaw::DropWhile
+                        ),
+                        "{method:?} prefix-state boundaries must publish prefix demand"
+                    );
+                }
+                BuiltinStreamingBoundary::Expanding => {
+                    assert_eq!(
+                        demand_law(id),
+                        BuiltinDemandLaw::FlatMapLike,
+                        "{method:?} expanding boundaries must publish flat-map demand"
                     );
                 }
                 BuiltinStreamingBoundary::FullInputState => {

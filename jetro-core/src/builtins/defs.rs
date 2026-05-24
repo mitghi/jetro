@@ -342,7 +342,7 @@ impl Builtin for FlatMap {
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::FlatMapLike)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-            .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::Expanding)
             .expr_stage(BuiltinExprStage::FlatMap)
             .logical_shape(BuiltinLogicalShape::FlatMap)
             .runtime_hook(BuiltinRuntimeHook::Barrier)
@@ -564,7 +564,7 @@ impl Builtin for TakeWhile {
             .view_stage(BuiltinViewStage::TakeWhile)
             .cost(10.0)
             .demand_law(BuiltinDemandLaw::TakeWhile)
-            .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+            .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::TakeWhile)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
@@ -632,7 +632,7 @@ impl Builtin for DropWhile {
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::DropWhile)
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-            .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
+            .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
@@ -1610,7 +1610,7 @@ fn unique_spec() -> BuiltinSpec {
         .order_effect(BuiltinPipelineOrderEffect::Preserves)
         .runtime_hook(BuiltinRuntimeHook::Barrier)
         .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
-        .streaming_boundary(BuiltinStreamingBoundary::LegacyMaterialized)
+        .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
 }
 
 /// Shared barrier body for Unique / UniqueBy.

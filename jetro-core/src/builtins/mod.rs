@@ -2102,6 +2102,11 @@ pub enum BuiltinStreamingBoundary {
     /// Bounded positional/prefix state only, such as `take`, `skip`, `window`,
     /// or `chunk` when downstream demand keeps it bounded.
     BoundedState,
+    /// Predicate-defined prefix state such as `take_while` / `drop_while`.
+    PrefixState,
+    /// One input may emit many outputs, but the operation can stream when the
+    /// executor supports borrowed expansion.
+    Expanding,
     /// Full-input state keyed by values, without requiring output order sort.
     FullInputState,
     /// Full-input ordering boundary such as `sort` or `reverse`.
