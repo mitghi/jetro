@@ -2945,6 +2945,33 @@ mod tests {
     }
 
     #[test]
+    fn registry_indexed_pipeline_shapes_are_cardinality_preserving() {
+        for (method, _, _) in all_method_entries() {
+            let id = BuiltinId::from_method(method);
+            if !pipeline_element(id) {
+                continue;
+            }
+            let Some(shape) = effective_pipeline_shape(id) else {
+                continue;
+            };
+            if !shape.can_indexed {
+                continue;
+            }
+
+            assert_eq!(
+                shape.cardinality,
+                BuiltinCardinality::OneToOne,
+                "{method:?} indexed dispatch requires one-to-one cardinality"
+            );
+            assert_eq!(
+                effective_pipeline_order_effect(id, false),
+                BuiltinPipelineOrderEffect::Preserves,
+                "{method:?} indexed dispatch requires preserved order"
+            );
+        }
+    }
+
+    #[test]
     fn registry_pipeline_elements_participate_in_demand_model() {
         for (method, _, _) in all_method_entries() {
             let id = BuiltinId::from_method(method);
@@ -3841,7 +3868,7 @@ mod tests {
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Split))
                 .unwrap()
                 .can_indexed,
-            true
+            false
         );
         assert_eq!(
             pipeline_shape(BuiltinId::from_method(BuiltinMethod::Chunk))

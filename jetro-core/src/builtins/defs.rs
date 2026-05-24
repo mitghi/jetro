@@ -563,7 +563,7 @@ impl Builtin for TakeWhile {
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
-                true,
+                false,
                 10.0,
                 0.5,
             ))
@@ -628,7 +628,7 @@ impl Builtin for DropWhile {
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Filtering,
-                true,
+                false,
                 10.0,
                 0.5,
             ))
@@ -973,7 +973,6 @@ impl Builtin for Enumerate {
     const NAME: &'static str = "enumerate";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-            .indexed()
             .cost(10.0)
     }
     #[inline]
@@ -992,7 +991,6 @@ impl Builtin for Pairwise {
     const NAME: &'static str = "pairwise";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-            .indexed()
             .cost(10.0)
     }
     #[inline]
@@ -1051,7 +1049,7 @@ impl Builtin for Split {
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Expanding,
-                true,
+                false,
                 2.0,
                 1.0,
             ))
@@ -1306,7 +1304,7 @@ impl Builtin for Window {
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
-                true,
+                false,
                 2.0,
                 1.0,
             ))
@@ -1338,7 +1336,7 @@ impl Builtin for Chunk {
             .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
-                true,
+                false,
                 2.0,
                 1.0,
             ))
@@ -1590,7 +1588,7 @@ fn unique_spec() -> BuiltinSpec {
         .demand_law(BuiltinDemandLaw::UniqueLike)
         .pipeline_shape(BuiltinPipelineShape::new(
             BuiltinCardinality::Filtering,
-            true,
+            false,
             10.0,
             1.0,
         ))
@@ -2553,7 +2551,6 @@ impl Builtin for Set {
     const NAME: &'static str = "set";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
-            .indexed()
             .demand_law(BuiltinDemandLaw::MapLike)
             .element()
     }
@@ -2573,7 +2570,6 @@ impl Builtin for Update {
     const NAME: &'static str = "update";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(BuiltinCategory::Mutation, BuiltinCardinality::OneToOne)
-            .indexed()
             .demand_law(BuiltinDemandLaw::MapLike)
             .lambda_arg()
     }
@@ -2588,7 +2584,6 @@ fn streaming_one_to_one_element_spec() -> BuiltinSpec {
     // as a 1-element stream and discard the structural shift, returning
     // the bare input. Same fix pattern as `enumerate`/`pairwise`.
     BuiltinSpec::new(BuiltinCategory::StreamingOneToOne, BuiltinCardinality::OneToOne)
-        .indexed()
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
