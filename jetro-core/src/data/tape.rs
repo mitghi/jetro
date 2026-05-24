@@ -5,10 +5,10 @@
 //! allocation. Used by the simd-json tape path so that string values returned
 //! from `Val::StrSlice` / `Val::StrSliceVec` never allocate.
 
-use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::{cell::OnceCell, collections::HashMap};
 
 /// Borrowed string slice into a parent `Arc<str>`. See module doc.
 #[derive(Clone, Debug)]
@@ -390,7 +390,7 @@ pub(crate) struct TapeScratch {
     bytes_buf: Vec<u8>,
     buffers: simd_json::Buffers,
     pub(crate) nodes: Vec<TapeNode>,
-    array_child_index: HashMap<usize, Box<[usize]>>,
+    array_child_index: OnceCell<HashMap<usize, Box<[usize]>>>,
 }
 impl TapeScratch {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
@@ -398,7 +398,7 @@ impl TapeScratch {
             bytes_buf: Vec::with_capacity(capacity),
             buffers: simd_json::Buffers::new(capacity),
             nodes: Vec::new(),
-            array_child_index: HashMap::new(),
+            array_child_index: OnceCell::new(),
         }
     }
 
@@ -409,7 +409,7 @@ impl TapeScratch {
             .map_err(|err| err.to_string())?;
         self.nodes =
             unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
-        rebuild_array_child_index(&self.nodes, &mut self.array_child_index);
+        self.array_child_index = OnceCell::new();
         Ok(())
     }
 
@@ -434,8 +434,10 @@ impl TapeScratch {
         if idx >= len {
             return None;
         }
-        if let Some(children) = self.array_child_index.get(&first) {
-            return children.get(idx).copied();
+        if len >= ARRAY_CHILD_INDEX_MIN_LEN {
+            if let Some(children) = self.array_child_index().get(&first) {
+                return children.get(idx).copied();
+            }
         }
         let mut cur = first;
         for _ in 0..idx {
@@ -449,8 +451,10 @@ impl TapeScratch {
             return None;
         };
         let first = array_idx + 1;
-        if let Some(children) = self.array_child_index.get(&first) {
-            return Some(children.to_vec());
+        if len >= ARRAY_CHILD_INDEX_MIN_LEN {
+            if let Some(children) = self.array_child_index().get(&first) {
+                return Some(children.to_vec());
+            }
         }
         let mut children = Vec::with_capacity(len);
         let mut cur = first;
@@ -463,14 +467,29 @@ impl TapeScratch {
 
     #[inline]
     pub(crate) fn array_child_indexed_starts(&self, first: usize) -> Option<&[usize]> {
-        self.array_child_index
+        let array_idx = first.checked_sub(1)?;
+        let TapeNode::Array { len, .. } = self.nodes.get(array_idx)? else {
+            return None;
+        };
+        if *len < ARRAY_CHILD_INDEX_MIN_LEN {
+            return None;
+        }
+        self.array_child_index()
             .get(&first)
             .map(|children| &**children)
     }
 
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
-        self.array_child_index.contains_key(&first)
+        self.array_child_index
+            .get()
+            .is_some_and(|index| index.contains_key(&first))
+    }
+
+    #[inline]
+    fn array_child_index(&self) -> &HashMap<usize, Box<[usize]>> {
+        self.array_child_index
+            .get_or_init(|| build_array_child_index(&self.nodes))
     }
 }
 
@@ -527,7 +546,7 @@ mod tests {
             .parse_slice(format!("[{}]", values).as_bytes())
             .expect("parse");
 
-        assert!(scratch.has_array_child_index(1));
+        assert!(!scratch.has_array_child_index(1));
         assert_eq!(
             scratch
                 .array_child_indexed_starts(1)
@@ -535,6 +554,7 @@ mod tests {
                 .len(),
             40
         );
+        assert!(scratch.has_array_child_index(1));
         assert_eq!(scratch.array_child_start(1, 40, 39), Some(40));
         assert_eq!(scratch.array_child_indices(0).expect("indices").len(), 40);
     }
@@ -546,6 +566,8 @@ mod tests {
         scratch
             .parse_slice(format!("[{}]", values).as_bytes())
             .expect("parse large");
+        assert!(!scratch.has_array_child_index(1));
+        assert_eq!(scratch.array_child_start(1, 40, 39), Some(40));
         assert!(scratch.has_array_child_index(1));
 
         scratch.parse_slice(br#"[1,2,3]"#).expect("parse small");
