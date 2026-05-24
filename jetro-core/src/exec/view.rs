@@ -234,6 +234,11 @@ where
     if let Some(count) = direct_count_from_source_len(&source, &capabilities.stages, &sink) {
         return Some(Ok(Val::Int(count as i64)));
     }
+    if let Some(result) =
+        direct_predicate_from_source_len(&source, &capabilities.stages, &sink, &body.sink_kernels)
+    {
+        return Some(Ok(result));
+    }
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -267,6 +272,60 @@ where
     else {
         return None;
     };
+    let count = cardinality_after_deterministic_stages(source, stages)?;
+    Some(count)
+}
+
+fn direct_predicate_from_source_len<'a, V>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+    sink_kernels: &[pipeline::BodyKernel],
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let pipeline::ViewSinkCapability::Predicate {
+        op,
+        predicate_kernel,
+    } = sink
+    else {
+        return None;
+    };
+    let matched = match sink_kernels.get(*predicate_kernel)? {
+        pipeline::BodyKernel::ConstBool(value) => *value,
+        pipeline::BodyKernel::Const(value) => crate::util::is_truthy(value),
+        _ => return None,
+    };
+    let count = cardinality_after_deterministic_stages(source, stages)?;
+    match op {
+        crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(matched && count > 0)),
+        crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(matched || count == 0)),
+        crate::builtins::BuiltinPredicateSink::FindIndex => {
+            if matched && count > 0 {
+                Some(Val::Int(0))
+            } else {
+                Some(Val::Null)
+            }
+        }
+        crate::builtins::BuiltinPredicateSink::IndicesWhere => {
+            if matched {
+                Some(Val::int_vec((0..count).map(|idx| idx as i64).collect()))
+            } else {
+                Some(Val::arr(Vec::new()))
+            }
+        }
+        crate::builtins::BuiltinPredicateSink::FindOne => None,
+    }
+}
+
+fn cardinality_after_deterministic_stages<'a, V>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+) -> Option<usize>
+where
+    V: ValueView<'a> + 'a,
+{
     let JsonView::ArrayLen(mut count) = source.scalar() else {
         return None;
     };
@@ -2381,6 +2440,38 @@ mod tests {
 
         assert_eq!(out, Val::Bool(false));
         assert_eq!(source.scalar_reads(), 3);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_constant_predicate_sink_uses_source_length_without_iterating_rows() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Skip,
+                    value: 1,
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::IndicesWhere,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: vec![BodyKernel::ConstBool(true)],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::int_vec(vec![0, 1, 2]));
+        assert_eq!(source.scalar_reads(), 1);
+        assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
 
