@@ -11,10 +11,8 @@ use std::sync::Arc;
 use crate::builtins::BuiltinCall;
 #[cfg(test)]
 use crate::builtins::{
-    registry::{
-        builtin_cardinality, effective_pipeline_order_effect, BuiltinId,
-    },
-    BuiltinCardinality, BuiltinMethod, BuiltinPipelineOrderEffect,
+    registry::{preserves_order_filtering, BuiltinId},
+    BuiltinMethod,
 };
 use crate::parse::ast::{KindType, Step};
 #[cfg(test)]
@@ -1248,12 +1246,7 @@ impl Monotonicity {
                 },
                 method => {
                     let id = BuiltinId::from_method(method);
-                    if builtin_cardinality(id) == Some(BuiltinCardinality::Filtering)
-                        && !matches!(
-                            effective_pipeline_order_effect(id, false),
-                            BuiltinPipelineOrderEffect::Blocks
-                        )
-                    {
+                    if preserves_order_filtering(id) {
                         self
                     } else {
                         Monotonicity::Unknown

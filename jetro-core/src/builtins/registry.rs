@@ -1140,6 +1140,19 @@ pub(crate) fn effective_pipeline_order_effect(
     }
 }
 
+/// Return true when builtin `id` filters rows without reordering or blocking
+/// the surviving stream. This is the shared monotonicity/demand fact for
+/// selective stages.
+#[inline]
+#[cfg(test)]
+pub(crate) fn preserves_order_filtering(id: BuiltinId) -> bool {
+    builtin_cardinality(id) == Some(BuiltinCardinality::Filtering)
+        && !matches!(
+            effective_pipeline_order_effect(id, false),
+            BuiltinPipelineOrderEffect::Blocks
+        )
+}
+
 /// Return the pipeline lowering strategy for builtin `id`, indicating which
 /// physical stage type and arguments the builtin compiles to.
 #[inline]
@@ -3925,6 +3938,37 @@ mod tests {
                 positional,
             );
             assert!(demand.order, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn registry_classifies_order_preserving_filters() {
+        for method in [
+            BuiltinMethod::Filter,
+            BuiltinMethod::Remove,
+            BuiltinMethod::Compact,
+            BuiltinMethod::TakeWhile,
+            BuiltinMethod::DropWhile,
+            BuiltinMethod::Unique,
+            BuiltinMethod::UniqueBy,
+        ] {
+            let id = BuiltinId::from_method(method);
+            assert_eq!(
+                preserves_order_filtering(id),
+                builtin_cardinality(id) == Some(BuiltinCardinality::Filtering)
+                    && !matches!(
+                        effective_pipeline_order_effect(id, false),
+                        BuiltinPipelineOrderEffect::Blocks
+                    ),
+                "{method:?}"
+            );
+        }
+
+        for method in [BuiltinMethod::Map, BuiltinMethod::Sort, BuiltinMethod::FlatMap] {
+            assert!(
+                !preserves_order_filtering(BuiltinId::from_method(method)),
+                "{method:?}"
+            );
         }
     }
 
