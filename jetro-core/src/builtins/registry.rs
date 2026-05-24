@@ -847,8 +847,7 @@ pub(crate) fn direct_view_call(id: BuiltinId, args: &BuiltinArgs) -> Option<Buil
 }
 
 /// Return receiver-local field demand for a view-native object/path builtin
-/// call. Callers that apply the builtin to a nested receiver should prefix the
-/// returned demand with the receiver path.
+/// call.
 #[inline]
 pub(crate) fn view_projection_field_demand(
     id: BuiltinId,
@@ -872,6 +871,27 @@ pub(crate) fn view_projection_field_demand(
             BuiltinArgs::Path(path),
         ) => path_field_demand(path),
         _ => None,
+    }
+}
+
+/// Return field demand for applying a view-native object/path builtin call to
+/// a receiver path relative to the current row.
+#[inline]
+pub(crate) fn view_projection_receiver_field_demand(
+    id: BuiltinId,
+    args: &BuiltinArgs,
+    receiver_path: &[Arc<str>],
+) -> Option<FieldDemand> {
+    view_projection_field_demand(id, args).map(|demand| prefix_field_demand(receiver_path, demand))
+}
+
+fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand {
+    if prefix.is_empty() {
+        return demand;
+    }
+    match demand {
+        FieldDemand::Fields(fields) => FieldDemand::Fields(fields.prefixed(prefix)),
+        other => other,
     }
 }
 
@@ -3721,6 +3741,22 @@ mod tests {
                 &BuiltinArgs::Str(Arc::from("isbn"))
             )
             .is_none()
+        );
+        assert_eq!(
+            field_paths(view_projection_receiver_field_demand(
+                BuiltinId::from_method(BuiltinMethod::HasKey),
+                &BuiltinArgs::Str(Arc::from("isbn")),
+                &[Arc::from("book")]
+            )),
+            vec!["book.isbn"]
+        );
+        assert_eq!(
+            field_paths(view_projection_receiver_field_demand(
+                BuiltinId::from_method(BuiltinMethod::GetPath),
+                &BuiltinArgs::Str(Arc::from("user.name")),
+                &[Arc::from("event")]
+            )),
+            vec!["event.user.name"]
         );
     }
 

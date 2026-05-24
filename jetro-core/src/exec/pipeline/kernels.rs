@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::builtins::registry::{
     apply_view_projection, by_name as builtin_by_name, count_sink_accepts_predicate, expr_stage,
-    numeric_reducer, view_projection, view_projection_field_demand, ViewProjectionResult,
+    numeric_reducer, view_projection, view_projection_receiver_field_demand, ViewProjectionResult,
 };
 use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExprStage};
 use crate::data::context::EvalError;
@@ -169,24 +169,9 @@ fn compose_field_demand(first: &BodyKernel, then: &BodyKernel) -> FieldDemand {
     }
 }
 
-fn receiver_field_prefix(receiver: &BodyKernel) -> Option<Vec<Arc<str>>> {
-    receiver.field_path_keys()
-}
-
-fn prefix_field_demand(prefix: &[Arc<str>], demand: FieldDemand) -> FieldDemand {
-    if prefix.is_empty() {
-        return demand;
-    }
-    match demand {
-        FieldDemand::Fields(fields) => FieldDemand::Fields(fields.prefixed(prefix)),
-        other => other,
-    }
-}
-
 fn object_key_call_field_demand(receiver: &BodyKernel, call: &BuiltinCall) -> Option<FieldDemand> {
-    let prefix = receiver_field_prefix(receiver)?;
-    view_projection_field_demand(call.id(), &call.args)
-        .map(|demand| prefix_field_demand(&prefix, demand))
+    let receiver_path = receiver.field_path_keys()?;
+    view_projection_receiver_field_demand(call.id(), &call.args, &receiver_path)
 }
 
 /// Pre-classified kernel for a format-string expression, avoiding VM re-entry for each part.
