@@ -1366,6 +1366,7 @@ impl Builtin for Window {
     const NAME: &'static str = "window";
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
@@ -1424,6 +1425,7 @@ impl Builtin for Chunk {
     const ALIASES: &'static [&'static str] = &["batch"];
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
@@ -3012,10 +3014,22 @@ scalar_native_element! {
     ParseFloat => ParseFloat, "parse_float", apply: parse_float_apply;
     ParseBool => ParseBool, "parse_bool", apply: parse_bool_apply;
     Schema => Schema, "schema", apply: schema_apply;
-    Type => Type, "type", apply: type_name_apply;
     ToString => ToString, "to_string", apply: to_string_apply;
     ToJson => ToJson, "to_json", apply: to_json_apply;
     Dedent => Dedent, "dedent", idempotent: true, apply: dedent_apply;
+}
+
+pub(crate) struct Type;
+impl Builtin for Type {
+    const METHOD: BuiltinMethod = BuiltinMethod::Type;
+    const NAME: &'static str = "type";
+    fn spec() -> BuiltinSpec {
+        scalar_view_scalar_element_spec().view_scalar_op(BuiltinViewScalarOp::TypeName)
+    }
+    #[inline]
+    fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
+        super::type_name_apply(recv)
+    }
 }
 
 /// `parse_int(radix)` — string → integer with optional radix (2–36).

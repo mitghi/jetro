@@ -737,6 +737,8 @@ pub enum BuiltinDemandLaw {
 pub enum BuiltinViewScalarOp {
     /// Return the length of an array, object, or string view.
     Len,
+    /// Return the JSON type name from the view tag.
+    TypeName,
     /// String receiver, no static argument.
     StringNoArg,
     /// Numeric receiver, no static argument.
@@ -3519,6 +3521,21 @@ fn json_view_len(recv: crate::util::JsonView<'_>) -> Option<i64> {
         crate::util::JsonView::Str(s) => Some(s.chars().count() as i64),
         crate::util::JsonView::ArrayLen(n) | crate::util::JsonView::ObjectLen(n) => Some(n as i64),
         _ => None,
+    }
+}
+
+/// Extracts the JSON type name from a `JsonView` tag without materialising the receiver.
+#[inline]
+fn json_view_type_name(recv: crate::util::JsonView<'_>) -> &'static str {
+    match recv {
+        crate::util::JsonView::Null => "null",
+        crate::util::JsonView::Bool(_) => "bool",
+        crate::util::JsonView::Int(_)
+        | crate::util::JsonView::UInt(_)
+        | crate::util::JsonView::Float(_) => "number",
+        crate::util::JsonView::Str(_) => "string",
+        crate::util::JsonView::ArrayLen(_) => "array",
+        crate::util::JsonView::ObjectLen(_) => "object",
     }
 }
 

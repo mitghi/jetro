@@ -1417,6 +1417,9 @@ pub(crate) fn apply_json_view_scalar_hook(
     }
     match (view_scalar_op(BuiltinId::from_method(method))?, args) {
         (BuiltinViewScalarOp::Len, BuiltinArgs::None) => super::json_view_len(recv).map(Val::Int),
+        (BuiltinViewScalarOp::TypeName, BuiltinArgs::None) => {
+            Some(Val::Str(std::sync::Arc::from(super::json_view_type_name(recv))))
+        }
         (BuiltinViewScalarOp::StringNoArg, BuiltinArgs::None) => {
             let value = super::json_view_str(recv)?;
             super::str_no_arg_scalar_apply(method, value)
@@ -3302,6 +3305,7 @@ mod tests {
             BuiltinMethod::Trim,
             BuiltinMethod::TrimLeft,
             BuiltinMethod::TrimRight,
+            BuiltinMethod::Type,
             BuiltinMethod::Upper,
         ];
 
@@ -3342,6 +3346,7 @@ mod tests {
 
         for (method, op) in [
             (BuiltinMethod::Len, BuiltinViewScalarOp::Len),
+            (BuiltinMethod::Type, BuiltinViewScalarOp::TypeName),
             (BuiltinMethod::Includes, BuiltinViewScalarOp::StringContainsArg),
             (BuiltinMethod::StartsWith, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::EndsWith, BuiltinViewScalarOp::StringArg),

@@ -5256,6 +5256,39 @@ mod tests {
     }
 
     #[test]
+    fn view_type_builtin_reads_tape_tags_without_materializing_receivers() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"a":1},[1,2],"s",3,true,null]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Type,
+                    crate::builtins::BuiltinArgs::None,
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body).unwrap().unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["object", "array", "string", "number", "bool", "null"])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {
