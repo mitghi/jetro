@@ -2346,13 +2346,31 @@ mod tests {
                 .requires_numeric_reducer()
         );
         assert!(
+            builtin_sink(BuiltinId::SUM)
+                .unwrap()
+                .accumulator
+                .finishes_from_reducer_state()
+        );
+        assert!(
             !builtin_sink(BuiltinId::COUNT)
                 .unwrap()
                 .requires_numeric_reducer()
         );
+        assert!(
+            builtin_sink(BuiltinId::COUNT)
+                .unwrap()
+                .accumulator
+                .finishes_from_reducer_state()
+        );
         assert_eq!(
             builtin_sink(BuiltinId::FIRST).unwrap().value_need(),
             BuiltinSinkValueNeed::Whole
+        );
+        assert!(
+            !builtin_sink(BuiltinId::FIRST)
+                .unwrap()
+                .accumulator
+                .finishes_from_reducer_state()
         );
         assert_eq!(
             builtin_sink(BuiltinId::APPROX_COUNT_DISTINCT)

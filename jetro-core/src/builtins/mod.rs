@@ -1366,6 +1366,14 @@ pub enum BuiltinSinkAccumulator {
     SelectOne(BuiltinSelectionPosition),
 }
 
+impl BuiltinSinkAccumulator {
+    /// Whether this accumulator stores its final result in reducer state.
+    #[inline]
+    pub(crate) const fn finishes_from_reducer_state(self) -> bool {
+        matches!(self, Self::Count | Self::Numeric)
+    }
+}
+
 /// The keyed-reduction algorithm used by `group_by` / `count_by` / `index_by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinKeyedReducer {

@@ -478,11 +478,13 @@ impl<'a> SinkAccumulator<'a> {
 
     /// Finalises state for a builtin-registered sink, delegating to the reducer or HLL as needed.
     fn finish_builtin(self, accumulator: BuiltinSinkAccumulator) -> Val {
-        match accumulator {
-            BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => self
+        if accumulator.finishes_from_reducer_state() {
+            return self
                 .reducer
                 .expect("reducer sinks construct reducer")
-                .finish(),
+                .finish();
+        }
+        match accumulator {
             BuiltinSinkAccumulator::ApproxDistinct => Val::Int(self.hll.estimate() as i64),
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First) => {
                 self.first.unwrap_or(Val::Null)
@@ -490,6 +492,7 @@ impl<'a> SinkAccumulator<'a> {
             BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last) => {
                 self.last.unwrap_or(Val::Null)
             }
+            BuiltinSinkAccumulator::Count | BuiltinSinkAccumulator::Numeric => unreachable!(),
         }
     }
 }
