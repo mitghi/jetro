@@ -1639,7 +1639,7 @@ mod tests {
 
             let numeric_sink = spec
                 .sink
-                .is_some_and(|sink| sink.accumulator == BuiltinSinkAccumulator::Numeric);
+                .is_some_and(BuiltinSinkSpec::requires_numeric_reducer);
             assert_eq!(
                 spec.numeric_reducer.is_some(),
                 numeric_sink,
@@ -2427,7 +2427,10 @@ mod tests {
             });
 
             assert_eq!(reducer.method(), method, "{method:?}");
-            assert_eq!(sink.accumulator, BuiltinSinkAccumulator::Numeric, "{method:?}");
+            assert!(
+                sink.requires_numeric_reducer(),
+                "{method:?} numeric reducer must expose numeric sink metadata"
+            );
             assert_eq!(demand_law(id), reducer.demand_law(), "{method:?}");
             assert_eq!(
                 reducer.selects_min(),

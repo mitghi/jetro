@@ -1048,7 +1048,7 @@ fn write_raw_string_case_call<W: Write>(
                 writer.write_all(&[byte.to_ascii_lowercase()])?;
             }
         }
-        BuiltinRawJsonScalar::Len => unreachable!("handled before writing"),
+        _ => unreachable!("non-string raw scalar handled before writing"),
     }
     writer.write_all(b"\"")?;
     Ok(true)
