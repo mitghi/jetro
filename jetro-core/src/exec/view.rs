@@ -5334,6 +5334,50 @@ mod tests {
     }
 
     #[test]
+    fn view_contains_vec_builtins_read_tape_strings_without_materializing_receivers() {
+        fn run(method: crate::builtins::BuiltinMethod) -> serde_json::Value {
+            let tape =
+                crate::data::tape::TapeData::parse(br#"["alpha beta","alpha","gamma"]"#.to_vec())
+                    .unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                )],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::BuiltinCall {
+                    receiver: Box::new(BodyKernel::Current),
+                    call: crate::builtins::BuiltinCall::new(
+                        method,
+                        crate::builtins::BuiltinArgs::StrVec(vec![
+                            Arc::from("alpha"),
+                            Arc::from("beta"),
+                        ]),
+                    ),
+                }],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+            serde_json::Value::from(out)
+        }
+
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ContainsAny),
+            serde_json::json!([true, true, false])
+        );
+        assert_eq!(
+            run(crate::builtins::BuiltinMethod::ContainsAll),
+            serde_json::json!([true, false, false])
+        );
+    }
+
+    #[test]
     fn view_value_string_builtins_traverse_tape_without_materializing_receivers() {
         let tape =
             crate::data::tape::TapeData::parse(br#"[{"a":1,"b":[true,null]},"plain"]"#.to_vec())

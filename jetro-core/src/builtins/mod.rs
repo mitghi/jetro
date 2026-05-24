@@ -912,6 +912,8 @@ pub enum BuiltinViewScalarOp {
     StringArg,
     /// String containment using a literal string target value.
     StringContainsArg,
+    /// String receiver with a static string-vector argument.
+    StringVecArg,
 }
 
 /// View-native projection that needs the whole value but can still avoid
@@ -3777,6 +3779,19 @@ fn str_arg_scalar_apply(method: BuiltinMethod, value: &str, arg: &str) -> Option
 #[inline]
 fn str_arg_scalar_val_apply(method: BuiltinMethod, recv: &Val, arg: &str) -> Option<Val> {
     str_arg_scalar_apply(method, recv.as_str_ref()?, arg)
+}
+
+#[inline]
+fn str_vec_arg_scalar_apply(method: BuiltinMethod, value: &str, args: &[Arc<str>]) -> Option<Val> {
+    match method {
+        BuiltinMethod::ContainsAny => Some(Val::Bool(
+            args.iter().any(|needle| value.contains(needle.as_ref())),
+        )),
+        BuiltinMethod::ContainsAll => Some(Val::Bool(
+            args.iter().all(|needle| value.contains(needle.as_ref())),
+        )),
+        _ => None,
+    }
 }
 
 /// Returns the character index of `needle` in `value`; uses `rfind` when `last` is true.

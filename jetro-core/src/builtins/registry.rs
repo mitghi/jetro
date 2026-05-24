@@ -1744,6 +1744,10 @@ pub(crate) fn apply_json_view_scalar_hook(
             let value = super::json_view_str(recv)?;
             Some(Val::Bool(value.contains(arg.as_str())))
         }
+        (BuiltinViewScalarOp::StringVecArg, BuiltinArgs::StrVec(args)) => {
+            let value = super::json_view_str(recv)?;
+            super::str_vec_arg_scalar_apply(method, value, args)
+        }
         _ => None,
     }
 }
@@ -3593,6 +3597,8 @@ mod tests {
             BuiltinMethod::Abs,
             BuiltinMethod::ByteLen,
             BuiltinMethod::Ceil,
+            BuiltinMethod::ContainsAll,
+            BuiltinMethod::ContainsAny,
             BuiltinMethod::EndsWith,
             BuiltinMethod::Floor,
             BuiltinMethod::Includes,
@@ -3667,6 +3673,8 @@ mod tests {
             (BuiltinMethod::Matches, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::IndexOf, BuiltinViewScalarOp::StringArg),
             (BuiltinMethod::LastIndexOf, BuiltinViewScalarOp::StringArg),
+            (BuiltinMethod::ContainsAny, BuiltinViewScalarOp::StringVecArg),
+            (BuiltinMethod::ContainsAll, BuiltinViewScalarOp::StringVecArg),
             (BuiltinMethod::Ceil, BuiltinViewScalarOp::NumericNoArg),
             (BuiltinMethod::Floor, BuiltinViewScalarOp::NumericNoArg),
             (BuiltinMethod::Round, BuiltinViewScalarOp::NumericNoArg),

@@ -4154,7 +4154,10 @@ macro_rules! str_vec_arg_scalar_native {
             impl Builtin for $ty {
                 const METHOD: BuiltinMethod = BuiltinMethod::$ty;
                 const NAME: &'static str = $name;
-                fn spec() -> BuiltinSpec { scalar_native_predicate_element_spec() }
+                fn spec() -> BuiltinSpec {
+                    scalar_native_predicate_element_spec()
+                        .view_scalar_op(BuiltinViewScalarOp::StringVecArg)
+                }
                 #[inline]
                 fn apply_args(recv: &crate::data::value::Val, args: &super::BuiltinArgs) -> Option<crate::data::value::Val> {
                     match args {
