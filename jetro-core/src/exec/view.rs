@@ -343,6 +343,12 @@ where
         return None;
     }
     match sink {
+        pipeline::ViewSinkCapability::Builtin {
+            accumulator: crate::builtins::BuiltinSinkAccumulator::ApproxDistinct,
+            predicate_kernel: None,
+            project_kernel: None,
+            ..
+        } => Some(Val::Int(0)),
         pipeline::ViewSinkCapability::Collect => Some(Val::arr(Vec::new())),
         pipeline::ViewSinkCapability::Nth { .. } => Some(Val::Null),
         pipeline::ViewSinkCapability::ArgExtreme { .. } => Some(Val::Null),
@@ -2643,6 +2649,21 @@ mod tests {
         assert_eq!(extreme_source.scalar_reads(), 1);
         assert_eq!(extreme_source.array_iter_reads(), 0);
         assert_eq!(extreme_source.materialize_reads(), 0);
+
+        let distinct_source = CountingView::root(&[1, 2, 3]);
+        let distinct_body = PipelineBody {
+            sink: Sink::ApproxCountDistinct,
+            sink_kernels: Vec::new(),
+            ..extreme_body
+        };
+
+        let distinct = super::run_full(distinct_source.clone(), &distinct_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(distinct, Val::Int(0));
+        assert_eq!(distinct_source.scalar_reads(), 1);
+        assert_eq!(distinct_source.array_iter_reads(), 0);
+        assert_eq!(distinct_source.materialize_reads(), 0);
     }
 
     #[test]
