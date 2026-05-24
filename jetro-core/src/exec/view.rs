@@ -182,6 +182,9 @@ where
     if let Some(result) = run_full_with_env(source.clone(), body, Some(base_env), vm) {
         return Some(result);
     }
+    if let Some(result) = run_reverse_prefix_then_view_suffix(source.clone(), body, base_env, vm) {
+        return Some(result);
+    }
     if let Some(result) = run_reducing_stage_prefix_then_materialized_suffix(
         source.clone(),
         body,
@@ -294,6 +297,103 @@ where
     }
 
     Some(sink_acc.finish_result(source_reversed))
+}
+
+struct ReverseBarrierPlan {
+    prefix: Vec<pipeline::ViewStageCapability>,
+    reverse_stage: usize,
+}
+
+fn run_reverse_prefix_then_view_suffix<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let plan = reverse_barrier_plan(body)?;
+    let suffix_start = plan.reverse_stage + 1;
+    let suffix = view_suffix_capabilities(body, suffix_start)?;
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
+    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, false);
+    let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+        Some(Ok(sink)) => sink,
+        Some(Err(err)) => return Some(Err(err)),
+        None => return None,
+    };
+
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
+        return run_reversed_rows_view_suffix(
+            Vec::<FrontierRow<V>>::new(),
+            body,
+            &suffix,
+            sink,
+            source_demand,
+            vm,
+        );
+    }
+
+    let mut rows = Vec::new();
+    if let Err(err) = drive_view_frontier(
+        source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
+        &plan.prefix,
+        &body.stage_kernels,
+        PullDemand::All,
+        vm,
+        |item, _vm| {
+            rows.push(item.clone());
+            Some(Ok(ViewRowAction::Emit))
+        },
+    )? {
+        return Some(Err(err));
+    }
+    rows.reverse();
+    run_reversed_rows_view_suffix(rows, body, &suffix, sink, source_demand, vm)
+}
+
+fn reverse_barrier_plan(body: &pipeline::PipelineBody) -> Option<ReverseBarrierPlan> {
+    let mut prefix = Vec::new();
+    for (idx, stage) in body.stages.iter().enumerate() {
+        if matches!(stage, pipeline::Stage::Reverse(_)) {
+            return Some(ReverseBarrierPlan {
+                prefix,
+                reverse_stage: idx,
+            });
+        }
+        prefix.push(pipeline::view_never_materializing_stage_capability(
+            body, idx,
+        )?);
+    }
+    None
+}
+
+fn run_reversed_rows_view_suffix<'a, V>(
+    rows: Vec<FrontierRow<V>>,
+    body: &pipeline::PipelineBody,
+    suffix: &ViewSuffixCapabilities,
+    sink: pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
+    if let Err(err) = drive_frontier_iter(
+        rows,
+        &suffix.stages,
+        &body.stage_kernels,
+        source_demand,
+        vm,
+        |item, vm| observe_view_sink(item, &sink, &mut sink_acc, &body.sink_kernels, vm),
+    )? {
+        return Some(Err(err));
+    }
+    Some(sink_acc.finish_result(false))
 }
 
 fn drive_reversed_direct_position<'a, V, F>(
@@ -3813,6 +3913,70 @@ mod tests {
         assert_eq!(nth, Val::Int(2));
         assert_eq!(nth_source.array_iter_reads(), 0);
         assert_eq!(nth_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_runner_reverses_filtered_rows_without_materializing_prefix() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::reverse().unwrap(),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(1)),
+                BodyKernel::Generic,
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 3]));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn view_runner_skips_empty_reverse_prefix_without_touching_source() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::reverse().unwrap(),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(source.clone(), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
