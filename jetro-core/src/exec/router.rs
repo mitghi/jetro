@@ -2045,6 +2045,23 @@ mod tests {
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
     #[test]
+    fn view_receiver_includes_filters_nested_tape_arrays_without_materializing_rows() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"price":12.5,"tags":["sf","classic"]},{"price":14,"tags":["sf","hugo"]},{"price":9,"tags":["sf"]}]}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.filter(tags.includes("hugo")).map(price).sum()"#)
+            .unwrap();
+
+        assert_eq!(out, json!(14));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+    #[test]
     fn view_index_dynamic_target_stops_without_row_materialization() {
         let j = Jetro::from_bytes(
             br#"{"xs":["a","b","needle","tail"],"needle":"needle","unused":{"large":[1,2,3,4]}}"#

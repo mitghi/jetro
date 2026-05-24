@@ -25,7 +25,7 @@ use crate::{
     data::{
         context::EvalError,
         value::Val,
-        view::{write_json_view, ValueView},
+        view::{view_matches_value, write_json_view, ValueView},
     },
     exec::pipeline::StageFlow,
     plan::demand::{
@@ -1019,12 +1019,12 @@ where
 {
     if let Some(method) = id.method() {
         if view_scalar_projection(id) {
-            return Some(
-                match apply_json_view_scalar_hook(method, args, view.scalar()) {
-                    Some(value) => ViewProjectionResult::Owned(value),
-                    None => ViewProjectionResult::View(view),
-                },
-            );
+            if let Some(value) = apply_json_view_scalar_hook(method, args, view.scalar()) {
+                return Some(ViewProjectionResult::Owned(value));
+            }
+            if view_value_projection(id).is_none() && view_object_projection(id).is_none() {
+                return Some(ViewProjectionResult::View(view));
+            }
         }
     }
     if let Some(projection) = view_value_projection(id) {
@@ -1223,6 +1223,14 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Includes => {
+            let BuiltinArgs::Val(target) = args else {
+                return None;
+            };
+            return Some(ViewProjectionResult::Owned(Val::Bool(view_includes_value(
+                &view, target,
+            ))));
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1237,6 +1245,27 @@ where
         }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn view_includes_value<'a, V>(view: &V, target: &Val) -> bool
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::ArrayLen(_) => view
+            .array_iter()
+            .map(|iter| iter.into_iter().any(|item| view_matches_value(&item, target)))
+            .unwrap_or(false),
+        JsonView::ObjectLen(_) => target
+            .as_str()
+            .and_then(|key| view.has_key(key))
+            .unwrap_or(false),
+        JsonView::Str(value) => target
+            .as_str()
+            .map(|needle| value.contains(needle))
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn reverse_view_string(value: &str) -> String {
@@ -4013,6 +4042,7 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::Includes, BuiltinViewValueProjection::Includes),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (
                 BuiltinMethod::KebabCase,
@@ -4087,7 +4117,9 @@ mod tests {
             let id = BuiltinId::from_method(method);
             let spec = method.spec();
             assert!(spec.view_native, "{method:?}");
-            assert!(!spec.view_scalar, "{method:?}");
+            if method != BuiltinMethod::Includes {
+                assert!(!spec.view_scalar, "{method:?}");
+            }
             assert_eq!(view_value_projection(id), Some(projection), "{method:?}");
             assert!(view_projection(id), "{method:?}");
             assert!(

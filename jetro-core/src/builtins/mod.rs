@@ -934,6 +934,8 @@ pub enum BuiltinViewValueProjection {
     HtmlUnescape,
     /// Escape HTML-sensitive characters.
     HtmlEscape,
+    /// Broad receiver membership/containment check.
+    Includes,
     /// Prepend a prefix to each line.
     Indent,
     /// Return a default value when the receiver is null/missing.
@@ -1010,6 +1012,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::StripSuffix
             | BuiltinViewValueProjection::UrlDecode
             | BuiltinViewValueProjection::UrlEncode => BuiltinDemandLaw::MapLike,
+            BuiltinViewValueProjection::Includes => BuiltinDemandLaw::PredicateMapLike,
         }
     }
 }

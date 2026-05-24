@@ -3714,6 +3714,7 @@ impl Builtin for Includes {
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::Includes)
             .view_scalar_op(BuiltinViewScalarOp::StringContainsArg)
+            .view_value_projection(super::BuiltinViewValueProjection::Includes)
             .membership_sink(BuiltinMembershipSink::Includes)
             .demand_law(BuiltinMembershipSink::Includes.demand_law())
             .lowering(BuiltinPipelineLowering::TerminalSink)
