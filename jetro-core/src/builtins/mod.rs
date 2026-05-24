@@ -2084,9 +2084,6 @@ pub enum BuiltinPipelineMaterialization {
     Streaming,
     /// Stage buffers all input (barrier), then emits via the composed path.
     ComposedBarrier,
-    /// Stage uses the legacy full-materialisation path.
-    #[allow(dead_code)]
-    LegacyMaterialized,
 }
 
 /// Semantic reason a builtin can or cannot stay in the borrowed streaming

@@ -646,9 +646,6 @@ pub(crate) fn streaming_boundary(id: BuiltinId) -> BuiltinStreamingBoundary {
     }
     match spec.materialization {
         BuiltinPipelineMaterialization::Streaming => BuiltinStreamingBoundary::RowLocal,
-        BuiltinPipelineMaterialization::LegacyMaterialized => {
-            BuiltinStreamingBoundary::LegacyMaterialized
-        }
         BuiltinPipelineMaterialization::ComposedBarrier => match spec.demand_law {
             BuiltinDemandLaw::OrderBarrier | BuiltinDemandLaw::Reverse => {
                 BuiltinStreamingBoundary::FullInputOrder
@@ -679,10 +676,7 @@ pub(crate) fn pipeline_composed_barrier(id: BuiltinId) -> bool {
 /// Return true when builtin `id` requires the legacy materialized executor.
 #[inline]
 pub(crate) fn pipeline_legacy_materialized(id: BuiltinId) -> bool {
-    matches!(
-        pipeline_materialization(id),
-        BuiltinPipelineMaterialization::LegacyMaterialized
-    )
+    matches!(streaming_boundary(id), BuiltinStreamingBoundary::LegacyMaterialized)
 }
 
 /// Return the cardinality/cost shape annotation for builtin `id`, used by
@@ -4307,11 +4301,7 @@ mod tests {
                     );
                 }
                 BuiltinStreamingBoundary::LegacyMaterialized => {
-                    assert_eq!(
-                        materialization,
-                        BuiltinPipelineMaterialization::LegacyMaterialized,
-                        "{method:?} legacy boundary must match legacy materialization policy"
-                    );
+                    panic!("{method:?} registered builtins must not use legacy materialization");
                 }
             }
         }
