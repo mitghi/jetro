@@ -1393,14 +1393,10 @@ fn direct_item_predicate_from_kernel(
             lit,
         });
     }
+    if let Some(path) = kernel_to_physical_path(kernel) {
+        return Some(NdjsonDirectItemPredicate::Path(path));
+    }
     match kernel {
-        crate::exec::pipeline::BodyKernel::Current => {
-            Some(NdjsonDirectItemPredicate::Path(Vec::new()))
-        }
-        crate::exec::pipeline::BodyKernel::FieldRead(_)
-        | crate::exec::pipeline::BodyKernel::FieldChain(_) => Some(
-            NdjsonDirectItemPredicate::Path(kernel_to_physical_path(kernel)?),
-        ),
         crate::exec::pipeline::BodyKernel::And(items) => {
             combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::And)
         }
@@ -1955,6 +1951,33 @@ mod tests {
                 suffix_steps.as_slice(),
                 [PhysicalPathStep::Field(name)] if name.as_ref() == "value"
             )
+        ));
+    }
+
+    #[test]
+    fn recognizes_array_find_get_path_predicate_from_kernel_metadata() {
+        let expr = crate::parse::parser::parse(
+            r#"custom_attributes.find(profile.get_path("flags.active"))"#,
+        )
+        .expect("parse");
+        let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
+            direct_array_any_predicate_expr(&expr)
+        else {
+            panic!("expected array-any predicate");
+        };
+        assert!(matches!(
+            predicate,
+            NdjsonDirectItemPredicate::Path(ref steps)
+                if matches!(
+                    steps.as_slice(),
+                    [
+                        PhysicalPathStep::Field(profile),
+                        PhysicalPathStep::Field(flags),
+                        PhysicalPathStep::Field(active),
+                    ] if profile.as_ref() == "profile"
+                        && flags.as_ref() == "flags"
+                        && active.as_ref() == "active"
+                )
         ));
     }
 
