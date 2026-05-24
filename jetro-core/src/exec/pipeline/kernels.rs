@@ -42,6 +42,15 @@ impl NestedPlanKernel {
         self.prepared.run(seed)
     }
 
+    pub(crate) fn receiver_view_body(&self) -> Option<super::PipelineBody> {
+        matches!(self.plan.source, super::Source::Receiver(_)).then(|| super::PipelineBody {
+            stages: self.plan.stages.clone(),
+            stage_exprs: self.plan.stage_exprs.clone(),
+            sink: self.plan.sink.clone(),
+            stage_kernels: self.plan.stage_kernels.clone(),
+            sink_kernels: self.plan.sink_kernels.clone(),
+        })
+    }
 }
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
@@ -921,7 +930,9 @@ impl BodyKernel {
                         .as_ref()
                         .is_none_or(|predicate| predicate.is_view_native())
             }
-            Self::NestedPlan(_) => false,
+            Self::NestedPlan(plan) => plan
+                .receiver_view_body()
+                .is_some_and(|body| body.can_run_with_view()),
             _ => true,
         }
     }

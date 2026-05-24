@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{scalar_view_to_owned_val, TapeScratchView, TapeView, ValView, ValueView};
+use crate::data::view::{scalar_view_to_owned_val, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -34,9 +34,9 @@ enum FrontierRow<V> {
 
 pub(crate) trait FrontierBaseView<'a>: ValueView<'a> + 'a {}
 
-impl<'a> FrontierBaseView<'a> for ValView<'a> {}
-impl<'a> FrontierBaseView<'a> for TapeView<'a> {}
-impl<'a> FrontierBaseView<'a> for TapeScratchView<'a> {}
+impl<'a> FrontierBaseView<'a> for crate::data::view::ValView<'a> {}
+impl<'a> FrontierBaseView<'a> for crate::data::view::TapeView<'a> {}
+impl<'a> FrontierBaseView<'a> for crate::data::view::TapeScratchView<'a> {}
 
 impl<'a, V> ValueView<'a> for FrontierRow<V>
 where
@@ -242,6 +242,18 @@ where
         return Some(result);
     }
     run_prefix_then_materialized_suffix(source, body, cache, base_env, vm)
+}
+
+pub(crate) fn run_receiver_nested_body_with_vm<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let env = Env::new(Val::Null);
+    run_with_env_and_vm(source, body, None, &env, vm)
 }
 
 fn run_leading_reverse_view<'a, V>(
@@ -2573,6 +2585,17 @@ fn eval_frontier_map_kernel<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
+    if let pipeline::BodyKernel::NestedPlan(plan) = kernel {
+        if let Some(body) = plan.receiver_view_body() {
+            let value = match item {
+                FrontierRow::Borrowed(view) => {
+                    run_receiver_nested_body_with_vm(view.clone(), &body, vm)?.ok()?
+                }
+                FrontierRow::Owned(value) => plan.run(value.clone()).ok()?,
+            };
+            return Some(FrontierRow::Owned(value));
+        }
+    }
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
         pipeline::ViewKernelValue::Owned(value) => Some(FrontierRow::Owned(value)),
@@ -2670,8 +2693,9 @@ mod tests {
     use crate::data::view::{TapeView, ValView, ValueView};
     use crate::exec::pipeline::{
         eval_view_kernel, ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget,
-        NumOp, PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, SourceCapabilities,
-        Stage, ViewKernelValue, ViewSinkCapability, ViewStageCapability,
+        NestedPlanKernel, NumOp, PipelineBody, Plan, PredicateSinkSpec, ReducerOp, ReducerSpec,
+        Sink, Source, SourceCapabilities, Stage, ViewKernelValue, ViewSinkCapability,
+        ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
@@ -2710,6 +2734,8 @@ mod tests {
             self.array_iter_reads.get()
         }
     }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingView {}
 
     impl<'a> ValueView<'a> for CountingView {
         fn scalar(&self) -> JsonView<'_> {
@@ -2817,8 +2843,6 @@ mod tests {
         }
     }
 
-    impl<'a> super::FrontierBaseView<'a> for CountingView {}
-
     #[derive(Clone)]
     struct CountingNestedView {
         rows: Arc<[Arc<[i64]>]>,
@@ -2849,6 +2873,8 @@ mod tests {
             self.materialize_reads.get()
         }
     }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingNestedView {}
 
     impl<'a> ValueView<'a> for CountingNestedView {
         fn scalar(&self) -> JsonView<'_> {
@@ -2971,8 +2997,6 @@ mod tests {
         }
     }
 
-    impl<'a> super::FrontierBaseView<'a> for CountingNestedView {}
-
     impl CountingNestedView {
         fn with_row(&self, row_idx: usize) -> Self {
             Self {
@@ -3006,6 +3030,8 @@ mod tests {
             self.materialize_reads.get()
         }
     }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingStringView {}
 
     impl<'a> ValueView<'a> for CountingStringView {
         fn scalar(&self) -> JsonView<'_> {
@@ -3094,8 +3120,6 @@ mod tests {
         }
     }
 
-    impl<'a> super::FrontierBaseView<'a> for CountingStringView {}
-
     #[derive(Clone)]
     struct CountingObjectValuesView {
         rows: Arc<[Arc<[i64]>]>,
@@ -3126,6 +3150,8 @@ mod tests {
             self.object_value_reads.get()
         }
     }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingObjectValuesView {}
 
     impl<'a> ValueView<'a> for CountingObjectValuesView {
         fn scalar(&self) -> JsonView<'_> {
@@ -3222,8 +3248,6 @@ mod tests {
         }
     }
 
-    impl<'a> super::FrontierBaseView<'a> for CountingObjectValuesView {}
-
     #[derive(Clone)]
     struct CountingKeyedObjectView {
         rows: Arc<[(i64, i64)]>,
@@ -3260,6 +3284,8 @@ mod tests {
             self.materialize_reads.get()
         }
     }
+
+    impl<'a> super::FrontierBaseView<'a> for CountingKeyedObjectView {}
 
     impl<'a> ValueView<'a> for CountingKeyedObjectView {
         fn scalar(&self) -> JsonView<'_> {
@@ -3400,8 +3426,6 @@ mod tests {
             }
         }
     }
-
-    impl<'a> super::FrontierBaseView<'a> for CountingKeyedObjectView {}
 
     #[test]
     fn view_frontier_zero_demand_skips_source_access() {
@@ -5265,6 +5289,37 @@ mod tests {
         assert_eq!(out, Val::Int(4));
         assert_eq!(source.object_value_reads(), 2);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_plan_runs_on_tape_view_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(br#"[[1,2,3],[4,5]]"#.to_vec()).unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body).unwrap().unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([1, 4]));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
