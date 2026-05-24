@@ -333,7 +333,7 @@ where
     };
 
     if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
-        return run_reversed_rows_view_suffix(
+        return run_buffered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
             &suffix,
@@ -343,7 +343,7 @@ where
         );
     }
     if source_demand.is_zero() {
-        return run_reversed_rows_view_suffix(
+        return run_buffered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
             &suffix,
@@ -368,7 +368,7 @@ where
     )? {
         return Some(Err(err));
     }
-    run_reversed_rows_view_suffix(rows.into_reversed(), body, &suffix, sink, source_demand, vm)
+    run_buffered_rows_view_suffix(rows.into_reversed(), body, &suffix, sink, source_demand, vm)
 }
 
 struct ReverseRows<V> {
@@ -437,7 +437,7 @@ fn reverse_barrier_plan(body: &pipeline::PipelineBody) -> Option<ReverseBarrierP
     None
 }
 
-fn run_reversed_rows_view_suffix<'a, V>(
+fn run_buffered_rows_view_suffix<'a, V>(
     rows: Vec<FrontierRow<V>>,
     body: &pipeline::PipelineBody,
     suffix: &ViewSuffixCapabilities,
@@ -490,7 +490,7 @@ where
     };
 
     if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
-        return run_reversed_rows_view_suffix(
+        return run_buffered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
             &suffix,
@@ -530,7 +530,7 @@ where
         rows.push(row);
     }
 
-    run_reversed_rows_view_suffix(rows, body, &suffix, sink, source_demand, vm)
+    run_buffered_rows_view_suffix(rows, body, &suffix, sink, source_demand, vm)
 }
 
 fn sorted_dedup_barrier_plan(body: &pipeline::PipelineBody) -> Option<SortedDedupBarrierPlan> {
