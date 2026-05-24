@@ -1937,7 +1937,6 @@ fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> 
     Ok(())
 }
 
-// compound scalars (array/object len variants) fall through to view.materialize()
 fn append_json_view_to_string<'a, V>(
     out: &mut String,
     view: &V,
@@ -1955,7 +1954,61 @@ where
         JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
         JsonView::Str(value) => out.push_str(value),
         JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
-            out.push_str(&crate::util::val_to_string(&view.materialize()));
+            append_json_view_value(out, view)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_json_view_value<'a, V>(out: &mut String, view: &V) -> Result<(), EvalError>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Null => out.push_str("null"),
+        JsonView::Bool(true) => out.push_str("true"),
+        JsonView::Bool(false) => out.push_str("false"),
+        JsonView::Int(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::UInt(value) => out.push_str(itoa::Buffer::new().format(value)),
+        JsonView::Float(value) => out.push_str(ryu::Buffer::new().format(value)),
+        JsonView::Str(value) => out.push_str(
+            &serde_json::to_string(value)
+                .map_err(|err| EvalError(format!("string format error: {err}")))?,
+        ),
+        JsonView::ArrayLen(_) => {
+            out.push('[');
+            let mut first = true;
+            for child in view.array_iter().ok_or_else(|| {
+                EvalError("array view format error: missing child iterator".to_string())
+            })? {
+                if first {
+                    first = false;
+                } else {
+                    out.push(',');
+                }
+                append_json_view_value(out, &child)?;
+            }
+            out.push(']');
+        }
+        JsonView::ObjectLen(_) => {
+            out.push('{');
+            let mut first = true;
+            for (key, child) in view.object_iter().ok_or_else(|| {
+                EvalError("object view format error: missing field iterator".to_string())
+            })? {
+                if first {
+                    first = false;
+                } else {
+                    out.push(',');
+                }
+                out.push_str(
+                    &serde_json::to_string(key.as_ref())
+                        .map_err(|err| EvalError(format!("object key format error: {err}")))?,
+                );
+                out.push(':');
+                append_json_view_value(out, &child)?;
+            }
+            out.push('}');
         }
     }
     Ok(())
@@ -2749,11 +2802,11 @@ mod tests {
     use crate::builtins::{BuiltinArgs, BuiltinCall, BuiltinMethod};
     use crate::compile::compiler::Compiler;
     use crate::data::value::Val;
-    use crate::data::view::{ValView, ValueView};
+    use crate::data::view::{TapeView, ValView, ValueView};
     use crate::parse::ast::BinOp;
     use crate::parse::parser::parse;
 
-    use super::{eval_view_kernel, BodyKernel, ViewKernelValue};
+    use super::{eval_view_kernel, BodyKernel, FStringKernel, FStringKernelPart, ViewKernelValue};
 
     fn key_call(method: BuiltinMethod, key: &str) -> BodyKernel {
         BodyKernel::BuiltinCall {
@@ -2784,6 +2837,41 @@ mod tests {
             ViewKernelValue::Owned(Val::Bool(value)) => Some(value),
             _ => None,
         }
+    }
+
+    fn owned_tape_value(value: Option<ViewKernelValue<TapeView<'_>>>) -> Option<Val> {
+        match value? {
+            ViewKernelValue::Owned(value) => Some(value),
+            ViewKernelValue::View(view) => Some(view.materialize()),
+        }
+    }
+
+    #[test]
+    fn fstring_formats_compound_tape_views_without_materializing() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"tags":["sf","hugo"],"meta":{"ok":true}}"#.to_vec(),
+        )
+        .unwrap();
+        let view = TapeView::root(&tape);
+        tape.reset_materialized_subtrees();
+        let kernel = BodyKernel::FString(FStringKernel {
+            parts: vec![
+                FStringKernelPart::Lit(Arc::from("tags=")),
+                FStringKernelPart::Interp(BodyKernel::FieldRead(Arc::from("tags"))),
+                FStringKernelPart::Lit(Arc::from(" meta=")),
+                FStringKernelPart::Interp(BodyKernel::FieldRead(Arc::from("meta"))),
+            ]
+            .into(),
+            base_capacity: 11,
+        });
+
+        let out = owned_tape_value(eval_view_kernel(&kernel, &view)).expect("fstring output");
+
+        assert_eq!(
+            out,
+            Val::Str(Arc::from(r#"tags=["sf","hugo"] meta={"ok":true}"#))
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     fn owned_value(value: Option<ViewKernelValue<ValView<'_>>>) -> Option<Val> {
