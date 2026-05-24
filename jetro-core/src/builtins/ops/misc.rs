@@ -145,12 +145,12 @@ pub fn missing_many_apply(recv: &Val, keys: &[Arc<str>]) -> Val {
 /// Membership test: arrays/vectors check element presence, strings check substring, objects check key.
 #[inline]
 pub fn includes_apply(recv: &Val, item: &Val) -> Val {
-    use crate::util::val_to_key;
-    let key = val_to_key(item);
     Val::Bool(match recv {
-        Val::Arr(a) => a.iter().any(|v| val_to_key(v) == key),
-        Val::IntVec(a) => a.iter().any(|n| val_to_key(&Val::Int(*n)) == key),
-        Val::FloatVec(a) => a.iter().any(|f| val_to_key(&Val::Float(*f)) == key),
+        Val::Arr(a) => a.iter().any(|v| crate::util::vals_deep_eq(v, item)),
+        Val::IntVec(a) => a.iter().any(|n| crate::util::vals_eq(&Val::Int(*n), item)),
+        Val::FloatVec(a) => a
+            .iter()
+            .any(|f| crate::util::vals_eq(&Val::Float(*f), item)),
         Val::StrVec(a) => match item.as_str() {
             Some(needle) => a.iter().any(|s| s.as_ref() == needle),
             None => false,

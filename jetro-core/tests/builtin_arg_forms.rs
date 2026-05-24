@@ -944,6 +944,11 @@ fn re_replace_args() {
 fn includes_index() {
     assert_eq!(run(r#"["a","b"].includes("a")"#, &json!({})), "true");
     assert_eq!(run(r#"["a","b","c"].index("b")"#, &json!({})), "1");
+    assert_eq!(
+        run(r#"[{"id":1},{"id":2}].includes({"id":2})"#, &json!({})),
+        "true"
+    );
+    assert_eq!(run(r#"[[1],[],[1]].indices_of([1])"#, &json!({})), "[0,2]");
 }
 
 // Group G: path-mutation methods

@@ -330,7 +330,7 @@ impl<'a> SinkAccumulator<'a> {
         item: &Val,
         target: &Val,
     ) -> bool {
-        let matched = crate::util::vals_eq(item, target);
+        let matched = crate::util::vals_deep_eq(item, target);
         self.observe_membership_match(op, matched)
     }
 

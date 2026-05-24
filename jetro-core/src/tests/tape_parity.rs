@@ -739,6 +739,8 @@ fn tape_matches_vm_for_dynamic_membership_targets_in_view_chains() {
     });
     for query in [
         "$.rows.map(tags).includes([\"user\"])",
+        "$.rows.map(tags).indices_of($.needles.empty)",
+        "$.rows.map({id, tag: tags.last()}).includes($.needles.compound)",
         "$.rows.map({id, tag: tags.last()}).map(tag).includes($.needles.role)",
         "$.rows.map(tags.first()).includes($.needles.role)",
         "$.rows.map(tags.first()).index($.needles.role)",

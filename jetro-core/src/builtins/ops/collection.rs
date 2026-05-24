@@ -479,7 +479,7 @@ pub fn join_apply(recv: &Val, sep: &str) -> Option<Val> {
 pub fn index_value_apply(recv: &Val, target: &Val) -> Option<Val> {
     let items_cow = recv.as_vals()?;
     for (i, item) in items_cow.iter().enumerate() {
-        if crate::util::vals_eq(item, target) {
+        if crate::util::vals_deep_eq(item, target) {
             return Some(Val::Int(i as i64));
         }
     }
@@ -493,7 +493,7 @@ pub fn indices_of_apply(recv: &Val, target: &Val) -> Option<Val> {
     let out: Vec<i64> = items_cow
         .iter()
         .enumerate()
-        .filter(|(_, v)| crate::util::vals_eq(v, target))
+        .filter(|(_, v)| crate::util::vals_deep_eq(v, target))
         .map(|(i, _)| i as i64)
         .collect();
     Some(Val::int_vec(out))
