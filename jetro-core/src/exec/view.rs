@@ -447,6 +447,17 @@ where
     Some(count)
 }
 
+fn deterministic_prefix_is_empty<'a, V>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+    stage_kernels: &[pipeline::BodyKernel],
+) -> bool
+where
+    V: ValueView<'a> + 'a,
+{
+    cardinality_after_deterministic_stages(source, stages, stage_kernels) == Some(0)
+}
+
 fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
     match kernel {
         pipeline::BodyKernel::ConstBool(value) => Some(*value),
@@ -1296,9 +1307,7 @@ where
         return None;
     }
     let source_demand = body.pull_demand();
-    if let Some(0) =
-        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
-    {
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
         return Some(run_materialized_value_suffix(
             body,
             plan.consumed_stages,
@@ -1367,9 +1376,7 @@ where
     {
         return None;
     }
-    if let Some(0) =
-        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
-    {
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
         return run_sorted_winners_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
@@ -1632,9 +1639,7 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if let Some(0) =
-        cardinality_after_deterministic_stages(&source, &plan.prefix, &body.stage_kernels)
-    {
+    if deterministic_prefix_is_empty(&source, &plan.prefix, &body.stage_kernels) {
         return run_ordered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
