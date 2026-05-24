@@ -631,7 +631,6 @@ impl Builtin for DropWhile {
             .demand_law(BuiltinDemandLaw::DropWhile)
             .expr_payload(BuiltinExprPayload::PredicateScan)
             .logical_shape(BuiltinLogicalShape::DropWhile)
-            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .streaming_boundary(BuiltinStreamingBoundary::PrefixState)
             .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .pipeline_shape(BuiltinPipelineShape::new(
@@ -644,16 +643,28 @@ impl Builtin for DropWhile {
             .lowering(BuiltinPipelineLowering::ExprArg)
     }
 
-    /// DropWhile in the streaming loop is a no-op pass-through (the materialised
-    /// barrier path handles the actual drop semantics in materialized_exec). Mirrors
-    /// the original `PrefixWhile { take: false }` arm in val_stage_flow.
     #[inline]
     fn apply_stream(
-        _ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
         item: crate::data::value::Val,
-        _body: Option<&crate::vm::Program>,
+        body: Option<&crate::vm::Program>,
     ) -> Result<crate::exec::pipeline::StageFlow<crate::data::value::Val>, crate::data::context::EvalError> {
-        Ok(crate::exec::pipeline::StageFlow::Continue(item))
+        if ctx.stage_taken[ctx.stage_idx] != 0 {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        }
+        let prog = body.expect("drop_while body");
+        let drop = super::filter_one(&item, |v| {
+            crate::exec::pipeline::eval_kernel_with_vm(ctx.kernel, v, ctx.vm, |it, vm| {
+                crate::exec::pipeline::apply_item_in_env(vm, ctx.env, it, prog)
+            })
+        })?;
+        if drop {
+            ctx.stage_skipped[ctx.stage_idx] += 1;
+            Ok(crate::exec::pipeline::StageFlow::SkipRow)
+        } else {
+            ctx.stage_taken[ctx.stage_idx] = 1;
+            Ok(crate::exec::pipeline::StageFlow::Continue(item))
+        }
     }
 
     #[inline]

@@ -1933,6 +1933,23 @@ mod tests {
     }
 
     #[test]
+    fn view_drop_while_map_first_streams_without_materializing_root() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"isbn":"skip","price":10},{"isbn":"answer","price":30},{"isbn":"late","price":40}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.drop_while(price < 20).map(isbn).first()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("answer"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_sort_filter_map_last_scans_sorted_tail_until_match() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"isbn":"top-fails","score":100,"price":10},{"isbn":"answer","score":90,"price":30},{"isbn":"tail-fails","score":80,"price":5}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

@@ -1924,6 +1924,16 @@ mod tests {
     }
 
     #[test]
+    fn drop_while_stays_in_streaming_prefix_path() {
+        let p = lower_query("$.books.drop_while(price < 20).map(isbn).first()").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        assert_eq!(
+            p.stages[0].builtin_id().map(crate::builtins::registry::streaming_boundary),
+            Some(crate::builtins::BuiltinStreamingBoundary::PrefixState)
+        );
+    }
+
+    #[test]
     fn demand_optimizer_computed_map_filter_count_matches_vm() {
         use serde_json::json;
         assert_pipeline_matches_vm(
