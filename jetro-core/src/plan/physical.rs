@@ -501,7 +501,8 @@ fn mask_active_local_stage_kernels(
     match &mut body.sink {
         crate::exec::pipeline::Sink::Reducer(spec) => {
             let mut kernel_idx = 0usize;
-            if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref()) {
+            if let (Some(program), Some(expr)) = (&mut spec.predicate, spec.predicate_expr.as_ref())
+            {
                 recompile_sink_program_for_lexical_env(
                     program,
                     expr,
@@ -773,9 +774,11 @@ fn try_lower_implicit_root_path(builder: &PlanBuilder, expr: &Expr) -> Option<Pl
     }
 
     match expr {
-        Expr::Ident(name) if !builder.is_local(name) => Some(PlanNode::RootPath(vec![
-            PhysicalPathStep::Field(Arc::from(name.as_str())),
-        ])),
+        Expr::Ident(name) if !builder.is_local(name) => {
+            Some(PlanNode::RootPath(vec![PhysicalPathStep::Field(
+                Arc::from(name.as_str()),
+            )]))
+        }
         Expr::Chain(base, steps) => {
             let Expr::Ident(name) = base.as_ref() else {
                 return None;
@@ -820,18 +823,17 @@ fn try_lower_chain(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
         return None;
     };
 
-    let mut cur = if builder.context.input == InputMode::Bytes {
-        match base.as_ref() {
-            Expr::Ident(name) if !builder.is_local(name) => {
-                builder.push(PlanNode::RootPath(vec![PhysicalPathStep::Field(Arc::from(
-                    name.as_str(),
-                ))]))
+    let mut cur =
+        if builder.context.input == InputMode::Bytes {
+            match base.as_ref() {
+                Expr::Ident(name) if !builder.is_local(name) => builder.push(PlanNode::RootPath(
+                    vec![PhysicalPathStep::Field(Arc::from(name.as_str()))],
+                )),
+                _ => lower_expr(builder, base),
             }
-            _ => lower_expr(builder, base),
-        }
-    } else {
-        lower_expr(builder, base)
-    };
+        } else {
+            lower_expr(builder, base)
+        };
     let mut out = Vec::new();
     for step in steps {
         match step {
@@ -1225,11 +1227,19 @@ mod tests {
     fn byte_context_lowers_bare_first_suffix_to_pipeline_chain() {
         let plan = plan_query_with_context("attributes.first().value", PlanningContext::bytes());
         let PlanNode::Chain { base, steps } = root_node(&plan) else {
-            panic!("expected chain, got {:?}", std::mem::discriminant(root_node(&plan)));
+            panic!(
+                "expected chain, got {:?}",
+                std::mem::discriminant(root_node(&plan))
+            );
         };
-        assert!(matches!(steps.as_slice(), [PhysicalChainStep::Field(key)] if key.as_ref() == "value"));
         assert!(
-            matches!(plan.node(*base), PlanNode::Pipeline { .. } | PlanNode::Call { .. }),
+            matches!(steps.as_slice(), [PhysicalChainStep::Field(key)] if key.as_ref() == "value")
+        );
+        assert!(
+            matches!(
+                plan.node(*base),
+                PlanNode::Pipeline { .. } | PlanNode::Call { .. }
+            ),
             "{:?}",
             std::mem::discriminant(plan.node(*base))
         );

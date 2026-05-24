@@ -419,8 +419,11 @@ impl ExecutionFacts {
                 let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
                 let view_native = crate::exec::pipeline::view_capabilities(body).is_some();
                 let view_prefix = crate::exec::pipeline::view_prefix_capabilities(body).is_some();
-                let materialized_source = field_chain && body.can_run_with_materialized_receiver();
-                let can_complete_without_root = field_chain && (view_native || materialized_source);
+                let materialized_source =
+                    field_chain && body.can_run_with_materialized_source_env();
+                let can_complete_without_root = field_chain
+                    && (view_native || materialized_source)
+                    && !body.needs_materialized_source_root_env();
                 Self {
                     can_avoid_root_materialization: can_complete_without_root,
                     can_stream_rows: field_chain && (view_native || view_prefix),

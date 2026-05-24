@@ -184,7 +184,7 @@ pub(super) fn run_tape_field_chain_with_vm(
     {
         return None;
     }
-    if !body.can_run_with_materialized_receiver() {
+    if !body.can_run_with_materialized_source_env() {
         return None;
     }
     let source = row_source::TapeRowSource::from_field_chain(tape, keys);

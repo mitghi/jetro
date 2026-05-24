@@ -210,13 +210,12 @@ where
         } => {
             let kernel = sink_kernels.get(*predicate_kernel)?;
             let matched = eval_filter_kernel_with_vm(item, kernel, vm)?;
-            let sink_done =
-                match sink_acc.observe_predicate_lazy(*op, matched, || {
-                    pipeline::view_kernel_view_to_owned(item.clone())
-                }) {
-                    Ok(done) => done,
-                    Err(err) => return Some(Err(err)),
-                };
+            let sink_done = match sink_acc.observe_predicate_lazy(*op, matched, || {
+                pipeline::view_kernel_view_to_owned(item.clone())
+            }) {
+                Ok(done) => done,
+                Err(err) => return Some(Err(err)),
+            };
             Some(Ok(if sink_done {
                 ViewRowAction::Stop
             } else if matched {
@@ -239,10 +238,7 @@ where
                 ViewRowAction::Skip
             }))
         }
-        pipeline::ViewSinkCapability::ArgExtreme {
-            op,
-            key_kernel,
-        } => {
+        pipeline::ViewSinkCapability::ArgExtreme { op, key_kernel } => {
             let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(*key_kernel)?, vm)?;
             sink_acc.observe_arg_extreme_lazy(op.wants_max(), key, || {
                 pipeline::view_kernel_view_to_owned(item.clone())
@@ -333,11 +329,11 @@ where
 {
     let prefix = pipeline::view_prefix_capabilities(body)?;
     if prefix.consumed_stages >= body.stages.len()
-        && !body.suffix_can_run_with_materialized_receiver(prefix.consumed_stages)
+        && !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages)
     {
         return None;
     }
-    if !body.suffix_can_run_with_materialized_receiver(prefix.consumed_stages) {
+    if !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages) {
         return None;
     }
 
@@ -794,7 +790,7 @@ where
     V: ValueView<'a>,
 {
     let mut plan = reducer_stage::plan(body)?;
-    if !body.suffix_can_run_with_materialized_receiver(plan.consumed_stages) {
+    if !body.suffix_can_run_with_materialized_source_env(plan.consumed_stages) {
         return None;
     }
     let source_demand = body.pull_demand();
@@ -853,7 +849,7 @@ where
     let select_projection_suffix = terminal_projection_run(body, suffix_start).is_some();
     if collect_suffix.is_none()
         && !select_projection_suffix
-        && !body.suffix_can_run_with_materialized_receiver(suffix_start)
+        && !body.suffix_can_run_with_materialized_source_env(suffix_start)
     {
         return None;
     }
@@ -1382,7 +1378,9 @@ where
 {
     match key {
         Some(program) => match program.eval_view_with_vm(item, vm)? {
-            pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
+            pipeline::ViewKernelValue::View(view) => {
+                Some(pipeline::view_kernel_view_to_owned(view))
+            }
             pipeline::ViewKernelValue::Owned(value) => Some(value),
         },
         None => Some(item.materialize()),
@@ -1397,6 +1395,8 @@ mod tests {
 
     use indexmap::IndexMap;
 
+    use crate::builtins::registry::view_scalar_projection;
+    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
     use crate::compile::compiler::Compiler;
     use crate::data::context::Env;
     use crate::data::value::Val;
@@ -1406,8 +1406,6 @@ mod tests {
         PipelineBody, PredicateSinkSpec, Sink, SourceCapabilities, Stage, ViewKernelValue,
         ViewSinkCapability, ViewStageCapability,
     };
-    use crate::builtins::registry::view_scalar_projection;
-    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
     use crate::util::JsonView;

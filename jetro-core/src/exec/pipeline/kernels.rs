@@ -529,10 +529,12 @@ fn try_classify_nested_array_reducer(base: &Expr, steps: &[Step]) -> Option<Body
             map,
             op,
         }),
-        (id, None, None) if count_sink_accepts_predicate(id) => Some(BodyKernel::NestedArrayCount {
-            source: Box::new(source),
-            predicate,
-        }),
+        (id, None, None) if count_sink_accepts_predicate(id) => {
+            Some(BodyKernel::NestedArrayCount {
+                source: Box::new(source),
+                predicate,
+            })
+        }
         _ => None,
     }
 }
@@ -626,10 +628,7 @@ fn array_selector_builtin_call(call: &BuiltinCall) -> Option<ArraySelector> {
         BuiltinArgs::I64(index) => Some(index),
         _ => None,
     };
-    ArraySelector::from_builtin_selector(
-        call.array_selector()?,
-        index,
-    )
+    ArraySelector::from_builtin_selector(call.array_selector()?, index)
 }
 
 impl BodyKernel {
@@ -725,9 +724,7 @@ impl BodyKernel {
                 Some((keys.iter().cloned().collect(), *op, lit.clone()))
             }
             Self::CurrentCmpLit(op, lit) => Some((Vec::new(), *op, lit.clone())),
-            Self::CmpLit { lhs, op, lit } => {
-                Some((lhs.field_path_keys()?, *op, lit.clone()))
-            }
+            Self::CmpLit { lhs, op, lit } => Some((lhs.field_path_keys()?, *op, lit.clone())),
             _ => None,
         }
     }
@@ -783,19 +780,15 @@ impl BodyKernel {
     /// Returns the field payload needed from the current row to evaluate this kernel.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         match self {
-            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) => {
-                FieldDemand::Whole
-            }
+            Self::Generic | Self::Current | Self::CurrentCmpLit(_, _) => FieldDemand::Whole,
             Self::FieldRead(key) | Self::FieldCmpLit(key, _, _) => {
                 FieldDemand::Fields(FieldSet::single(Arc::clone(key)))
             }
             Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => {
                 FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
             }
-            Self::BuiltinCall { receiver, call } => {
-                object_key_call_field_demand(receiver, call)
-                    .unwrap_or_else(|| receiver.field_demand())
-            }
+            Self::BuiltinCall { receiver, call } => object_key_call_field_demand(receiver, call)
+                .unwrap_or_else(|| receiver.field_demand()),
             Self::Compose { first, then } => compose_field_demand(first, then),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
@@ -1262,14 +1255,24 @@ fn flatten_or_kernel(kernel: BodyKernel, out: &mut Vec<BodyKernel>) {
 }
 
 fn match_is_receiver_local(cm: &crate::vm::CompiledMatch) -> bool {
-    matches!(
-        cm.scrutinee,
-        crate::vm::MatchScrutinee::Current | crate::vm::MatchScrutinee::Program(_)
-    ) && cm.guards.is_empty()
+    match_is_materialized_env_local(cm, false)
+}
+
+fn match_is_materialized_env_local(cm: &crate::vm::CompiledMatch, allow_root: bool) -> bool {
+    let scrutinee_ok = match cm.scrutinee {
+        crate::vm::MatchScrutinee::Current => true,
+        crate::vm::MatchScrutinee::Root => allow_root,
+        crate::vm::MatchScrutinee::Program(_) => true,
+    };
+    scrutinee_ok
+        && cm
+            .guards
+            .iter()
+            .all(|program| program_ops_are_materialized_env_local(program, allow_root))
         && cm
             .bodies
             .iter()
-            .all(|program| program_is_receiver_local(program))
+            .all(|program| program_ops_are_materialized_env_local(program, allow_root))
 }
 
 fn match_bodies_need_current(cm: &crate::vm::CompiledMatch) -> bool {
@@ -1337,13 +1340,23 @@ fn opcode_uses_current(opcode: &crate::vm::Opcode) -> bool {
 }
 
 pub(super) fn program_is_receiver_local(program: &crate::vm::Program) -> bool {
-    program.ops.iter().all(opcode_is_receiver_local)
+    program
+        .ops
+        .iter()
+        .all(|opcode| opcode_is_materialized_env_local(opcode, false))
 }
 
-fn opcode_is_receiver_local(opcode: &crate::vm::Opcode) -> bool {
+pub(super) fn program_is_materialized_env_local(program: &crate::vm::Program) -> bool {
+    program
+        .ops
+        .iter()
+        .all(|opcode| opcode_is_materialized_env_local(opcode, true))
+}
+
+fn opcode_is_materialized_env_local(opcode: &crate::vm::Opcode, allow_root: bool) -> bool {
     use crate::vm::Opcode;
     match opcode {
-        Opcode::PushRoot | Opcode::RootChain(_) => false,
+        Opcode::PushRoot | Opcode::RootChain(_) => allow_root,
         Opcode::PipelineRun { .. }
         | Opcode::ListComp(_)
         | Opcode::DictComp(_)
@@ -1352,48 +1365,64 @@ fn opcode_is_receiver_local(opcode: &crate::vm::Opcode) -> bool {
         | Opcode::UpdateBatchEval(_)
         | Opcode::DeepMatchAll(_)
         | Opcode::DeepMatchFirst(_) => false,
-        Opcode::Match(cm) => match_is_receiver_local(cm),
+        Opcode::Match(cm) => match_is_materialized_env_local(cm, allow_root),
         Opcode::DynIndex(prog)
         | Opcode::InlineFilter(prog)
         | Opcode::AndOp(prog)
         | Opcode::OrOp(prog)
-        | Opcode::CoalesceOp(prog) => program_is_receiver_local(prog),
-        Opcode::BindLamCurrent { body, .. } => program_is_receiver_local(body),
+        | Opcode::CoalesceOp(prog) => program_ops_are_materialized_env_local(prog, allow_root),
+        Opcode::BindLamCurrent { body, .. } => {
+            program_ops_are_materialized_env_local(body, allow_root)
+        }
         Opcode::CallMethod(call) | Opcode::CallOptMethod(call) => call
             .sub_progs
             .iter()
-            .all(|prog| program_is_receiver_local(prog)),
+            .all(|prog| program_ops_are_materialized_env_local(prog, allow_root)),
         Opcode::MakeObj(entries) => entries.iter().all(|entry| match entry {
             crate::vm::CompiledObjEntry::Short { .. }
             | crate::vm::CompiledObjEntry::KvPath { .. } => true,
             crate::vm::CompiledObjEntry::Kv { prog, cond, .. } => {
-                program_is_receiver_local(prog)
+                program_ops_are_materialized_env_local(prog, allow_root)
                     && cond
                         .as_ref()
-                        .is_none_or(|cond| program_is_receiver_local(cond))
+                        .is_none_or(|cond| program_ops_are_materialized_env_local(cond, allow_root))
             }
             crate::vm::CompiledObjEntry::Dynamic { key, val } => {
-                program_is_receiver_local(key) && program_is_receiver_local(val)
+                program_ops_are_materialized_env_local(key, allow_root)
+                    && program_ops_are_materialized_env_local(val, allow_root)
             }
             crate::vm::CompiledObjEntry::Spread(prog)
-            | crate::vm::CompiledObjEntry::SpreadDeep(prog) => program_is_receiver_local(prog),
+            | crate::vm::CompiledObjEntry::SpreadDeep(prog) => {
+                program_ops_are_materialized_env_local(prog, allow_root)
+            }
         }),
         Opcode::MakeArr(items) => items
             .iter()
-            .all(|(program, _)| program_is_receiver_local(program)),
+            .all(|(program, _)| program_ops_are_materialized_env_local(program, allow_root)),
         Opcode::FString(parts) => parts.iter().all(|part| match part {
             crate::vm::CompiledFSPart::Lit(_) => true,
-            crate::vm::CompiledFSPart::Interp { prog, .. } => program_is_receiver_local(prog),
+            crate::vm::CompiledFSPart::Interp { prog, .. } => {
+                program_ops_are_materialized_env_local(prog, allow_root)
+            }
         }),
-        Opcode::LetExpr { body, .. } => program_is_receiver_local(body),
+        Opcode::LetExpr { body, .. } => program_ops_are_materialized_env_local(body, allow_root),
         Opcode::IfElse { then_, else_ } => {
-            program_is_receiver_local(then_) && program_is_receiver_local(else_)
+            program_ops_are_materialized_env_local(then_, allow_root)
+                && program_ops_are_materialized_env_local(else_, allow_root)
         }
         Opcode::TryExpr { body, default } => {
-            program_is_receiver_local(body) && program_is_receiver_local(default)
+            program_ops_are_materialized_env_local(body, allow_root)
+                && program_ops_are_materialized_env_local(default, allow_root)
         }
         _ => true,
     }
+}
+
+fn program_ops_are_materialized_env_local(program: &crate::vm::Program, allow_root: bool) -> bool {
+    program
+        .ops
+        .iter()
+        .all(|opcode| opcode_is_materialized_env_local(opcode, allow_root))
 }
 
 fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKernel> {
@@ -1709,12 +1738,12 @@ fn eval_native_kernel_with_vm(
         }
         BodyKernel::ConstBool(b) => Ok(Val::Bool(*b)),
         BodyKernel::Const(v) => Ok(v.clone()),
-        BodyKernel::FString(fstring) => {
-            eval_fstring_kernel(fstring, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
-        }
-        BodyKernel::Object(object) => {
-            eval_object_kernel(object, |kernel| eval_native_kernel_with_vm(kernel, item, vm))
-        }
+        BodyKernel::FString(fstring) => eval_fstring_kernel(fstring, |kernel| {
+            eval_native_kernel_with_vm(kernel, item, vm)
+        }),
+        BodyKernel::Object(object) => eval_object_kernel(object, |kernel| {
+            eval_native_kernel_with_vm(kernel, item, vm)
+        }),
         BodyKernel::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item_kernel in items.iter() {
@@ -2204,24 +2233,20 @@ where
             let rhs = eval_view_numeric_kernel(rhs, item, vm)?;
             eval_numeric_binary(lhs, *op, rhs)
         }
-        BodyKernel::Compose { first, then } => {
-            match eval_view_kernel_inner(first, item, vm)? {
-                ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view, vm),
-                ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
+        BodyKernel::Compose { first, then } => match eval_view_kernel_inner(first, item, vm)? {
+            ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view, vm),
+            ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
+        },
+        BodyKernel::ArraySelect { array, selector } => {
+            match eval_view_kernel_inner(array, item, vm)? {
+                ViewKernelValue::View(view) => {
+                    numeric_from_json_view(eval_array_select_view(view, *selector).scalar())
+                }
+                ViewKernelValue::Owned(value) => {
+                    numeric_from_val(&eval_array_select_native(&value, *selector))
+                }
             }
         }
-        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel_inner(
-            array,
-            item,
-            vm,
-        )? {
-            ViewKernelValue::View(view) => {
-                numeric_from_json_view(eval_array_select_view(view, *selector).scalar())
-            }
-            ViewKernelValue::Owned(value) => {
-                numeric_from_val(&eval_array_select_native(&value, *selector))
-            }
-        },
         _ => None,
     }
 }
@@ -2530,14 +2555,16 @@ where
             for part in fstring.parts.iter() {
                 match part {
                     FStringKernelPart::Lit(value) => out.push_str(value),
-                    FStringKernelPart::Interp(kernel) => match eval_view_kernel_inner(kernel, item, vm)? {
-                        ViewKernelValue::View(view) => {
-                            append_json_view_to_string(&mut out, &view, view.scalar()).ok()?;
+                    FStringKernelPart::Interp(kernel) => {
+                        match eval_view_kernel_inner(kernel, item, vm)? {
+                            ViewKernelValue::View(view) => {
+                                append_json_view_to_string(&mut out, &view, view.scalar()).ok()?;
+                            }
+                            ViewKernelValue::Owned(value) => {
+                                append_val_to_string(&mut out, &value).ok()?;
+                            }
                         }
-                        ViewKernelValue::Owned(value) => {
-                            append_val_to_string(&mut out, &value).ok()?;
-                        }
-                    },
+                    }
                 }
             }
             Some(ViewKernelValue::Owned(Val::Str(Arc::from(out))))
@@ -2572,17 +2599,15 @@ where
             predicate,
             map,
             op,
-        } => {
-            eval_nested_array_reducer_view(
-                source,
-                predicate.as_deref(),
-                map.as_deref(),
-                *op,
-                item,
-                vm,
-            )
-            .map(ViewKernelValue::Owned)
-        }
+        } => eval_nested_array_reducer_view(
+            source,
+            predicate.as_deref(),
+            map.as_deref(),
+            *op,
+            item,
+            vm,
+        )
+        .map(ViewKernelValue::Owned),
         BodyKernel::NestedArrayCount { source, predicate } => {
             eval_nested_array_count_view(source, predicate.as_deref(), item, vm)
                 .map(ViewKernelValue::Owned)
@@ -2593,21 +2618,21 @@ where
                 .unwrap_or_else(|| plan.run(item.materialize()));
             result.ok().map(ViewKernelValue::Owned)
         }
-        BodyKernel::BuiltinCall { receiver, call } => match eval_view_kernel_inner(receiver, item, vm)? {
-            ViewKernelValue::View(view) => match apply_view_projection(
-                call.id(),
-                &call.args,
-                view,
-            )? {
-                ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
-                ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
-            },
-            ViewKernelValue::Owned(value) => call
-                .try_apply(&value)
-                .ok()
-                .flatten()
-                .map(ViewKernelValue::Owned),
-        },
+        BodyKernel::BuiltinCall { receiver, call } => {
+            match eval_view_kernel_inner(receiver, item, vm)? {
+                ViewKernelValue::View(view) => {
+                    match apply_view_projection(call.id(), &call.args, view)? {
+                        ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
+                        ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
+                    }
+                }
+                ViewKernelValue::Owned(value) => call
+                    .try_apply(&value)
+                    .ok()
+                    .flatten()
+                    .map(ViewKernelValue::Owned),
+            }
+        }
         BodyKernel::Compose { first, then } => match eval_view_kernel_inner(first, item, vm)? {
             ViewKernelValue::View(view) => eval_view_kernel_inner(then, &view, vm),
             ViewKernelValue::Owned(value) => eval_native_kernel_with_vm(then, &value, vm)
@@ -2639,14 +2664,16 @@ where
                 .ok()
                 .map(ViewKernelValue::Owned)
         }
-        BodyKernel::ArraySelect { array, selector } => match eval_view_kernel_inner(array, item, vm)? {
-            ViewKernelValue::View(view) => Some(ViewKernelValue::View(eval_array_select_view(
-                view, *selector,
-            ))),
-            ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(
-                eval_array_select_native(&value, *selector),
-            )),
-        },
+        BodyKernel::ArraySelect { array, selector } => {
+            match eval_view_kernel_inner(array, item, vm)? {
+                ViewKernelValue::View(view) => Some(ViewKernelValue::View(eval_array_select_view(
+                    view, *selector,
+                ))),
+                ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(
+                    eval_array_select_native(&value, *selector),
+                )),
+            }
+        }
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -2660,14 +2687,14 @@ where
                 };
                 let env = crate::data::context::Env::new(current);
                 crate::vm::exec_match_view(vm, compiled, view, &env)
-                .ok()
-                .map(ViewKernelValue::Owned)
+                    .ok()
+                    .map(ViewKernelValue::Owned)
             }
             ViewKernelValue::Owned(value) => {
                 let env = crate::data::context::Env::new(value.clone());
                 vm.exec_match(compiled, &value, &env)
-                .ok()
-                .map(ViewKernelValue::Owned)
+                    .ok()
+                    .map(ViewKernelValue::Owned)
             }
         },
         BodyKernel::And(predicates) => {
@@ -2855,7 +2882,10 @@ mod tests {
 
     #[test]
     fn literal_value_reports_only_constant_kernels() {
-        assert_eq!(BodyKernel::Const(Val::Int(7)).literal_value(), Some(Val::Int(7)));
+        assert_eq!(
+            BodyKernel::Const(Val::Int(7)).literal_value(),
+            Some(Val::Int(7))
+        );
         assert_eq!(
             BodyKernel::ConstBool(true).literal_value(),
             Some(Val::Bool(true))
@@ -2898,7 +2928,10 @@ mod tests {
 
     #[test]
     fn object_key_calls_on_current_have_field_demand() {
-        assert_eq!(field_paths(&key_call(BuiltinMethod::HasKey, "isbn")), vec!["isbn"]);
+        assert_eq!(
+            field_paths(&key_call(BuiltinMethod::HasKey, "isbn")),
+            vec!["isbn"]
+        );
         assert_eq!(
             field_paths(&key_call(BuiltinMethod::Missing, "title")),
             vec!["title"]
@@ -2919,7 +2952,10 @@ mod tests {
             field_paths(&path_call(BuiltinMethod::GetPath, "items[0].price")),
             vec!["items"]
         );
-        assert_eq!(field_paths(&key_call(BuiltinMethod::Has, "isbn")), vec!["*"]);
+        assert_eq!(
+            field_paths(&key_call(BuiltinMethod::Has, "isbn")),
+            vec!["*"]
+        );
     }
 
     #[test]
@@ -3594,16 +3630,17 @@ mod tests {
         let compiled_kernel = BodyKernel::classify(&program);
         assert!(compiled_kernel.is_view_native());
         let out =
-            eval_view_kernel(&compiled_kernel, &ValView::new(&value)).and_then(|value| match value {
-                ViewKernelValue::Owned(value) => Some(value),
-                _ => None,
-            });
+            eval_view_kernel(&compiled_kernel, &ValView::new(&value)).and_then(
+                |value| match value {
+                    ViewKernelValue::Owned(value) => Some(value),
+                    _ => None,
+                },
+            );
         assert_eq!(out, Some(Val::Str(Arc::from("contact"))));
 
-        let method_arg_program = crate::exec::pipeline::lower::compile_subexpr(
-            &crate::parse::ast::Arg::Pos(expr),
-        )
-        .expect("method arg program");
+        let method_arg_program =
+            crate::exec::pipeline::lower::compile_subexpr(&crate::parse::ast::Arg::Pos(expr))
+                .expect("method arg program");
         let method_arg_kernel = BodyKernel::classify(&method_arg_program);
         assert!(method_arg_kernel.is_view_native());
         let mut expected_fields = crate::plan::demand::FieldSet::new();
@@ -3619,12 +3656,13 @@ mod tests {
             method_arg_kernel.field_demand(),
             crate::plan::demand::FieldDemand::Fields(expected_fields)
         );
-        let out = eval_view_kernel(&method_arg_kernel, &ValView::new(&value)).and_then(|value| {
-            match value {
-                ViewKernelValue::Owned(value) => Some(value),
-                _ => None,
-            }
-        });
+        let out =
+            eval_view_kernel(&method_arg_kernel, &ValView::new(&value)).and_then(
+                |value| match value {
+                    ViewKernelValue::Owned(value) => Some(value),
+                    _ => None,
+                },
+            );
         assert_eq!(out, Some(Val::Str(Arc::from("contact"))));
     }
 }

@@ -5,7 +5,8 @@ use super::common::vm_query;
 use serde_json::{json, Value};
 
 fn assert_tape_vm_eq(query: &str, doc: &Value) {
-    let expected = vm_query(query, doc).unwrap_or_else(|err| panic!("VM failed for {query}: {err}"));
+    let expected =
+        vm_query(query, doc).unwrap_or_else(|err| panic!("VM failed for {query}: {err}"));
     let bytes = serde_json::to_vec(doc).expect("serialize fixture");
     let jetro = crate::Jetro::from_bytes(bytes).expect("build byte engine");
     let actual: Value = jetro
@@ -653,6 +654,98 @@ fn tape_matches_vm_for_late_projection_after_mixed_boundaries() {
         "$.orders.drop_while(score > 25).map({id, keys: customer.keys(), tier: customer.get_path(\"tier\")}).first()",
         "$.orders.take_while(status == \"open\").map({id, item: items.last().pick(\"sku\", \"price\")}).last()",
         "$.orders.filter(items.any(price > 15)).map({id, match: items.filter(price > 10).map(sku).first()}).last()",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
+fn tape_matches_vm_for_terminal_sinks_after_materialized_boundaries() {
+    let doc = json!({
+        "orders": [
+            {
+                "id": "a1",
+                "status": "open",
+                "score": 30,
+                "customer": {"region": "eu", "tier": "gold"},
+                "items": [
+                    {"sku": "p1", "price": 12, "qty": 2, "tags": ["hot", "fragile"]},
+                    {"sku": "p2", "price": 4, "qty": 1, "tags": ["cold"]}
+                ]
+            },
+            {
+                "id": "a2",
+                "status": "closed",
+                "score": 10,
+                "customer": {"region": "us", "tier": "silver"},
+                "items": [
+                    {"sku": "p3", "price": 9, "qty": 3, "tags": ["hot"]},
+                    {"sku": "p4", "price": 16, "qty": 1, "tags": ["bulk", "hot"]}
+                ]
+            },
+            {
+                "id": "a3",
+                "status": "open",
+                "score": 20,
+                "customer": {"region": "eu", "tier": "gold"},
+                "items": [
+                    {"sku": "p5", "price": 7, "qty": 4, "tags": []}
+                ]
+            },
+            {
+                "id": "a4",
+                "status": "open",
+                "score": 40,
+                "customer": {"region": "apac", "tier": "bronze"},
+                "items": [
+                    {"sku": "p6", "price": 20, "qty": 1, "tags": ["hot"]},
+                    {"sku": "p7", "price": 3, "qty": 5, "tags": ["clearance"]}
+                ]
+            }
+        ],
+        "wanted_sku": "p6",
+        "wanted_region": "eu"
+    });
+    for query in [
+        "$.orders.flat_map(items).map(sku).includes($.wanted_sku)",
+        "$.orders.flat_map(items).map(sku).index($.wanted_sku)",
+        "$.orders.flat_map(items).map(tags.first()).indices_of(\"hot\")",
+        "$.orders.sort_by(score).drop(1).map(customer.region).includes($.wanted_region)",
+        "$.orders.sort_by(score).drop(1).map(customer.region).indices_of($.wanted_region)",
+        "$.orders.take_while(status == \"open\").map(items.map(price).sum()).any(@ > 20)",
+        "$.orders.drop_while(score > 25).map({id, total: items.sum(price)}).find_index(total > 20)",
+        "$.orders.flat_map(items).indices_where(tags.includes(\"hot\"))",
+        "$.orders.group_by(customer.region).entries().map({region: @[0], count: @[1].len()}).any(count > 1)",
+        "$.orders.unique_by(customer.tier).map(customer.region).all(@ != \"\")",
+    ] {
+        assert_tape_vm_eq(query, &doc);
+    }
+}
+
+#[test]
+fn tape_matches_vm_for_dynamic_membership_targets_in_view_chains() {
+    let doc = json!({
+        "rows": [
+            {"id": 1, "name": "ada", "tags": ["admin", "ops"], "meta": {"primary": "admin"}},
+            {"id": 2, "name": "bob", "tags": ["user"], "meta": {"primary": "user"}},
+            {"id": 3, "name": "cy", "tags": ["ops", "review"], "meta": {"primary": "review"}},
+            {"id": 4, "name": "dee", "tags": [], "meta": {"primary": "guest"}}
+        ],
+        "needles": {
+            "role": "ops",
+            "empty": [],
+            "compound": {"id": 3, "tag": "review"}
+        }
+    });
+    for query in [
+        "$.rows.map(tags).includes([\"user\"])",
+        "$.rows.map({id, tag: tags.last()}).map(tag).includes($.needles.role)",
+        "$.rows.map(tags.first()).includes($.needles.role)",
+        "$.rows.map(tags.first()).index($.needles.role)",
+        "$.rows.map(meta.primary).indices_of($.needles.role)",
+        "$.rows.filter(tags.includes($.needles.role)).map(name).includes(\"ada\")",
+        "$.rows.filter(tags.includes($.needles.role)).map({id, tag: tags.last()}).index($.needles.compound)",
+        "$.rows.map(tags.len()).indices_of(0)",
     ] {
         assert_tape_vm_eq(query, &doc);
     }

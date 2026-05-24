@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
+use crate::builtins::registry::{apply_view_projection, ViewProjectionResult};
 use crate::data::context::{Env, EvalError};
 use crate::data::runtime::{PipelineSourceResolver, ResolvedPipelineSource};
 use crate::data::value::Val;
 use crate::data::view::{ValView, ValueView};
-use crate::builtins::registry::{apply_view_projection, ViewProjectionResult};
 use crate::exec::pipeline;
 use crate::exec::view as view_pipeline;
 use crate::ir::physical::{
@@ -255,7 +255,7 @@ impl ExecCtx<'_, '_> {
     /// pipelines can use a null root; dynamic membership targets may contain
     /// root-relative expressions and therefore need the real document root.
     fn view_pipeline_env(&self, body: &pipeline::PipelineBody) -> Result<Env, EvalError> {
-        if pipeline_body_has_dynamic_membership_target(body) {
+        if pipeline_body_needs_root_env(body) {
             self.j
                 .root_val()
                 .map(|root| self.env_with_fast_locals(root))
@@ -576,7 +576,7 @@ impl ExecCtx<'_, '_> {
         keys: &[Arc<str>],
         body: &pipeline::PipelineBody,
     ) -> Option<Result<Val, EvalError>> {
-        if !body.can_run_with_materialized_receiver() {
+        if !body.can_run_with_materialized_source_env() {
             return None;
         }
         {
@@ -817,13 +817,12 @@ impl ExecCtx<'_, '_> {
             if optional && matches!(view.scalar(), crate::util::JsonView::Null) {
                 return Some(Ok(Val::Null));
             }
-            apply_view_projection(call.id(), &call.args, view)
-                .map(|result| {
-                    Ok(match result {
-                        ViewProjectionResult::View(view) => view.materialize(),
-                        ViewProjectionResult::Owned(value) => value,
-                    })
+            apply_view_projection(call.id(), &call.args, view).map(|result| {
+                Ok(match result {
+                    ViewProjectionResult::View(view) => view.materialize(),
+                    ViewProjectionResult::Owned(value) => value,
                 })
+            })
         }
     }
 
@@ -1053,6 +1052,10 @@ fn pipeline_body_has_dynamic_membership_target(body: &pipeline::PipelineBody) ->
     )
 }
 
+fn pipeline_body_needs_root_env(body: &pipeline::PipelineBody) -> bool {
+    pipeline_body_has_dynamic_membership_target(body) || body.needs_materialized_source_root_env()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1082,11 +1085,13 @@ mod tests {
             crate::vm::Program::new(Vec::new(), ""),
         )));
         assert!(super::pipeline_body_has_dynamic_membership_target(&dynamic));
+        assert!(super::pipeline_body_needs_root_env(&dynamic));
 
         let literal = body_with_target(MembershipSinkTarget::Literal(Val::Int(1)));
         assert!(!super::pipeline_body_has_dynamic_membership_target(
             &literal
         ));
+        assert!(!super::pipeline_body_needs_root_env(&literal));
 
         let collect = PipelineBody {
             stages: Vec::new(),
@@ -1098,5 +1103,6 @@ mod tests {
         assert!(!super::pipeline_body_has_dynamic_membership_target(
             &collect
         ));
+        assert!(!super::pipeline_body_needs_root_env(&collect));
     }
 }

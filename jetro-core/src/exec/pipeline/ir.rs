@@ -13,8 +13,8 @@ use crate::builtins::registry::{
     count_sink_accepts_predicate, direct_scalar_for_plain_sink, effective_pipeline_order_effect,
     effective_pipeline_shape, expr_payload, expr_stage as builtin_expr_stage,
     expr_stage_elidable_when_value_unused, keyed_reducer as builtin_keyed_reducer,
-    nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_composed_barrier,
-    pipeline_builtin_call_stage, pipeline_legacy_materialized, pipeline_lowering,
+    nullary_stage as builtin_nullary_stage, participates_in_demand, pipeline_builtin_call_stage,
+    pipeline_composed_barrier, pipeline_legacy_materialized, pipeline_lowering,
     pipeline_stage_consumes_value, pipeline_stage_is_order_only, pipeline_stage_is_positional,
     pipeline_streams, sink_accumulator as builtin_sink_accumulator,
     sink_demand as builtin_sink_demand,
@@ -163,9 +163,7 @@ impl Sink {
 
     /// Build a multi-row selection sink from resolved builtin metadata.
     pub(crate) fn select_many_builtin_id(id: BuiltinId, n: usize) -> Option<Self> {
-        let BuiltinSinkAccumulator::SelectOne(position) =
-            builtin_sink_accumulator(id)?
-        else {
+        let BuiltinSinkAccumulator::SelectOne(position) = builtin_sink_accumulator(id)? else {
             return None;
         };
         Some(Sink::SelectMany {
@@ -197,11 +195,8 @@ impl Sink {
 
     /// Build a plain count reducer from resolved builtin metadata.
     pub(crate) fn count_builtin_id(id: BuiltinId) -> Option<Self> {
-        matches!(
-            builtin_sink_accumulator(id)?,
-            BuiltinSinkAccumulator::Count
-        )
-        .then_some(Sink::Reducer(ReducerSpec::count()))
+        matches!(builtin_sink_accumulator(id)?, BuiltinSinkAccumulator::Count)
+            .then_some(Sink::Reducer(ReducerSpec::count()))
     }
 
     /// Build a plain count reducer from builtin metadata.
@@ -768,9 +763,8 @@ impl<'a> StageDescriptor<'a> {
     /// or falling back to the method's registered view stage.
     #[inline]
     pub(crate) fn view_stage(self) -> Option<BuiltinViewStage> {
-        self.view_stage_override.or_else(|| {
-            self.builtin_id().and_then(builtin_view_stage)
-        })
+        self.view_stage_override
+            .or_else(|| self.builtin_id().and_then(builtin_view_stage))
     }
 
     /// Returns the columnar-stage metadata for the method, if it supports columnar execution.
@@ -974,11 +968,8 @@ impl Stage {
 
     /// Build a sort stage only for builtins with registry-declared sort lowering.
     pub(crate) fn sort_builtin_id(id: BuiltinId, spec: super::SortSpec) -> Option<Self> {
-        matches!(
-            pipeline_lowering(id),
-            Some(BuiltinPipelineLowering::Sort)
-        )
-        .then_some(Stage::Sort(spec))
+        matches!(pipeline_lowering(id), Some(BuiltinPipelineLowering::Sort))
+            .then_some(Stage::Sort(spec))
     }
 
     /// Build a sort stage only for builtins with registry-declared sort lowering.
@@ -1514,9 +1505,9 @@ pub struct Plan {
 }
 
 pub(super) fn stages_can_run_with_materialized_receiver(stages: &[Stage]) -> bool {
-    stages.iter().all(|stage| {
-        stage.can_run_with_receiver_only(super::kernels::program_is_receiver_local)
-    })
+    stages
+        .iter()
+        .all(|stage| stage.can_run_with_receiver_only(super::kernels::program_is_receiver_local))
 }
 
 /// Return the `CompiledMatch` payload when `program`'s op stream is a
@@ -1560,15 +1551,35 @@ impl PipelineBody {
                 .can_run_with_receiver_only(super::kernels::program_is_receiver_local)
     }
 
-    /// Like `can_run_with_materialized_receiver` but only checks stages starting at index
-    /// `consumed_stages`, used after a view-pipeline prefix has already been executed.
-    pub(crate) fn suffix_can_run_with_materialized_receiver(&self, consumed_stages: usize) -> bool {
-        consumed_stages <= self.stages.len()
-            && !self.suffix_starts_with_direct_view_projection(consumed_stages)
-            && stages_can_run_with_materialized_receiver(&self.stages[consumed_stages..])
+    /// Returns `true` when the body can run against a materialised source
+    /// receiver while still using the caller-provided environment for `$` and
+    /// let-bound values.
+    pub(crate) fn can_run_with_materialized_source_env(&self) -> bool {
+        !self.suffix_starts_with_direct_view_projection(0)
+            && self.stages.iter().all(|stage| {
+                stage.can_run_with_receiver_only(super::kernels::program_is_materialized_env_local)
+            })
             && self
                 .sink
-                .can_run_with_receiver_only(super::kernels::program_is_receiver_local)
+                .can_run_with_receiver_only(super::kernels::program_is_materialized_env_local)
+    }
+
+    pub(crate) fn needs_materialized_source_root_env(&self) -> bool {
+        !self.can_run_with_materialized_receiver() && self.can_run_with_materialized_source_env()
+    }
+
+    pub(crate) fn suffix_can_run_with_materialized_source_env(
+        &self,
+        consumed_stages: usize,
+    ) -> bool {
+        consumed_stages <= self.stages.len()
+            && !self.suffix_starts_with_direct_view_projection(consumed_stages)
+            && self.stages[consumed_stages..].iter().all(|stage| {
+                stage.can_run_with_receiver_only(super::kernels::program_is_materialized_env_local)
+            })
+            && self
+                .sink
+                .can_run_with_receiver_only(super::kernels::program_is_materialized_env_local)
     }
 
     /// Returns `true` when the suffix begins with a value projection. That
@@ -1924,11 +1935,9 @@ fn stage_payload_lanes(stage: &Stage, kernel: &BodyKernel, downstream: DemandLan
             lanes.merge_scan(FieldDemand::Whole);
             lanes
         }
-        Stage::ExprBuiltin { method, .. } => expr_builtin_payload_lanes(
-            BuiltinId::from_method(*method),
-            kernel,
-            downstream,
-        ),
+        Stage::ExprBuiltin { method, .. } => {
+            expr_builtin_payload_lanes(BuiltinId::from_method(*method), kernel, downstream)
+        }
         Stage::Builtin(call) if call.preserves_cardinality() => {
             if downstream.scan_need.is_none() && downstream.result_need.is_none() {
                 downstream
@@ -2117,12 +2126,10 @@ mod tests {
             BuiltinMethod::Max,
         ] {
             assert!(
-                Sink::numeric_builtin(method, None, None)
-                    .and_then(|sink| match sink {
-                        Sink::Reducer(spec) => spec.method(),
-                        _ => None,
-                    })
-                    == Some(method),
+                Sink::numeric_builtin(method, None, None).and_then(|sink| match sink {
+                    Sink::Reducer(spec) => spec.method(),
+                    _ => None,
+                }) == Some(method),
                 "{method:?}"
             );
         }
@@ -2140,8 +2147,7 @@ mod tests {
         let count = Sink::count_builtin(BuiltinMethod::Count).unwrap();
         assert!(count.is_plain_count_reducer());
         assert_eq!(
-            count.scalar_call_for_plain_sink()
-                .map(|call| call.method),
+            count.scalar_call_for_plain_sink().map(|call| call.method),
             Some(BuiltinMethod::Len)
         );
         assert_eq!(count.identity_numeric_reducer(), None);
@@ -2203,7 +2209,8 @@ mod tests {
 
         assert!(body.suffix_starts_with_direct_view_projection(0));
         assert!(!body.can_run_with_materialized_receiver());
-        assert!(!body.suffix_can_run_with_materialized_receiver(0));
+        assert!(!body.can_run_with_materialized_source_env());
+        assert!(!body.suffix_can_run_with_materialized_source_env(0));
     }
 
     #[test]
@@ -2221,7 +2228,9 @@ mod tests {
         let body = PipelineBody::planned(vec![map], vec![Some(Arc::new(expr))], Sink::Collect);
 
         assert!(body.can_run_with_materialized_receiver());
-        assert!(body.suffix_can_run_with_materialized_receiver(0));
+        assert!(body.can_run_with_materialized_source_env());
+        assert!(!body.needs_materialized_source_root_env());
+        assert!(body.suffix_can_run_with_materialized_source_env(0));
     }
 
     #[test]
@@ -2238,6 +2247,8 @@ mod tests {
         let body = PipelineBody::planned(vec![map], vec![Some(Arc::new(expr))], Sink::Collect);
 
         assert!(!body.can_run_with_materialized_receiver());
-        assert!(!body.suffix_can_run_with_materialized_receiver(0));
+        assert!(body.can_run_with_materialized_source_env());
+        assert!(body.needs_materialized_source_root_env());
+        assert!(body.suffix_can_run_with_materialized_source_env(0));
     }
 }
