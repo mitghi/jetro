@@ -193,6 +193,34 @@ struct ObjectFieldEntry {
     value_idx: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TapeObjectField {
+    pub(crate) key_idx: usize,
+    pub(crate) value_idx: usize,
+}
+
+pub(crate) struct TapeObjectFields<'a> {
+    nodes: &'a [TapeNode],
+    remaining: usize,
+    cur: usize,
+}
+
+impl<'a> Iterator for TapeObjectFields<'a> {
+    type Item = TapeObjectField;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let key_idx = self.cur;
+        let value_idx = key_idx + 1;
+        self.cur = value_idx + tape_node_span(self.nodes, value_idx);
+        self.remaining -= 1;
+        Some(TapeObjectField { key_idx, value_idx })
+    }
+}
+
 /// Parsed simd-json tape together with the byte buffer and structural-index buffers
 /// that must remain alive for the duration of the tape's use.
 pub struct TapeData {
@@ -381,6 +409,18 @@ impl TapeData {
             cur += self.span(cur);
         }
         None
+    }
+
+    #[inline]
+    pub(crate) fn object_fields(&self, idx: usize) -> Option<TapeObjectFields<'_>> {
+        let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
+            return None;
+        };
+        Some(TapeObjectFields {
+            nodes: &self.nodes,
+            remaining: len,
+            cur: idx + 1,
+        })
     }
 
     #[cfg(test)]
@@ -632,6 +672,18 @@ impl TapeScratch {
         None
     }
 
+    #[inline]
+    pub(crate) fn object_fields(&self, idx: usize) -> Option<TapeObjectFields<'_>> {
+        let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
+            return None;
+        };
+        Some(TapeObjectFields {
+            nodes: &self.nodes,
+            remaining: len,
+            cur: idx + 1,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index
@@ -705,6 +757,29 @@ mod tests {
         assert_eq!(tape.str_at(title), "Dune");
         assert!(matches!(tape.nodes[score], TapeNode::Static(_)));
         assert_eq!(tape.object_field_value(book, "missing"), None);
+    }
+
+    #[test]
+    fn object_fields_iterates_key_and_value_slots() {
+        let tape = TapeData::parse(br#"{"a":1,"b":{"c":2},"d":[3]}"#.to_vec()).unwrap();
+        let fields = tape.object_fields(0).expect("fields").collect::<Vec<_>>();
+
+        assert_eq!(fields.len(), 3);
+        assert_eq!(tape.str_at(fields[0].key_idx), "a");
+        assert_eq!(tape.str_at(fields[1].key_idx), "b");
+        assert_eq!(tape.str_at(fields[2].key_idx), "d");
+        assert!(matches!(
+            tape.nodes[fields[0].value_idx],
+            TapeNode::Static(_)
+        ));
+        assert!(matches!(
+            tape.nodes[fields[1].value_idx],
+            TapeNode::Object { .. }
+        ));
+        assert!(matches!(
+            tape.nodes[fields[2].value_idx],
+            TapeNode::Array { .. }
+        ));
     }
 
     #[test]

@@ -18,6 +18,7 @@ trait TapeLike {
     fn span(&self, i: usize) -> usize;
     fn materialize_at(&self, idx: &mut usize) -> Val;
     fn object_field_value(&self, idx: usize, key: &str) -> Option<usize>;
+    fn object_fields(&self, idx: usize) -> Option<crate::data::tape::TapeObjectFields<'_>>;
 
     fn array_child_start(&self, first: usize, len: usize, idx: usize) -> Option<usize> {
         if idx >= len {
@@ -76,6 +77,11 @@ impl TapeLike for crate::data::tape::TapeData {
     }
 
     #[inline]
+    fn object_fields(&self, idx: usize) -> Option<crate::data::tape::TapeObjectFields<'_>> {
+        crate::data::tape::TapeData::object_fields(self, idx)
+    }
+
+    #[inline]
     fn materialize_at(&self, idx: &mut usize) -> Val {
         TapeView::materialize_at(self, idx)
     }
@@ -110,6 +116,11 @@ impl TapeLike for crate::data::tape::TapeScratch {
     #[inline]
     fn object_field_value(&self, idx: usize, key: &str) -> Option<usize> {
         crate::data::tape::TapeScratch::object_field_value(self, idx, key)
+    }
+
+    #[inline]
+    fn object_fields(&self, idx: usize) -> Option<crate::data::tape::TapeObjectFields<'_>> {
+        crate::data::tape::TapeScratch::object_fields(self, idx)
     }
 
     #[inline]
@@ -202,11 +213,8 @@ fn tape_object_keys<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     };
 
     let mut out = Vec::with_capacity(len);
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        out.push(Val::Str(Arc::from(tape.str_at(cur))));
-        cur += 1;
-        cur += tape.span(cur);
+    for field in tape.object_fields(idx)? {
+        out.push(Val::Str(Arc::from(tape.str_at(field.key_idx))));
     }
     Some(Val::arr(out))
 }
@@ -219,12 +227,9 @@ fn tape_object_values<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     };
 
     let mut out = Vec::with_capacity(len);
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        cur += 1;
-        let mut value_idx = cur;
+    for field in tape.object_fields(idx)? {
+        let mut value_idx = field.value_idx;
         out.push(tape.materialize_at(&mut value_idx));
-        cur += tape.span(cur);
     }
     Some(Val::arr(out))
 }
@@ -237,16 +242,13 @@ fn tape_object_entries<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     };
 
     let mut out = Vec::with_capacity(len);
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        let key = Arc::from(tape.str_at(cur));
-        cur += 1;
-        let mut value_idx = cur;
+    for field in tape.object_fields(idx)? {
+        let key = Arc::from(tape.str_at(field.key_idx));
+        let mut value_idx = field.value_idx;
         out.push(Val::arr(vec![
             Val::Str(key),
             tape.materialize_at(&mut value_idx),
         ]));
-        cur += tape.span(cur);
     }
     Some(Val::arr(out))
 }
@@ -259,18 +261,15 @@ fn tape_object_pairs<T: TapeLike>(tape: &T, idx: usize) -> Option<Val> {
     };
 
     let mut out = Vec::with_capacity(len);
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        let key = Arc::from(tape.str_at(cur));
-        cur += 1;
-        let mut value_idx = cur;
+    for field in tape.object_fields(idx)? {
+        let key = Arc::from(tape.str_at(field.key_idx));
+        let mut value_idx = field.value_idx;
         out.push(crate::util::obj2(
             "key",
             Val::Str(key),
             "val",
             tape.materialize_at(&mut value_idx),
         ));
-        cur += tape.span(cur);
     }
     Some(Val::arr(out))
 }
@@ -325,36 +324,30 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
 
     if keys.len() <= 4 {
         let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(keys.len()));
-        let mut cur = idx + 1;
-        for _ in 0..len {
-            let current_key = tape.str_at(cur);
-            cur += 1;
+        for field in tape.object_fields(idx)? {
+            let current_key = tape.str_at(field.key_idx);
             if !key_slice_contains(keys, current_key) {
-                let mut value_idx = cur;
+                let mut value_idx = field.value_idx;
                 out.insert(
                     crate::data::value::intern_key(current_key),
                     tape.materialize_at(&mut value_idx),
                 );
             }
-            cur += tape.span(cur);
         }
         return Some(Val::obj(out));
     }
 
     let omitted: HashSet<&str> = keys.iter().map(|key| key.as_ref()).collect();
     let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(omitted.len()));
-    let mut cur = idx + 1;
-    for _ in 0..len {
-        let current_key = tape.str_at(cur);
-        cur += 1;
+    for field in tape.object_fields(idx)? {
+        let current_key = tape.str_at(field.key_idx);
         if !omitted.contains(current_key) {
-            let mut value_idx = cur;
+            let mut value_idx = field.value_idx;
             out.insert(
                 crate::data::value::intern_key(current_key),
                 tape.materialize_at(&mut value_idx),
             );
         }
-        cur += tape.span(cur);
     }
     Some(Val::obj(out))
 }
@@ -1091,19 +1084,11 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
     #[inline]
     fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-        Some(Box::new(TapeObjectIter {
-            tape,
-            remaining: len,
-            cur: *idx + 1,
-        }))
+        let fields = tape.object_fields(*idx)?;
+        Some(Box::new(TapeObjectIter { tape, fields }))
     }
 
     #[inline]
@@ -1122,8 +1107,7 @@ impl<'a> ValueView<'a> for TapeView<'a> {
 
 struct TapeObjectIter<'a> {
     tape: &'a crate::data::tape::TapeData,
-    remaining: usize,
-    cur: usize,
+    fields: crate::data::tape::TapeObjectFields<'a>,
 }
 
 impl<'a> Iterator for TapeObjectIter<'a> {
@@ -1131,19 +1115,13 @@ impl<'a> Iterator for TapeObjectIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let key = Arc::from(self.tape.str_at(self.cur));
-        self.cur += 1;
-        let value_idx = self.cur;
-        self.cur += self.tape.span(self.cur);
-        self.remaining -= 1;
+        let field = self.fields.next()?;
+        let key = Arc::from(self.tape.str_at(field.key_idx));
         Some((
             key,
             TapeView::Node {
                 tape: self.tape,
-                idx: value_idx,
+                idx: field.value_idx,
             },
         ))
     }
@@ -1403,19 +1381,11 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
 
     #[inline]
     fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
-        use crate::data::tape::TapeNode;
-
         let Self::Node { tape, idx } = self else {
             return None;
         };
-        let TapeNode::Object { len, .. } = tape.nodes[*idx] else {
-            return None;
-        };
-        Some(Box::new(TapeScratchObjectIter {
-            tape,
-            remaining: len,
-            cur: *idx + 1,
-        }))
+        let fields = tape.object_fields(*idx)?;
+        Some(Box::new(TapeScratchObjectIter { tape, fields }))
     }
 
     #[inline]
@@ -1432,8 +1402,7 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
 
 struct TapeScratchObjectIter<'a> {
     tape: &'a crate::data::tape::TapeScratch,
-    remaining: usize,
-    cur: usize,
+    fields: crate::data::tape::TapeObjectFields<'a>,
 }
 
 impl<'a> Iterator for TapeScratchObjectIter<'a> {
@@ -1441,19 +1410,13 @@ impl<'a> Iterator for TapeScratchObjectIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let key = Arc::from(self.tape.str_at(self.cur));
-        self.cur += 1;
-        let value_idx = self.cur;
-        self.cur += self.tape.span(self.cur);
-        self.remaining -= 1;
+        let field = self.fields.next()?;
+        let key = Arc::from(self.tape.str_at(field.key_idx));
         Some((
             key,
             TapeScratchView::Node {
                 tape: self.tape,
-                idx: value_idx,
+                idx: field.value_idx,
             },
         ))
     }
