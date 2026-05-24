@@ -239,6 +239,9 @@ where
     {
         return Some(Ok(result));
     }
+    if let Some(result) = direct_empty_cardinality_sink(&source, &capabilities.stages, &sink) {
+        return Some(Ok(result));
+    }
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -292,12 +295,21 @@ where
     else {
         return None;
     };
+    let count = cardinality_after_deterministic_stages(source, stages)?;
+    if count == 0 {
+        return match op {
+            crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(false)),
+            crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(true)),
+            crate::builtins::BuiltinPredicateSink::FindIndex => Some(Val::Null),
+            crate::builtins::BuiltinPredicateSink::IndicesWhere => Some(Val::arr(Vec::new())),
+            crate::builtins::BuiltinPredicateSink::FindOne => None,
+        };
+    }
     let matched = match sink_kernels.get(*predicate_kernel)? {
         pipeline::BodyKernel::ConstBool(value) => *value,
         pipeline::BodyKernel::Const(value) => crate::util::is_truthy(value),
         _ => return None,
     };
-    let count = cardinality_after_deterministic_stages(source, stages)?;
     match op {
         crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(matched && count > 0)),
         crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(matched || count == 0)),
@@ -316,6 +328,29 @@ where
             }
         }
         crate::builtins::BuiltinPredicateSink::FindOne => None,
+    }
+}
+
+fn direct_empty_cardinality_sink<'a, V>(
+    source: &V,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    if cardinality_after_deterministic_stages(source, stages)? != 0 {
+        return None;
+    }
+    match sink {
+        pipeline::ViewSinkCapability::Membership { op, target } if target.is_scalar_literal() => {
+            match op {
+                crate::builtins::BuiltinMembershipSink::Includes => Some(Val::Bool(false)),
+                crate::builtins::BuiltinMembershipSink::Index => Some(Val::Null),
+                crate::builtins::BuiltinMembershipSink::IndicesOf => Some(Val::arr(Vec::new())),
+            }
+        }
+        _ => None,
     }
 }
 
@@ -2473,6 +2508,58 @@ mod tests {
         assert_eq!(source.scalar_reads(), 1);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_empty_cardinality_sinks_skip_row_and_predicate_evaluation() {
+        let predicate_source = CountingView::root(&[1, 2, 3]);
+        let predicate_body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: vec![BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(0))],
+        };
+
+        let predicate = super::run_full(predicate_source.clone(), &predicate_body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(predicate, Val::Bool(false));
+        assert_eq!(predicate_source.scalar_reads(), 1);
+        assert_eq!(predicate_source.array_iter_reads(), 0);
+        assert_eq!(predicate_source.materialize_reads(), 0);
+
+        let membership_source = CountingView::root(&[1, 2, 3]);
+        let membership_body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Take,
+                value: 0,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Membership(MembershipSinkSpec {
+                op: BuiltinMembershipSink::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(1)),
+            }),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let membership = super::run_full(membership_source.clone(), &membership_body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(membership, Val::Bool(false));
+        assert_eq!(membership_source.scalar_reads(), 1);
+        assert_eq!(membership_source.array_iter_reads(), 0);
+        assert_eq!(membership_source.materialize_reads(), 0);
     }
 
     #[test]

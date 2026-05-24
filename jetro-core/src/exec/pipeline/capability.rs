@@ -742,7 +742,7 @@ pub(crate) enum ViewMembershipTarget {
 }
 
 impl ViewMembershipTarget {
-    fn is_scalar_literal(&self) -> bool {
+    pub(crate) fn is_scalar_literal(&self) -> bool {
         match self {
             Self::Literal(value) => target_is_scalar(value),
             Self::Program(_) => false,
