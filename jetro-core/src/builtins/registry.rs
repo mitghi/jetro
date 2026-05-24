@@ -1094,6 +1094,20 @@ where
 {
     let mut out = String::new();
     match projection {
+        BuiltinViewValueProjection::Replace | BuiltinViewValueProjection::ReplaceAll => {
+            let BuiltinArgs::StrPair { first, second } = args else {
+                return None;
+            };
+            return Some(match view.scalar() {
+                JsonView::Str(value) => ViewProjectionResult::Owned(replace_view_string(
+                    value,
+                    first,
+                    second,
+                    matches!(projection, BuiltinViewValueProjection::ReplaceAll),
+                )),
+                _ => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Slice => {
             let BuiltinArgs::I64Opt { first, second } = args else {
                 return None;
@@ -1119,6 +1133,18 @@ where
         }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn replace_view_string(value: &str, needle: &str, replacement: &str, all: bool) -> Val {
+    if !value.contains(needle) {
+        return Val::Str(Arc::from(value));
+    }
+    let out = if all {
+        value.replace(needle, replacement)
+    } else {
+        value.replacen(needle, replacement, 1)
+    };
+    Val::Str(Arc::from(out))
 }
 
 fn slice_view_string(value: &str, start: i64, end: Option<i64>) -> Val {
@@ -3748,6 +3774,11 @@ mod tests {
     #[test]
     fn registry_view_value_projection_contracts_are_exhaustive() {
         let expected = [
+            (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
+            (
+                BuiltinMethod::ReplaceAll,
+                BuiltinViewValueProjection::ReplaceAll,
+            ),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
             (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
             (
@@ -5759,6 +5790,14 @@ mod tests {
             Some(BuiltinViewValueProjection::ToString)
         );
         assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::Replace)),
+            Some(BuiltinViewValueProjection::Replace)
+        );
+        assert_eq!(
+            view_value_projection(BuiltinId::from_method(BuiltinMethod::ReplaceAll)),
+            Some(BuiltinViewValueProjection::ReplaceAll)
+        );
+        assert_eq!(
             view_value_projection(BuiltinId::from_method(BuiltinMethod::Slice)),
             Some(BuiltinViewValueProjection::Slice)
         );
@@ -5923,6 +5962,17 @@ mod tests {
         );
         assert_eq!(
             serde_json::Value::from(sliced_non_string),
+            serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
+        );
+        let replaced_non_string = apply(
+            BuiltinMethod::Replace,
+            BuiltinArgs::StrPair {
+                first: std::sync::Arc::from("l"),
+                second: std::sync::Arc::from("L"),
+            },
+        );
+        assert_eq!(
+            serde_json::Value::from(replaced_non_string),
             serde_json::json!({"a": 1, "b": null, "nested": {"x": 7}})
         );
     }

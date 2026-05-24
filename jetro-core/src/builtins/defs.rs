@@ -3594,18 +3594,17 @@ impl Builtin for Slice {
 }
 
 #[inline]
-fn scalar_string_pair_spec(stage: BuiltinStringPairStage) -> BuiltinSpec {
-    BuiltinSpec::new(BuiltinCategory::Scalar, BuiltinCardinality::OneToOne)
-        .indexed()
-        .view_native()
+fn scalar_string_pair_spec(
+    stage: BuiltinStringPairStage,
+    projection: super::BuiltinViewValueProjection,
+) -> BuiltinSpec {
+    scalar_view_value_element_spec(projection)
         .pipeline_shape(BuiltinPipelineShape::new(
             BuiltinCardinality::OneToOne,
             true,
             2.0,
             1.0,
         ))
-        .order_effect(BuiltinPipelineOrderEffect::Preserves)
-        .demand_law(BuiltinDemandLaw::MapLike)
         .string_pair_stage(stage)
         .lowering(BuiltinPipelineLowering::StringPairArg)
 }
@@ -3616,7 +3615,10 @@ impl Builtin for Replace {
     const METHOD: BuiltinMethod = BuiltinMethod::Replace;
     const NAME: &'static str = "replace";
     fn spec() -> BuiltinSpec {
-        scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: false })
+        scalar_string_pair_spec(
+            BuiltinStringPairStage::Replace { all: false },
+            super::BuiltinViewValueProjection::Replace,
+        )
     }
     #[inline]
     fn apply_args(
@@ -3638,7 +3640,10 @@ impl Builtin for ReplaceAll {
     const METHOD: BuiltinMethod = BuiltinMethod::ReplaceAll;
     const NAME: &'static str = "replace_all";
     fn spec() -> BuiltinSpec {
-        scalar_string_pair_spec(BuiltinStringPairStage::Replace { all: true })
+        scalar_string_pair_spec(
+            BuiltinStringPairStage::Replace { all: true },
+            super::BuiltinViewValueProjection::ReplaceAll,
+        )
     }
     #[inline]
     fn apply_args(

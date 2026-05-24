@@ -5390,6 +5390,73 @@ mod tests {
     }
 
     #[test]
+    fn view_replace_stages_transform_tape_strings_without_materializing_receivers() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"["foo foo","bar"]"#.to_vec()).unwrap();
+
+        for (method, expected) in [
+            (
+                crate::builtins::BuiltinMethod::Replace,
+                serde_json::json!(["xoo foo", "bar"]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::ReplaceAll,
+                serde_json::json!(["xoo xoo", "bar"]),
+            ),
+        ] {
+            let body = PipelineBody {
+                stages: vec![Stage::StringPairBuiltin {
+                    method,
+                    first: Arc::from("f"),
+                    second: Arc::from("x"),
+                }],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected);
+            assert_eq!(tape.materialized_subtrees(), 0);
+        }
+    }
+
+    #[test]
+    fn view_replace_stage_passes_non_strings_as_borrowed_views() {
+        let tape = crate::data::tape::TapeData::parse(br#"[{"k":"foo"}]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::StringPairBuiltin {
+                    method: crate::builtins::BuiltinMethod::Replace,
+                    first: Arc::from("f"),
+                    second: Arc::from("x"),
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Type,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!(["object"]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_flat_map_accepts_owned_array_projection_without_materializing_rows() {
         let source = CountingObjectValuesView::root(&[&[1, 2, 3], &[4, 5]]);
         let body = PipelineBody {
