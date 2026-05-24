@@ -2943,6 +2943,22 @@ mod tests {
             Some(vec!["user".to_string(), "name".to_string()])
         );
         assert_eq!(
+            path_keys(&BodyKernel::classify_expr(
+                &parse(r#"profile.get_path("author.name")"#).expect("parse get_path")
+            )),
+            Some(vec![
+                "profile".to_string(),
+                "author".to_string(),
+                "name".to_string()
+            ])
+        );
+        assert_eq!(
+            path_keys(&BodyKernel::classify_expr(
+                &parse(r#"profile.get_path("items[0].sku")"#).expect("parse indexed get_path")
+            )),
+            None
+        );
+        assert_eq!(
             path_keys(&BodyKernel::FieldCmpLit(
                 Arc::from("score"),
                 crate::parse::ast::BinOp::Gt,
@@ -2985,6 +3001,18 @@ mod tests {
         );
         assert_eq!(op, crate::parse::ast::BinOp::Gte);
         assert_eq!(lit, Val::Int(90));
+
+        let get_path_cmp = BodyKernel::classify_expr(
+            &parse(r#"profile.get_path("author.name") == "ada""#)
+                .expect("parse get_path comparison"),
+        );
+        let (keys, op, lit) = get_path_cmp.field_path_literal_cmp().unwrap();
+        assert_eq!(
+            keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>(),
+            vec!["profile", "author", "name"]
+        );
+        assert_eq!(op, crate::parse::ast::BinOp::Eq);
+        assert_eq!(lit, Val::Str(Arc::from("ada")));
 
         let computed = BodyKernel::CmpLit {
             lhs: Box::new(BodyKernel::Binary {
@@ -3241,6 +3269,47 @@ mod tests {
             vec!["user", "name"]
         );
         assert_eq!(call.call.method, crate::builtins::BuiltinMethod::Len);
+
+        let expr = parse(r#"profile.get_path("author.name").len()"#)
+            .expect("parse get_path scalar call");
+        let kernel = BodyKernel::classify_expr(&expr);
+        let call = kernel
+            .path_scalar_call()
+            .expect("get_path scalar call metadata");
+        assert_eq!(
+            call.receiver_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["profile", "author", "name"]
+        );
+        assert_eq!(call.call.method, crate::builtins::BuiltinMethod::Len);
+    }
+
+    #[test]
+    fn array_element_path_metadata_accepts_get_path_sources() {
+        let expr = parse(r#"profile.get_path("events").last().kind"#)
+            .expect("parse get_path array selector");
+        let kernel = BodyKernel::classify_expr(&expr);
+        let (source_keys, selector, suffix_keys) = kernel
+            .array_element_path()
+            .expect("array element path metadata");
+
+        assert_eq!(
+            source_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["profile", "events"]
+        );
+        assert_eq!(selector, super::ArraySelector::Last);
+        assert_eq!(
+            suffix_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["kind"]
+        );
     }
 
     #[test]
