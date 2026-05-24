@@ -417,7 +417,20 @@ fn tape_matches_vm_for_materialized_suffix_after_view_prefix() {
             {"id": "c", "value": 18},
             {"id": "d", "value": 12},
             {"id": "e", "value": 20}
-        ]
+        ],
+        "labels": ["low", "mid", "high"],
+        "left": [
+            {"book": "Dune", "author": "Herbert"},
+            {"book": "Foundation", "author": "Asimov"}
+        ],
+        "right": [
+            {"author": "Asimov", "country": "US"},
+            {"author": "Herbert", "country": "US"}
+        ],
+        "columns": {
+            "id": [1, 2, 3],
+            "name": ["ada", "bob", "cy"]
+        }
     });
     for query in [
         "$.samples.map(value).partition(@ > 12).last()",
@@ -427,6 +440,11 @@ fn tape_matches_vm_for_materialized_suffix_after_view_prefix() {
         "$.samples.map(value).diff([13, 20]).last()",
         "$.samples.map(value).intersect([10, 18, 99]).last()",
         "$.samples.map(value).union([10, 99]).last()",
+        "$.samples.map(value).zip($.labels).last()",
+        "$.samples.map(value).zip_longest($.labels).last()",
+        "$.samples.map(value.fanout(@ * 2, @ + 1)).last()",
+        "$.columns.zip_shape().last()",
+        "$.left.equi_join($.right, \"author\", \"author\").map({book, country}).last()",
     ] {
         assert_tape_vm_eq(query, &doc);
     }
