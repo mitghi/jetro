@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::{cell::OnceCell, collections::HashMap};
 
 /// Borrowed string slice into a parent `Arc<str>`. See module doc.
@@ -183,6 +183,14 @@ impl From<String> for StrRef {
 pub type TapeNode = simd_json::Node<'static>;
 
 const ARRAY_CHILD_INDEX_MIN_LEN: usize = 32;
+const OBJECT_FIELD_INDEX_MIN_LEN: usize = 8;
+
+#[derive(Clone, Copy)]
+struct ObjectFieldEntry {
+    hash: u64,
+    key_idx: usize,
+    value_idx: usize,
+}
 
 /// Parsed simd-json tape together with the byte buffer and structural-index buffers
 /// that must remain alive for the duration of the tape's use.
@@ -198,6 +206,9 @@ pub struct TapeData {
     /// Immutable direct-child tape starts for arrays large enough to benefit
     /// from positional and reverse access.
     array_child_index: HashMap<usize, Box<[usize]>>,
+    /// Lazy direct-field key/value tape slots for objects large enough to
+    /// benefit from repeated field lookup.
+    object_field_index: OnceLock<HashMap<usize, Box<[ObjectFieldEntry]>>>,
     /// Counter of how many subtrees were materialised into `Val`; used in tests
     /// to verify lazy-materialisation assumptions.
     #[cfg(test)]
@@ -217,6 +228,7 @@ impl TapeData {
                     _buffers: buffers,
                     nodes,
                     array_child_index,
+                    object_field_index: OnceLock::new(),
                     #[cfg(test)]
                     materialized_subtrees: AtomicUsize::new(0),
                 })
@@ -352,6 +364,13 @@ impl TapeData {
         let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
             return None;
         };
+        if len >= OBJECT_FIELD_INDEX_MIN_LEN {
+            if let Some(value_idx) =
+                indexed_object_field_value(|i| self.str_at(i), self.object_field_index(), idx, key)
+            {
+                return Some(value_idx);
+            }
+        }
         let mut cur = idx + 1;
         for _ in 0..len {
             if self.str_at(cur) == key {
@@ -366,6 +385,19 @@ impl TapeData {
     #[cfg(test)]
     pub(crate) fn has_array_child_index(&self, first: usize) -> bool {
         self.array_child_index.contains_key(&first)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_object_field_index(&self, object_idx: usize) -> bool {
+        self.object_field_index
+            .get()
+            .is_some_and(|index| index.contains_key(&object_idx))
+    }
+
+    #[inline]
+    fn object_field_index(&self) -> &HashMap<usize, Box<[ObjectFieldEntry]>> {
+        self.object_field_index
+            .get_or_init(|| build_object_field_index(&self.nodes))
     }
 }
 
@@ -395,6 +427,75 @@ fn rebuild_array_child_index(nodes: &[TapeNode], index: &mut HashMap<usize, Box<
     }
 }
 
+fn build_object_field_index(nodes: &[TapeNode]) -> HashMap<usize, Box<[ObjectFieldEntry]>> {
+    let mut index = HashMap::new();
+    rebuild_object_field_index(nodes, &mut index);
+    index
+}
+
+fn rebuild_object_field_index(
+    nodes: &[TapeNode],
+    index: &mut HashMap<usize, Box<[ObjectFieldEntry]>>,
+) {
+    index.clear();
+    for (node_idx, node) in nodes.iter().enumerate() {
+        let TapeNode::Object { len, .. } = *node else {
+            continue;
+        };
+        if len < OBJECT_FIELD_INDEX_MIN_LEN {
+            continue;
+        }
+        let mut fields = Vec::with_capacity(len);
+        let mut cur = node_idx + 1;
+        for _ in 0..len {
+            let key_idx = cur;
+            let value_idx = cur + 1;
+            fields.push(ObjectFieldEntry {
+                hash: tape_string_hash(nodes, key_idx),
+                key_idx,
+                value_idx,
+            });
+            cur = value_idx + tape_node_span(nodes, value_idx);
+        }
+        index.insert(node_idx, fields.into_boxed_slice());
+    }
+}
+
+#[inline]
+fn indexed_object_field_value<'a, F>(
+    str_at: F,
+    index: &HashMap<usize, Box<[ObjectFieldEntry]>>,
+    idx: usize,
+    key: &str,
+) -> Option<usize>
+where
+    F: Fn(usize) -> &'a str,
+{
+    let fields = index.get(&idx)?;
+    let needle_hash = str_hash(key);
+    fields.iter().find_map(|field| {
+        (field.hash == needle_hash && str_at(field.key_idx) == key).then_some(field.value_idx)
+    })
+}
+
+#[inline]
+fn tape_string_hash(nodes: &[TapeNode], idx: usize) -> u64 {
+    match nodes[idx] {
+        TapeNode::String(value) => str_hash(value),
+        _ => 0,
+    }
+}
+
+#[inline]
+fn str_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 #[inline]
 fn tape_node_span(nodes: &[TapeNode], i: usize) -> usize {
     match nodes[i] {
@@ -407,6 +508,7 @@ pub(crate) struct TapeScratch {
     buffers: simd_json::Buffers,
     pub(crate) nodes: Vec<TapeNode>,
     array_child_index: OnceCell<HashMap<usize, Box<[usize]>>>,
+    object_field_index: OnceCell<HashMap<usize, Box<[ObjectFieldEntry]>>>,
 }
 impl TapeScratch {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
@@ -415,6 +517,7 @@ impl TapeScratch {
             buffers: simd_json::Buffers::new(capacity),
             nodes: Vec::new(),
             array_child_index: OnceCell::new(),
+            object_field_index: OnceCell::new(),
         }
     }
 
@@ -426,6 +529,7 @@ impl TapeScratch {
         self.nodes =
             unsafe { std::mem::transmute::<Vec<simd_json::Node<'_>>, Vec<TapeNode>>(tape.0) };
         self.array_child_index = OnceCell::new();
+        self.object_field_index = OnceCell::new();
         Ok(())
     }
 
@@ -500,6 +604,13 @@ impl TapeScratch {
         let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
             return None;
         };
+        if len >= OBJECT_FIELD_INDEX_MIN_LEN {
+            if let Some(value_idx) =
+                indexed_object_field_value(|i| self.str_at(i), self.object_field_index(), idx, key)
+            {
+                return Some(value_idx);
+            }
+        }
         let mut cur = idx + 1;
         for _ in 0..len {
             if self.str_at(cur) == key {
@@ -518,10 +629,23 @@ impl TapeScratch {
             .is_some_and(|index| index.contains_key(&first))
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_object_field_index(&self, object_idx: usize) -> bool {
+        self.object_field_index
+            .get()
+            .is_some_and(|index| index.contains_key(&object_idx))
+    }
+
     #[inline]
     fn array_child_index(&self) -> &HashMap<usize, Box<[usize]>> {
         self.array_child_index
             .get_or_init(|| build_array_child_index(&self.nodes))
+    }
+
+    #[inline]
+    fn object_field_index(&self) -> &HashMap<usize, Box<[ObjectFieldEntry]>> {
+        self.object_field_index
+            .get_or_init(|| build_object_field_index(&self.nodes))
     }
 }
 
@@ -567,6 +691,46 @@ mod tests {
         assert_eq!(tape.str_at(title), "Dune");
         assert!(matches!(tape.nodes[score], TapeNode::Static(_)));
         assert_eq!(tape.object_field_value(book, "missing"), None);
+    }
+
+    #[test]
+    fn object_field_index_covers_large_objects_without_key_allocation() {
+        let fields = (0..12)
+            .map(|n| format!(r#""k{n}":{{"value":{n}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let tape = TapeData::parse(format!("{{{fields}}}").into_bytes()).unwrap();
+
+        assert!(!tape.has_object_field_index(0));
+        let k11 = tape.object_field_value(0, "k11").expect("k11");
+        assert!(tape.has_object_field_index(0));
+        let value = tape.object_field_value(k11, "value").expect("value");
+
+        assert!(matches!(tape.nodes[k11], TapeNode::Object { .. }));
+        assert!(matches!(tape.nodes[value], TapeNode::Static(_)));
+        assert_eq!(tape.object_field_value(0, "missing"), None);
+    }
+
+    #[test]
+    fn scratch_object_field_index_is_rebuilt_between_rows() {
+        let fields = (0..12)
+            .map(|n| format!(r#""k{n}":{n}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut scratch = super::TapeScratch::with_capacity(fields.len() + 2);
+        scratch
+            .parse_slice(format!("{{{fields}}}").as_bytes())
+            .expect("parse large object");
+
+        assert!(!scratch.has_object_field_index(0));
+        assert!(scratch.object_field_value(0, "k11").is_some());
+        assert!(scratch.has_object_field_index(0));
+
+        scratch.parse_slice(br#"{"k11":1}"#).expect("parse small");
+
+        assert!(!scratch.has_object_field_index(0));
+        assert!(scratch.object_field_value(0, "k11").is_some());
+        assert!(!scratch.has_object_field_index(0));
     }
 
     #[test]
