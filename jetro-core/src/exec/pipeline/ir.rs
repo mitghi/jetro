@@ -1062,11 +1062,16 @@ impl Stage {
                 _ => None,
             };
         }
+        let kernel_is_borrowed_view_output =
+            kernel.is_some_and(|kernel| kernel.is_view_native() && !kernel.view_result_owned());
         ViewStageCapability::from_stage_metadata(
             stage,
             desc.usize_arg,
             idx,
-            kernel.is_some_and(BodyKernel::is_view_native),
+            match stage {
+                BuiltinViewStage::FlatMap => kernel_is_borrowed_view_output,
+                _ => kernel.is_some_and(BodyKernel::is_view_native),
+            },
         )
     }
 

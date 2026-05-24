@@ -958,7 +958,7 @@ impl BodyKernel {
         }
     }
 
-    fn view_result_owned(&self) -> bool {
+    pub(crate) fn view_result_owned(&self) -> bool {
         match self {
             Self::BuiltinCall { receiver, call } => {
                 receiver.is_view_native() && call.view_projection_returns_owned()

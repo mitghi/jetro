@@ -985,6 +985,25 @@ mod tests {
             remove,
             ViewStageCapability::RemoveValue(Val::Int(2))
         ));
+        assert!(
+            Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                BuiltinViewStage::Map
+            )
+            .view_capability(11, Some(&BodyKernel::Const(Val::Int(1))))
+            .is_some()
+        );
+        assert!(
+            Stage::FlatMap(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                BuiltinViewStage::FlatMap
+            )
+            .view_capability(
+                12,
+                Some(&BodyKernel::Array(Arc::from([BodyKernel::Current]))),
+            )
+            .is_none()
+        );
         let cancel = cancellation(BuiltinId::from_method(BuiltinMethod::Reverse)).unwrap();
         assert!(Stage::Reverse(cancel).view_capability(9, None).is_none());
     }
