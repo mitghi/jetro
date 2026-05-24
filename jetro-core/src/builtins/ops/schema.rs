@@ -332,10 +332,12 @@ mod spec_tests {
             BuiltinViewStage::Map.output_mode(),
             BuiltinViewOutputMode::BorrowedSubview
         );
+        assert!(!BuiltinViewStage::Map.requires_borrowed_body_result());
         assert_eq!(
             BuiltinViewStage::FlatMap.output_mode(),
             BuiltinViewOutputMode::BorrowedSubviews
         );
+        assert!(BuiltinViewStage::FlatMap.requires_borrowed_body_result());
         assert_eq!(
             BuiltinViewStage::Skip.output_mode(),
             BuiltinViewOutputMode::PreservesInputView

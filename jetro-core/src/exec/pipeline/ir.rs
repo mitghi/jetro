@@ -1075,9 +1075,10 @@ impl Stage {
             stage,
             desc.usize_arg,
             idx,
-            match stage {
-                BuiltinViewStage::FlatMap => kernel_is_borrowed_view_output,
-                _ => kernel.is_some_and(BodyKernel::is_view_native),
+            if stage.requires_borrowed_body_result() {
+                kernel_is_borrowed_view_output
+            } else {
+                kernel.is_some_and(BodyKernel::is_view_native)
             },
         )
     }
