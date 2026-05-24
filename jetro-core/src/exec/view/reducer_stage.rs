@@ -5,7 +5,10 @@
 use indexmap::IndexMap;
 
 use crate::{
-    builtins::{BuiltinArgs, BuiltinKeyedReducer, BuiltinMethod},
+    builtins::{
+        registry::{view_projection_needs_only_object_keys, BuiltinId},
+        BuiltinArgs, BuiltinKeyedReducer, BuiltinMethod,
+    },
     data::value::Val,
     data::view::ValueView,
     exec::pipeline,
@@ -209,14 +212,38 @@ fn keyed_reducer_value_need(body: &pipeline::PipelineBody, reducer_stage: usize)
 }
 
 fn key_only_object_projection(method: BuiltinMethod, args: &BuiltinArgs) -> bool {
-    matches!(
-        (method, args),
-        (BuiltinMethod::Len, BuiltinArgs::None)
-            | (BuiltinMethod::Keys, BuiltinArgs::None)
-            | (BuiltinMethod::HasKey, BuiltinArgs::Str(_))
-            | (BuiltinMethod::Missing, BuiltinArgs::Str(_))
-            | (BuiltinMethod::Missing, BuiltinArgs::StrVec(_))
-            | (BuiltinMethod::Has, BuiltinArgs::Str(_))
-            | (BuiltinMethod::HasAll, BuiltinArgs::StrVec(_))
-    )
+    view_projection_needs_only_object_keys(BuiltinId::from_method(method), args)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::builtins::{BuiltinArgs, BuiltinMethod};
+
+    use super::key_only_object_projection;
+
+    #[test]
+    fn keyed_reducer_key_only_policy_comes_from_registry_metadata() {
+        assert!(key_only_object_projection(
+            BuiltinMethod::Len,
+            &BuiltinArgs::None
+        ));
+        assert!(key_only_object_projection(
+            BuiltinMethod::HasKey,
+            &BuiltinArgs::Str(Arc::from("open"))
+        ));
+        assert!(key_only_object_projection(
+            BuiltinMethod::HasAll,
+            &BuiltinArgs::StrVec(vec![Arc::from("open"), Arc::from("closed")])
+        ));
+        assert!(!key_only_object_projection(
+            BuiltinMethod::Missing,
+            &BuiltinArgs::Str(Arc::from("open"))
+        ));
+        assert!(!key_only_object_projection(
+            BuiltinMethod::Values,
+            &BuiltinArgs::None
+        ));
+    }
 }

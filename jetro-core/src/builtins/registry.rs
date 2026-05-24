@@ -880,6 +880,20 @@ pub(crate) fn view_object_items_projection_call(
     projection.is_item_projection().then_some(projection)
 }
 
+/// Return true when applying this builtin to an object can be answered from
+/// the object's key set alone, without reading or preserving field values.
+#[inline]
+pub(crate) fn view_projection_needs_only_object_keys(id: BuiltinId, args: &BuiltinArgs) -> bool {
+    match (view_scalar_op(id), view_object_projection(id), args) {
+        (Some(BuiltinViewScalarOp::Len), _, BuiltinArgs::None) => true,
+        (_, Some(BuiltinViewObjectProjection::Keys), BuiltinArgs::None) => true,
+        (_, Some(BuiltinViewObjectProjection::HasKey), BuiltinArgs::Str(_)) => true,
+        (_, Some(BuiltinViewObjectProjection::Has), BuiltinArgs::Str(_)) => true,
+        (_, Some(BuiltinViewObjectProjection::HasAll), BuiltinArgs::StrVec(_)) => true,
+        _ => false,
+    }
+}
+
 /// Return the direct borrowed-view call family for a concrete builtin call.
 #[inline]
 pub(crate) fn direct_view_call(id: BuiltinId, args: &BuiltinArgs) -> Option<BuiltinDirectViewCall> {
@@ -4026,6 +4040,38 @@ mod tests {
             };
             assert_eq!(demand_law(id), projection.demand_law(), "{method:?}");
         }
+    }
+
+    #[test]
+    fn registry_identifies_object_key_only_view_projections() {
+        assert!(view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::Len),
+            &BuiltinArgs::None
+        ));
+        assert!(view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::Keys),
+            &BuiltinArgs::None
+        ));
+        assert!(view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::HasKey),
+            &BuiltinArgs::Str(Arc::from("open"))
+        ));
+        assert!(view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::HasAll),
+            &BuiltinArgs::StrVec(vec![Arc::from("open"), Arc::from("closed")])
+        ));
+        assert!(!view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::Missing),
+            &BuiltinArgs::Str(Arc::from("open"))
+        ));
+        assert!(!view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::Values),
+            &BuiltinArgs::None
+        ));
+        assert!(!view_projection_needs_only_object_keys(
+            BuiltinId::from_method(BuiltinMethod::Pick),
+            &BuiltinArgs::StrVec(vec![Arc::from("open")])
+        ));
     }
 
     #[test]
