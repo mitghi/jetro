@@ -55,6 +55,7 @@ impl ViewKey {
             Val::Int(value) => Self::Int(value),
             Val::Float(value) => Self::Float(value.to_bits()),
             Val::Str(value) => Self::Str(value),
+            Val::StrSlice(value) => Self::Str(Arc::from(value.as_str())),
             value => Self::Owned(Arc::from(crate::util::val_to_key(&value).as_str())),
         }
     }
@@ -193,7 +194,7 @@ mod tests {
     use crate::data::{
         tape::TapeData,
         value::Val,
-        view::{TapeView, ValView},
+        view::{TapeView, ValView, ValueView},
     };
 
     use super::ViewKey;
@@ -210,6 +211,21 @@ mod tests {
         assert_eq!(
             ViewKey::from_structural_value_view(&ValView::new(&int)),
             ViewKey::from_structural_value_view(&ValView::new(&float))
+        );
+    }
+
+    #[test]
+    fn owned_string_slice_uses_scalar_key_without_stringification() {
+        let tape = TapeData::parse(br#"{"name":"ada"}"#.to_vec()).unwrap();
+        let name = TapeView::root(&tape).field("name").materialize();
+
+        assert_eq!(
+            ViewKey::from_owned(name.clone()),
+            ViewKey::from_value_view(&ValView::new(&name)).unwrap()
+        );
+        assert_eq!(
+            ViewKey::from_structural_owned(name.clone()),
+            ViewKey::from_structural_value_view(&ValView::new(&name)).unwrap()
         );
     }
 
