@@ -1347,6 +1347,33 @@ where
     crate::for_each_builtin!(trait_arm)
 }
 
+/// Dispatch the migrated end-of-stream hook for buffered streaming stages.
+#[inline]
+pub(crate) fn finish_stream_hook(
+    method: BuiltinMethod,
+    ctx: &mut StreamCtx<'_, '_>,
+    body: Option<&Program>,
+) -> Result<Vec<Val>, EvalError> {
+    let Some(hook) = runtime_hook(BuiltinId::from_method(method)) else {
+        return Ok(Vec::new());
+    };
+    if !hook.has_stream() {
+        return Ok(Vec::new());
+    }
+    macro_rules! trait_arm {
+        ( $( $variant:ident ),* $(,)? ) => {
+            match method {
+                $(
+                    BuiltinMethod::$variant => {
+                        <defs::$variant as Builtin>::finish_stream(ctx, body)
+                    }
+                )*
+            }
+        };
+    }
+    crate::for_each_builtin!(trait_arm)
+}
+
 /// Dispatch migrated scalar hooks for a builtin call.
 ///
 /// Like the stream/barrier hook dispatchers, this is a static generated match:
@@ -1804,7 +1831,7 @@ mod tests {
             (BuiltinMethod::MinBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Sort, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Window, BuiltinRuntimeHook::StreamAndBarrier),
-            (BuiltinMethod::Chunk, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Chunk, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),

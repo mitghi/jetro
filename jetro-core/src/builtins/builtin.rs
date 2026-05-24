@@ -111,6 +111,16 @@ pub(crate) trait Builtin {
         Ok(crate::exec::pipeline::StageFlow::Continue(item))
     }
 
+    /// End-of-input hook for streaming stages with buffered state. Most stages
+    /// emit nothing here; stages such as `chunk(n)` can flush a bounded tail.
+    #[inline]
+    fn finish_stream(
+        _ctx: &mut StreamCtx<'_, '_>,
+        _body: Option<&Program>,
+    ) -> Result<Vec<Val>, EvalError> {
+        Ok(Vec::new())
+    }
+
     /// Barrier full-buffer runtime: transforms `buf` in place. Default leaves `buf`
     /// unchanged. Override on barrier-shaped builtins (Sort, Reverse, Unique, GroupBy,
     /// Window, Chunk, RowFilter materialised, RowMap materialised, RowFlatMap, ...).

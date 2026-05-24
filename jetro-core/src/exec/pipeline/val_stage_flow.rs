@@ -53,6 +53,39 @@ pub(super) fn apply_adapter_streaming<'a>(
     fallback_streaming(stage, item)
 }
 
+pub(super) fn finish_adapter_streaming<'a>(
+    stage: &Stage,
+    stage_idx: usize,
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+    kernel: &BodyKernel,
+    stage_taken: &mut [usize],
+    stage_skipped: &mut [usize],
+    stage_unique_seen: &mut [crate::util::StructuralValueSet],
+    stage_window_buffers: &mut [std::collections::VecDeque<Val>],
+    terminal_map_idx: Option<usize>,
+    terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
+) -> Result<Vec<Val>, EvalError> {
+    let Some(method) = stage.descriptor().and_then(|d| d.method) else {
+        return Ok(Vec::new());
+    };
+    let body = stage.body_program();
+    let mut ctx = crate::builtins::builtin::StreamCtx {
+        vm,
+        env: loop_env,
+        kernel,
+        stage,
+        stage_idx,
+        stage_taken,
+        stage_skipped,
+        stage_unique_seen,
+        stage_window_buffers,
+        terminal_map_idx,
+        terminal_map_collect,
+    };
+    crate::builtins::registry::finish_stream_hook(method, &mut ctx, body)
+}
+
 fn fallback_streaming(stage: &Stage, item: Val) -> Result<StageFlow<Val>, EvalError> {
     match stage {
         Stage::Builtin(_) | Stage::IntRangeBuiltin { .. } | Stage::StringPairBuiltin { .. } => Ok(

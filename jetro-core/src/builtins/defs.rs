@@ -1380,7 +1380,6 @@ impl Builtin for Chunk {
     const ALIASES: &'static [&'static str] = &["batch"];
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
-            .materialization(BuiltinPipelineMaterialization::LegacyMaterialized)
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
@@ -1389,8 +1388,44 @@ impl Builtin for Chunk {
                 1.0,
             ))
             .demand_law(BuiltinDemandLaw::Chunk)
-            .runtime_hook(BuiltinRuntimeHook::Barrier)
+            .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
             .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+    }
+
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let Some(n) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+        buffer.push_back(item);
+        if buffer.len() < n {
+            return Ok(crate::exec::pipeline::StageFlow::SkipRow);
+        }
+        let chunk = buffer.drain(..).collect();
+        Ok(crate::exec::pipeline::StageFlow::Continue(
+            crate::data::value::Val::arr(chunk),
+        ))
+    }
+
+    #[inline]
+    fn finish_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<Vec<crate::data::value::Val>, crate::data::context::EvalError> {
+        let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+        if buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk = buffer.drain(..).collect();
+        Ok(vec![crate::data::value::Val::arr(chunk)])
     }
 
     #[inline]

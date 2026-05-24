@@ -20,7 +20,7 @@ use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels,
     eval_kernel_view_first_with_vm, eval_kernel_with_vm, is_truthy, BodyKernel, Pipeline,
-    PipelineBody, Sink, Source, SourceAccessMode, Stage, StageFlow, StageStrategy,
+    LateProjection, PipelineBody, Sink, Source, SourceAccessMode, Stage, StageFlow, StageStrategy,
     TerminalMapCollector,
 };
 
@@ -272,7 +272,7 @@ where
         })
         .collect();
 
-    'outer: for mut item in iter {
+    'outer: for item in iter {
         if source_demand.input_satisfied_by(pulled_inputs) {
             break 'outer;
         }
@@ -282,85 +282,76 @@ where
         }
         pulled_inputs += 1;
 
-        for (stage_idx, stage) in pipeline.stages[..stage_limit].iter().enumerate() {
-            let kernel = pipeline
-                .stage_kernels
-                .get(stage_idx)
-                .unwrap_or(&BodyKernel::Generic);
-            match stage {
-                Stage::CompiledMap(_) => {
-                    item = prepared_nested[stage_idx]
-                        .as_ref()
-                        .expect("compiled map stages have prepared nested plans")
-                        .run(item)?;
-                }
-                _ => match super::val_stage_flow::apply_adapter_streaming(
-                    stage,
-                    stage_idx,
-                    item,
-                    vm,
-                    &mut loop_env,
-                    kernel,
-                    &mut stage_taken,
-                    &mut stage_skipped,
-                    &mut stage_unique_seen,
-                    &mut stage_window_buffers,
-                    terminal_map_idx,
-                    &mut terminal_map_collect,
-                )? {
-                    StageFlow::Continue(next) => item = next,
-                    StageFlow::SkipRow => continue 'outer,
-                    StageFlow::Stop => break 'outer,
-                    StageFlow::TerminalCollected => {
-                        emitted_outputs += 1;
-                        if source_demand.output_satisfied_by(emitted_outputs) {
-                            break 'outer;
-                        }
-                        continue 'outer;
-                    }
-                },
-            }
+        match process_stream_item(
+            pipeline,
+            item,
+            0,
+            stage_limit,
+            late_projection,
+            source_demand,
+            &prepared_nested,
+            vm,
+            &mut loop_env,
+            &mut stage_taken,
+            &mut stage_skipped,
+            &mut stage_unique_seen,
+            &mut stage_window_buffers,
+            terminal_map_idx,
+            &mut terminal_map_collect,
+            membership_target.as_ref(),
+            &mut sink_acc,
+            &mut emitted_outputs,
+        )? {
+            StreamItemFlow::Continue => {}
+            StreamItemFlow::Stop => break 'outer,
+            StreamItemFlow::Return(value) => return Ok(value),
         }
+    }
 
-        if source_demand.is_nth_input() && matches!(pipeline.sink, Sink::Nth(_)) {
-            if let Some(projection) = late_projection {
-                return eval_late_projection(&projection.kernel, &item, vm);
+    'flush: for stage_idx in 0..stage_limit {
+        let stage = &pipeline.stages[stage_idx];
+        let kernel = pipeline
+            .stage_kernels
+            .get(stage_idx)
+            .unwrap_or(&BodyKernel::Generic);
+        let flushed = super::val_stage_flow::finish_adapter_streaming(
+            stage,
+            stage_idx,
+            vm,
+            &mut loop_env,
+            kernel,
+            &mut stage_taken,
+            &mut stage_skipped,
+            &mut stage_unique_seen,
+            &mut stage_window_buffers,
+            terminal_map_idx,
+            &mut terminal_map_collect,
+        )?;
+        for item in flushed {
+            match process_stream_item(
+                pipeline,
+                item,
+                stage_idx + 1,
+                stage_limit,
+                late_projection,
+                source_demand,
+                &prepared_nested,
+                vm,
+                &mut loop_env,
+                &mut stage_taken,
+                &mut stage_skipped,
+                &mut stage_unique_seen,
+                &mut stage_window_buffers,
+                terminal_map_idx,
+                &mut terminal_map_collect,
+                membership_target.as_ref(),
+                &mut sink_acc,
+                &mut emitted_outputs,
+            )? {
+                StreamItemFlow::Continue => {}
+                StreamItemFlow::Stop => break 'flush,
+                StreamItemFlow::Return(value) => return Ok(value),
             }
-            return Ok(item);
-        }
-
-        if let Some(projection) = late_projection {
-            item = eval_late_projection(&projection.kernel, &item, vm)?;
-        }
-
-        let sink_done = match &pipeline.sink {
-            Sink::Predicate(_) => {
-                observe_predicate_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
-            }
-            Sink::Membership(spec) => sink_acc.observe_membership(
-                spec.op,
-                &item,
-                membership_target
-                    .as_ref()
-                    .expect("membership target exists"),
-            ),
-            Sink::ArgExtreme(_) => {
-                observe_arg_extreme_sink_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)?
-            }
-            Sink::Reducer(_) => {
-                match observe_reducer_item(pipeline, item, &mut sink_acc, vm, &mut loop_env)? {
-                    ReducerItemFlow::Observed => false,
-                    ReducerItemFlow::Skipped => continue 'outer,
-                }
-            }
-            _ => sink_acc.push(item),
-        };
-        if sink_done {
-            break 'outer;
-        }
-        emitted_outputs += 1;
-        if source_demand.output_satisfied_by(emitted_outputs) {
-            break 'outer;
         }
     }
 
@@ -368,6 +359,112 @@ where
         return Ok(collector.finish());
     }
     sink_acc.finish_result(false)
+}
+
+enum StreamItemFlow {
+    Continue,
+    Stop,
+    Return(Val),
+}
+
+fn process_stream_item<'a>(
+    pipeline: &Pipeline,
+    mut item: Val,
+    start_stage: usize,
+    stage_limit: usize,
+    late_projection: Option<&LateProjection>,
+    source_demand: PullDemand,
+    prepared_nested: &[Option<PreparedPlan>],
+    vm: &mut crate::vm::VM,
+    loop_env: &mut Env,
+    stage_taken: &mut [usize],
+    stage_skipped: &mut [usize],
+    stage_unique_seen: &mut [crate::util::StructuralValueSet],
+    stage_window_buffers: &mut [std::collections::VecDeque<Val>],
+    terminal_map_idx: Option<usize>,
+    terminal_map_collect: &mut Option<TerminalMapCollector<'a>>,
+    membership_target: Option<&Val>,
+    sink_acc: &mut SinkAccumulator,
+    emitted_outputs: &mut usize,
+) -> Result<StreamItemFlow, EvalError> {
+    for (stage_idx, stage) in pipeline.stages[start_stage..stage_limit].iter().enumerate() {
+        let stage_idx = start_stage + stage_idx;
+        let kernel = pipeline
+            .stage_kernels
+            .get(stage_idx)
+            .unwrap_or(&BodyKernel::Generic);
+        match stage {
+            Stage::CompiledMap(_) => {
+                item = prepared_nested[stage_idx]
+                    .as_ref()
+                    .expect("compiled map stages have prepared nested plans")
+                    .run(item)?;
+            }
+            _ => match super::val_stage_flow::apply_adapter_streaming(
+                stage,
+                stage_idx,
+                item,
+                vm,
+                loop_env,
+                kernel,
+                stage_taken,
+                stage_skipped,
+                stage_unique_seen,
+                stage_window_buffers,
+                terminal_map_idx,
+                terminal_map_collect,
+            )? {
+                StageFlow::Continue(next) => item = next,
+                StageFlow::SkipRow => return Ok(StreamItemFlow::Continue),
+                StageFlow::Stop => return Ok(StreamItemFlow::Stop),
+                StageFlow::TerminalCollected => {
+                    *emitted_outputs += 1;
+                    if source_demand.output_satisfied_by(*emitted_outputs) {
+                        return Ok(StreamItemFlow::Stop);
+                    }
+                    return Ok(StreamItemFlow::Continue);
+                }
+            },
+        }
+    }
+
+    if source_demand.is_nth_input() && matches!(pipeline.sink, Sink::Nth(_)) {
+        if let Some(projection) = late_projection {
+            return Ok(StreamItemFlow::Return(eval_late_projection(
+                &projection.kernel,
+                &item,
+                vm,
+            )?));
+        }
+        return Ok(StreamItemFlow::Return(item));
+    }
+
+    if let Some(projection) = late_projection {
+        item = eval_late_projection(&projection.kernel, &item, vm)?;
+    }
+
+    let sink_done = match &pipeline.sink {
+        Sink::Predicate(_) => observe_predicate_sink_item(pipeline, item, sink_acc, vm, loop_env)?,
+        Sink::Membership(spec) => sink_acc.observe_membership(
+            spec.op,
+            &item,
+            membership_target.expect("membership target exists"),
+        ),
+        Sink::ArgExtreme(_) => observe_arg_extreme_sink_item(pipeline, item, sink_acc, vm, loop_env)?,
+        Sink::Reducer(_) => match observe_reducer_item(pipeline, item, sink_acc, vm, loop_env)? {
+            ReducerItemFlow::Observed => false,
+            ReducerItemFlow::Skipped => return Ok(StreamItemFlow::Continue),
+        },
+        _ => sink_acc.push(item),
+    };
+    if sink_done {
+        return Ok(StreamItemFlow::Stop);
+    }
+    *emitted_outputs += 1;
+    if source_demand.output_satisfied_by(*emitted_outputs) {
+        return Ok(StreamItemFlow::Stop);
+    }
+    Ok(StreamItemFlow::Continue)
 }
 
 fn restore_reversed_select_many_result(value: Val) -> Val {

@@ -2906,12 +2906,18 @@ mod tests {
         let doc: Val = (&json!({"xs": [1, 2, 3, 4, 5, 6, 7, 8]})).into();
 
         let p = lower_query("$.xs.chunk(3).take(2)").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
         assert_eq!(
             p.source_demand().chain.pull,
             crate::plan::demand::PullDemand::FirstInput(6)
         );
         let out: serde_json::Value = p.run(&doc).unwrap().into();
         assert_eq!(out, json!([[1, 2, 3], [4, 5, 6]]));
+
+        let p = lower_query("$.xs.chunk(3)").unwrap();
+        assert_eq!(p.fallback_boundary, FallbackBoundary::None);
+        let out: serde_json::Value = p.run(&doc).unwrap().into();
+        assert_eq!(out, json!([[1, 2, 3], [4, 5, 6], [7, 8]]));
 
         let p = lower_query("$.xs.window(3).take(2)").unwrap();
         assert_eq!(p.fallback_boundary, FallbackBoundary::None);
