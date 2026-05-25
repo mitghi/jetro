@@ -2472,6 +2472,10 @@ impl Builtin for Merge {
     const NAME: &'static str = "merge";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Merge)
+            .demand_law(BuiltinViewValueProjection::Merge.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(
@@ -2512,6 +2516,10 @@ impl Builtin for Defaults {
     const NAME: &'static str = "defaults";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Defaults)
+            .demand_law(BuiltinViewValueProjection::Defaults.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

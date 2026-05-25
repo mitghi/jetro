@@ -1303,13 +1303,28 @@ where
             if !matches!(args, BuiltinArgs::None) {
                 return None;
             }
-            return view_from_pairs(&view).map(ViewProjectionResult::Owned);
+            return Some(match view_from_pairs(&view) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
         }
         BuiltinViewValueProjection::Invert => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
             }
-            return view_invert(&view).map(ViewProjectionResult::Owned);
+            return Some(match view_invert(&view) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
+        BuiltinViewValueProjection::Merge | BuiltinViewValueProjection::Defaults => {
+            let BuiltinArgs::Val(other) = args else {
+                return None;
+            };
+            return Some(match view_shallow_merge(&view, other, projection) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
         }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
@@ -1361,6 +1376,47 @@ where
         out.insert(Arc::from(key), value);
     }
     Some(Val::obj(out))
+}
+
+fn view_shallow_merge<'a, V>(
+    view: &V,
+    other: &Val,
+    projection: BuiltinViewValueProjection,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let other = other.as_object()?;
+    let mut out = view_object_to_map(view)?;
+    match projection {
+        BuiltinViewValueProjection::Merge => {
+            for (key, value) in other.iter() {
+                out.insert(Arc::clone(key), value.clone());
+            }
+        }
+        BuiltinViewValueProjection::Defaults => {
+            for (key, value) in other.iter() {
+                let entry = out.entry(Arc::clone(key)).or_insert(Val::Null);
+                if entry.is_null() {
+                    *entry = value.clone();
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(Val::obj(out))
+}
+
+fn view_object_to_map<'a, V>(view: &V) -> Option<indexmap::IndexMap<Arc<str>, Val>>
+where
+    V: ValueView<'a> + 'a,
+{
+    let len = view.object_len()?;
+    let mut out = indexmap::IndexMap::with_capacity(len);
+    for (key, value) in view.object_iter()? {
+        out.insert(key, view_to_owned(value));
+    }
+    Some(out)
 }
 
 fn view_invert<'a, V>(view: &V) -> Option<Val>
@@ -4270,10 +4326,17 @@ mod tests {
             (BuiltinMethod::Center, BuiltinViewValueProjection::Center),
             (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
+                BuiltinMethod::Defaults,
+                BuiltinViewValueProjection::Defaults,
+            ),
+            (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
-            (BuiltinMethod::FromPairs, BuiltinViewValueProjection::FromPairs),
+            (
+                BuiltinMethod::FromPairs,
+                BuiltinViewValueProjection::FromPairs,
+            ),
             (
                 BuiltinMethod::HtmlEscape,
                 BuiltinViewValueProjection::HtmlEscape,
@@ -4292,6 +4355,7 @@ mod tests {
                 BuiltinMethod::KebabCase,
                 BuiltinViewValueProjection::KebabCase,
             ),
+            (BuiltinMethod::Merge, BuiltinViewValueProjection::Merge),
             (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (BuiltinMethod::PadLeft, BuiltinViewValueProjection::PadLeft),
             (
@@ -6376,10 +6440,17 @@ mod tests {
             ),
             (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
+                BuiltinMethod::Defaults,
+                BuiltinViewValueProjection::Defaults,
+            ),
+            (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
-            (BuiltinMethod::FromPairs, BuiltinViewValueProjection::FromPairs),
+            (
+                BuiltinMethod::FromPairs,
+                BuiltinViewValueProjection::FromPairs,
+            ),
             (
                 BuiltinMethod::HtmlEscape,
                 BuiltinViewValueProjection::HtmlEscape,
@@ -6394,6 +6465,7 @@ mod tests {
                 BuiltinMethod::KebabCase,
                 BuiltinViewValueProjection::KebabCase,
             ),
+            (BuiltinMethod::Merge, BuiltinViewValueProjection::Merge),
             (BuiltinMethod::Or, BuiltinViewValueProjection::Or),
             (
                 BuiltinMethod::PascalCase,
@@ -6504,7 +6576,9 @@ mod tests {
                 "words": "Hello world_test",
                 "indent": "  a\n    b",
                 "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}],
-                "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]}
+                "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]},
+                "merge_base": {"a": 1, "b": 2},
+                "defaults_base": {"a": null, "b": 2}
             }));
             let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view)
@@ -6626,6 +6700,22 @@ mod tests {
                 "true": "c",
                 "[\"x\"]": "d"
             }))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::Merge,
+                BuiltinArgs::Val(Val::from(&serde_json::json!({"b": 20, "c": 3}))),
+                "merge_base"
+            ),
+            &Val::from(&serde_json::json!({"a": 1, "b": 20, "c": 3}))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::Defaults,
+                BuiltinArgs::Val(Val::from(&serde_json::json!({"a": 10, "c": 3}))),
+                "defaults_base"
+            ),
+            &Val::from(&serde_json::json!({"a": 10, "b": 2, "c": 3}))
         ));
         assert_view_eq(
             BuiltinMethod::Pick,

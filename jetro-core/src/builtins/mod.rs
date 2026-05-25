@@ -928,6 +928,10 @@ pub enum BuiltinViewValueProjection {
     FromPairs,
     /// Swap object keys and values, coercing values to object keys.
     Invert,
+    /// Shallow-merge an owned object argument into the receiver object.
+    Merge,
+    /// Fill missing or null receiver object keys from an owned defaults object.
+    Defaults,
     /// Convert to camelCase.
     CamelCase,
     /// Uppercase first character and lowercase the rest.
@@ -996,11 +1000,13 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Capitalize
             | BuiltinViewValueProjection::Center
             | BuiltinViewValueProjection::Dedent
+            | BuiltinViewValueProjection::Defaults
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
             | BuiltinViewValueProjection::Invert
+            | BuiltinViewValueProjection::Merge
             | BuiltinViewValueProjection::Indent
             | BuiltinViewValueProjection::KebabCase
             | BuiltinViewValueProjection::Or
