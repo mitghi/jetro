@@ -74,16 +74,18 @@ impl ViewStageState {
 /// Applies a single view-domain stage to `item`, returning the appropriate
 /// `ViewStageFlow`. Returns `None` when the stage requires materialisation
 /// or is handled by the recursive view frontier (`FlatMap` expansion).
-pub(super) fn apply_stage<'a, V>(
+pub(super) fn apply_stage<'a, V, F>(
     item: V,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
     vm: &mut crate::vm::VM,
+    mut eval_predicate: F,
 ) -> Option<ViewStageFlow<V>>
 where
     V: ValueView<'a> + 'a,
+    F: FnMut(&V, &pipeline::BodyKernel, &mut crate::vm::VM) -> Option<bool>,
 {
     if !matches!(
         stage.materialization(),
@@ -128,7 +130,7 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
+            if eval_predicate(&item, kernel, vm)? {
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Drop)
@@ -165,7 +167,7 @@ where
                 pipeline::ViewOutputMode::PreservesInputView
             );
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
+            if eval_predicate(&item, kernel, vm)? {
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Stop)
@@ -182,7 +184,7 @@ where
                 return Some(ViewStageFlow::Keep(item));
             }
             let kernel = stage_kernels.get(kernel)?;
-            if super::eval_filter_kernel_with_vm(&item, kernel, vm)? {
+            if eval_predicate(&item, kernel, vm)? {
                 Some(ViewStageFlow::Drop)
             } else {
                 *done = true;

@@ -1015,7 +1015,7 @@ where
         return Some(true);
     };
     let kernel = sink_kernels.get(kernel_idx)?;
-    eval_filter_kernel_with_vm(item, kernel, vm)
+    eval_frontier_filter_kernel_with_vm(item, kernel, vm)
 }
 
 /// Runs as many leading stages as possible in the view domain, materialises the
@@ -2266,17 +2266,25 @@ fn run_materialized_value_suffix(
 /// Applies a single view stage to `item`, returning the control flow decision
 /// (`Keep`, `Drop`, or `Stop`). Delegates to `stage_flow::apply_stage`.
 fn apply_view_stage<'a, V>(
-    item: V,
+    item: FrontierRow<V>,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
     vm: &mut VM,
-) -> Option<ViewStageFlow<V>>
+) -> Option<ViewStageFlow<FrontierRow<V>>>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
-    stage_flow::apply_stage(item, stage, op_idx, op_state, stage_kernels, vm)
+    stage_flow::apply_stage(
+        item,
+        stage,
+        op_idx,
+        op_state,
+        stage_kernels,
+        vm,
+        eval_frontier_filter_kernel_with_vm,
+    )
 }
 
 /// Slices `body` to produce a new `PipelineBody` starting at `consumed_stages`,
@@ -2305,6 +2313,20 @@ where
     V: ValueView<'a> + 'a,
 {
     match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+        pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
+        pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
+    }
+}
+
+fn eval_frontier_filter_kernel_with_vm<'a, V>(
+    item: &FrontierRow<V>,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<bool>
+where
+    V: FrontierBaseView<'a>,
+{
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
         pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
     }
@@ -6033,6 +6055,40 @@ mod tests {
                 .unwrap();
 
         assert_eq!(out, Val::Int(1));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_filter_predicate_runs_on_tape_view_without_materializing_rows() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[1,2],[],[0],[3]]"#.to_vec()).unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Filter(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Filter,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(2));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
