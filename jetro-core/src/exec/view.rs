@@ -811,7 +811,7 @@ where
     let Some(predicate_kernel) = predicate_kernel else {
         return Some(count);
     };
-    let predicate = constant_kernel_truthy(sink_kernels.get(predicate_kernel)?)?;
+    let predicate = sink_kernels.get(predicate_kernel)?.constant_truthy()?;
     Some(if predicate { count } else { 0 })
 }
 
@@ -830,11 +830,7 @@ where
     if forced_empty {
         return op.empty_stream_result();
     }
-    let matched = match sink_kernels.get(predicate_kernel)? {
-        pipeline::BodyKernel::ConstBool(value) => *value,
-        pipeline::BodyKernel::Const(value) => crate::util::is_truthy(value),
-        _ => return None,
-    };
+    let matched = sink_kernels.get(predicate_kernel)?.constant_truthy()?;
     let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
     op.constant_predicate_stream_result(matched, count)
 }
@@ -907,14 +903,6 @@ fn deterministic_prefix_forces_empty(
     stage_kernels: &[pipeline::BodyKernel],
 ) -> bool {
     pipeline::ViewStageCapability::prefix_forces_empty(stages, stage_kernels)
-}
-
-fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
-    match kernel {
-        pipeline::BodyKernel::ConstBool(value) => Some(*value),
-        pipeline::BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
-        _ => None,
-    }
 }
 
 fn resolve_view_sink(

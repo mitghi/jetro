@@ -735,6 +735,15 @@ impl BodyKernel {
         }
     }
 
+    /// Returns the truthiness of a literal-only kernel.
+    pub(crate) fn constant_truthy(&self) -> Option<bool> {
+        match self {
+            Self::ConstBool(value) => Some(*value),
+            Self::Const(value) => Some(crate::util::is_truthy(value)),
+            _ => None,
+        }
+    }
+
     /// Returns a direct field-path-to-literal comparison when this kernel is
     /// exactly that shape.
     pub(crate) fn field_path_literal_cmp(
@@ -2961,6 +2970,15 @@ mod tests {
             BodyKernel::FieldRead(Arc::from("isbn")).literal_value(),
             None
         );
+    }
+
+    #[test]
+    fn constant_truthy_reports_literal_kernel_truthiness() {
+        assert_eq!(BodyKernel::ConstBool(true).constant_truthy(), Some(true));
+        assert_eq!(BodyKernel::ConstBool(false).constant_truthy(), Some(false));
+        assert_eq!(BodyKernel::Const(Val::Int(1)).constant_truthy(), Some(true));
+        assert_eq!(BodyKernel::Const(Val::Null).constant_truthy(), Some(false));
+        assert_eq!(BodyKernel::Current.constant_truthy(), None);
     }
 
     #[test]

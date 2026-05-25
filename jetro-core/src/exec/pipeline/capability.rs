@@ -669,14 +669,14 @@ impl ViewStageCapability {
     ) -> ViewStageConstantEffect {
         match self {
             Self::Filter { kernel } | Self::TakeWhile { kernel } => {
-                match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                match stage_kernels.get(*kernel).and_then(BodyKernel::constant_truthy) {
                     Some(true) => ViewStageConstantEffect::NoOp,
                     Some(false) => ViewStageConstantEffect::Empty,
                     None => ViewStageConstantEffect::Keep,
                 }
             }
             Self::DropWhile { kernel } => {
-                match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                match stage_kernels.get(*kernel).and_then(BodyKernel::constant_truthy) {
                     Some(true) => ViewStageConstantEffect::Empty,
                     Some(false) => ViewStageConstantEffect::NoOp,
                     None => ViewStageConstantEffect::Keep,
@@ -698,11 +698,11 @@ impl ViewStageCapability {
             Self::Take(n) => Some(count.min(*n)),
             Self::Skip(n) => Some(count.saturating_sub(*n)),
             Self::Filter { kernel } | Self::TakeWhile { kernel } => {
-                let keep = constant_kernel_truthy(stage_kernels.get(*kernel)?)?;
+                let keep = stage_kernels.get(*kernel)?.constant_truthy()?;
                 Some(if keep { count } else { 0 })
             }
             Self::DropWhile { kernel } => {
-                let drop_all = constant_kernel_truthy(stage_kernels.get(*kernel)?)?;
+                let drop_all = stage_kernels.get(*kernel)?.constant_truthy()?;
                 Some(if drop_all { 0 } else { count })
             }
             Self::Compact
@@ -796,14 +796,6 @@ impl ViewStageCapability {
             }
         }
         rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
-    }
-}
-
-fn constant_kernel_truthy(kernel: &BodyKernel) -> Option<bool> {
-    match kernel {
-        BodyKernel::ConstBool(value) => Some(*value),
-        BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
-        _ => None,
     }
 }
 
