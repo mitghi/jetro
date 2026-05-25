@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{view_matches_value, ValueView};
+use crate::data::view::{view_matches_value, ValView, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -2888,17 +2888,32 @@ fn run_materialized_value_suffix(
         if !call.is_view_projection() {
             break;
         }
-        boundary_value = call
-            .try_apply(&boundary_value)?
-            .or_else(|| call.apply(&boundary_value))
-            .ok_or_else(|| EvalError(format!("{:?}: unsupported projection", call.method)))?;
+        boundary_value = match crate::builtins::registry::apply_view_projection(
+            call.id(),
+            &call.args,
+            ValView::new(&boundary_value),
+        ) {
+            Some(crate::builtins::registry::ViewProjectionResult::View(view)) => view.materialize(),
+            Some(crate::builtins::registry::ViewProjectionResult::Owned(value)) => value,
+            None => call
+                .try_apply(&boundary_value)?
+                .or_else(|| call.apply(&boundary_value))
+                .ok_or_else(|| EvalError(format!("{:?}: unsupported projection", call.method)))?,
+        };
         consumed_stages += 1;
     }
     if consumed_stages >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
         return Ok(boundary_value);
     }
-    let suffix =
-        suffix_body(body, consumed_stages).with_source(pipeline::Source::Receiver(boundary_value));
+    let suffix = suffix_body(body, consumed_stages);
+    if pipeline::view_capabilities(&suffix).is_some() {
+        if let Some(result) =
+            run_with_env_and_vm(ValView::new(&boundary_value), &suffix, cache, base_env, vm)
+        {
+            return result;
+        }
+    }
+    let suffix = suffix.with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
     suffix.run_with_env_and_vm(&root, base_env, cache, vm)
 }
@@ -8357,6 +8372,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(out, Val::Bool(true));
+        assert_eq!(source.scalar_reads(), 4);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn reducing_boundary_suffix_reenters_view_executor() {
+        let source = CountingView::root(&[1, 2, 1, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::ExprBuiltin {
+                    method: crate::builtins::BuiltinMethod::GroupBy,
+                    body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Keys,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![
+                BodyKernel::Current,
+                BodyKernel::Generic,
+                BodyKernel::CmpLit {
+                    lhs: Box::new(BodyKernel::Current),
+                    op: BinOp::Eq,
+                    lit: Val::Str(Arc::from("2")),
+                },
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Str(Arc::from("2")));
         assert_eq!(source.scalar_reads(), 4);
         assert_eq!(source.materialize_reads(), 0);
     }
