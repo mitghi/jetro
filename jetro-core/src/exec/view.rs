@@ -2507,6 +2507,29 @@ where
                 }
             }
         }
+        pipeline::BodyKernel::Match {
+            scrutinee,
+            compiled,
+            body_needs_current,
+        } => match eval_frontier_kernel_with_vm(item, scrutinee, vm)? {
+            pipeline::ViewKernelValue::View(view) => {
+                let current = if *body_needs_current {
+                    pipeline::view_kernel_view_to_owned(view.clone())
+                } else {
+                    Val::Null
+                };
+                let env = Env::new(current);
+                crate::vm::exec_match_view(vm, compiled, view, &env)
+                    .ok()
+                    .map(pipeline::ViewKernelValue::Owned)
+            }
+            pipeline::ViewKernelValue::Owned(value) => {
+                let env = Env::new(value.clone());
+                vm.exec_match(compiled, &value, &env)
+                    .ok()
+                    .map(pipeline::ViewKernelValue::Owned)
+            }
+        },
         pipeline::BodyKernel::And(predicates) => {
             for predicate in predicates.iter() {
                 if !eval_frontier_filter_kernel_with_vm(item, predicate, vm)? {
@@ -7036,6 +7059,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([[2, 4], [1, 4]]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_match_recurses_into_nested_receiver_scrutinee() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[2,"bb"],[1,"a"],[2,"cc"]]"#.to_vec())
+                .unwrap();
+        let first = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let match_src = r#"match @ with { 2 -> "two", _ -> "other" }"#;
+        let match_expr = crate::parse::parser::parse(match_src).unwrap();
+        let match_program = Compiler::compile(&match_expr, match_src);
+        let BodyKernel::Match {
+            compiled,
+            body_needs_current,
+            ..
+        } = BodyKernel::classify(&match_program)
+        else {
+            panic!("expected match kernel");
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Match {
+                scrutinee: Box::new(BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                    Arc::new(first),
+                )))),
+                compiled,
+                body_needs_current,
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_terminal_collect(TapeView::root(&tape), &body, &mut VM::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["two", "other", "two"])
+        );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
