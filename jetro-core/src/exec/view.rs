@@ -356,6 +356,46 @@ where
         return Some(Ok(result));
     }
 
+    if let Some((op, key_kernel)) = sink.arg_extreme_contract() {
+        let mut extreme = FrontierArgExtreme::new(op, key_kernel);
+        let result = if source_reversed {
+            if let Some(result) = drive_reversed_direct_position(
+                &source,
+                &suffix.stages,
+                &body.stage_kernels,
+                drive_demand,
+                vm,
+                |item, vm| extreme.observe(item, &body.sink_kernels, vm),
+            ) {
+                result
+            } else {
+                let items = source.array_iter_rev()?;
+                drive_view_iter(
+                    items,
+                    &suffix.stages,
+                    &body.stage_kernels,
+                    drive_demand,
+                    vm,
+                    |item, vm| extreme.observe(item, &body.sink_kernels, vm),
+                )?
+            }
+        } else {
+            drive_view_frontier(
+                source,
+                pipeline::SourceCapabilities::VIEW_ARRAY,
+                &suffix.stages,
+                &body.stage_kernels,
+                source_demand,
+                vm,
+                |item, vm| extreme.observe(item, &body.sink_kernels, vm),
+            )?
+        };
+        if let Err(err) = result {
+            return Some(Err(err));
+        }
+        return Some(Ok(extreme.finish()));
+    }
+
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let result = if source_reversed {
         if let Some(result) = drive_reversed_direct_position(
@@ -688,8 +728,7 @@ where
     I: IntoIterator<Item = FrontierRow<V>>,
 {
     let (op, key_kernel) = sink.arg_extreme_contract()?;
-    let mut best_key = None::<Val>;
-    let mut best_row = None::<FrontierRow<V>>;
+    let mut extreme = FrontierArgExtreme::new(op, key_kernel);
 
     if let Err(err) = drive_frontier_iter(
         rows,
@@ -697,32 +736,66 @@ where
         stage_kernels,
         source_demand,
         vm,
-        |item, vm| {
-            let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(key_kernel)?, vm)?;
-            let should_take = match best_key.as_ref() {
-                None => true,
-                Some(existing) => {
-                    let ordering = pipeline::cmp_val_total(&key, existing);
-                    if op.wants_max() {
-                        ordering.is_gt()
-                    } else {
-                        ordering.is_lt()
-                    }
-                }
-            };
-            if should_take {
-                best_key = Some(key);
-                best_row = Some(item.clone());
-            }
-            Some(Ok(ViewRowAction::Emit))
-        },
+        |item, vm| extreme.observe(item, sink_kernels, vm),
     )? {
         return Some(Err(err));
     }
 
-    Some(Ok(best_row
-        .map(pipeline::view_kernel_view_to_owned)
-        .unwrap_or(Val::Null)))
+    Some(Ok(extreme.finish()))
+}
+
+struct FrontierArgExtreme<V> {
+    op: crate::builtins::BuiltinArgExtremeSink,
+    key_kernel: usize,
+    best_key: Option<Val>,
+    best_row: Option<FrontierRow<V>>,
+}
+
+impl<V> FrontierArgExtreme<V> {
+    fn new(op: crate::builtins::BuiltinArgExtremeSink, key_kernel: usize) -> Self {
+        Self {
+            op,
+            key_kernel,
+            best_key: None,
+            best_row: None,
+        }
+    }
+}
+
+impl<'a, V> FrontierArgExtreme<V>
+where
+    V: FrontierBaseView<'a>,
+{
+    fn finish(self) -> Val {
+        self.best_row
+            .map(pipeline::view_kernel_view_to_owned)
+            .unwrap_or(Val::Null)
+    }
+
+    fn observe(
+        &mut self,
+        item: &FrontierRow<V>,
+        sink_kernels: &[pipeline::BodyKernel],
+        vm: &mut VM,
+    ) -> Option<Result<ViewRowAction, EvalError>> {
+        let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(self.key_kernel)?, vm)?;
+        let should_take = match self.best_key.as_ref() {
+            None => true,
+            Some(existing) => {
+                let ordering = pipeline::cmp_val_total(&key, existing);
+                if self.op.wants_max() {
+                    ordering.is_gt()
+                } else {
+                    ordering.is_lt()
+                }
+            }
+        };
+        if should_take {
+            self.best_key = Some(key);
+            self.best_row = Some(item.clone());
+        }
+        Some(Ok(ViewRowAction::Emit))
+    }
 }
 
 fn drive_reversed_direct_position<'a, V, F>(
@@ -870,8 +943,7 @@ where
         return Some(Ok(Val::Null));
     }
 
-    let mut best_key = None::<Val>;
-    let mut best_row = None::<FrontierRow<V>>;
+    let mut extreme = FrontierArgExtreme::new(op, key_kernel);
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -880,32 +952,12 @@ where
         &body.stage_kernels,
         body.pull_demand(),
         vm,
-        |item, vm| {
-            let key = view_arg_extreme_key_with_vm(item, body.sink_kernels.get(key_kernel)?, vm)?;
-            let should_take = match best_key.as_ref() {
-                None => true,
-                Some(existing) => {
-                    let ordering = pipeline::cmp_val_total(&key, existing);
-                    if op.wants_max() {
-                        ordering.is_gt()
-                    } else {
-                        ordering.is_lt()
-                    }
-                }
-            };
-            if should_take {
-                best_key = Some(key);
-                best_row = Some(item.clone());
-            }
-            Some(Ok(ViewRowAction::Emit))
-        },
+        |item, vm| extreme.observe(item, &body.sink_kernels, vm),
     )? {
         return Some(Err(err));
     }
 
-    Some(Ok(best_row
-        .map(pipeline::view_kernel_view_to_owned)
-        .unwrap_or(Val::Null)))
+    Some(Ok(extreme.finish()))
 }
 
 fn direct_sink_result_from_source_len<'a, V>(
@@ -5252,6 +5304,39 @@ mod tests {
         )
         .unwrap()
         .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"id": 4, "score": 4})
+        );
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn leading_reverse_arg_extreme_materializes_only_final_winner() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":4,"score":4},{"id":3,"score":3},{"id":2,"score":2},{"id":1,"score":1}]"#
+                .to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: vec![Stage::reverse().unwrap()],
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
+            }),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("score"))],
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(TapeView::root(&tape), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
 
         assert_eq!(
             serde_json::Value::from(out),
