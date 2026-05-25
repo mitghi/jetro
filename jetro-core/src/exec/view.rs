@@ -985,11 +985,6 @@ where
     V: FrontierBaseView<'a>,
 {
     let prefix = pipeline::view_prefix_capabilities(body)?;
-    if prefix.consumed_stages >= body.stages.len()
-        && !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages)
-    {
-        return None;
-    }
     if !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages) {
         return None;
     }
