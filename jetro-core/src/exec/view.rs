@@ -6795,6 +6795,38 @@ mod tests {
     }
 
     #[test]
+    fn view_parse_int_radix_applies_static_args_without_materializing() {
+        let tape = crate::data::tape::TapeData::parse(br#"["ff","0x10","zz"]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::ParseInt,
+                    crate::builtins::BuiltinArgs::Usize(16),
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([255, 16, null])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_binary_arithmetic_uses_tape_scalar_reads_without_materializing_rows() {
         let tape = crate::data::tape::TapeData::parse(
             br#"[{"qty":2,"price":10,"fee":1},{"qty":3,"price":7,"fee":2}]"#.to_vec(),

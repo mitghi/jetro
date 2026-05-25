@@ -1846,6 +1846,26 @@ pub(crate) fn apply_json_view_scalar_hook(
             let value = super::json_view_str(recv)?;
             super::str_no_arg_scalar_apply(method, value)
         }
+        (BuiltinViewScalarOp::ParseInt, BuiltinArgs::None) => {
+            let value = super::json_view_str(recv)?;
+            Some(super::parse_int_str(value))
+        }
+        (BuiltinViewScalarOp::ParseInt, BuiltinArgs::Usize(radix)) => {
+            let value = super::json_view_str(recv)?;
+            let radix = *radix as u32;
+            if !(2..=36).contains(&radix) {
+                return Some(Val::Null);
+            }
+            Some(super::parse_int_radix_str(value, radix))
+        }
+        (BuiltinViewScalarOp::ParseInt, BuiltinArgs::I64(radix)) if *radix > 0 => {
+            let value = super::json_view_str(recv)?;
+            let radix = *radix as u32;
+            if !(2..=36).contains(&radix) {
+                return Some(Val::Null);
+            }
+            Some(super::parse_int_radix_str(value, radix))
+        }
         (BuiltinViewScalarOp::NumericNoArg, BuiltinArgs::None) => {
             super::numeric_no_arg_scalar_apply(method, recv)
         }
@@ -3821,7 +3841,7 @@ mod tests {
             (BuiltinMethod::IsAscii, BuiltinViewScalarOp::StringNoArg),
             (BuiltinMethod::ToNumber, BuiltinViewScalarOp::StringNoArg),
             (BuiltinMethod::ToBool, BuiltinViewScalarOp::StringNoArg),
-            (BuiltinMethod::ParseInt, BuiltinViewScalarOp::StringNoArg),
+            (BuiltinMethod::ParseInt, BuiltinViewScalarOp::ParseInt),
             (BuiltinMethod::ParseFloat, BuiltinViewScalarOp::StringNoArg),
             (BuiltinMethod::ParseBool, BuiltinViewScalarOp::StringNoArg),
         ] {

@@ -3472,7 +3472,7 @@ impl Builtin for ParseInt {
     const METHOD: BuiltinMethod = BuiltinMethod::ParseInt;
     const NAME: &'static str = "parse_int";
     fn spec() -> BuiltinSpec {
-        scalar_native_element_spec().view_scalar_op(BuiltinViewScalarOp::StringNoArg)
+        scalar_native_element_spec().view_scalar_op(BuiltinViewScalarOp::ParseInt)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

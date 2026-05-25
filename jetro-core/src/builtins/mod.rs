@@ -908,6 +908,8 @@ pub enum BuiltinViewScalarOp {
     TypeName,
     /// String receiver, no static argument.
     StringNoArg,
+    /// String receiver parsed as an integer with optional radix.
+    ParseInt,
     /// Numeric receiver, no static argument.
     NumericNoArg,
     /// String receiver with a single string argument.
