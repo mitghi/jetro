@@ -754,6 +754,30 @@ impl ViewSinkCapability {
             }
         }
     }
+
+    /// Returns a sink adjusted for the selected source traversal demand.
+    pub(crate) fn for_source_demand(self, demand: PullDemand, source_reversed: bool) -> Self {
+        match (demand, self) {
+            (PullDemand::NthInput(_), Self::Nth { .. }) => Self::Nth { index: 0 },
+            (PullDemand::LastInput(_), Self::SelectMany { n, from_end, .. }) => Self::SelectMany {
+                n,
+                from_end,
+                source_reversed,
+            },
+            (_, sink) => sink,
+        }
+    }
+
+    /// Whether this sink semantically wants the last retained row(s).
+    pub(crate) fn selects_from_end(&self) -> bool {
+        match self {
+            Self::SelectMany { from_end, .. } => *from_end,
+            Self::Builtin { accumulator, .. } => accumulator
+                .selection_position()
+                .is_some_and(crate::builtins::BuiltinSelectionPosition::wants_last),
+            _ => false,
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -859,6 +883,7 @@ mod tests {
         ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
+    use crate::plan::demand::PullDemand;
 
     use super::{
         view_capabilities, view_never_materializing_stage_range, view_prefix_capabilities,
@@ -1116,6 +1141,44 @@ mod tests {
             .unwrap()),
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn view_sink_capability_carries_source_demand_adjustments() {
+        let nth = ViewSinkCapability::Nth { index: 7 }
+            .for_source_demand(PullDemand::NthInput(7), false);
+        assert!(matches!(nth, ViewSinkCapability::Nth { index: 0 }));
+
+        let last_many = ViewSinkCapability::SelectMany {
+            n: 3,
+            from_end: true,
+            source_reversed: false,
+        }
+        .for_source_demand(PullDemand::LastInput(3), true);
+        assert!(matches!(
+            last_many,
+            ViewSinkCapability::SelectMany {
+                n: 3,
+                from_end: true,
+                source_reversed: true,
+            }
+        ));
+
+        assert!(last_many.selects_from_end());
+        assert!(ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::SinkFinalRow,
+        }
+        .selects_from_end());
+        assert!(!ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::SinkFinalRow,
+        }
+        .selects_from_end());
     }
 
     #[test]

@@ -2409,30 +2409,11 @@ fn view_suffix_sink_for_demand(
     source_demand: PullDemand,
     source_reversed: bool,
 ) -> pipeline::ViewSinkCapability {
-    match (source_demand, sink) {
-        (PullDemand::NthInput(_), pipeline::ViewSinkCapability::Nth { .. }) => {
-            pipeline::ViewSinkCapability::Nth { index: 0 }
-        }
-        (
-            PullDemand::LastInput(_),
-            pipeline::ViewSinkCapability::SelectMany { n, from_end, .. },
-        ) => pipeline::ViewSinkCapability::SelectMany {
-            n,
-            from_end,
-            source_reversed,
-        },
-        (_, sink) => sink,
-    }
+    sink.for_source_demand(source_demand, source_reversed)
 }
 
 fn view_sink_selects_last(sink: &pipeline::ViewSinkCapability) -> bool {
-    match sink {
-        pipeline::ViewSinkCapability::SelectMany { from_end, .. } => *from_end,
-        pipeline::ViewSinkCapability::Builtin { accumulator, .. } => accumulator
-            .selection_position()
-            .is_some_and(crate::builtins::BuiltinSelectionPosition::wants_last),
-        _ => false,
-    }
+    sink.selects_from_end()
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
