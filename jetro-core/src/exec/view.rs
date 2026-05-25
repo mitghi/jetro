@@ -370,7 +370,7 @@ where
         None => return None,
     };
 
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return run_buffered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
@@ -527,7 +527,7 @@ where
         None => return None,
     };
 
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return run_buffered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
@@ -713,7 +713,10 @@ where
 {
     let capabilities = pipeline::view_capabilities(body)?;
     let (op, key_kernel) = capabilities.sink.arg_extreme_contract()?;
-    if deterministic_prefix_forces_empty(&capabilities.stages, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(
+        &capabilities.stages,
+        &body.stage_kernels,
+    ) {
         return Some(Ok(Val::Null));
     }
 
@@ -766,7 +769,7 @@ fn direct_sink_result_from_source_len<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    if deterministic_prefix_forces_empty(stages, stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(stages, stage_kernels) {
         return sink
             .result_from_known_source_cardinality(None, stages, stage_kernels, sink_kernels)
             .or_else(|| body_sink.empty_stream_result());
@@ -790,13 +793,6 @@ where
         stage_kernels,
         sink_kernels,
     )
-}
-
-fn deterministic_prefix_forces_empty(
-    stages: &[pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-) -> bool {
-    pipeline::ViewStageCapability::prefix_forces_empty(stages, stage_kernels)
 }
 
 fn resolve_view_sink(
@@ -992,7 +988,7 @@ where
         return None;
     }
 
-    if deterministic_prefix_forces_empty(&prefix.stages, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&prefix.stages, &body.stage_kernels) {
         return Some(run_materialized_suffix(
             body,
             prefix.consumed_stages,
@@ -1044,7 +1040,7 @@ where
 {
     let plan = terminal_collect_plan(body)?;
     let mut collector = pipeline::TerminalCollector::new(plan.collect_program.kernel());
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return Some(Ok(collector.finish()));
     }
 
@@ -1084,7 +1080,7 @@ where
     let prefix = terminal_collect_prefix_from(&body.stages[..prefix_len], body, 0)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[..prefix_len], &body.sink);
-    if deterministic_prefix_forces_empty(&prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&prefix, &body.stage_kernels) {
         return Some(Ok(Val::Null));
     }
     let mut selected = Val::Null;
@@ -1692,7 +1688,7 @@ where
         return None;
     }
     let source_demand = body.pull_demand();
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return Some(run_materialized_value_suffix(
             body,
             plan.consumed_stages,
@@ -1761,7 +1757,7 @@ where
     {
         return None;
     }
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return run_sorted_winners_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
@@ -2027,7 +2023,7 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if deterministic_prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
+    if pipeline::ViewStageCapability::prefix_forces_empty(&plan.prefix, &body.stage_kernels) {
         return run_ordered_rows_view_suffix(
             Vec::<FrontierRow<V>>::new(),
             body,
