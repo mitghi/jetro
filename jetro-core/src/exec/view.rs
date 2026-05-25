@@ -48,10 +48,35 @@ where
         }
     }
 
+    fn array_len(&self) -> Option<usize> {
+        match self {
+            Self::Borrowed(view) => view.array_len(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).array_len(),
+        }
+    }
+
+    fn object_len(&self) -> Option<usize> {
+        match self {
+            Self::Borrowed(view) => view.object_len(),
+            Self::Owned(value) => crate::data::view::ValView::new(value).object_len(),
+        }
+    }
+
     fn field(&self, key: &str) -> Self {
         match self {
             Self::Borrowed(view) => Self::Borrowed(view.field(key)),
             Self::Owned(value) => Self::Owned(value.get_field(key)),
+        }
+    }
+
+    fn field_chain(&self, keys: &[Arc<str>]) -> Self {
+        match self {
+            Self::Borrowed(view) => Self::Borrowed(view.field_chain(keys)),
+            Self::Owned(value) => Self::Owned(
+                crate::data::view::ValView::new(value)
+                    .field_chain(keys)
+                    .materialize(),
+            ),
         }
     }
 
@@ -110,6 +135,36 @@ where
         match self {
             Self::Borrowed(view) => Self::Borrowed(view.index(idx)),
             Self::Owned(value) => Self::Owned(value.get_index(idx)),
+        }
+    }
+
+    fn array_child(&self, idx: usize) -> Self {
+        match self {
+            Self::Borrowed(view) => Self::Borrowed(view.array_child(idx)),
+            Self::Owned(value) => Self::Owned(value.get_index(idx as i64)),
+        }
+    }
+
+    fn array_child_range_iter(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Box<dyn Iterator<Item = Self> + 'a> {
+        match self {
+            Self::Borrowed(view) => {
+                Box::new(view.array_child_range_iter(start, end).map(Self::Borrowed))
+            }
+            Self::Owned(value) => {
+                let len = value.array_len().unwrap_or(0);
+                let end = end.min(len);
+                if start >= end {
+                    return Box::new(std::iter::empty());
+                }
+                let items = (start..end)
+                    .map(|idx| value.get_index(idx as i64))
+                    .collect::<Vec<_>>();
+                Box::new(items.into_iter().map(Self::Owned))
+            }
         }
     }
 
