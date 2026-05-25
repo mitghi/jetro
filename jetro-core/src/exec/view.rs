@@ -663,12 +663,11 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
-    let access_stages = pipeline::ViewStageCapability::source_access_stages(
+    let source_access = pipeline::SourceCapabilities::VIEW_ARRAY.choose_view_access_for_kernels(
+        source_demand,
         &capabilities.stages,
         &body.stage_kernels,
     );
-    let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
-        .choose_view_access(source_demand, access_stages.as_ref());
     let sink = capabilities.sink.for_source_demand(
         source_demand,
         matches!(source_access, pipeline::SourceAccessMode::Reverse { .. }),
@@ -1224,8 +1223,8 @@ where
     if source_demand.is_zero() {
         return Some(Ok(()));
     }
-    let access_stages = pipeline::ViewStageCapability::source_access_stages(stages, stage_kernels);
-    let access = source_capabilities.choose_view_access(source_demand, access_stages.as_ref());
+    let access =
+        source_capabilities.choose_view_access_for_kernels(source_demand, stages, stage_kernels);
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
             let items = source.array_iter_rev()?;

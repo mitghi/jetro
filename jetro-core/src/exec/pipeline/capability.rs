@@ -121,6 +121,19 @@ impl SourceCapabilities {
         access
     }
 
+    /// Chooses source access for a view prefix after applying deterministic
+    /// constant-stage rewrites such as removing always-true filters and
+    /// truncating at provably-empty filters.
+    pub(crate) fn choose_view_access_for_kernels(
+        self,
+        demand: PullDemand,
+        stages: &[ViewStageCapability],
+        stage_kernels: &[BodyKernel],
+    ) -> SourceAccessMode {
+        let access_stages = ViewStageCapability::source_access_stages(stages, stage_kernels);
+        self.choose_view_access(demand, access_stages.as_ref())
+    }
+
     /// Returns true when this source can satisfy split payload lanes without
     /// materialising every row as a full owned value.
     pub(crate) fn supports_payload_lanes(
@@ -298,7 +311,7 @@ mod source_capability_tests {
     use super::{SourceAccessMode, SourceCapabilities, SourceIndexedAccess, ViewStageCapability};
     use crate::builtins::BuiltinViewStage;
     use crate::data::value::Val;
-    use crate::exec::pipeline::Stage;
+    use crate::exec::pipeline::{BodyKernel, Stage};
     use crate::plan::demand::{FieldDemand, FieldSet, PullDemand};
     use std::sync::Arc;
 
@@ -460,6 +473,33 @@ mod source_capability_tests {
         assert_eq!(
             indexed_forward.choose_access(PullDemand::LastInput(1)),
             SourceAccessMode::IndexedFromEnd(0)
+        );
+    }
+
+    #[test]
+    fn source_capabilities_choose_view_access_applies_constant_stage_rewrites() {
+        let stages = [
+            ViewStageCapability::Filter { kernel: 0 },
+            ViewStageCapability::Map { kernel: 1 },
+        ];
+        let kernels = [BodyKernel::ConstBool(true), BodyKernel::Current];
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_view_access_for_kernels(
+                PullDemand::LastInput(1),
+                &stages,
+                &kernels
+            ),
+            SourceAccessMode::IndexedFromEnd(0)
+        );
+
+        let kernels = [BodyKernel::ConstBool(false), BodyKernel::Current];
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_view_access_for_kernels(
+                PullDemand::LastInput(1),
+                &stages,
+                &kernels
+            ),
+            SourceAccessMode::Reverse { outputs: 1 }
         );
     }
 
