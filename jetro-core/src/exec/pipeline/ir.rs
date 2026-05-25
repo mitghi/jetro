@@ -1100,6 +1100,14 @@ impl Stage {
                     field: Arc::clone(value),
                 });
             }
+            if matches!(
+                crate::builtins::registry::view_stage(id),
+                Some(crate::builtins::BuiltinViewStage::JoinString)
+            ) {
+                return Some(ViewStageCapability::JoinString {
+                    sep: Arc::clone(value),
+                });
+            }
         }
         if let Stage::Builtin(call) = self {
             if let Some(op) = crate::builtins::registry::view_string_expand(call.id()) {

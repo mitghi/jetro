@@ -849,6 +849,11 @@ pub(crate) enum ViewStageCapability {
         /// Static argument values appended when absent from the receiver.
         values: Vec<Val>,
     },
+    /// Join stage; accumulates receiver rows into one string.
+    JoinString {
+        /// Separator inserted between rows.
+        sep: std::sync::Arc<str>,
+    },
     /// Append one owned literal after all input rows.
     AppendValue(Val),
     /// Prepend one owned literal before input rows.
@@ -914,6 +919,9 @@ impl ViewStageCapability {
                 values: Vec::new(),
             }),
             BuiltinViewStage::SetUnion => Some(Self::SetUnion { values: Vec::new() }),
+            BuiltinViewStage::JoinString => Some(Self::JoinString {
+                sep: std::sync::Arc::from(""),
+            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -947,6 +955,7 @@ impl ViewStageCapability {
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
             Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
             Self::SetUnion { .. } => BuiltinViewStage::SetUnion,
+            Self::JoinString { .. } => BuiltinViewStage::JoinString,
             Self::AppendValue(_) => BuiltinViewStage::AppendValue,
             Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,
@@ -1110,6 +1119,7 @@ impl ViewStageCapability {
             | Self::KeyedReduce { .. }
             | Self::SetFilter { .. }
             | Self::SetUnion { .. }
+            | Self::JoinString { .. }
             | Self::AppendValue(_)
             | Self::PrependValue(_) => None,
         }
@@ -1193,6 +1203,7 @@ impl ViewStageCapability {
                 | Self::KeyedReduce { .. }
                 | Self::SetFilter { .. }
                 | Self::SetUnion { .. }
+                | Self::JoinString { .. }
                 | Self::AppendValue(_)
                 | Self::PrependValue(_) => return false,
             }

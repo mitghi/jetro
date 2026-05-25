@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{view_matches_value, ValView, ValueView};
+use crate::data::view::{view_matches_value, write_json_view, ValView, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -2544,6 +2544,18 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::JoinString { ref sep } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let state = op_state.get_mut(stage_idx)?.join_string();
+        if state.count > 0 {
+            state.out.push_str(sep);
+        }
+        write_join_view(&item, &mut state.out)?;
+        state.count = state.count.saturating_add(1);
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+
     if let pipeline::ViewStageCapability::Lag { offset } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4193,6 +4205,22 @@ fn numeric_full_input_tail_values(
     }
 }
 
+fn write_join_view<'a, V>(item: &FrontierRow<V>, out: &mut String) -> Option<()>
+where
+    V: FrontierBaseView<'a>,
+{
+    match item.scalar() {
+        JsonView::Str(value) => out.push_str(value),
+        JsonView::Int(value) => out.push_str(&value.to_string()),
+        JsonView::UInt(value) => out.push_str(&value.to_string()),
+        JsonView::Float(value) => out.push_str(&value.to_string()),
+        JsonView::Bool(value) => out.push_str(if value { "true" } else { "false" }),
+        JsonView::Null => out.push_str("null"),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => write_json_view(item, out)?,
+    }
+    Some(())
+}
+
 fn drive_lag_frontier_row<'a, V, F>(
     item: FrontierRow<V>,
     offset: usize,
@@ -4487,6 +4515,10 @@ where
                         }
                     })
                     .collect()
+            }
+            pipeline::ViewStageCapability::JoinString { .. } => {
+                let state = op_state.get_mut(stage_idx)?.join_string();
+                vec![Val::Str(Arc::from(std::mem::take(&mut state.out)))]
             }
             _ => continue,
         };
@@ -8114,6 +8146,56 @@ mod tests {
             serde_json::Value::from(out),
             serde_json::json!([{"a":1}, {"a":2}, {"a":3}])
         );
+    }
+
+    #[test]
+    fn terminal_collect_join_tape_rows_without_materializing_receiver() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"["a",1,true,null,{"x":2}]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::StringBuiltin {
+                method: crate::builtins::BuiltinMethod::Join,
+                value: Arc::from("|"),
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["a|1|true|null|{\"x\":2}"])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_join_empty_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::StringBuiltin {
+                method: crate::builtins::BuiltinMethod::Join,
+                value: Arc::from(","),
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([""]));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]

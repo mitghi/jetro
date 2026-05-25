@@ -1579,6 +1579,8 @@ pub enum BuiltinViewStage {
     SetFilter(BuiltinViewSetFilter),
     /// Set union with a static argument list.
     SetUnion,
+    /// Join all receiver rows into one string with a static separator.
+    JoinString,
     /// Append one static value after all receiver rows.
     AppendValue,
     /// Prepend one static value before receiver rows.
@@ -2428,6 +2430,7 @@ impl BuiltinViewStage {
             | Self::KeyedReduce
             | Self::SetFilter(_)
             | Self::SetUnion
+            | Self::JoinString
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -2452,6 +2455,7 @@ impl BuiltinViewStage {
             | Self::Window
             | Self::KeyedReduce
             | Self::SetUnion
+            | Self::JoinString
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
@@ -2503,7 +2507,7 @@ impl BuiltinViewStage {
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
-            Self::SetUnion | Self::AppendValue | Self::PrependValue => {
+            Self::SetUnion | Self::JoinString | Self::AppendValue | Self::PrependValue => {
                 BuiltinCardinality::Barrier
             }
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
@@ -2542,6 +2546,7 @@ impl BuiltinViewStage {
             | Self::Distinct
             | Self::SetFilter(_)
             | Self::SetUnion
+            | Self::JoinString
             | Self::AppendValue
             | Self::PrependValue
             | Self::Take
@@ -2580,6 +2585,7 @@ impl BuiltinViewStage {
             | Self::Distinct
             | Self::SetFilter(_)
             | Self::SetUnion
+            | Self::JoinString
             | Self::KeyedReduce
             | Self::AppendValue
             | Self::PrependValue => 10.0,
@@ -2613,6 +2619,7 @@ impl BuiltinViewStage {
             | Self::Window
             | Self::KeyedReduce
             | Self::SetUnion
+            | Self::JoinString
             | Self::AppendValue
             | Self::PrependValue => 1.0,
             Self::Take | Self::Skip => 0.5,

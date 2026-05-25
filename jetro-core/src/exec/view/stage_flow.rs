@@ -30,6 +30,12 @@ pub(super) struct StaticStructuralSetState {
     initialized: bool,
 }
 
+#[derive(Default)]
+pub(super) struct JoinStringState {
+    pub out: String,
+    pub count: usize,
+}
+
 /// Per-element control flow for the view-domain stage loop, parameterised by
 /// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
@@ -68,6 +74,8 @@ pub(super) enum ViewStageState {
     NumericFullInput(Box<NumericFullInputState>),
     /// Lazily built structural-key set for static set-filter stages.
     StaticStructuralSet(Box<StaticStructuralSetState>),
+    /// String accumulator for join stages.
+    JoinString(Box<JoinStringState>),
 }
 
 impl ViewStageState {
@@ -176,6 +184,16 @@ impl ViewStageState {
                 &value.keys
             }
             _ => unreachable!("static structural set state was initialized"),
+        }
+    }
+
+    pub(super) fn join_string(&mut self) -> &mut JoinStringState {
+        if !matches!(self, Self::JoinString(_)) {
+            *self = Self::JoinString(Box::default());
+        }
+        match self {
+            Self::JoinString(value) => value,
+            _ => unreachable!("join string state was initialized"),
         }
     }
 }
@@ -342,6 +360,7 @@ where
         pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::SetUnion { .. } => None,
+        pipeline::ViewStageCapability::JoinString { .. } => None,
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,

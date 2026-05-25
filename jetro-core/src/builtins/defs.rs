@@ -2438,6 +2438,8 @@ impl Builtin for Join {
     const NAME: &'static str = "join";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::JoinString)
     }
     #[inline]
     fn apply_args(
