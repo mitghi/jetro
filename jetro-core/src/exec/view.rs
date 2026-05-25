@@ -1087,15 +1087,13 @@ where
     let mut seen = false;
     let mut nth_seen = 0usize;
     let nth_target = match body.sink {
-        pipeline::Sink::Nth(_)
-            if pipeline::ViewStageCapability::nth_selection_already_applied_at_source(
+        pipeline::Sink::Nth(index) => {
+            Some(pipeline::ViewStageCapability::terminal_nth_target_after_source_selection(
                 source_demand,
                 &prefix,
-            ) =>
-        {
-            Some(0)
+                index,
+            ))
         }
-        pipeline::Sink::Nth(index) => Some(index),
         _ => None,
     };
 

@@ -838,6 +838,22 @@ impl ViewStageCapability {
         source_demand.is_nth_input() && Self::all_preserve_cardinality(stages)
     }
 
+    /// Returns the terminal `nth` target that remains after source access has
+    /// applied positional demand. When source access already selected the
+    /// requested row and the prefix preserves positions, the terminal observer
+    /// should consume the first surviving row.
+    pub(crate) fn terminal_nth_target_after_source_selection(
+        source_demand: PullDemand,
+        stages: &[Self],
+        sink_index: usize,
+    ) -> usize {
+        if Self::nth_selection_already_applied_at_source(source_demand, stages) {
+            0
+        } else {
+            sink_index
+        }
+    }
+
     /// Returns the deterministic source-access effect for stages with
     /// compile-time constant predicate kernels.
     pub(crate) fn constant_access_effect(
@@ -2067,6 +2083,22 @@ mod tests {
                 PullDemand::FirstInput(1),
                 &preserving
             )
+        );
+        assert_eq!(
+            ViewStageCapability::terminal_nth_target_after_source_selection(
+                PullDemand::NthInput(4),
+                &preserving,
+                4
+            ),
+            0
+        );
+        assert_eq!(
+            ViewStageCapability::terminal_nth_target_after_source_selection(
+                PullDemand::NthInput(4),
+                &selective,
+                4
+            ),
+            4
         );
     }
 
