@@ -273,13 +273,11 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[leading_reverses..], &body.sink);
     let source_reversed = leading_reverses % 2 == 1;
-    let selective_reversed_suffix_last = suffix
-        .sink
-        .requires_full_reverse_scan_for_selective_last(
-            source_demand,
-            source_reversed,
-            &suffix.stages,
-        );
+    let selective_reversed_suffix_last = suffix.sink.requires_full_reverse_scan_for_selective_last(
+        source_demand,
+        source_reversed,
+        &suffix.stages,
+    );
     let drive_demand = if selective_reversed_suffix_last {
         PullDemand::All
     } else {
@@ -293,29 +291,12 @@ where
         None => return None,
     };
 
-    if let Some(count) = direct_count_from_source_len(
+    if let Some(result) = direct_sink_result_from_source_len(
         &source,
         &suffix.stages,
         &body.stage_kernels,
         &sink,
         &body.sink_kernels,
-    ) {
-        return Some(Ok(Val::Int(count as i64)));
-    }
-    if let Some(result) = direct_predicate_from_source_len(
-        &source,
-        &suffix.stages,
-        &body.stage_kernels,
-        &sink,
-        &body.sink_kernels,
-    ) {
-        return Some(Ok(result));
-    }
-    if let Some(result) = direct_empty_cardinality_sink(
-        &source,
-        &suffix.stages,
-        &body.stage_kernels,
-        &sink,
         &body.sink,
     ) {
         return Some(Ok(result));
@@ -701,29 +682,12 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if let Some(count) = direct_count_from_source_len(
+    if let Some(result) = direct_sink_result_from_source_len(
         &source,
         &capabilities.stages,
         &body.stage_kernels,
         &sink,
         &body.sink_kernels,
-    ) {
-        return Some(Ok(Val::Int(count as i64)));
-    }
-    if let Some(result) = direct_predicate_from_source_len(
-        &source,
-        &capabilities.stages,
-        &body.stage_kernels,
-        &sink,
-        &body.sink_kernels,
-    ) {
-        return Some(Ok(result));
-    }
-    if let Some(result) = direct_empty_cardinality_sink(
-        &source,
-        &capabilities.stages,
-        &body.stage_kernels,
-        &sink,
         &body.sink,
     ) {
         return Some(Ok(result));
@@ -796,64 +760,31 @@ where
         .unwrap_or(Val::Null)))
 }
 
-fn direct_count_from_source_len<'a, V>(
+fn direct_sink_result_from_source_len<'a, V>(
     source: &V,
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
     sink: &pipeline::ViewSinkCapability,
     sink_kernels: &[pipeline::BodyKernel],
-) -> Option<usize>
-where
-    V: ValueView<'a> + 'a,
-{
-    let predicate_kernel = sink.count_from_cardinality_predicate()?;
-    if deterministic_prefix_forces_empty(stages, stage_kernels) {
-        return Some(0);
-    }
-    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
-    let Some(predicate_kernel) = predicate_kernel else {
-        return Some(count);
-    };
-    let predicate = sink_kernels.get(predicate_kernel)?.constant_truthy()?;
-    Some(if predicate { count } else { 0 })
-}
-
-fn direct_predicate_from_source_len<'a, V>(
-    source: &V,
-    stages: &[pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-    sink: &pipeline::ViewSinkCapability,
-    sink_kernels: &[pipeline::BodyKernel],
-) -> Option<Val>
-where
-    V: ValueView<'a> + 'a,
-{
-    let (op, predicate_kernel) = sink.constant_predicate_cardinality_contract()?;
-    let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
-    if forced_empty {
-        return op.empty_stream_result();
-    }
-    let matched = sink_kernels.get(predicate_kernel)?.constant_truthy()?;
-    let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
-    op.constant_predicate_stream_result(matched, count)
-}
-
-fn direct_empty_cardinality_sink<'a, V>(
-    _source: &V,
-    stages: &[pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-    sink: &pipeline::ViewSinkCapability,
     body_sink: &pipeline::Sink,
 ) -> Option<Val>
 where
     V: ValueView<'a> + 'a,
 {
-    if !deterministic_prefix_forces_empty(stages, stage_kernels) {
-        return None;
+    let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
+    if let Some(count) = if forced_empty {
+        Some(0)
+    } else if !sink.can_finish_from_known_cardinality(sink_kernels) {
+        None
+    } else {
+        cardinality_after_deterministic_stages(source, stages, stage_kernels)
+    } {
+        if let Some(result) = sink.result_from_known_cardinality(count, forced_empty, sink_kernels)
+        {
+            return Some(result);
+        }
     }
-    body_sink
-        .empty_stream_result()
-        .or_else(|| sink.empty_stream_result())
+    forced_empty.then(|| body_sink.empty_stream_result())?
 }
 
 fn cardinality_after_deterministic_stages<'a, V>(
@@ -881,12 +812,8 @@ fn deterministic_cardinality_supported(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> bool {
-    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(
-        stages,
-        stage_kernels,
-        0,
-    )
-    .is_some()
+    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(stages, stage_kernels, 0)
+        .is_some()
 }
 
 fn deterministic_prefix_is_empty<'a, V>(
@@ -3568,13 +3495,11 @@ mod tests {
             (out, source)
         }
 
-        let (any_false, any_source) =
-            run(BuiltinPredicateSink::Any, BodyKernel::ConstBool(false));
+        let (any_false, any_source) = run(BuiltinPredicateSink::Any, BodyKernel::ConstBool(false));
         assert_eq!(any_false, Val::Bool(false));
         assert_eq!(any_source.array_iter_reads(), 0);
 
-        let (all_false, all_source) =
-            run(BuiltinPredicateSink::All, BodyKernel::ConstBool(false));
+        let (all_false, all_source) = run(BuiltinPredicateSink::All, BodyKernel::ConstBool(false));
         assert_eq!(all_false, Val::Bool(false));
         assert_eq!(all_source.array_iter_reads(), 0);
 
@@ -3583,8 +3508,10 @@ mod tests {
         assert_eq!(find_index, Val::Int(0));
         assert_eq!(find_source.array_iter_reads(), 0);
 
-        let (indices, indices_source) =
-            run(BuiltinPredicateSink::IndicesWhere, BodyKernel::ConstBool(true));
+        let (indices, indices_source) = run(
+            BuiltinPredicateSink::IndicesWhere,
+            BodyKernel::ConstBool(true),
+        );
         assert_eq!(indices, Val::int_vec(vec![0, 1, 2]));
         assert_eq!(indices_source.array_iter_reads(), 0);
     }

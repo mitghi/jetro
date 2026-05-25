@@ -741,14 +741,20 @@ impl ViewStageCapability {
     ) -> ViewStageConstantEffect {
         match self {
             Self::Filter { kernel } | Self::TakeWhile { kernel } => {
-                match stage_kernels.get(*kernel).and_then(BodyKernel::constant_truthy) {
+                match stage_kernels
+                    .get(*kernel)
+                    .and_then(BodyKernel::constant_truthy)
+                {
                     Some(true) => ViewStageConstantEffect::NoOp,
                     Some(false) => ViewStageConstantEffect::Empty,
                     None => ViewStageConstantEffect::Keep,
                 }
             }
             Self::DropWhile { kernel } => {
-                match stage_kernels.get(*kernel).and_then(BodyKernel::constant_truthy) {
+                match stage_kernels
+                    .get(*kernel)
+                    .and_then(BodyKernel::constant_truthy)
+                {
                     Some(true) => ViewStageConstantEffect::Empty,
                     Some(false) => ViewStageConstantEffect::NoOp,
                     None => ViewStageConstantEffect::Keep,
@@ -1042,6 +1048,52 @@ impl ViewSinkCapability {
             } if !op.returns_matching_row() => Some((*op, *predicate_kernel)),
             _ => None,
         }
+    }
+
+    /// Returns a complete sink result when the executor has proven the stream
+    /// cardinality without reading rows.
+    pub(crate) fn result_from_known_cardinality(
+        &self,
+        count: usize,
+        stream_forced_empty: bool,
+        sink_kernels: &[BodyKernel],
+    ) -> Option<Val> {
+        if stream_forced_empty {
+            return self.empty_stream_result();
+        }
+
+        if let Some(predicate_kernel) = self.count_from_cardinality_predicate() {
+            let count = match predicate_kernel {
+                Some(predicate_kernel) if count > 0 => {
+                    if sink_kernels.get(predicate_kernel)?.constant_truthy()? {
+                        count
+                    } else {
+                        0
+                    }
+                }
+                Some(_) | None => count,
+            };
+            return Some(Val::Int(count as i64));
+        }
+
+        let (op, predicate_kernel) = self.constant_predicate_cardinality_contract()?;
+        let matched = sink_kernels.get(predicate_kernel)?.constant_truthy()?;
+        op.constant_predicate_stream_result(matched, count)
+    }
+
+    /// Returns true when it is worth asking the source for exact cardinality
+    /// because this sink can potentially finish from that fact alone.
+    pub(crate) fn can_finish_from_known_cardinality(&self, sink_kernels: &[BodyKernel]) -> bool {
+        match self.count_from_cardinality_predicate() {
+            Some(None) => return true,
+            Some(Some(_)) => return true,
+            None => {}
+        }
+
+        self.constant_predicate_cardinality_contract()
+            .and_then(|(_, predicate_kernel)| sink_kernels.get(predicate_kernel))
+            .and_then(BodyKernel::constant_truthy)
+            .is_some()
     }
 
     /// Returns the arg-extreme sink contract when this sink selects a row by a
@@ -1432,13 +1484,15 @@ mod tests {
             Some(Val::Null)
         );
         assert_eq!(
-            serde_json::Value::from(ViewSinkCapability::SelectMany {
-                n: 2,
-                from_end: false,
-                source_reversed: false,
-            }
-            .empty_stream_result()
-            .unwrap()),
+            serde_json::Value::from(
+                ViewSinkCapability::SelectMany {
+                    n: 2,
+                    from_end: false,
+                    source_reversed: false,
+                }
+                .empty_stream_result()
+                .unwrap()
+            ),
             serde_json::json!([])
         );
     }
@@ -1524,6 +1578,66 @@ mod tests {
     }
 
     #[test]
+    fn view_sink_capability_finishes_from_known_cardinality() {
+        let count = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::Count,
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::Never,
+        };
+        assert_eq!(
+            count.result_from_known_cardinality(7, false, &[]),
+            Some(Val::Int(7))
+        );
+
+        let pred_count = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::Count,
+            predicate_kernel: Some(0),
+            project_kernel: None,
+            materialization: ViewMaterialization::Never,
+        };
+        assert_eq!(
+            pred_count.result_from_known_cardinality(7, false, &[BodyKernel::ConstBool(true)]),
+            Some(Val::Int(7))
+        );
+        assert_eq!(
+            pred_count.result_from_known_cardinality(7, false, &[BodyKernel::ConstBool(false)]),
+            Some(Val::Int(0))
+        );
+        assert_eq!(
+            pred_count.result_from_known_cardinality(0, false, &[BodyKernel::Current]),
+            Some(Val::Int(0))
+        );
+
+        let any = ViewSinkCapability::Predicate {
+            op: BuiltinPredicateSink::Any,
+            predicate_kernel: 0,
+        };
+        assert!(any.can_finish_from_known_cardinality(&[BodyKernel::ConstBool(true)]));
+        assert!(!any.can_finish_from_known_cardinality(&[BodyKernel::Current]));
+        assert_eq!(
+            any.result_from_known_cardinality(7, false, &[BodyKernel::ConstBool(true)]),
+            Some(Val::Bool(true))
+        );
+        assert_eq!(
+            any.result_from_known_cardinality(7, false, &[BodyKernel::ConstBool(false)]),
+            Some(Val::Bool(false))
+        );
+        assert_eq!(
+            any.result_from_known_cardinality(0, true, &[BodyKernel::Current]),
+            Some(Val::Bool(false))
+        );
+
+        let first = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::First),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::SinkFinalRow,
+        };
+        assert!(!first.can_finish_from_known_cardinality(&[]));
+    }
+
+    #[test]
     fn view_sink_capability_describes_arg_extreme_contract() {
         assert_eq!(
             ViewSinkCapability::ArgExtreme {
@@ -1562,20 +1676,18 @@ mod tests {
                 target: ViewMembershipTarget::Literal(Val::Int(9)),
             }
         ));
-        assert!(
-            ViewSinkCapability::Membership {
-                op: BuiltinMembershipSink::Index,
-                target: ViewMembershipTarget::Literal(Val::Int(1)),
-            }
-            .membership_target_program()
-            .is_none()
-        );
+        assert!(ViewSinkCapability::Membership {
+            op: BuiltinMembershipSink::Index,
+            target: ViewMembershipTarget::Literal(Val::Int(1)),
+        }
+        .membership_target_program()
+        .is_none());
     }
 
     #[test]
     fn view_sink_capability_carries_source_demand_adjustments() {
-        let nth = ViewSinkCapability::Nth { index: 7 }
-            .for_source_demand(PullDemand::NthInput(7), false);
+        let nth =
+            ViewSinkCapability::Nth { index: 7 }.for_source_demand(PullDemand::NthInput(7), false);
         assert!(matches!(nth, ViewSinkCapability::Nth { index: 0 }));
 
         let last_many = ViewSinkCapability::SelectMany {
@@ -1641,11 +1753,13 @@ mod tests {
             false,
             &selective
         ));
-        assert!(!ViewSinkCapability::Collect.requires_full_reverse_scan_for_selective_last(
-            PullDemand::LastInput(1),
-            true,
-            &selective
-        ));
+        assert!(
+            !ViewSinkCapability::Collect.requires_full_reverse_scan_for_selective_last(
+                PullDemand::LastInput(1),
+                true,
+                &selective
+            )
+        );
     }
 
     #[test]
@@ -1729,7 +1843,10 @@ mod tests {
         let rewritten = ViewStageCapability::source_access_stages(&stages, &kernels);
         assert!(matches!(
             rewritten.as_ref(),
-            [ViewStageCapability::Map { kernel: 0 }, ViewStageCapability::Take(3)]
+            [
+                ViewStageCapability::Map { kernel: 0 },
+                ViewStageCapability::Take(3)
+            ]
         ));
 
         let empty = [
@@ -1741,7 +1858,10 @@ mod tests {
         let rewritten = ViewStageCapability::source_access_stages(&empty, &kernels);
         assert!(matches!(
             rewritten.as_ref(),
-            [ViewStageCapability::Map { kernel: 0 }, ViewStageCapability::Take(0)]
+            [
+                ViewStageCapability::Map { kernel: 0 },
+                ViewStageCapability::Take(0)
+            ]
         ));
 
         let unchanged = [ViewStageCapability::Filter { kernel: 0 }];
