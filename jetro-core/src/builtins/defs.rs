@@ -1153,6 +1153,9 @@ impl Builtin for Flatten {
     const NAME: &'static str = "flatten";
     fn spec() -> BuiltinSpec {
         expand_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::Flatten)
+            .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
     }
     #[inline]
     fn apply_args(

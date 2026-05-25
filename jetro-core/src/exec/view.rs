@@ -2356,6 +2356,26 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
+    if let pipeline::ViewStageCapability::Flatten { depth } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(
+            stage.output_mode(),
+            pipeline::ViewOutputMode::BorrowedSubviews
+        );
+        return drive_flatten_frontier_row(
+            item,
+            depth,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::StringExpand { op, arg } = stage {
         let JsonView::Str(value) = item.scalar() else {
             return Some(Ok(ViewDriveFlow::Continue));
@@ -3542,6 +3562,71 @@ where
         )),
         _ => None,
     }
+}
+
+fn drive_flatten_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    depth: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    if depth == 0 {
+        return drive_view_item(
+            item,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+    let Some(children) = item.array_iter() else {
+        return drive_view_item(
+            item,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    };
+    for child in children {
+        let flow = match drive_flatten_frontier_row(
+            child,
+            depth - 1,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        )? {
+            Ok(flow) => flow,
+            Err(err) => return Some(Err(err)),
+        };
+        if matches!(flow, ViewDriveFlow::Stop) {
+            return Some(Ok(ViewDriveFlow::Stop));
+        }
+    }
+    Some(Ok(ViewDriveFlow::Continue))
 }
 
 fn eval_frontier_nested_array_count_with_vm<'a, V>(
@@ -6665,6 +6750,39 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn terminal_collect_flattens_tape_arrays_without_materializing_receiver() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[[1,2],[3]],[[4],[5,6]]]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Flatten,
+                    value: 2,
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([1, 2, 3])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]

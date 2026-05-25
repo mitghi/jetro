@@ -3752,6 +3752,11 @@ mod tests {
             }
         );
 
+        let flatten = BuiltinId::from_method(BuiltinMethod::Flatten);
+        assert_eq!(demand_law(flatten), BuiltinDemandLaw::FlatMapLike);
+        assert_eq!(view_stage(flatten), Some(BuiltinViewStage::Flatten));
+        assert!(demand_is_conservative_barrier(flatten));
+
         for method in [BuiltinMethod::Unique, BuiltinMethod::UniqueBy] {
             let id = BuiltinId::from_method(method);
             assert_eq!(demand_law(id), BuiltinDemandLaw::UniqueLike, "{method:?}");
