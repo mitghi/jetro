@@ -74,18 +74,20 @@ impl ViewStageState {
 /// Applies a single view-domain stage to `item`, returning the appropriate
 /// `ViewStageFlow`. Returns `None` when the stage requires materialisation
 /// or is handled by the recursive view frontier (`FlatMap` expansion).
-pub(super) fn apply_stage<'a, V, F>(
+pub(super) fn apply_stage<'a, V, P, K>(
     item: V,
     stage: pipeline::ViewStageCapability,
     op_idx: usize,
     op_state: &mut [ViewStageState],
     stage_kernels: &[pipeline::BodyKernel],
     vm: &mut crate::vm::VM,
-    mut eval_predicate: F,
+    mut eval_predicate: P,
+    mut eval_structural_key: K,
 ) -> Option<ViewStageFlow<V>>
 where
     V: ValueView<'a> + 'a,
-    F: FnMut(&V, &pipeline::BodyKernel, &mut crate::vm::VM) -> Option<bool>,
+    P: FnMut(&V, &pipeline::BodyKernel, &mut crate::vm::VM) -> Option<bool>,
+    K: FnMut(&V, Option<&pipeline::BodyKernel>, &mut crate::vm::VM) -> Option<ViewKey>,
 {
     if !matches!(
         stage.materialization(),
@@ -197,14 +199,7 @@ where
                 stage.output_mode(),
                 pipeline::ViewOutputMode::PreservesInputView
             );
-            let key = match kernel {
-                Some(kernel) => super::eval_structural_view_key_with_vm(
-                    &item,
-                    Some(stage_kernels.get(kernel)?),
-                    vm,
-                )?,
-                None => super::eval_structural_view_key_with_vm(&item, None, vm)?,
-            };
+            let key = eval_structural_key(&item, kernel.and_then(|idx| stage_kernels.get(idx)), vm)?;
             if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))
             } else {

@@ -2284,6 +2284,7 @@ where
         stage_kernels,
         vm,
         eval_frontier_filter_kernel_with_vm,
+        eval_frontier_structural_view_key_with_vm,
     )
 }
 
@@ -2419,16 +2420,16 @@ where
     }
 }
 
-fn eval_structural_view_key_with_vm<'a, V>(
-    item: &V,
+fn eval_frontier_structural_view_key_with_vm<'a, V>(
+    item: &FrontierRow<V>,
     kernel: Option<&pipeline::BodyKernel>,
     vm: &mut VM,
 ) -> Option<ViewKey>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
     match kernel {
-        Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+        Some(kernel) => match eval_frontier_kernel_with_vm(item, kernel, vm)? {
             pipeline::ViewKernelValue::View(view) => ViewKey::from_structural_value_view(&view),
             pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_structural_owned(value)),
         },
@@ -6075,6 +6076,41 @@ mod tests {
                 Arc::new(crate::vm::Program::new(Vec::new(), "")),
                 crate::builtins::BuiltinViewStage::Filter,
             )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(2));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_distinct_key_runs_on_tape_view_without_materializing_rows() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[1,"a"],[1,"b"],[2,"c"]]"#.to_vec())
+                .unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::UniqueBy(Some(Arc::new(crate::vm::Program::new(
+                Vec::new(),
+                "",
+            ))))],
             stage_exprs: Vec::new(),
             sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
             stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
