@@ -617,6 +617,22 @@ mod source_capability_tests {
     }
 
     #[test]
+    fn access_mode_resolves_common_source_bounds() {
+        assert_eq!(
+            SourceAccessMode::ForwardBounded(3).bounded_forward_end(10),
+            Some(3)
+        );
+        assert_eq!(
+            SourceAccessMode::ForwardBounded(30).bounded_forward_end(10),
+            Some(10)
+        );
+        assert_eq!(SourceAccessMode::Forward.bounded_forward_end(10), None);
+        assert_eq!(SourceAccessMode::IndexedSuffix(3).suffix_start(10), Some(7));
+        assert_eq!(SourceAccessMode::IndexedSuffix(30).suffix_start(10), Some(0));
+        assert_eq!(SourceAccessMode::Indexed(1).suffix_start(10), None);
+    }
+
+    #[test]
     fn access_mode_resolves_direct_indexed_reads() {
         assert_eq!(
             SourceAccessMode::Indexed(2).indexed_access(5),
