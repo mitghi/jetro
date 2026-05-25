@@ -2492,13 +2492,17 @@ where
 }
 
 /// Extracts a sort key `Val` from `item`, optionally applying a row program.
-/// Falls back to `item.materialize()` when no key program is specified.
-fn view_sort_key<'a, V>(item: &V, key: Option<&pipeline::RowProgram>, vm: &mut VM) -> Option<Val>
+/// Falls back to materialising the key value when no key program is specified.
+fn view_sort_key<'a, V>(
+    item: &FrontierRow<V>,
+    key: Option<&pipeline::RowProgram>,
+    vm: &mut VM,
+) -> Option<Val>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
     match key {
-        Some(program) => match program.eval_view_with_vm(item, vm)? {
+        Some(program) => match eval_frontier_kernel_with_vm(item, program.kernel(), vm)? {
             pipeline::ViewKernelValue::View(view) => {
                 Some(pipeline::view_kernel_view_to_owned(view))
             }
@@ -6386,6 +6390,49 @@ mod tests {
         assert_eq!(out, Val::Int(3));
         assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn sort_by_nested_key_avoids_row_materialization() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[2,"b"],[1,"a"],[3,"c"]]"#.to_vec())
+                .unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Sort(crate::exec::pipeline::SortSpec {
+                key: Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                descending: false,
+            })],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
