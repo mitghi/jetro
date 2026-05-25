@@ -38,6 +38,8 @@ pub(super) enum ViewStageState {
     Values(Vec<Val>),
     /// Owned sliding values, used by bounded-state window stages.
     Deque(VecDeque<Val>),
+    /// Numeric state used by one-pass numeric scan stages.
+    Numeric(Option<f64>),
 }
 
 impl ViewStageState {
@@ -99,6 +101,16 @@ impl ViewStageState {
         let out = *value;
         *value = value.saturating_add(1);
         out
+    }
+
+    pub(super) fn numeric(&mut self) -> &mut Option<f64> {
+        if !matches!(self, Self::Numeric(_)) {
+            *self = Self::Numeric(None);
+        }
+        match self {
+            Self::Numeric(value) => value,
+            _ => unreachable!("numeric state was initialized"),
+        }
     }
 }
 
@@ -249,6 +261,7 @@ where
         pipeline::ViewStageCapability::Explode { .. } => None,
         pipeline::ViewStageCapability::Enumerate => None,
         pipeline::ViewStageCapability::Pairwise => None,
+        pipeline::ViewStageCapability::NumericScan(_) => None,
         pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,

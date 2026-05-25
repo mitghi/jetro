@@ -13,7 +13,7 @@ pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
     BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
-    BuiltinViewStringExpand,
+    BuiltinViewNumericScan, BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -776,6 +776,8 @@ pub(crate) enum ViewStageCapability {
     Enumerate,
     /// Emit adjacent owned pairs from a borrowed row stream.
     Pairwise,
+    /// Emit one-pass numeric scan outputs from a borrowed row stream.
+    NumericScan(BuiltinViewNumericScan),
     /// Emit fixed-size owned chunks from a borrowed row stream.
     Chunk {
         /// Chunk width.
@@ -855,6 +857,7 @@ impl ViewStageCapability {
             BuiltinViewStage::Flatten => Some(Self::Flatten { depth: usize_arg? }),
             BuiltinViewStage::Enumerate => Some(Self::Enumerate),
             BuiltinViewStage::Pairwise => Some(Self::Pairwise),
+            BuiltinViewStage::NumericScan(op) => Some(Self::NumericScan(op)),
             BuiltinViewStage::Chunk => Some(Self::Chunk { width: usize_arg? }),
             BuiltinViewStage::Window => Some(Self::Window { width: usize_arg? }),
             BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
@@ -882,6 +885,7 @@ impl ViewStageCapability {
             Self::Explode { .. } => BuiltinViewStage::Explode,
             Self::Enumerate => BuiltinViewStage::Enumerate,
             Self::Pairwise => BuiltinViewStage::Pairwise,
+            Self::NumericScan(op) => BuiltinViewStage::NumericScan(*op),
             Self::Chunk { .. } => BuiltinViewStage::Chunk,
             Self::Window { .. } => BuiltinViewStage::Window,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
@@ -914,7 +918,10 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        !matches!(self, Self::StringExpand { .. } | Self::Enumerate)
+        !matches!(
+            self,
+            Self::StringExpand { .. } | Self::Enumerate | Self::NumericScan(_)
+        )
             && self.view_stage().preserves_cardinality()
     }
 
@@ -1029,6 +1036,7 @@ impl ViewStageCapability {
             | Self::Explode { .. }
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk { .. }
             | Self::Window { .. }
             | Self::StringExpand { .. }
@@ -1103,6 +1111,7 @@ impl ViewStageCapability {
                 | Self::Explode { .. }
                 | Self::Enumerate
                 | Self::Pairwise
+                | Self::NumericScan(_)
                 | Self::Chunk { .. }
                 | Self::Window { .. }
                 | Self::StringExpand { .. }
@@ -1530,7 +1539,7 @@ mod tests {
     use crate::builtins::{
         registry::{cancellation, BuiltinId},
         BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewStage,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewNumericScan, BuiltinViewStage,
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
@@ -1620,29 +1629,35 @@ mod tests {
         ))
         .view_capability(10, None)
         .unwrap();
+        let diff_window = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::DiffWindow,
+            crate::builtins::BuiltinArgs::None,
+        ))
+        .view_capability(11, None)
+        .unwrap();
         let chunk = Stage::UsizeBuiltin {
             method: BuiltinMethod::Chunk,
             value: 2,
         }
-        .view_capability(11, None)
+        .view_capability(12, None)
         .unwrap();
         let window = Stage::UsizeBuiltin {
             method: BuiltinMethod::Window,
             value: 3,
         }
-        .view_capability(12, None)
+        .view_capability(13, None)
         .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(13, None)
+        .view_capability(14, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(14, None)
+        .view_capability(15, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1669,6 +1684,12 @@ mod tests {
         assert!(!enumerate.preserves_cardinality());
         assert!(matches!(pairwise, ViewStageCapability::Pairwise));
         assert_eq!(pairwise.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(matches!(
+            diff_window,
+            ViewStageCapability::NumericScan(BuiltinViewNumericScan::DiffWindow)
+        ));
+        assert_eq!(diff_window.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(!diff_window.preserves_cardinality());
         assert!(matches!(chunk, ViewStageCapability::Chunk { width: 2 }));
         assert_eq!(chunk.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(window, ViewStageCapability::Window { width: 3 }));

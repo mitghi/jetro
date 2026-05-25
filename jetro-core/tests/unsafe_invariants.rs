@@ -1310,6 +1310,15 @@ fn simd_lazy_enumerate_and_pairwise_keep_public_semantics() {
 }
 
 #[test]
+fn simd_lazy_numeric_scans_keep_public_semantics() {
+    let j = Jetro::from_bytes(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+    assert_eq!(j.collect("$.diff_window()").unwrap(), json!([null, 2.0, null, null, 5.0]));
+    assert_eq!(j.collect("$.pct_change()").unwrap(), json!([null, 2.0, null, null, null]));
+    assert_eq!(j.collect("$.cummax()").unwrap(), json!([1.0, 3.0, 3.0, 3.0, 5.0]));
+    assert_eq!(j.collect("$.cummin()").unwrap(), json!([1.0, 1.0, 1.0, 0.0, 0.0]));
+}
+
+#[test]
 fn simd_json_invalid_falls_back_with_helpful_error() {
     let bad = b"{ this is not json ".to_vec();
     let j = Jetro::from_bytes(bad).expect("from_bytes keeps bytes lazily");

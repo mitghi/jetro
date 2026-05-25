@@ -1553,6 +1553,8 @@ pub enum BuiltinViewStage {
     Enumerate,
     /// Adjacent pair stage.
     Pairwise,
+    /// Stateful numeric one-pass scan stage.
+    NumericScan(BuiltinViewNumericScan),
     /// Non-overlapping fixed-size chunk stage.
     Chunk,
     /// Sliding fixed-size window stage.
@@ -1591,6 +1593,19 @@ pub enum BuiltinViewOutputMode {
     BorrowedSubviews,
     /// Output is a freshly constructed owned value (keyed reduce, etc.).
     EmitsOwnedValue,
+}
+
+/// One-pass numeric scan operation for borrowed view rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewNumericScan {
+    /// Difference from the previous numeric row.
+    DiffWindow,
+    /// Percentage change from the previous numeric row.
+    PctChange,
+    /// Cumulative maximum, carrying previous best over null/non-numeric rows.
+    CumMax,
+    /// Cumulative minimum, carrying previous best over null/non-numeric rows.
+    CumMin,
 }
 
 /// Extra executor data required to construct a borrowed-view stage capability.
@@ -2351,6 +2366,7 @@ impl BuiltinViewStage {
             | Self::Explode
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2370,6 +2386,7 @@ impl BuiltinViewStage {
             Self::Explode
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
@@ -2410,6 +2427,7 @@ impl BuiltinViewStage {
             Self::FlatMap | Self::Flatten | Self::Explode => BuiltinCardinality::Expanding,
             Self::Enumerate => BuiltinCardinality::OneToOne,
             Self::Pairwise => BuiltinCardinality::Filtering,
+            Self::NumericScan(_) => BuiltinCardinality::OneToOne,
             Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
@@ -2438,6 +2456,7 @@ impl BuiltinViewStage {
             | Self::Explode
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2467,6 +2486,7 @@ impl BuiltinViewStage {
             | Self::Explode
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2493,6 +2513,7 @@ impl BuiltinViewStage {
             | Self::Explode
             | Self::Enumerate
             | Self::Pairwise
+            | Self::NumericScan(_)
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => 1.0,

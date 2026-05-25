@@ -2447,6 +2447,24 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::NumericScan(op) = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_numeric_scan_frontier_row(
+            item,
+            op,
+            stage_idx,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Chunk { width } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -3913,6 +3931,92 @@ where
         vm,
         observe,
     )
+}
+
+fn drive_numeric_scan_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    op: crate::builtins::BuiltinViewNumericScan,
+    stage_idx: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let current = numeric_view_value(&item);
+    let state = op_state.get_mut(stage_idx)?.numeric();
+    let out = match op {
+        crate::builtins::BuiltinViewNumericScan::DiffWindow => {
+            let previous = *state;
+            *state = current;
+            match (previous, current) {
+                (Some(previous), Some(current)) => Some(current - previous),
+                _ => None,
+            }
+        }
+        crate::builtins::BuiltinViewNumericScan::PctChange => {
+            let previous = *state;
+            *state = current;
+            match (previous, current) {
+                (Some(previous), Some(current)) if previous != 0.0 => {
+                    Some((current - previous) / previous)
+                }
+                _ => None,
+            }
+        }
+        crate::builtins::BuiltinViewNumericScan::CumMax => {
+            let next = match (current, *state) {
+                (Some(current), Some(best)) => Some(current.max(best)),
+                (Some(current), None) => Some(current),
+                (None, best) => best,
+            };
+            *state = next;
+            next
+        }
+        crate::builtins::BuiltinViewNumericScan::CumMin => {
+            let next = match (current, *state) {
+                (Some(current), Some(best)) => Some(current.min(best)),
+                (Some(current), None) => Some(current),
+                (None, best) => best,
+            };
+            *state = next;
+            next
+        }
+    };
+    drive_owned_child(
+        optional_float_value(out),
+        next_stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn numeric_view_value<'a, V>(item: &FrontierRow<V>) -> Option<f64>
+where
+    V: FrontierBaseView<'a>,
+{
+    match item.scalar() {
+        JsonView::Int(n) => Some(n as f64),
+        JsonView::UInt(n) => Some(n as f64),
+        JsonView::Float(f) => Some(f),
+        _ => None,
+    }
+}
+
+fn optional_float_value(value: Option<f64>) -> Val {
+    value.map_or(Val::Null, Val::Float)
 }
 
 fn drive_window_frontier_row<'a, V, F>(
@@ -7271,6 +7375,51 @@ mod tests {
             serde_json::json!([[1, 2], [2, 3], [3, 4]])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_numeric_scans_tape_rows_without_materializing_receiver() {
+        let cases = [
+            (
+                crate::builtins::BuiltinMethod::DiffWindow,
+                serde_json::json!([null, 2.0, null, null, 5.0]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::PctChange,
+                serde_json::json!([null, 2.0, null, null, null]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::CumMax,
+                serde_json::json!([1.0, 3.0, 3.0, 3.0, 5.0]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::CumMin,
+                serde_json::json!([1.0, 1.0, 1.0, 0.0, 0.0]),
+            ),
+        ];
+
+        for (method, expected) in cases {
+            let tape =
+                crate::data::tape::TapeData::parse(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::None,
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+        }
     }
 
     #[test]

@@ -14,8 +14,9 @@ use super::{
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
-    BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp,
-    BuiltinViewStage, BuiltinViewStringExpand, BuiltinViewValueProjection,
+    BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericScan,
+    BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage, BuiltinViewStringExpand,
+    BuiltinViewValueProjection,
 };
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
@@ -3213,6 +3214,99 @@ fn streaming_one_to_one_element_spec() -> BuiltinSpec {
     .demand_law(BuiltinDemandLaw::OrderBarrier)
 }
 
+#[inline]
+fn numeric_scan_spec(op: BuiltinViewNumericScan) -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::NumericScan(op))
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::OneToOne,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::Nullary)
+}
+
+#[inline]
+fn numeric_val(item: &crate::data::value::Val) -> Option<f64> {
+    match item {
+        crate::data::value::Val::Int(n) => Some(*n as f64),
+        crate::data::value::Val::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+#[inline]
+fn opt_float_val(value: Option<f64>) -> crate::data::value::Val {
+    value.map_or(crate::data::value::Val::Null, crate::data::value::Val::Float)
+}
+
+#[inline]
+fn numeric_scan_apply_stream(
+    ctx: &mut super::builtin::StreamCtx<'_, '_>,
+    item: crate::data::value::Val,
+    op: BuiltinViewNumericScan,
+) -> Result<
+    crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+    crate::data::context::EvalError,
+> {
+    let current = numeric_val(&item);
+    let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+    let out = match op {
+        BuiltinViewNumericScan::DiffWindow => {
+            let previous = buffer.front().and_then(numeric_val);
+            buffer.clear();
+            buffer.push_back(opt_float_val(current));
+            match (previous, current) {
+                (Some(previous), Some(current)) => Some(current - previous),
+                _ => None,
+            }
+        }
+        BuiltinViewNumericScan::PctChange => {
+            let previous = buffer.front().and_then(numeric_val);
+            buffer.clear();
+            buffer.push_back(opt_float_val(current));
+            match (previous, current) {
+                (Some(previous), Some(current)) if previous != 0.0 => {
+                    Some((current - previous) / previous)
+                }
+                _ => None,
+            }
+        }
+        BuiltinViewNumericScan::CumMax => {
+            let best = buffer.front().and_then(numeric_val);
+            let next = match (current, best) {
+                (Some(current), Some(best)) => Some(current.max(best)),
+                (Some(current), None) => Some(current),
+                (None, best) => best,
+            };
+            buffer.clear();
+            buffer.push_back(opt_float_val(next));
+            next
+        }
+        BuiltinViewNumericScan::CumMin => {
+            let best = buffer.front().and_then(numeric_val);
+            let next = match (current, best) {
+                (Some(current), Some(best)) => Some(current.min(best)),
+                (Some(current), None) => Some(current),
+                (None, best) => best,
+            };
+            buffer.clear();
+            buffer.push_back(opt_float_val(next));
+            next
+        }
+    };
+    Ok(crate::exec::pipeline::StageFlow::Continue(opt_float_val(out)))
+}
+
 /// `lag(n)` — element shifted by N positions.
 pub(crate) struct Lag;
 impl Builtin for Lag {
@@ -3259,7 +3353,18 @@ impl Builtin for DiffWindow {
     const METHOD: BuiltinMethod = BuiltinMethod::DiffWindow;
     const NAME: &'static str = "diff_window";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_scan_spec(BuiltinViewNumericScan::DiffWindow)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        numeric_scan_apply_stream(ctx, item, BuiltinViewNumericScan::DiffWindow)
     }
     #[inline]
     fn apply_args(
@@ -3281,7 +3386,18 @@ impl Builtin for PctChange {
     const METHOD: BuiltinMethod = BuiltinMethod::PctChange;
     const NAME: &'static str = "pct_change";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_scan_spec(BuiltinViewNumericScan::PctChange)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        numeric_scan_apply_stream(ctx, item, BuiltinViewNumericScan::PctChange)
     }
     #[inline]
     fn apply_args(
@@ -3303,7 +3419,18 @@ impl Builtin for CumMax {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMax;
     const NAME: &'static str = "cummax";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_scan_spec(BuiltinViewNumericScan::CumMax)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        numeric_scan_apply_stream(ctx, item, BuiltinViewNumericScan::CumMax)
     }
     #[inline]
     fn apply_args(
@@ -3325,7 +3452,18 @@ impl Builtin for CumMin {
     const METHOD: BuiltinMethod = BuiltinMethod::CumMin;
     const NAME: &'static str = "cummin";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_scan_spec(BuiltinViewNumericScan::CumMin)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        numeric_scan_apply_stream(ctx, item, BuiltinViewNumericScan::CumMin)
     }
     #[inline]
     fn apply_args(

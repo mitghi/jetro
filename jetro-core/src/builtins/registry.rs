@@ -3782,6 +3782,12 @@ mod tests {
             Some(BuiltinViewStage::Pairwise)
         );
         assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::DiffWindow)),
+            Some(BuiltinViewStage::NumericScan(
+                crate::builtins::BuiltinViewNumericScan::DiffWindow
+            ))
+        );
+        assert_eq!(
             view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
             Some(BuiltinViewStage::Chunk)
         );
