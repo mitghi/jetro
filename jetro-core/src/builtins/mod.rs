@@ -932,6 +932,8 @@ pub enum BuiltinViewScalarOp {
 pub enum BuiltinViewValueProjection {
     /// Convert `[key, value]` / `{key, val}` pairs into an object.
     FromPairs,
+    /// Parse a JSON string into a value.
+    FromJson,
     /// Swap object keys and values, coercing values to object keys.
     Invert,
     /// Recursively merge an owned value argument into the receiver value.
@@ -1031,6 +1033,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::DeepMerge
             | BuiltinViewValueProjection::Defaults
             | BuiltinViewValueProjection::FlattenKeys
+            | BuiltinViewValueProjection::FromJson
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape

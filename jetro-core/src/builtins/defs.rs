@@ -4222,6 +4222,8 @@ impl Builtin for FromJson {
     const NAME: &'static str = "from_json";
     fn spec() -> BuiltinSpec {
         default_scalar_spec(BuiltinMethod::FromJson)
+            .view_value_projection(BuiltinViewValueProjection::FromJson)
+            .demand_law(BuiltinViewValueProjection::FromJson.demand_law())
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

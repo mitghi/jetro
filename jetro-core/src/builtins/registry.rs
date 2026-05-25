@@ -1319,6 +1319,15 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::FromJson => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return Some(match view_from_json(&view) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Invert => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1654,6 +1663,21 @@ where
         out.insert(Arc::from(key), value);
     }
     Some(Val::obj(out))
+}
+
+fn view_from_json<'a, V>(view: &V) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut bytes = match view.scalar() {
+        JsonView::Str(value) => value.as_bytes().to_vec(),
+        _ => {
+            let mut value = String::new();
+            write_view_string_value(view, &mut value)?;
+            value.into_bytes()
+        }
+    };
+    Val::from_json_simd(&mut bytes).ok()
 }
 
 fn view_shallow_merge<'a, V>(
@@ -4972,6 +4996,10 @@ mod tests {
             (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
+            ),
+            (
+                BuiltinMethod::FromJson,
+                BuiltinViewValueProjection::FromJson,
             ),
             (
                 BuiltinMethod::FromPairs,
