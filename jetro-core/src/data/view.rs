@@ -1097,6 +1097,33 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn array_child_range_iter(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Box<dyn Iterator<Item = Self> + 'a> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return Box::new(std::iter::empty());
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*idx] else {
+            return Box::new(std::iter::empty());
+        };
+        if start >= end || end > len {
+            return Box::new(std::iter::empty());
+        }
+        let Some(cur) = tape.array_child_start(*idx + 1, len, start) else {
+            return Box::new(std::iter::empty());
+        };
+        Box::new(TapeArrayIter {
+            tape,
+            remaining: end - start,
+            cur,
+        })
+    }
+
+    #[inline]
     fn array_iter(&self) -> Option<Box<dyn Iterator<Item = Self> + 'a>> {
         use crate::data::tape::TapeNode;
 
@@ -1406,6 +1433,33 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             return Self::Missing;
         };
         Self::Node { tape, idx: cur }
+    }
+
+    #[inline]
+    fn array_child_range_iter(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Box<dyn Iterator<Item = Self> + 'a> {
+        use crate::data::tape::TapeNode;
+
+        let Self::Node { tape, idx } = self else {
+            return Box::new(std::iter::empty());
+        };
+        let TapeNode::Array { len, .. } = tape.nodes[*idx] else {
+            return Box::new(std::iter::empty());
+        };
+        if start >= end || end > len {
+            return Box::new(std::iter::empty());
+        }
+        let Some(cur) = tape.array_child_start(*idx + 1, len, start) else {
+            return Box::new(std::iter::empty());
+        };
+        Box::new(TapeScratchArrayIter {
+            tape,
+            remaining: end - start,
+            cur,
+        })
     }
 
     #[inline]
