@@ -273,10 +273,13 @@ where
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[leading_reverses..], &body.sink);
     let source_reversed = leading_reverses % 2 == 1;
-    let selective_reversed_suffix_last = source_reversed
-        && matches!(source_demand, PullDemand::LastInput(_))
-        && view_sink_selects_last(&suffix.sink)
-        && !pipeline::ViewStageCapability::all_preserve_cardinality(&suffix.stages);
+    let selective_reversed_suffix_last = suffix
+        .sink
+        .requires_full_reverse_scan_for_selective_last(
+            source_demand,
+            source_reversed,
+            &suffix.stages,
+        );
     let drive_demand = if selective_reversed_suffix_last {
         PullDemand::All
     } else {
@@ -2214,10 +2217,6 @@ fn view_suffix_sink_for_demand(
     source_reversed: bool,
 ) -> pipeline::ViewSinkCapability {
     sink.for_source_demand(source_demand, source_reversed)
-}
-
-fn view_sink_selects_last(sink: &pipeline::ViewSinkCapability) -> bool {
-    sink.selects_from_end()
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
@@ -4230,9 +4229,9 @@ mod tests {
             materialization: crate::builtins::BuiltinViewMaterialization::Never,
         };
 
-        assert!(!super::view_sink_selects_last(&first));
-        assert!(super::view_sink_selects_last(&last));
-        assert!(!super::view_sink_selects_last(&count));
+        assert!(!first.selects_from_end());
+        assert!(last.selects_from_end());
+        assert!(!count.selects_from_end());
     }
 
     #[test]

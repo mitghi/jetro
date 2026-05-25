@@ -1002,6 +1002,20 @@ impl ViewSinkCapability {
         }
     }
 
+    /// Returns true when a reversed source cannot use a bounded last-input
+    /// pull because a selective suffix can change which semantic row is last.
+    pub(crate) fn requires_full_reverse_scan_for_selective_last(
+        &self,
+        source_demand: PullDemand,
+        source_reversed: bool,
+        stages: &[ViewStageCapability],
+    ) -> bool {
+        source_reversed
+            && matches!(source_demand, PullDemand::LastInput(_))
+            && self.selects_from_end()
+            && !ViewStageCapability::all_preserve_cardinality(stages)
+    }
+
     /// Returns the optional predicate kernel for count sinks whose result can
     /// be derived from known source cardinality without row materialization.
     pub(crate) fn count_from_cardinality_predicate(&self) -> Option<Option<usize>> {
@@ -1594,6 +1608,44 @@ mod tests {
             materialization: ViewMaterialization::SinkFinalRow,
         }
         .selects_from_end());
+    }
+
+    #[test]
+    fn view_sink_capability_describes_selective_reverse_last_scan() {
+        let last = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::SelectOne(BuiltinSelectionPosition::Last),
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::SinkFinalRow,
+        };
+        let selective = [ViewStageCapability::Filter { kernel: 0 }];
+        let preserving = [ViewStageCapability::Map { kernel: 0 }];
+
+        assert!(last.requires_full_reverse_scan_for_selective_last(
+            PullDemand::LastInput(1),
+            true,
+            &selective
+        ));
+        assert!(!last.requires_full_reverse_scan_for_selective_last(
+            PullDemand::LastInput(1),
+            true,
+            &preserving
+        ));
+        assert!(!last.requires_full_reverse_scan_for_selective_last(
+            PullDemand::FirstInput(1),
+            true,
+            &selective
+        ));
+        assert!(!last.requires_full_reverse_scan_for_selective_last(
+            PullDemand::LastInput(1),
+            false,
+            &selective
+        ));
+        assert!(!ViewSinkCapability::Collect.requires_full_reverse_scan_for_selective_last(
+            PullDemand::LastInput(1),
+            true,
+            &selective
+        ));
     }
 
     #[test]
