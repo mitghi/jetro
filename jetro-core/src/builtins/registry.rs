@@ -2590,6 +2590,14 @@ mod tests {
             (BuiltinMethod::Take, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Skip, BuiltinRuntimeHook::StreamAndBarrier),
             (
+                BuiltinMethod::Enumerate,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::Pairwise,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
                 BuiltinMethod::TakeWhile,
                 BuiltinRuntimeHook::StreamAndBarrier,
             ),
@@ -2604,6 +2612,35 @@ mod tests {
             (BuiltinMethod::Sort, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Window, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Chunk, BuiltinRuntimeHook::StreamAndBarrier),
+            (
+                BuiltinMethod::RollingSum,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::RollingAvg,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::RollingMin,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::RollingMax,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (BuiltinMethod::Lag, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Lead, BuiltinRuntimeHook::StreamAndBarrier),
+            (
+                BuiltinMethod::DiffWindow,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (
+                BuiltinMethod::PctChange,
+                BuiltinRuntimeHook::StreamAndBarrier,
+            ),
+            (BuiltinMethod::CumMax, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::CumMin, BuiltinRuntimeHook::StreamAndBarrier),
+            (BuiltinMethod::Zscore, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
@@ -3937,6 +3974,7 @@ mod tests {
                             || spec.view_object_projection.is_some()
                             || spec.view_value_projection.is_some()
                             || spec.view_string_expand.is_some()
+                            || spec.view_stage.is_some()
                             || spec.view_scalar,
                         "{method:?} has Nullary lowering but no nullary/view execution metadata"
                     );
@@ -5365,6 +5403,8 @@ mod tests {
                                 | BuiltinDemandLaw::First
                                 | BuiltinDemandLaw::Last
                                 | BuiltinDemandLaw::Nth
+                                | BuiltinDemandLaw::Pairwise
+                                | BuiltinDemandLaw::OrderBarrier
                         ),
                         "{method:?} bounded-state boundaries must publish bounded demand"
                     );

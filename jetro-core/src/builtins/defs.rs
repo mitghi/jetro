@@ -1146,7 +1146,7 @@ impl Builtin for Pairwise {
     const NAME: &'static str = "pairwise";
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(
-            BuiltinCategory::StreamingOneToOne,
+            BuiltinCategory::StreamingFilter,
             BuiltinCardinality::Filtering,
         )
         .view_native()
