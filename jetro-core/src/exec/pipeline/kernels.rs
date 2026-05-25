@@ -318,6 +318,8 @@ pub enum ObjectKernelKey {
     Static(Arc<str>),
     /// A computed key evaluated against the current row and coerced via `val_to_key`.
     Dynamic(BodyKernel),
+    /// A shallow object spread; `value` is evaluated and merged if it is an object.
+    Spread,
 }
 
 /// Positional selector used by `BodyKernel::ArraySelect`.
@@ -425,6 +427,10 @@ impl ObjectKernel {
     ) -> bool {
         let start = cells.len();
         for entry in self.entries.iter() {
+            if !matches!(entry.key, ObjectKernelKey::Static(_)) {
+                cells.truncate(start);
+                return false;
+            }
             if let Some(cond) = &entry.cond {
                 let keep = eval_native_kernel_with_vm(cond, item, vm)
                     .map(|value| crate::util::is_truthy(&value))
@@ -433,10 +439,6 @@ impl ObjectKernel {
                     cells.truncate(start);
                     return false;
                 }
-            }
-            if !matches!(entry.key, ObjectKernelKey::Static(_)) {
-                cells.truncate(start);
-                return false;
             }
             let value = eval_native_kernel_with_vm(&entry.value, item, vm).unwrap_or(Val::Null);
             if (entry.optional || entry.omit_null) && value.is_null() {
@@ -475,7 +477,7 @@ impl ObjectKernelEntry {
     pub(crate) fn static_key(&self) -> Option<&Arc<str>> {
         match &self.key {
             ObjectKernelKey::Static(key) => Some(key),
-            ObjectKernelKey::Dynamic(_) => None,
+            ObjectKernelKey::Dynamic(_) | ObjectKernelKey::Spread => None,
         }
     }
 
@@ -514,6 +516,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => FieldDemand::None,
             Self::Dynamic(kernel) => kernel.field_demand(),
+            Self::Spread => FieldDemand::None,
         }
     }
 
@@ -521,6 +524,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => true,
             Self::Dynamic(kernel) => kernel.is_view_native(),
+            Self::Spread => true,
         }
     }
 
@@ -528,6 +532,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => false,
             Self::Dynamic(kernel) => kernel.mentions_any_field_like_ident(names),
+            Self::Spread => false,
         }
     }
 }
@@ -578,6 +583,13 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
                     return BodyKernel::Generic;
                 }
                 (ObjectKernelKey::Dynamic(key), value, None, false, false)
+            }
+            ObjField::Spread(value) => {
+                let value = BodyKernel::classify_expr(value);
+                if matches!(value, BodyKernel::Generic) {
+                    return BodyKernel::Generic;
+                }
+                (ObjectKernelKey::Spread, value, None, false, false)
             }
             _ => return BodyKernel::Generic,
         };
@@ -1275,6 +1287,13 @@ impl BodyKernel {
                                 return Self::Generic;
                             }
                             (ObjectKernelKey::Dynamic(key), value, None, false, false)
+                        }
+                        crate::vm::CompiledObjEntry::Spread(prog) => {
+                            let value = BodyKernel::classify(prog);
+                            if matches!(value, BodyKernel::Generic) {
+                                return Self::Generic;
+                            }
+                            (ObjectKernelKey::Spread, value, None, false, false)
                         }
                         _ => return Self::Generic,
                     };
@@ -2177,6 +2196,10 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries.len());
     for entry in object.entries.iter() {
+        if matches!(entry.key, ObjectKernelKey::Spread) {
+            append_spread_val_pairs(&mut pairs, eval(&entry.value)?);
+            continue;
+        }
         if let Some(cond) = &entry.cond {
             let keep = crate::util::is_truthy(&eval(cond)?);
             if !keep {
@@ -2188,6 +2211,7 @@ where
             ObjectKernelKey::Dynamic(kernel) => {
                 Arc::from(crate::util::val_to_key(&eval(kernel)?).as_str())
             }
+            ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
         };
         let value = eval(&entry.value)?;
         if (entry.optional || entry.omit_null) && value.is_null() {
@@ -2196,6 +2220,22 @@ where
         pairs.push((key, value));
     }
     Ok(Val::ObjSmall(pairs.into()))
+}
+
+pub(crate) fn append_spread_val_pairs(pairs: &mut Vec<(Arc<str>, Val)>, value: Val) {
+    match value {
+        Val::Obj(map) => {
+            for (key, value) in map.iter() {
+                pairs.push((Arc::clone(key), value.clone()));
+            }
+        }
+        Val::ObjSmall(spread_pairs) => {
+            for (key, value) in spread_pairs.iter() {
+                pairs.push((Arc::clone(key), value.clone()));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn eval_fstring_kernel<F>(fstring: &FStringKernel, mut eval: F) -> Result<Val, EvalError>
@@ -2842,6 +2882,13 @@ where
         BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
+                if matches!(entry.key, ObjectKernelKey::Spread) {
+                    match eval_view_kernel_inner(&entry.value, item, vm)? {
+                        ViewKernelValue::View(view) => append_spread_view_pairs(&mut pairs, view)?,
+                        ViewKernelValue::Owned(value) => append_spread_val_pairs(&mut pairs, value),
+                    }
+                    continue;
+                }
                 if let Some(cond) = &entry.cond {
                     let keep = match eval_view_kernel_inner(cond, item, vm)? {
                         ViewKernelValue::View(view) => view.scalar().truthy(),
@@ -2858,6 +2905,7 @@ where
                             view_kernel_value_to_owned(eval_view_kernel_inner(kernel, item, vm)?);
                         Arc::from(crate::util::val_to_key(&value).as_str())
                     }
+                    ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
                 };
                 let value = match eval_view_kernel_inner(&entry.value, item, vm)? {
                     ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
@@ -3031,6 +3079,16 @@ where
         ))),
         BodyKernel::Generic => None,
     }
+}
+
+fn append_spread_view_pairs<'a, V>(pairs: &mut Vec<(Arc<str>, Val)>, view: V) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    for (key, child) in view.object_iter()? {
+        pairs.push((key, view_kernel_view_to_owned(child)));
+    }
+    Some(())
 }
 
 /// Evaluates `lhs op rhs` using JSON-view comparison semantics, returning the boolean result.
@@ -3570,6 +3628,33 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"isbn":"978"})
+        );
+    }
+
+    #[test]
+    fn shallow_object_spread_projection_stays_view_native() {
+        let expr = parse(r#"{...base, extra: value}"#).expect("parse object spread projection");
+        let program = Compiler::compile(&expr, "object-spread");
+        let kernel = BodyKernel::classify(&program);
+
+        let BodyKernel::Object(object) = &kernel else {
+            panic!("expected object kernel, got {kernel:#?}");
+        };
+        assert!(!object.has_static_layout());
+        assert!(matches!(
+            object.entries()[0].key_kernel(),
+            ObjectKernelKey::Spread
+        ));
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+        assert!(matches!(kernel.collect_layout(), CollectLayout::Values));
+
+        let json = serde_json::json!({"base":{"isbn":"978","price":20},"value":"ok"});
+        let val = Val::from(&json);
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
+            .expect("object spread projection output");
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"isbn":"978","price":20,"extra":"ok"})
         );
     }
 

@@ -3820,6 +3820,17 @@ where
         pipeline::BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries().len());
             for entry in object.entries() {
+                if matches!(entry.key_kernel(), pipeline::ObjectKernelKey::Spread) {
+                    match eval_frontier_kernel_with_vm(item, entry.value(), vm)? {
+                        pipeline::ViewKernelValue::View(view) => {
+                            append_frontier_spread_view_pairs(&mut pairs, view)?
+                        }
+                        pipeline::ViewKernelValue::Owned(value) => {
+                            pipeline::append_spread_val_pairs(&mut pairs, value)
+                        }
+                    }
+                    continue;
+                }
                 if let Some(cond) = entry.cond() {
                     if !eval_frontier_filter_kernel_with_vm(item, cond, vm)? {
                         continue;
@@ -3831,6 +3842,7 @@ where
                         let value = eval_frontier_value_kernel_with_vm(kernel, item, vm)?;
                         Arc::from(crate::util::val_to_key(&value).as_str())
                     }
+                    pipeline::ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
                 };
                 let value = eval_frontier_value_kernel_with_vm(entry.value(), item, vm)?;
                 if entry.omits_null() && value.is_null() {
@@ -5078,6 +5090,19 @@ where
     V: FrontierBaseView<'a>,
 {
     eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm)
+}
+
+fn append_frontier_spread_view_pairs<'a, V>(
+    pairs: &mut Vec<(Arc<str>, Val)>,
+    view: V,
+) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    for (key, child) in view.object_iter()? {
+        pairs.push((key, pipeline::view_kernel_view_to_owned(child)));
+    }
+    Some(())
 }
 
 fn eval_frontier_structural_view_key_with_vm<'a, V>(

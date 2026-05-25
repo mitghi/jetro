@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crate::data::value::{ObjVecData, Val};
 use crate::data::view::ValueView;
 
-use super::{BodyKernel, CollectLayout, ObjectKernel, ObjectKernelKey, RowProgram};
+use super::{
+    append_spread_val_pairs, BodyKernel, CollectLayout, ObjectKernel, ObjectKernelKey, RowProgram,
+};
 
 /// Output collector for the terminal stage of a pipeline.
 pub(crate) enum TerminalCollector<'a> {
@@ -185,6 +187,10 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries().len());
     for entry in object.entries() {
+        if matches!(entry.key_kernel(), ObjectKernelKey::Spread) {
+            append_spread_val_pairs(&mut pairs, eval(entry.value(), item, vm)?);
+            continue;
+        }
         if let Some(cond) = entry.cond() {
             let keep = eval(cond, item, vm).map(|value| crate::util::is_truthy(&value))?;
             if !keep {
@@ -197,6 +203,7 @@ where
                 let value = eval(kernel, item, vm)?;
                 Arc::from(crate::util::val_to_key(&value).as_str())
             }
+            ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
         };
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
@@ -220,6 +227,10 @@ where
 {
     let start = cells.len();
     for entry in object.entries() {
+        if !matches!(entry.key_kernel(), ObjectKernelKey::Static(_)) {
+            cells.truncate(start);
+            return Some(false);
+        }
         if let Some(cond) = entry.cond() {
             let keep = eval(cond, item, vm).map(|value| crate::util::is_truthy(&value))?;
             if !keep {
@@ -229,10 +240,6 @@ where
         }
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
-            cells.truncate(start);
-            return Some(false);
-        }
-        if !matches!(entry.key_kernel(), ObjectKernelKey::Static(_)) {
             cells.truncate(start);
             return Some(false);
         }
