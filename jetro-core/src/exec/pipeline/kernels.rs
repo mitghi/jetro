@@ -162,6 +162,19 @@ pub enum BodyKernel {
     And(Arc<[BodyKernel]>),
     /// Short-circuits through a list of predicates, returning `true` on the first success.
     Or(Arc<[BodyKernel]>),
+    /// Boolean negation of a view-native expression.
+    Not(Box<BodyKernel>),
+    /// Null coalescing: returns the first non-null expression.
+    Coalesce {
+        lhs: Box<BodyKernel>,
+        rhs: Box<BodyKernel>,
+    },
+    /// Conditional expression with view-native condition and branches.
+    IfElse {
+        cond: Box<BodyKernel>,
+        then_: Box<BodyKernel>,
+        else_: Box<BodyKernel>,
+    },
     /// Reads a single field and compares it to a literal in one fused step.
     FieldCmpLit(Arc<str>, crate::parse::ast::BinOp, Val),
     /// Traverses a field chain and compares the result to a literal in one fused step.
@@ -928,6 +941,43 @@ impl BodyKernel {
             Expr::FString(parts) => classify_fstring_expr(parts),
             Expr::Object(fields) => classify_object_expr(fields),
             Expr::Array(elems) => classify_array_expr(elems),
+            Expr::Not(expr) => {
+                let kernel = Self::classify_expr(expr);
+                if matches!(kernel, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::Not(Box::new(kernel))
+                }
+            }
+            Expr::Coalesce(lhs, rhs) => {
+                let lhs = Self::classify_expr(lhs);
+                let rhs = Self::classify_expr(rhs);
+                if matches!(lhs, Self::Generic) || matches!(rhs, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::Coalesce {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    }
+                }
+            }
+            Expr::IfElse { cond, then_, else_ } => {
+                let cond = Self::classify_expr(cond);
+                let then_ = Self::classify_expr(then_);
+                let else_ = Self::classify_expr(else_);
+                if matches!(cond, Self::Generic)
+                    || matches!(then_, Self::Generic)
+                    || matches!(else_, Self::Generic)
+                {
+                    Self::Generic
+                } else {
+                    Self::IfElse {
+                        cond: Box::new(cond),
+                        then_: Box::new(then_),
+                        else_: Box::new(else_),
+                    }
+                }
+            }
             Expr::Chain(base, steps) => classify_chain_expr(base, steps),
             Expr::Match { .. } => {
                 let program = crate::compile::compiler::Compiler::compile(expr, "<match-kernel>");
@@ -1059,6 +1109,12 @@ impl BodyKernel {
                 .fold(FieldDemand::None, |need, predicate| {
                     need.merge(predicate.field_demand())
                 }),
+            Self::Not(kernel) => kernel.field_demand(),
+            Self::Coalesce { lhs, rhs } => lhs.field_demand().merge(rhs.field_demand()),
+            Self::IfElse { cond, then_, else_ } => cond
+                .field_demand()
+                .merge(then_.field_demand())
+                .merge(else_.field_demand()),
             Self::FString(fstring) => {
                 fstring
                     .parts
@@ -1116,6 +1172,15 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
+            Self::Not(kernel) => kernel.mentions_any_field_like_ident(names),
+            Self::Coalesce { lhs, rhs } => {
+                lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
+            }
+            Self::IfElse { cond, then_, else_ } => {
+                cond.mentions_any_field_like_ident(names)
+                    || then_.mentions_any_field_like_ident(names)
+                    || else_.mentions_any_field_like_ident(names)
+            }
             Self::FString(fstring) => fstring.parts.iter().any(|part| match part {
                 FStringKernelPart::Lit(_) => false,
                 FStringKernelPart::Interp(kernel) => kernel.mentions_any_field_like_ident(names),
@@ -1179,6 +1244,11 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
             }
+            Self::Not(kernel) => kernel.is_view_native(),
+            Self::Coalesce { lhs, rhs } => lhs.is_view_native() && rhs.is_view_native(),
+            Self::IfElse { cond, then_, else_ } => {
+                cond.is_view_native() && then_.is_view_native() && else_.is_view_native()
+            }
             Self::Object(object) => object.entries.iter().all(|entry| {
                 entry.key.is_view_native()
                     && entry.value.is_view_native()
@@ -1232,9 +1302,12 @@ impl BodyKernel {
             | Self::Match { .. }
             | Self::And(_)
             | Self::Or(_)
+            | Self::Not(_)
+            | Self::IfElse { .. }
             | Self::CurrentCmpLit(_, _)
             | Self::FieldCmpLit(_, _, _)
             | Self::FieldChainCmpLit(_, _, _) => true,
+            Self::Coalesce { lhs, rhs } => lhs.view_result_owned() && rhs.view_result_owned(),
             Self::Current | Self::FieldRead(_) | Self::FieldChain(_) | Self::Generic => false,
         }
     }
@@ -1456,6 +1529,49 @@ impl BodyKernel {
                     parts: out.into(),
                     base_capacity,
                 });
+            }
+            [body @ .., Opcode::Not] => {
+                let body =
+                    BodyKernel::classify(&crate::vm::Program::new(body.to_vec(), "<not-kernel>"));
+                if !matches!(body, BodyKernel::Generic) && body.is_view_native() {
+                    return Self::Not(Box::new(body));
+                }
+            }
+            [lhs @ .., Opcode::CoalesceOp(rhs)] => {
+                let lhs = BodyKernel::classify(&crate::vm::Program::new(
+                    lhs.to_vec(),
+                    "<coalesce-lhs>",
+                ));
+                let rhs = BodyKernel::classify(rhs);
+                if !matches!(lhs, BodyKernel::Generic)
+                    && !matches!(rhs, BodyKernel::Generic)
+                    && lhs.is_view_native()
+                    && rhs.is_view_native()
+                {
+                    return Self::Coalesce {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    };
+                }
+            }
+            [cond @ .., Opcode::IfElse { then_, else_ }] => {
+                let cond =
+                    BodyKernel::classify(&crate::vm::Program::new(cond.to_vec(), "<if-cond>"));
+                let then_ = BodyKernel::classify(then_);
+                let else_ = BodyKernel::classify(else_);
+                if !matches!(cond, BodyKernel::Generic)
+                    && !matches!(then_, BodyKernel::Generic)
+                    && !matches!(else_, BodyKernel::Generic)
+                    && cond.is_view_native()
+                    && then_.is_view_native()
+                    && else_.is_view_native()
+                {
+                    return Self::IfElse {
+                        cond: Box::new(cond),
+                        then_: Box::new(then_),
+                        else_: Box::new(else_),
+                    };
+                }
             }
             [Opcode::PushCurrent, Opcode::GetField(k)]
             | [Opcode::GetField(k)]
@@ -2212,6 +2328,25 @@ fn eval_native_kernel_with_vm(
                 }
             }
             Ok(Val::Bool(false))
+        }
+        BodyKernel::Not(kernel) => Ok(Val::Bool(!crate::util::is_truthy(
+            &eval_native_kernel_with_vm(kernel, item, vm)?,
+        ))),
+        BodyKernel::Coalesce { lhs, rhs } => {
+            let value = eval_native_kernel_with_vm(lhs, item, vm)?;
+            if value.is_null() {
+                eval_native_kernel_with_vm(rhs, item, vm)
+            } else {
+                Ok(value)
+            }
+        }
+        BodyKernel::IfElse { cond, then_, else_ } => {
+            let cond = eval_native_kernel_with_vm(cond, item, vm)?;
+            if crate::util::is_truthy(&cond) {
+                eval_native_kernel_with_vm(then_, item, vm)
+            } else {
+                eval_native_kernel_with_vm(else_, item, vm)
+            }
         }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
@@ -3248,6 +3383,33 @@ where
             }
             Some(ViewKernelValue::Owned(Val::Bool(false)))
         }
+        BodyKernel::Not(kernel) => {
+            let passes = match eval_view_kernel_inner(kernel, item, vm)? {
+                ViewKernelValue::View(view) => view.scalar().truthy(),
+                ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+            };
+            Some(ViewKernelValue::Owned(Val::Bool(!passes)))
+        }
+        BodyKernel::Coalesce { lhs, rhs } => match eval_view_kernel_inner(lhs, item, vm)? {
+            ViewKernelValue::View(view) if !matches!(view.scalar(), JsonView::Null) => {
+                Some(ViewKernelValue::View(view))
+            }
+            ViewKernelValue::Owned(value) if !value.is_null() => {
+                Some(ViewKernelValue::Owned(value))
+            }
+            _ => eval_view_kernel_inner(rhs, item, vm),
+        },
+        BodyKernel::IfElse { cond, then_, else_ } => {
+            let passes = match eval_view_kernel_inner(cond, item, vm)? {
+                ViewKernelValue::View(view) => view.scalar().truthy(),
+                ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+            };
+            if passes {
+                eval_view_kernel_inner(then_, item, vm)
+            } else {
+                eval_view_kernel_inner(else_, item, vm)
+            }
+        }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
             Some(ViewKernelValue::Owned(Val::Bool(
@@ -3686,6 +3848,48 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Float(39.75))
+        );
+    }
+
+    #[test]
+    fn expression_combinator_kernels_run_on_value_views() {
+        let expr = parse(
+            r#"{ok: not archived, label: nickname ?? name, tier: "high" if score > 90 else "normal"}"#,
+        )
+        .expect("parse expression combinator projection");
+        let program = Compiler::compile(&expr, "expression-combinators");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({
+            "archived": false,
+            "name": "Ada",
+            "nickname": null,
+            "score": 95
+        }));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("expression combinator output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"ok": true, "label": "Ada", "tier": "high"})
+        );
+    }
+
+    #[test]
+    fn ast_expression_combinators_stay_view_native() {
+        let expr = parse(r#"nickname ?? name"#).expect("parse coalesce projection");
+        let kernel = BodyKernel::classify_expr(&expr);
+
+        assert!(matches!(kernel, BodyKernel::Coalesce { .. }), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"name": "Ada", "nickname": null}));
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &ValView::new(&value))),
+            Some(Val::Str(Arc::from("Ada")))
         );
     }
 

@@ -2495,6 +2495,31 @@ mod tests {
     }
 
     #[test]
+    fn view_expression_combinator_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"archived":false,"name":"Ada","nickname":null,"score":95},{"archived":true,"name":"Grace","nickname":"g","score":80}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(
+                r#"$.data.map({ok: not archived, label: nickname ?? name, tier: "high" if score > 90 else "normal"})"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"ok": true, "label": "Ada", "tier": "high"},
+                {"ok": false, "label": "g", "tier": "normal"}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_sort_string_predicate_map_last_stays_borrowed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"prod","score":100},{"name":"skip_test","score":90},{"name":"answer","score":80}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
