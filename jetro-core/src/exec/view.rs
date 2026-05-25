@@ -2997,6 +2997,9 @@ where
             )))
         }
         pipeline::BodyKernel::Binary { lhs, op, rhs } => {
+            if let Some(value) = pipeline::eval_view_numeric_kernel_value(kernel, item, vm) {
+                return Some(pipeline::ViewKernelValue::Owned(value));
+            }
             let lhs = eval_frontier_value_kernel_with_vm(lhs, item, vm)?;
             let rhs = eval_frontier_value_kernel_with_vm(rhs, item, vm)?;
             pipeline::eval_binary_op(lhs, *op, rhs)
@@ -6253,6 +6256,40 @@ mod tests {
             serde_json::Value::from(out),
             serde_json::json!(["object", "array", "string", "number", "bool", "null"])
         );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_binary_arithmetic_uses_tape_scalar_reads_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"qty":2,"price":10,"fee":1},{"qty":3,"price":7,"fee":2}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Binary {
+                lhs: Box::new(BodyKernel::Binary {
+                    lhs: Box::new(BodyKernel::FieldRead(Arc::from("qty"))),
+                    op: BinOp::Mul,
+                    rhs: Box::new(BodyKernel::FieldRead(Arc::from("price"))),
+                }),
+                op: BinOp::Add,
+                rhs: Box::new(BodyKernel::FieldRead(Arc::from("fee"))),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([21, 23]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 

@@ -2271,6 +2271,17 @@ where
     }
 }
 
+pub(crate) fn eval_view_numeric_kernel_value<'a, V>(
+    kernel: &BodyKernel,
+    item: &V,
+    vm: &mut crate::vm::VM,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    eval_view_numeric_kernel(kernel, item, vm).map(numeric_kernel_value_to_val)
+}
+
 fn eval_native_numeric_kernel(kernel: &BodyKernel, item: &Val) -> Option<NumericKernelValue> {
     match kernel {
         BodyKernel::Current => numeric_from_val(item),
