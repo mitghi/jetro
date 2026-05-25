@@ -623,6 +623,12 @@ where
     V: FrontierBaseView<'a>,
     F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
+    if !pipeline::ViewStageCapability::can_use_reversed_single_access_after_prefix(
+        source_demand,
+        stages,
+    ) {
+        return None;
+    }
     let JsonView::ArrayLen(len) = source.scalar() else {
         return None;
     };

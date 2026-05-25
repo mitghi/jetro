@@ -863,8 +863,18 @@ impl ViewStageCapability {
         stages: &[Self],
         source_len: usize,
     ) -> Option<SourceIndexedAccess> {
-        Self::all_preserve_cardinality(stages).then_some(())?;
+        Self::can_use_reversed_single_access_after_prefix(source_demand, stages).then_some(())?;
         SourceAccessMode::reversed_single_access_for_demand(source_demand, source_len)
+    }
+
+    /// Returns true when a reversed source can resolve the requested demand by
+    /// direct single-row access without reading source cardinality first.
+    pub(crate) fn can_use_reversed_single_access_after_prefix(
+        source_demand: PullDemand,
+        stages: &[Self],
+    ) -> bool {
+        Self::all_preserve_cardinality(stages)
+            && SourceAccessMode::reversed_single_access_for_demand(source_demand, 0).is_some()
     }
 
     /// Returns the deterministic source-access effect for stages with
@@ -2129,6 +2139,18 @@ mod tests {
             ),
             None
         );
+        assert!(ViewStageCapability::can_use_reversed_single_access_after_prefix(
+            PullDemand::LastInput(1),
+            &preserving
+        ));
+        assert!(!ViewStageCapability::can_use_reversed_single_access_after_prefix(
+            PullDemand::LastInput(1),
+            &selective
+        ));
+        assert!(!ViewStageCapability::can_use_reversed_single_access_after_prefix(
+            PullDemand::FirstInput(2),
+            &preserving
+        ));
     }
 
     #[test]
