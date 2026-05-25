@@ -1717,6 +1717,52 @@ mod tests {
     }
 
     #[test]
+    fn tape_array_range_iter_yields_borrowed_subrange() {
+        use super::{TapeScratchView, TapeView};
+
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"items":[{"id":1},{"id":2},{"id":3},{"id":4}]}"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let ids = TapeView::root(&tape)
+            .field("items")
+            .array_child_range_iter(1, 3)
+            .map(|item| match item.field("id").scalar() {
+                JsonView::Int(n) => n,
+                other => panic!("unexpected id view: {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![2, 3]);
+        assert_eq!(tape.materialized_subtrees(), 0);
+        assert_eq!(
+            TapeView::root(&tape)
+                .field("items")
+                .array_child_range_iter(3, 2)
+                .count(),
+            0
+        );
+
+        let mut scratch = crate::data::tape::TapeScratch::with_capacity(64);
+        scratch
+            .parse_slice(br#"[{"id":10},{"id":20},{"id":30},{"id":40}]"#)
+            .expect("parse");
+        let scratch_ids = TapeScratchView::Node {
+            tape: &scratch,
+            idx: 0,
+        }
+        .array_child_range_iter(2, 4)
+        .map(|item| match item.field("id").scalar() {
+            JsonView::Int(n) => n,
+            other => panic!("unexpected scratch id view: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(scratch_ids, vec![30, 40]);
+    }
+
+    #[test]
     fn val_view_materializes_current_view_only() {
         let value = Val::from(&json!({"items": [{"id": 1}, {"id": 2}]}));
         let item = ValView::new(&value).field("items").index(1);
