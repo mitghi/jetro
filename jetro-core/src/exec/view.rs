@@ -629,9 +629,7 @@ where
     ) {
         return None;
     }
-    let JsonView::ArrayLen(len) = source.scalar() else {
-        return None;
-    };
+    let len = source.array_len()?;
     let idx = match pipeline::ViewStageCapability::reversed_single_access_after_prefix(
         source_demand,
         stages,
@@ -786,10 +784,7 @@ where
         stage_kernels,
         sink_kernels,
     ) {
-        match source.scalar() {
-            JsonView::ArrayLen(count) => Some(count),
-            _ => None,
-        }
+        source.array_len()
     } else {
         None
     };
@@ -1215,10 +1210,7 @@ where
         );
     }
     if access.is_direct_indexed() {
-        let len = match source.scalar() {
-            JsonView::ArrayLen(len) => len,
-            _ => return None,
-        };
+        let len = source.array_len()?;
         return match access.indexed_access(len)? {
             pipeline::SourceIndexedAccess::Single(idx) => {
                 let items = std::iter::once(source.index(idx as i64));

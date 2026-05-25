@@ -358,6 +358,13 @@ fn tape_omit_keys<T: TapeLike>(tape: &T, idx: usize, keys: &[Arc<str>]) -> Optio
 pub(crate) trait ValueView<'a>: Clone {
     /// Return a borrowed scalar view of the current node without allocating.
     fn scalar(&self) -> JsonView<'_>;
+    /// Return the current array length without iterating or materialising.
+    fn array_len(&self) -> Option<usize> {
+        match self.scalar() {
+            JsonView::ArrayLen(len) => Some(len),
+            _ => None,
+        }
+    }
     /// Navigate into the named field of an object node, returning `Null` if absent.
     fn field(&self, key: &str) -> Self;
     /// Return whether the current object has `key`, or `None` if the current node is not an object.
