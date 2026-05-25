@@ -848,10 +848,9 @@ where
     if !deterministic_prefix_forces_empty(stages, stage_kernels) {
         return None;
     }
-    if let Some(op) = body_sink.reducer_spec().and_then(|spec| spec.numeric_op()) {
-        return Some(op.empty());
-    }
-    sink.empty_stream_result()
+    body_sink
+        .empty_stream_result()
+        .or_else(|| sink.empty_stream_result())
 }
 
 fn cardinality_after_deterministic_stages<'a, V>(

@@ -28,6 +28,7 @@ use crate::builtins::{
     BuiltinPipelineOrderEffect, BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinSinkSpec,
     BuiltinSinkValueNeed, BuiltinStreamingBoundary, BuiltinViewCapabilityShape, BuiltinViewStage,
 };
+use crate::data::value::Val;
 use crate::parse::ast::Expr;
 use crate::plan::chain_ir::{ChainOp, MatchRole};
 use crate::plan::demand::{
@@ -276,6 +277,35 @@ impl Sink {
             Sink::ArgExtreme(spec) => Some(spec.id()),
             Sink::ApproxCountDistinct => Some(BuiltinId::APPROX_COUNT_DISTINCT),
             Sink::Collect | Sink::Nth(_) | Sink::SelectMany { .. } => None,
+        }
+    }
+
+    /// Result for an empty input stream when the sink can complete without
+    /// observing any rows.
+    pub(crate) fn empty_stream_result(&self) -> Option<Val> {
+        match self {
+            Sink::Collect => Some(Val::arr(Vec::new())),
+            Sink::Reducer(spec) => match spec.op {
+                super::ReducerOp::Count => Some(Val::Int(0)),
+                super::ReducerOp::Numeric(op) => Some(op.empty()),
+            },
+            Sink::Predicate(spec) => spec.op.empty_stream_result(),
+            Sink::Membership(spec) => Some(spec.op.empty_stream_result()),
+            Sink::ArgExtreme(_) | Sink::Nth(_) => Some(Val::Null),
+            Sink::Terminal(method) => {
+                match builtin_sink_accumulator(BuiltinId::from_method(*method))? {
+                    BuiltinSinkAccumulator::SelectOne(_) => Some(Val::Null),
+                    accumulator => accumulator.empty_stream_result(),
+                }
+            }
+            Sink::SelectMany { n, .. } => {
+                if *n <= 1 {
+                    Some(Val::Null)
+                } else {
+                    Some(Val::arr(Vec::new()))
+                }
+            }
+            Sink::ApproxCountDistinct => Some(Val::Int(0)),
         }
     }
 
@@ -2079,6 +2109,8 @@ fn kernel_payload_need(kernels: &[BodyKernel], idx: usize) -> FieldDemand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
+    use crate::exec::pipeline::{MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec};
 
     fn empty_program() -> Arc<Program> {
         Arc::new(Program::new(Vec::new(), "<pipeline-ir-test>"))
@@ -2197,6 +2229,57 @@ mod tests {
             Some(Sink::ApproxCountDistinct)
         ));
         assert!(Sink::approx_distinct_builtin(BuiltinMethod::Count).is_none());
+    }
+
+    #[test]
+    fn sink_empty_stream_results_are_shared_execution_metadata() {
+        assert_eq!(
+            serde_json::Value::from(Sink::Collect.empty_stream_result().unwrap()),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            Sink::Reducer(ReducerSpec::count()).empty_stream_result(),
+            Some(Val::Int(0))
+        );
+        assert_eq!(
+            Sink::numeric_builtin(BuiltinMethod::Sum, None, None)
+                .unwrap()
+                .empty_stream_result(),
+            Some(Val::Int(0))
+        );
+        assert_eq!(
+            Sink::numeric_builtin(BuiltinMethod::Avg, None, None)
+                .unwrap()
+                .empty_stream_result(),
+            Some(Val::Null)
+        );
+        assert_eq!(
+            Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::FindOne,
+                predicate: empty_program(),
+                predicate_expr: None,
+            })
+            .empty_stream_result(),
+            None
+        );
+        assert_eq!(
+            Sink::Membership(MembershipSinkSpec {
+                op: BuiltinMembershipSink::Includes,
+                target: MembershipSinkTarget::Literal(Val::Int(1)),
+            })
+            .empty_stream_result(),
+            Some(Val::Bool(false))
+        );
+        assert_eq!(Sink::Nth(0).empty_stream_result(), Some(Val::Null));
+        assert_eq!(
+            serde_json::Value::from(Sink::SelectMany {
+                n: 2,
+                from_end: false,
+            }
+            .empty_stream_result()
+            .unwrap()),
+            serde_json::json!([])
+        );
     }
 
     #[test]
