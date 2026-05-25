@@ -956,7 +956,7 @@ where
             predicate_kernel,
         } => {
             let kernel = sink_kernels.get(*predicate_kernel)?;
-            let matched = eval_filter_kernel_with_vm(item, kernel, vm)?;
+            let matched = eval_frontier_filter_kernel_with_vm(item, kernel, vm)?;
             let sink_done = match sink_acc.observe_predicate_lazy(*op, matched, || {
                 pipeline::view_kernel_view_to_owned(item.clone())
             }) {
@@ -1018,14 +1018,14 @@ where
 }
 
 fn view_arg_extreme_key_with_vm<'a, V>(
-    item: &V,
+    item: &FrontierRow<V>,
     kernel: &pipeline::BodyKernel,
     vm: &mut VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
-    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
@@ -2335,20 +2335,6 @@ fn suffix_body(body: &pipeline::PipelineBody, consumed_stages: usize) -> pipelin
         sink: body.sink.clone(),
         stage_kernels: body.stage_kernels[consumed_stages..].to_vec(),
         sink_kernels: body.sink_kernels.clone(),
-    }
-}
-
-fn eval_filter_kernel_with_vm<'a, V>(
-    item: &V,
-    kernel: &pipeline::BodyKernel,
-    vm: &mut VM,
-) -> Option<bool>
-where
-    V: ValueView<'a> + 'a,
-{
-    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
-        pipeline::ViewKernelValue::View(view) => Some(view.scalar().truthy()),
-        pipeline::ViewKernelValue::Owned(value) => Some(crate::util::is_truthy(&value)),
     }
 }
 
@@ -6145,6 +6131,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_receiver_predicate_sink_runs_on_tape_view_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(br#"[[],[0],[1]]"#.to_vec()).unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::Any,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Bool(true));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn nested_receiver_distinct_key_runs_on_tape_view_without_materializing_rows() {
         let tape =
             crate::data::tape::TapeData::parse(br#"[[1,"a"],[1,"b"],[2,"c"]]"#.to_vec())
@@ -6177,6 +6197,42 @@ mod tests {
 
         assert_eq!(out, Val::Int(2));
         assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_arg_extreme_key_runs_on_tape_view_without_materializing_rows() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[3,"a"],[2,"b"],[1,"c"]]"#.to_vec())
+                .unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([3, "a"]));
+        assert_eq!(tape.materialized_subtrees(), 1);
     }
 
     #[test]
