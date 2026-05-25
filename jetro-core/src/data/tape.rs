@@ -413,13 +413,10 @@ impl TapeData {
 
     pub(crate) fn object_field_chain_value(
         &self,
-        mut idx: usize,
+        idx: usize,
         keys: &[Arc<str>],
     ) -> Option<usize> {
-        for key in keys {
-            idx = self.object_field_value(idx, key.as_ref())?;
-        }
-        Some(idx)
+        object_field_chain_value(idx, keys, |idx, key| self.object_field_value(idx, key))
     }
 
     #[inline]
@@ -522,6 +519,21 @@ fn build_object_field_entries(
         cur = value_idx + tape_node_span(nodes, value_idx);
     }
     fields.into_boxed_slice()
+}
+
+#[inline]
+fn object_field_chain_value<F>(
+    mut idx: usize,
+    keys: &[Arc<str>],
+    mut field_value: F,
+) -> Option<usize>
+where
+    F: FnMut(usize, &str) -> Option<usize>,
+{
+    for key in keys {
+        idx = field_value(idx, key.as_ref())?;
+    }
+    Some(idx)
 }
 
 #[inline]
@@ -685,13 +697,10 @@ impl TapeScratch {
 
     pub(crate) fn object_field_chain_value(
         &self,
-        mut idx: usize,
+        idx: usize,
         keys: &[Arc<str>],
     ) -> Option<usize> {
-        for key in keys {
-            idx = self.object_field_value(idx, key.as_ref())?;
-        }
-        Some(idx)
+        object_field_chain_value(idx, keys, |idx, key| self.object_field_value(idx, key))
     }
 
     #[inline]
