@@ -2,6 +2,7 @@
 //! `ViewKey` mirrors `Val` scalar variants but implements `Hash` and `Eq`
 //! without materialising a full `Val` from the view.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::{
@@ -109,6 +110,52 @@ impl ViewKey {
             Self::Float(value) => Arc::from(f64::from_bits(value).to_string().as_str()),
             Self::Str(value) | Self::Owned(value) => value,
         }
+    }
+
+    pub(super) fn cmp_total(a: &Self, b: &Self) -> Ordering {
+        match (numeric_key(a), numeric_key(b)) {
+            (Some(left), Some(right)) => {
+                return left.partial_cmp(&right).unwrap_or(Ordering::Equal);
+            }
+            _ => {}
+        }
+        match (a, b) {
+            (Self::Str(left) | Self::Owned(left), Self::Str(right) | Self::Owned(right)) => {
+                left.cmp(right)
+            }
+            _ => key_rank(a)
+                .cmp(&key_rank(b))
+                .then_with(|| key_text(a).cmp(&key_text(b))),
+        }
+    }
+}
+
+fn numeric_key(key: &ViewKey) -> Option<f64> {
+    match key {
+        ViewKey::Int(value) => Some(*value as f64),
+        ViewKey::UInt(value) => Some(*value as f64),
+        ViewKey::Float(value) => Some(f64::from_bits(*value)),
+        _ => None,
+    }
+}
+
+fn key_rank(key: &ViewKey) -> u8 {
+    match key {
+        ViewKey::Null => 0,
+        ViewKey::Bool(_) => 1,
+        ViewKey::Int(_) | ViewKey::UInt(_) | ViewKey::Float(_) => 2,
+        ViewKey::Str(_) | ViewKey::Owned(_) => 3,
+    }
+}
+
+fn key_text(key: &ViewKey) -> String {
+    match key {
+        ViewKey::Null => "null".to_string(),
+        ViewKey::Bool(value) => value.to_string(),
+        ViewKey::Int(value) => value.to_string(),
+        ViewKey::UInt(value) => value.to_string(),
+        ViewKey::Float(value) => f64::from_bits(*value).to_string(),
+        ViewKey::Str(value) | ViewKey::Owned(value) => value.to_string(),
     }
 }
 

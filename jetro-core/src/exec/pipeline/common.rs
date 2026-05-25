@@ -207,29 +207,29 @@ where
 }
 
 /// Key-based sorter that caps memory to top-K or bottom-K entries via a `BinaryHeap`; degrades to a plain vec sort when unbounded.
-pub(crate) struct BoundedKeySorter<T> {
+pub(crate) struct BoundedKeySorter<T, K = Val> {
     // Direction of the final sort; reversed relative to heap priority order.
     descending: bool,
     // Maximum number of entries to retain; `None` means keep all.
     limit: Option<usize>,
     // When `true`, the heap evicts the smallest entry when over capacity; otherwise the largest.
     keep_largest: bool,
-    // Caller-supplied comparator for `Val` keys.
-    cmp: fn(&Val, &Val) -> Ordering,
+    // Caller-supplied comparator for sort keys.
+    cmp: fn(&K, &K) -> Ordering,
     // Accumulator used when no limit is active.
-    keyed: Vec<(Val, usize, T)>,
+    keyed: Vec<(K, usize, T)>,
     // Bounded heap used when a limit is active.
-    heap: BinaryHeap<BoundedEntry<T>>,
+    heap: BinaryHeap<BoundedEntry<T, K>>,
     // Monotonically increasing sequence counter for stable ordering.
     next_seq: usize,
 }
 
-impl<T> BoundedKeySorter<T> {
+impl<T, K> BoundedKeySorter<T, K> {
     /// Constructs a `BoundedKeySorter`; `SortTopK`/`SortBottomK` activate heap mode, `Default` uses a plain vec.
     pub(crate) fn new(
         descending: bool,
         strategy: StageStrategy,
-        cmp: fn(&Val, &Val) -> Ordering,
+        cmp: fn(&K, &K) -> Ordering,
     ) -> Self {
         let k = match strategy {
             StageStrategy::SortTopK(k) | StageStrategy::SortBottomK(k) => Some(k),
@@ -254,7 +254,7 @@ impl<T> BoundedKeySorter<T> {
     }
 
     /// Inserts `item` with `key`; in heap mode evicts the current worst entry when at capacity and the new key is better.
-    pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
+    pub(crate) fn push_keyed(&mut self, key: K, item: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
         match self.limit {
@@ -318,31 +318,31 @@ impl<T> BoundedKeySorter<T> {
 }
 
 // Heap entry for `BoundedKeySorter`; ordering is inverted so `BinaryHeap::pop` removes the least-desirable entry.
-struct BoundedEntry<T> {
-    key: Val,
+struct BoundedEntry<T, K> {
+    key: K,
     item: T,
     // Insertion sequence for stable ordering among equal keys.
     seq: usize,
     // When `true`, the heap is a max-heap (evicts smallest); otherwise min-heap.
     keep_largest: bool,
-    cmp: fn(&Val, &Val) -> Ordering,
+    cmp: fn(&K, &K) -> Ordering,
 }
 
-impl<T> PartialEq for BoundedEntry<T> {
+impl<T, K> PartialEq for BoundedEntry<T, K> {
     fn eq(&self, other: &Self) -> bool {
         self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
     }
 }
 
-impl<T> Eq for BoundedEntry<T> {}
+impl<T, K> Eq for BoundedEntry<T, K> {}
 
-impl<T> PartialOrd for BoundedEntry<T> {
+impl<T, K> PartialOrd for BoundedEntry<T, K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T> Ord for BoundedEntry<T> {
+impl<T, K> Ord for BoundedEntry<T, K> {
     fn cmp(&self, other: &Self) -> Ordering {
         let key_order = (self.cmp)(&self.key, &other.key);
         let priority = if self.keep_largest {
@@ -374,18 +374,18 @@ where
 }
 
 /// Collects `(key, item)` pairs into a `BinaryHeap` so `finish` can serve them via `OrderedByKey` for lazy sorted pulls.
-pub(crate) struct OrderedKeySorter<T> {
-    heap: BinaryHeap<OrderedEntry<T>>,
+pub(crate) struct OrderedKeySorter<T, K = Val> {
+    heap: BinaryHeap<OrderedEntry<T, K>>,
     // Monotonically increasing insertion sequence for stable ordering.
     next_seq: usize,
     // Output order (`true` = largest first).
     descending: bool,
-    cmp: fn(&Val, &Val) -> Ordering,
+    cmp: fn(&K, &K) -> Ordering,
 }
 
-impl<T> OrderedKeySorter<T> {
+impl<T, K> OrderedKeySorter<T, K> {
     /// Creates a new `OrderedKeySorter` with the given sort direction and key comparator.
-    pub(crate) fn new(descending: bool, cmp: fn(&Val, &Val) -> Ordering) -> Self {
+    pub(crate) fn new(descending: bool, cmp: fn(&K, &K) -> Ordering) -> Self {
         Self {
             heap: BinaryHeap::new(),
             next_seq: 0,
@@ -395,7 +395,7 @@ impl<T> OrderedKeySorter<T> {
     }
 
     /// Inserts `item` associated with `key` into the heap.
-    pub(crate) fn push_keyed(&mut self, key: Val, item: T) {
+    pub(crate) fn push_keyed(&mut self, key: K, item: T) {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.heap.push(OrderedEntry {
@@ -408,17 +408,17 @@ impl<T> OrderedKeySorter<T> {
     }
 
     /// Converts the sorter into a lazy `OrderedByKey` iterator over the heap.
-    pub(crate) fn finish(self) -> OrderedByKey<T> {
+    pub(crate) fn finish(self) -> OrderedByKey<T, K> {
         OrderedByKey { heap: self.heap }
     }
 }
 
 /// Lazy iterator that extracts items from a `BinaryHeap` in sorted order, created by `OrderedKeySorter::finish`.
-pub(crate) struct OrderedByKey<T> {
-    heap: BinaryHeap<OrderedEntry<T>>,
+pub(crate) struct OrderedByKey<T, K = Val> {
+    heap: BinaryHeap<OrderedEntry<T, K>>,
 }
 
-impl<T> Iterator for OrderedByKey<T> {
+impl<T, K> Iterator for OrderedByKey<T, K> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -427,31 +427,31 @@ impl<T> Iterator for OrderedByKey<T> {
 }
 
 // Internal heap entry for `OrderedKeySorter`; ordering ensures `BinaryHeap::pop` always yields the next sorted item.
-struct OrderedEntry<T> {
-    key: Val,
+struct OrderedEntry<T, K> {
+    key: K,
     item: T,
     // Insertion sequence number for stable ordering.
     seq: usize,
     // `true` when larger keys should appear first in the output.
     descending: bool,
-    cmp: fn(&Val, &Val) -> Ordering,
+    cmp: fn(&K, &K) -> Ordering,
 }
 
-impl<T> PartialEq for OrderedEntry<T> {
+impl<T, K> PartialEq for OrderedEntry<T, K> {
     fn eq(&self, other: &Self) -> bool {
         self.seq == other.seq && (self.cmp)(&self.key, &other.key) == Ordering::Equal
     }
 }
 
-impl<T> Eq for OrderedEntry<T> {}
+impl<T, K> Eq for OrderedEntry<T, K> {}
 
-impl<T> PartialOrd for OrderedEntry<T> {
+impl<T, K> PartialOrd for OrderedEntry<T, K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<T> Ord for OrderedEntry<T> {
+impl<T, K> Ord for OrderedEntry<T, K> {
     fn cmp(&self, other: &Self) -> Ordering {
         let key_order = (self.cmp)(&self.key, &other.key);
         let priority = if self.descending {

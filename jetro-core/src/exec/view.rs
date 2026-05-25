@@ -2406,7 +2406,7 @@ where
     }
 
     let mut sorter =
-        pipeline::BoundedKeySorter::new(plan.descending, strategy, pipeline::cmp_val_total);
+        pipeline::BoundedKeySorter::new(plan.descending, strategy, ViewKey::cmp_total);
     if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
@@ -2687,7 +2687,7 @@ where
             vm,
         );
     }
-    let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, pipeline::cmp_val_total);
+    let mut sorter = pipeline::OrderedKeySorter::new(ordered_descending, ViewKey::cmp_total);
 
     if let Err(err) = drive_view_frontier(
         source,
@@ -3359,24 +3359,22 @@ where
     ViewKey::from_value_view(item)
 }
 
-/// Extracts a sort key `Val` from `item`, optionally applying a row program.
-/// Falls back to materialising the key value when no key program is specified.
+/// Extracts a sort key from `item`, optionally applying a row program.
+/// Compound keys are serialised directly from the view without materialising a `Val` subtree.
 fn view_sort_key<'a, V>(
     item: &FrontierRow<V>,
     key: Option<&pipeline::RowProgram>,
     vm: &mut VM,
-) -> Option<Val>
+) -> Option<ViewKey>
 where
     V: FrontierBaseView<'a>,
 {
     match key {
         Some(program) => match eval_frontier_kernel_with_vm(item, program.kernel(), vm)? {
-            pipeline::ViewKernelValue::View(view) => {
-                Some(pipeline::view_kernel_view_to_owned(view))
-            }
-            pipeline::ViewKernelValue::Owned(value) => Some(value),
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
         },
-        None => Some(pipeline::view_kernel_view_to_owned(item.clone())),
+        None => ViewKey::from_value_view(item),
     }
 }
 
@@ -7599,6 +7597,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(out, Val::Int(3));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn natural_sort_compound_keys_stay_view_serialized() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[[2,"b"],[1,"a"],[3,"c"],[1,"aa"]]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Sort(crate::exec::pipeline::SortSpec::identity())],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Int(4));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
