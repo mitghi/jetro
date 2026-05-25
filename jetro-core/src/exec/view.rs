@@ -737,13 +737,13 @@ where
     )? {
         return Some(Err(err));
     }
-    keyed.sort_by(|a, b| pipeline::cmp_val_total(&a.0, &b.0));
+    keyed.sort_by(|a, b| ViewKey::cmp_total(&a.0, &b.0));
     let mut rows = Vec::with_capacity(keyed.len());
-    let mut last_key: Option<Val> = None;
+    let mut last_key: Option<ViewKey> = None;
     for (key, row) in keyed {
         if last_key
             .as_ref()
-            .is_some_and(|last| pipeline::cmp_val_total(last, &key) == Ordering::Equal)
+            .is_some_and(|last| ViewKey::cmp_total(last, &key) == Ordering::Equal)
         {
             continue;
         }
@@ -784,13 +784,16 @@ fn sorted_dedup_view_key<'a, V>(
     item: &FrontierRow<V>,
     key_kernel: Option<&pipeline::BodyKernel>,
     vm: &mut VM,
-) -> Option<Val>
+) -> Option<ViewKey>
 where
     V: FrontierBaseView<'a>,
 {
     match key_kernel {
-        Some(kernel) => eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm),
-        None => Some(pipeline::view_kernel_view_to_owned(item.clone())),
+        Some(kernel) => match eval_frontier_kernel_with_vm(item, kernel, vm)? {
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
+        },
+        None => ViewKey::from_value_view(item),
     }
 }
 
@@ -5776,6 +5779,31 @@ mod tests {
         );
         assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn sorted_dedup_compound_keys_stay_view_serialized() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[[2,"b"],[1,"a"],[2,"b"],[1,"aa"],[1,"a"]]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::SortedDedup(None)],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_with_env_and_vm(TapeView::root(&tape), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
