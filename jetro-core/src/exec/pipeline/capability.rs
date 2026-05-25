@@ -4,6 +4,8 @@
 //! the view execution path decide, per stage, whether it can operate on borrowed
 //! `ValueView` slices or must materialise rows into owned `Val`s.
 
+use std::borrow::Cow;
+
 use crate::builtins::registry::BuiltinId;
 pub(crate) use crate::builtins::BuiltinViewInputMode as ViewInputMode;
 pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterialization;
@@ -760,6 +762,41 @@ impl ViewStageCapability {
         }
         false
     }
+
+    /// Rewrites a view-stage prefix for source-access selection by removing
+    /// constant no-op predicate stages and truncating at a provably-empty stage.
+    pub(crate) fn source_access_stages<'a>(
+        stages: &'a [Self],
+        stage_kernels: &[BodyKernel],
+    ) -> Cow<'a, [Self]> {
+        let mut rewritten: Option<Vec<Self>> = None;
+        for (idx, stage) in stages.iter().enumerate() {
+            match stage.constant_access_effect(stage_kernels) {
+                ViewStageConstantEffect::Keep => {
+                    if let Some(out) = rewritten.as_mut() {
+                        out.push(stage.clone());
+                    }
+                }
+                ViewStageConstantEffect::NoOp => {
+                    if rewritten.is_none() {
+                        let mut out = Vec::with_capacity(stages.len());
+                        out.extend_from_slice(&stages[..idx]);
+                        rewritten = Some(out);
+                    }
+                }
+                ViewStageConstantEffect::Empty => {
+                    let mut out = rewritten.unwrap_or_else(|| {
+                        let mut out = Vec::with_capacity(idx + 1);
+                        out.extend_from_slice(&stages[..idx]);
+                        out
+                    });
+                    out.push(Self::Take(0));
+                    return Cow::Owned(out);
+                }
+            }
+        }
+        rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
+    }
 }
 
 fn constant_kernel_truthy(kernel: &BodyKernel) -> Option<bool> {
@@ -1371,6 +1408,40 @@ mod tests {
             None
         );
         assert!(!ViewStageCapability::prefix_forces_empty(&unsupported, &[]));
+    }
+
+    #[test]
+    fn view_stage_capability_rewrites_source_access_prefix() {
+        let stages = [
+            ViewStageCapability::Map { kernel: 0 },
+            ViewStageCapability::Filter { kernel: 1 },
+            ViewStageCapability::Take(3),
+        ];
+        let kernels = [BodyKernel::Current, BodyKernel::ConstBool(true)];
+        let rewritten = ViewStageCapability::source_access_stages(&stages, &kernels);
+        assert!(matches!(
+            rewritten.as_ref(),
+            [ViewStageCapability::Map { kernel: 0 }, ViewStageCapability::Take(3)]
+        ));
+
+        let empty = [
+            ViewStageCapability::Map { kernel: 0 },
+            ViewStageCapability::TakeWhile { kernel: 1 },
+            ViewStageCapability::Take(3),
+        ];
+        let kernels = [BodyKernel::Current, BodyKernel::ConstBool(false)];
+        let rewritten = ViewStageCapability::source_access_stages(&empty, &kernels);
+        assert!(matches!(
+            rewritten.as_ref(),
+            [ViewStageCapability::Map { kernel: 0 }, ViewStageCapability::Take(0)]
+        ));
+
+        let unchanged = [ViewStageCapability::Filter { kernel: 0 }];
+        let rewritten = ViewStageCapability::source_access_stages(&unchanged, &[]);
+        assert!(matches!(
+            rewritten.as_ref(),
+            [ViewStageCapability::Filter { kernel: 0 }]
+        ));
     }
 
     #[test]

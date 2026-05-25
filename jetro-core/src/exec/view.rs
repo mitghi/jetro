@@ -6,7 +6,6 @@
 //! method call), calls `materialize()`. Used by `physical_eval` when the
 //! planner selects the `View` backend preference.
 
-use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -683,7 +682,10 @@ where
     let capabilities = pipeline::view_capabilities(body)?;
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let source_demand = body.pull_demand();
-    let access_stages = source_access_stages(&capabilities.stages, &body.stage_kernels);
+    let access_stages = pipeline::ViewStageCapability::source_access_stages(
+        &capabilities.stages,
+        &body.stage_kernels,
+    );
     let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
         .choose_view_access(source_demand, access_stages.as_ref());
     let sink = view_suffix_sink_for_demand(
@@ -932,39 +934,6 @@ fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {
         pipeline::BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
         _ => None,
     }
-}
-
-fn source_access_stages<'a>(
-    stages: &'a [pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-) -> Cow<'a, [pipeline::ViewStageCapability]> {
-    let mut rewritten: Option<Vec<pipeline::ViewStageCapability>> = None;
-    for (idx, stage) in stages.iter().enumerate() {
-        match stage.constant_access_effect(stage_kernels) {
-            pipeline::ViewStageConstantEffect::Keep => {
-                if let Some(out) = rewritten.as_mut() {
-                    out.push(stage.clone());
-                }
-            }
-            pipeline::ViewStageConstantEffect::NoOp => {
-                if rewritten.is_none() {
-                    let mut out = Vec::with_capacity(stages.len());
-                    out.extend_from_slice(&stages[..idx]);
-                    rewritten = Some(out);
-                }
-            }
-            pipeline::ViewStageConstantEffect::Empty => {
-                let mut out = rewritten.unwrap_or_else(|| {
-                    let mut out = Vec::with_capacity(idx + 1);
-                    out.extend_from_slice(&stages[..idx]);
-                    out
-                });
-                out.push(pipeline::ViewStageCapability::Take(0));
-                return Cow::Owned(out);
-            }
-        }
-    }
-    rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
 }
 
 fn resolve_view_sink(
@@ -1379,7 +1348,7 @@ where
     if source_demand.is_zero() {
         return Some(Ok(()));
     }
-    let access_stages = source_access_stages(stages, stage_kernels);
+    let access_stages = pipeline::ViewStageCapability::source_access_stages(stages, stage_kernels);
     let access = source_capabilities.choose_view_access(source_demand, access_stages.as_ref());
     match access {
         pipeline::SourceAccessMode::Reverse { .. } => {
