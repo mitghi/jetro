@@ -3713,13 +3713,12 @@ where
 {
     match kernel {
         pipeline::BodyKernel::NestedPlan(plan) => {
-            let Some(body) = plan.receiver_view_body() else {
+            let Some(view_plan) = plan.view_plan() else {
                 return pipeline::eval_view_kernel_with_vm(kernel, item, vm);
             };
             let value = match item {
-                FrontierRow::Borrowed(view) => {
-                    run_receiver_nested_body_with_vm(view.clone(), &body, vm)?.ok()?
-                }
+                FrontierRow::Borrowed(view) => run_nested_view_plan(view.clone(), view_plan, vm)?
+                    .ok()?,
                 FrontierRow::Owned(value) => plan.run(value.clone()).ok()?,
             };
             Some(pipeline::ViewKernelValue::Owned(value))
@@ -3925,12 +3924,14 @@ where
     V: FrontierBaseView<'a>,
 {
     if let pipeline::BodyKernel::NestedPlan(plan) = kernel {
-        if let Some(body) = plan.receiver_view_body() {
+        if let Some(view_plan) = plan.view_plan() {
             return match item {
-                FrontierRow::Borrowed(view) => {
-                    let rows = collect_receiver_nested_body_views(view.clone(), &body, vm)?;
-                    Some(Box::new(rows.into_iter()))
-                }
+                FrontierRow::Borrowed(view) => collect_nested_view_plan_rows(
+                    view.clone(),
+                    view_plan,
+                    vm,
+                )
+                .map(|rows| Box::new(rows.into_iter()) as Box<dyn Iterator<Item = FrontierRow<V>>>),
                 FrontierRow::Owned(value) => {
                     let value = plan.run(value.clone()).ok()?;
                     owned_array_rows(value)
@@ -3941,6 +3942,42 @@ where
     match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => view.array_iter(),
         pipeline::ViewKernelValue::Owned(value) => owned_array_rows(value),
+    }
+}
+
+fn run_nested_view_plan<'a, V>(
+    row: V,
+    plan: &pipeline::NestedViewPlan,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    match plan.source() {
+        pipeline::NestedViewSource::Receiver => {
+            run_receiver_nested_body_with_vm(row, plan.body(), vm)
+        }
+        pipeline::NestedViewSource::FieldChain(keys) => {
+            run_receiver_nested_body_with_vm(row.field_chain(keys), plan.body(), vm)
+        }
+    }
+}
+
+fn collect_nested_view_plan_rows<'a, V>(
+    row: V,
+    plan: &pipeline::NestedViewPlan,
+    vm: &mut VM,
+) -> Option<Vec<FrontierRow<V>>>
+where
+    V: FrontierBaseView<'a>,
+{
+    match plan.source() {
+        pipeline::NestedViewSource::Receiver => {
+            collect_receiver_nested_body_views(row, plan.body(), vm)
+        }
+        pipeline::NestedViewSource::FieldChain(keys) => {
+            collect_receiver_nested_body_views(row.field_chain(keys), plan.body(), vm)
+        }
     }
 }
 

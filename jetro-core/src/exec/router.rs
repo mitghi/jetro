@@ -1402,6 +1402,30 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn nested_field_chain_pipeline_in_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"a","items":[{"isbn":"old","price":5},{"isbn":"new","price":25}],"payload":{"large":[1,2,3]}},{"title":"b","items":[{"isbn":"x","price":30}],"payload":{"large":[4,5,6]}}],"unused":{"large":[7,8,9]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map({title, last: items.filter(price > 20).map(isbn).last()})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"title": "a", "last": "new"},
+                {"title": "b", "last": "x"}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn object_shape_pipeline_child_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(

@@ -27,12 +27,46 @@ use crate::util::JsonView;
 pub struct NestedPlanKernel {
     plan: Arc<super::Plan>,
     prepared: super::nested::PreparedPlan,
+    view_plan: Option<NestedViewPlan>,
+}
+
+/// View-native source metadata for a nested plan relative to the current row.
+#[derive(Debug, Clone)]
+pub(crate) enum NestedViewSource {
+    /// The nested plan runs directly against the current row.
+    Receiver,
+    /// The nested plan first reads a field path from the current row.
+    FieldChain(Arc<[Arc<str>]>),
+}
+
+/// Cached view-native body/source pair for nested plan execution.
+#[derive(Debug, Clone)]
+pub(crate) struct NestedViewPlan {
+    source: NestedViewSource,
+    body: super::PipelineBody,
+}
+
+impl NestedViewPlan {
+    #[inline]
+    pub(crate) fn source(&self) -> &NestedViewSource {
+        &self.source
+    }
+
+    #[inline]
+    pub(crate) fn body(&self) -> &super::PipelineBody {
+        &self.body
+    }
 }
 
 impl NestedPlanKernel {
     pub(crate) fn new(plan: Arc<super::Plan>) -> Self {
         let prepared = super::nested::PreparedPlan::new(&plan);
-        Self { plan, prepared }
+        let view_plan = nested_view_plan(&plan);
+        Self {
+            plan,
+            prepared,
+            view_plan,
+        }
     }
 
     pub(crate) fn parent_field_demand(&self) -> FieldDemand {
@@ -43,15 +77,26 @@ impl NestedPlanKernel {
         self.prepared.run(seed)
     }
 
-    pub(crate) fn receiver_view_body(&self) -> Option<super::PipelineBody> {
-        matches!(self.plan.source, super::Source::Receiver(_)).then(|| super::PipelineBody {
-            stages: self.plan.stages.clone(),
-            stage_exprs: self.plan.stage_exprs.clone(),
-            sink: self.plan.sink.clone(),
-            stage_kernels: self.plan.stage_kernels.clone(),
-            sink_kernels: self.plan.sink_kernels.clone(),
-        })
+    pub(crate) fn view_plan(&self) -> Option<&NestedViewPlan> {
+        self.view_plan.as_ref()
     }
+}
+
+fn nested_view_plan(plan: &super::Plan) -> Option<NestedViewPlan> {
+    let source = match &plan.source {
+        super::Source::Receiver(_) => NestedViewSource::Receiver,
+        super::Source::FieldChain { keys } => NestedViewSource::FieldChain(Arc::clone(keys)),
+    };
+    Some(NestedViewPlan {
+        source,
+        body: super::PipelineBody {
+            stages: plan.stages.clone(),
+            stage_exprs: plan.stage_exprs.clone(),
+            sink: plan.sink.clone(),
+            stage_kernels: plan.stage_kernels.clone(),
+            sink_kernels: plan.sink_kernels.clone(),
+        },
+    })
 }
 
 /// Pre-classified stage body expression; variants are ordered least-to-most expensive, `Generic` re-enters the VM.
@@ -962,8 +1007,8 @@ impl BodyKernel {
                         .is_none_or(|predicate| predicate.is_view_native())
             }
             Self::NestedPlan(plan) => plan
-                .receiver_view_body()
-                .is_some_and(|body| body.can_run_with_view()),
+                .view_plan()
+                .is_some_and(|plan| plan.body().can_run_with_view()),
             _ => true,
         }
     }
@@ -3415,6 +3460,25 @@ mod tests {
 
         assert!(matches!(kernel, BodyKernel::NestedPlan(_)), "{kernel:#?}");
         assert_eq!(field_paths(&kernel), vec!["items.price", "items.isbn"]);
+    }
+
+    #[test]
+    fn nested_plan_reuses_cached_field_chain_view_body() {
+        let expr =
+            parse("items.filter(price > 20).map(isbn).last()").expect("parse nested pipeline");
+        let BodyKernel::NestedPlan(plan) = BodyKernel::classify_expr(&expr) else {
+            panic!("expected nested plan");
+        };
+        let first = plan
+            .view_plan()
+            .expect("field-chain nested plan should expose view plan");
+        let second = plan
+            .view_plan()
+            .expect("field-chain nested plan should expose cached view plan");
+
+        assert!(std::ptr::eq(first, second));
+        assert!(matches!(first.source(), super::NestedViewSource::FieldChain(_)));
+        assert!(first.body().can_run_with_view());
     }
 
     #[test]
