@@ -1581,6 +1581,8 @@ pub enum BuiltinViewStage {
     SetUnion,
     /// Join all receiver rows into one string with a static separator.
     JoinString,
+    /// Zip receiver rows with a static array argument.
+    ZipStatic,
     /// Append one static value after all receiver rows.
     AppendValue,
     /// Prepend one static value before receiver rows.
@@ -2431,6 +2433,7 @@ impl BuiltinViewStage {
             | Self::SetFilter(_)
             | Self::SetUnion
             | Self::JoinString
+            | Self::ZipStatic
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -2456,6 +2459,7 @@ impl BuiltinViewStage {
             | Self::KeyedReduce
             | Self::SetUnion
             | Self::JoinString
+            | Self::ZipStatic
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
@@ -2481,7 +2485,9 @@ impl BuiltinViewStage {
     pub fn capability_shape(self) -> BuiltinViewCapabilityShape {
         match self {
             Self::RemoveValue => BuiltinViewCapabilityShape::RemoveValueTarget,
-            Self::AppendValue | Self::PrependValue => BuiltinViewCapabilityShape::ValueArg,
+            Self::AppendValue | Self::PrependValue | Self::ZipStatic => {
+                BuiltinViewCapabilityShape::ValueArg
+            }
             Self::SetFilter(_) | Self::SetUnion => BuiltinViewCapabilityShape::ValVecArg,
             Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
             Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
@@ -2507,9 +2513,11 @@ impl BuiltinViewStage {
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
-            Self::SetUnion | Self::JoinString | Self::AppendValue | Self::PrependValue => {
-                BuiltinCardinality::Barrier
-            }
+            Self::SetUnion
+            | Self::JoinString
+            | Self::ZipStatic
+            | Self::AppendValue
+            | Self::PrependValue => BuiltinCardinality::Barrier,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
         }
     }
@@ -2547,6 +2555,7 @@ impl BuiltinViewStage {
             | Self::SetFilter(_)
             | Self::SetUnion
             | Self::JoinString
+            | Self::ZipStatic
             | Self::AppendValue
             | Self::PrependValue
             | Self::Take
@@ -2586,6 +2595,7 @@ impl BuiltinViewStage {
             | Self::SetFilter(_)
             | Self::SetUnion
             | Self::JoinString
+            | Self::ZipStatic
             | Self::KeyedReduce
             | Self::AppendValue
             | Self::PrependValue => 10.0,
@@ -2620,6 +2630,7 @@ impl BuiltinViewStage {
             | Self::KeyedReduce
             | Self::SetUnion
             | Self::JoinString
+            | Self::ZipStatic
             | Self::AppendValue
             | Self::PrependValue => 1.0,
             Self::Take | Self::Skip => 0.5,

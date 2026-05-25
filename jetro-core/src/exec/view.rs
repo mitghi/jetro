@@ -2556,6 +2556,27 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
+    if let pipeline::ViewStageCapability::ZipStatic { ref values } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let idx = op_state.get_mut(stage_idx)?.next_index();
+        let Some(right) = values.get(idx).cloned() else {
+            return Some(Ok(ViewDriveFlow::Stop));
+        };
+        let pair = Val::arr(vec![pipeline::view_kernel_view_to_owned(item), right]);
+        return drive_owned_child(
+            pair,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Lag { offset } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -8195,6 +8216,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([""]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_zip_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,2,3,4]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Zip,
+                crate::builtins::BuiltinArgs::Val(Val::arr(vec![
+                    Val::Str(Arc::from("a")),
+                    Val::Str(Arc::from("b")),
+                    Val::Str(Arc::from("c")),
+                ])),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([[1, "a"], [2, "b"], [3, "c"]])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_zip_empty_right_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,2,3]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Zip,
+                crate::builtins::BuiltinArgs::Val(Val::arr(Vec::new())),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 

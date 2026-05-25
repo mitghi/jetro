@@ -854,6 +854,11 @@ pub(crate) enum ViewStageCapability {
         /// Separator inserted between rows.
         sep: std::sync::Arc<str>,
     },
+    /// Zip rows with a static right-hand array.
+    ZipStatic {
+        /// Right-hand values paired with receiver rows.
+        values: Vec<Val>,
+    },
     /// Append one owned literal after all input rows.
     AppendValue(Val),
     /// Prepend one owned literal before input rows.
@@ -922,6 +927,7 @@ impl ViewStageCapability {
             BuiltinViewStage::JoinString => Some(Self::JoinString {
                 sep: std::sync::Arc::from(""),
             }),
+            BuiltinViewStage::ZipStatic => Some(Self::ZipStatic { values: Vec::new() }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -956,6 +962,7 @@ impl ViewStageCapability {
             Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
             Self::SetUnion { .. } => BuiltinViewStage::SetUnion,
             Self::JoinString { .. } => BuiltinViewStage::JoinString,
+            Self::ZipStatic { .. } => BuiltinViewStage::ZipStatic,
             Self::AppendValue(_) => BuiltinViewStage::AppendValue,
             Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,
@@ -1120,6 +1127,7 @@ impl ViewStageCapability {
             | Self::SetFilter { .. }
             | Self::SetUnion { .. }
             | Self::JoinString { .. }
+            | Self::ZipStatic { .. }
             | Self::AppendValue(_)
             | Self::PrependValue(_) => None,
         }
@@ -1204,6 +1212,7 @@ impl ViewStageCapability {
                 | Self::SetFilter { .. }
                 | Self::SetUnion { .. }
                 | Self::JoinString { .. }
+                | Self::ZipStatic { .. }
                 | Self::AppendValue(_)
                 | Self::PrependValue(_) => return false,
             }

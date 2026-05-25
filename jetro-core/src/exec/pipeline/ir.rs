@@ -1174,6 +1174,15 @@ impl Stage {
                             crate::builtins::BuiltinViewStage::PrependValue,
                             crate::builtins::BuiltinArgs::Val(value),
                         ) => Some(ViewStageCapability::PrependValue(value.clone())),
+                        (
+                            crate::builtins::BuiltinViewStage::ZipStatic,
+                            crate::builtins::BuiltinArgs::Val(value),
+                        ) => Some(ViewStageCapability::ZipStatic {
+                            values: value
+                                .as_vals()
+                                .map(|values| values.into_owned())
+                                .unwrap_or_default(),
+                        }),
                         _ => None,
                     },
                     _ => None,

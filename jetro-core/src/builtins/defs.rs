@@ -2462,6 +2462,8 @@ impl Builtin for Zip {
     const NAME: &'static str = "zip";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::ZipStatic)
     }
 }
 

@@ -361,6 +361,7 @@ where
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::SetUnion { .. } => None,
         pipeline::ViewStageCapability::JoinString { .. } => None,
+        pipeline::ViewStageCapability::ZipStatic { .. } => None,
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,
