@@ -827,21 +827,12 @@ fn direct_predicate_from_source_len<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    let pipeline::ViewSinkCapability::Predicate {
-        op,
-        predicate_kernel,
-    } = sink
-    else {
-        return None;
-    };
-    if matches!(op, crate::builtins::BuiltinPredicateSink::FindOne) {
-        return None;
-    }
+    let (op, predicate_kernel) = sink.constant_predicate_cardinality_contract()?;
     let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
     if forced_empty {
         return op.empty_stream_result();
     }
-    let matched = match sink_kernels.get(*predicate_kernel)? {
+    let matched = match sink_kernels.get(predicate_kernel)? {
         pipeline::BodyKernel::ConstBool(value) => *value,
         pipeline::BodyKernel::Const(value) => crate::util::is_truthy(value),
         _ => return None,

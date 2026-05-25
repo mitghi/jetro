@@ -951,6 +951,20 @@ impl ViewSinkCapability {
             _ => None,
         }
     }
+
+    /// Returns the predicate terminal contract for sinks whose result can be
+    /// derived from known source cardinality and a compile-time constant predicate.
+    pub(crate) fn constant_predicate_cardinality_contract(
+        &self,
+    ) -> Option<(BuiltinPredicateSink, usize)> {
+        match self {
+            Self::Predicate {
+                op,
+                predicate_kernel,
+            } if !op.returns_matching_row() => Some((*op, *predicate_kernel)),
+            _ => None,
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -1360,6 +1374,38 @@ mod tests {
         );
         assert_eq!(
             ViewSinkCapability::Collect.count_from_cardinality_predicate(),
+            None
+        );
+    }
+
+    #[test]
+    fn view_sink_capability_describes_constant_predicate_cardinality_contract() {
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: BuiltinPredicateSink::Any,
+                predicate_kernel: 3,
+            }
+            .constant_predicate_cardinality_contract(),
+            Some((BuiltinPredicateSink::Any, 3))
+        );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: BuiltinPredicateSink::IndicesWhere,
+                predicate_kernel: 4,
+            }
+            .constant_predicate_cardinality_contract(),
+            Some((BuiltinPredicateSink::IndicesWhere, 4))
+        );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: BuiltinPredicateSink::FindOne,
+                predicate_kernel: 5,
+            }
+            .constant_predicate_cardinality_contract(),
+            None
+        );
+        assert_eq!(
+            ViewSinkCapability::Collect.constant_predicate_cardinality_contract(),
             None
         );
     }
