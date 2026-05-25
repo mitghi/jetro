@@ -304,6 +304,7 @@ fn select_backend_plan(
             },
         ) if facts.can_stream_rows => BackendPlan::new(&[
             crate::ir::physical::BackendPreference::TapeView,
+            crate::ir::physical::BackendPreference::TapeRows,
             crate::ir::physical::BackendPreference::MaterializedSource,
             crate::ir::physical::BackendPreference::ValView,
             crate::ir::physical::BackendPreference::Interpreted,

@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::data::value::{ObjVecData, Val};
+use crate::ir::physical::PhysicalPathStep;
 
 use super::{index_from_end, walk_field_chain, Source, SourceAccessMode};
 
@@ -450,6 +451,17 @@ impl<'a> TapeRowSource<'a> {
         Self::from_tape_index(tape, idx)
     }
 
+    /// Walks a static root path through `tape` and returns a row source rooted at the resolved node.
+    pub(super) fn from_root_path(
+        tape: &'a crate::data::tape::TapeData,
+        steps: &[PhysicalPathStep],
+    ) -> Self {
+        let Some(idx) = tape_index_for_root_path(tape, steps) else {
+            return Self::Missing;
+        };
+        Self::from_tape_index(tape, idx)
+    }
+
     /// Constructs a `TapeRowSource` at tape node `idx`, choosing `Array` for JSON arrays and `Single` otherwise.
     pub(super) fn from_tape_index(tape: &'a crate::data::tape::TapeData, idx: usize) -> Self {
         match tape.nodes.get(idx) {
@@ -579,6 +591,36 @@ impl<'a> TapeRowSource<'a> {
             Self::Missing => TapeRowsIter::Empty,
         }
     }
+}
+
+fn tape_index_for_root_path(
+    tape: &crate::data::tape::TapeData,
+    steps: &[PhysicalPathStep],
+) -> Option<usize> {
+    let mut idx = 0;
+    for step in steps {
+        idx = match step {
+            PhysicalPathStep::Field(key) => tape.object_field_value(idx, key.as_ref())?,
+            PhysicalPathStep::Index(index) => tape_array_child_index(tape, idx, *index)?,
+        };
+    }
+    Some(idx)
+}
+
+fn tape_array_child_index(
+    tape: &crate::data::tape::TapeData,
+    idx: usize,
+    index: i64,
+) -> Option<usize> {
+    let crate::data::tape::TapeNode::Array { len, .. } = tape.nodes.get(idx)? else {
+        return None;
+    };
+    let child = if index < 0 {
+        len.checked_sub(index.unsigned_abs() as usize)?
+    } else {
+        index as usize
+    };
+    tape.array_child_start(idx + 1, *len, child)
 }
 
 /// Resolves a `Source` to a `Val`, cloning the embedded receiver or walking the field-chain on `root`.

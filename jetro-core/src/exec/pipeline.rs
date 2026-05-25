@@ -120,6 +120,17 @@ pub(crate) fn run_tape_field_chain_with_vm(
     materialized_exec::run_tape_field_chain_with_vm(body, tape, keys, base_env, vm)
 }
 
+/// Executes tape row streaming from a static root path with caller-owned VM state.
+pub(crate) fn run_tape_root_path_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+    base_env: &Env,
+    vm: &mut crate::vm::VM,
+) -> Option<Result<Val, EvalError>> {
+    materialized_exec::run_tape_root_path_with_vm(body, tape, steps, base_env, vm)
+}
+
 /// Extension point allowing the host (e.g. `Jetro`) to upgrade a flat `Arc<Vec<Val>>` array
 /// into a columnar `ObjVecData` representation for zero-copy row iteration.
 pub trait PipelineData {

@@ -589,6 +589,7 @@ impl PlanNode {
                 ],
                 PipelinePlanSource::RootPath { .. } => &[
                     BackendPreference::TapeView,
+                    BackendPreference::TapeRows,
                     BackendPreference::MaterializedSource,
                     BackendPreference::ValView,
                     BackendPreference::Interpreted,

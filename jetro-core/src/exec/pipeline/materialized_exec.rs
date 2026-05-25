@@ -200,6 +200,37 @@ pub(super) fn run_tape_field_chain_with_vm(
     )
 }
 
+/// Streams a pipeline directly from a static root path on a `simd-json` tape using caller-owned VM state.
+pub(super) fn run_tape_root_path_with_vm(
+    body: &PipelineBody,
+    tape: &crate::data::tape::TapeData,
+    steps: &[crate::ir::physical::PhysicalPathStep],
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    if body
+        .stages
+        .iter()
+        .any(Stage::requires_legacy_materialization)
+    {
+        return None;
+    }
+    if !body.can_run_with_materialized_source_env() {
+        return None;
+    }
+    let source = row_source::TapeRowSource::from_root_path(tape, steps);
+    if !source.is_array_provider() {
+        return None;
+    }
+    let pipeline = body.clone().with_source(Source::Receiver(Val::Null));
+    let planned = planned_stream_for_access(&pipeline);
+    let iter = source.iter_materialized_for_access(planned.access);
+    Some(
+        run_streaming_rows_with_vm(planned.pipeline.as_ref(), base_env, iter, vm)
+            .map(|out| planned.restore(out)),
+    )
+}
+
 #[cfg(test)]
 fn run_streaming_rows<I>(pipeline: &Pipeline, base_env: &Env, iter: I) -> Result<Val, EvalError>
 where
@@ -1087,6 +1118,43 @@ mod tests {
                 .unwrap();
 
         assert_eq!(out, Val::Int(4));
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn tape_row_bridge_streams_static_root_path_before_materializing() {
+        let plan = crate::plan::physical::plan_query("$.groups[0].books.map(score + 1).nth(1)");
+        let crate::ir::physical::QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        let crate::ir::physical::PlanNode::Pipeline {
+            source:
+                crate::ir::physical::PipelinePlanSource::RootPath {
+                    steps: source_steps,
+                },
+            body,
+        } = plan.node(*root)
+        else {
+            panic!("expected root-path pipeline");
+        };
+        let tape = crate::data::tape::TapeData::parse(
+            br#"{"groups":[{"books":[{"score":1},{"score":2},{"score":3}]},{"books":[{"score":100}]}],"unused":{"large":[1,2,3]}}"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_tape_root_path_with_vm(
+            body,
+            &tape,
+            source_steps,
+            &Env::new(Val::Null),
+            &mut vm,
+        )
+        .expect("tape rows path")
+        .unwrap();
+
+        assert_eq!(out, Val::Int(3));
         assert_eq!(tape.materialized_subtrees(), 1);
     }
 

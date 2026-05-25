@@ -479,6 +479,7 @@ impl ExecCtx<'_, '_> {
             ) => self.eval_field_chain_pipeline_backend(backend, keys, body),
             (
                 BackendPreference::TapeView
+                | BackendPreference::TapeRows
                 | BackendPreference::ValView
                 | BackendPreference::MaterializedSource,
                 PipelinePlanSource::RootPath { steps },
@@ -532,6 +533,7 @@ impl ExecCtx<'_, '_> {
     ) -> Option<Result<Val, EvalError>> {
         match backend {
             BackendPreference::TapeView => self.eval_tape_view_root_path_pipeline(steps, body),
+            BackendPreference::TapeRows => self.eval_tape_rows_root_path_pipeline(steps, body),
             BackendPreference::MaterializedSource => {
                 self.eval_materialized_root_path_pipeline(steps, body)
             }
@@ -616,6 +618,27 @@ impl ExecCtx<'_, '_> {
                     Err(err) => return Some(Err(err)),
                 };
                 return pipeline::run_tape_field_chain_with_vm(body, tape, keys, &env, self.vm);
+            }
+        }
+        None
+    }
+
+    /// Runs the tape row bridge from a static root path, materialising individual rows on demand.
+    fn eval_tape_rows_root_path_pipeline(
+        &mut self,
+        steps: &[PhysicalPathStep],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
+                return pipeline::run_tape_root_path_with_vm(body, tape, steps, &env, self.vm);
             }
         }
         None
