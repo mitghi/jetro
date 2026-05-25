@@ -1030,6 +1030,13 @@ fn direct_tape_predicate_from_kernel(
 ) -> Option<NdjsonDirectPredicate> {
     match kernel {
         crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit } if op.is_scalar_comparison() => {
+            if let Some(steps) = kernel_to_physical_path(lhs) {
+                return Some(NdjsonDirectPredicate::Binary {
+                    lhs: Box::new(NdjsonDirectPredicate::Path(steps)),
+                    op: *op,
+                    rhs: Box::new(NdjsonDirectPredicate::Literal(lit.clone())),
+                });
+            }
             if let Some((source_steps, element, suffix_steps)) =
                 direct_array_element_path_from_kernel(lhs)
             {
@@ -1077,6 +1084,9 @@ fn direct_tape_predicate_from_kernel(
         }
         crate::exec::pipeline::BodyKernel::ArraySelect { .. }
         | crate::exec::pipeline::BodyKernel::Compose { .. } => {
+            if let Some(path) = kernel_to_physical_path(kernel) {
+                return Some(NdjsonDirectPredicate::Path(path));
+            }
             let (source_steps, element, suffix_steps) =
                 direct_array_element_path_from_kernel(kernel)?;
             Some(NdjsonDirectPredicate::ArrayElementPath {
@@ -1440,6 +1450,13 @@ fn direct_item_predicate_from_kernel(
     }
     if let crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit } = kernel {
         if op.is_scalar_comparison() {
+            if let Some(lhs) = kernel_to_physical_path(lhs) {
+                return Some(NdjsonDirectItemPredicate::CmpLit {
+                    lhs,
+                    op: *op,
+                    lit: lit.clone(),
+                });
+            }
             if let Some((source_steps, element, suffix_steps)) =
                 direct_array_element_path_from_kernel(lhs)
             {
@@ -1531,9 +1548,38 @@ fn combine_direct_item_predicate_kernels(
 fn kernel_to_physical_path(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonPhysicalPath> {
-    kernel
-        .field_path_keys()
-        .map(|keys| physical_field_keys_to_path_steps(&keys))
+    use crate::exec::pipeline::{ArraySelector, BodyKernel};
+
+    match kernel {
+        BodyKernel::Current => Some(Vec::new()),
+        BodyKernel::FieldRead(key) => Some(vec![PhysicalPathStep::Field(Arc::clone(key))]),
+        BodyKernel::FieldChain(keys) => Some(physical_field_keys_to_path_steps(keys)),
+        BodyKernel::ArraySelect { array, selector } => {
+            let mut steps = kernel_to_physical_path(array)?;
+            steps.push(PhysicalPathStep::Index(match selector {
+                ArraySelector::First => 0,
+                ArraySelector::Last => -1,
+                ArraySelector::Nth(index) => i64::try_from(*index).ok()?,
+            }));
+            Some(steps)
+        }
+        BodyKernel::Compose { first, then } => {
+            let mut steps = kernel_to_physical_path(first)?;
+            steps.extend(kernel_to_physical_path(then)?);
+            Some(steps)
+        }
+        BodyKernel::BuiltinCall { receiver, call } => {
+            let mut steps = kernel_to_physical_path(receiver)?;
+            let result_keys = crate::builtins::registry::view_projection_result_field_path(
+                call.id(),
+                &call.args,
+                &Vec::new(),
+            )?;
+            steps.extend(physical_field_keys_to_path_steps(&result_keys));
+            Some(steps)
+        }
+        _ => None,
+    }
 }
 
 fn direct_projection_value_from_kernel(
@@ -1652,11 +1698,19 @@ fn direct_array_element_path_from_kernel(
 fn direct_scalar_call_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<(NdjsonPhysicalPath, crate::builtins::BuiltinCall)> {
-    let call = kernel.path_scalar_call()?;
-    Some((
-        physical_field_keys_to_path_steps(&call.receiver_keys),
-        call.call,
-    ))
+    if let Some(call) = kernel.path_scalar_call() {
+        return Some((
+            physical_field_keys_to_path_steps(&call.receiver_keys),
+            call.call,
+        ));
+    }
+    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
+        return None;
+    };
+    if !call.is_direct_view_scalar_call() {
+        return None;
+    }
+    Some((kernel_to_physical_path(receiver)?, call.clone()))
 }
 
 fn direct_object_fields_from_kernel(
@@ -1916,15 +1970,53 @@ mod tests {
     fn direct_tape_predicate_accepts_array_selector_paths() {
         let cmp = crate::parse::parser::parse(r#"tags.first().name == "sf""#)
             .expect("parse cmp");
+        let cmp_index =
+            crate::parse::parser::parse(r#"tags[0].name == "sf""#).expect("parse index cmp");
         let truthy = crate::parse::parser::parse("attrs.first().value").expect("parse path");
 
         assert!(matches!(
             direct_tape_predicate_for_expr(&cmp),
-            Some(NdjsonDirectPredicate::ArrayElementCmpLit { .. })
+            Some(NdjsonDirectPredicate::Binary { ref lhs, op: BinOp::Eq, .. })
+                if matches!(
+                    lhs.as_ref(),
+                    NdjsonDirectPredicate::Path(steps)
+                        if matches!(
+                            steps.as_slice(),
+                            [
+                                PhysicalPathStep::Field(tags),
+                                PhysicalPathStep::Index(0),
+                                PhysicalPathStep::Field(name)
+                            ] if tags.as_ref() == "tags" && name.as_ref() == "name"
+                        )
+                )
+        ));
+        assert!(matches!(
+            direct_tape_predicate_for_expr(&cmp_index),
+            Some(NdjsonDirectPredicate::Binary { ref lhs, op: BinOp::Eq, .. })
+                if matches!(
+                    lhs.as_ref(),
+                    NdjsonDirectPredicate::Path(steps)
+                        if matches!(
+                            steps.as_slice(),
+                            [
+                                PhysicalPathStep::Field(tags),
+                                PhysicalPathStep::Index(0),
+                                PhysicalPathStep::Field(name)
+                            ] if tags.as_ref() == "tags" && name.as_ref() == "name"
+                        )
+                )
         ));
         assert!(matches!(
             direct_tape_predicate_for_expr(&truthy),
-            Some(NdjsonDirectPredicate::ArrayElementPath { .. })
+            Some(NdjsonDirectPredicate::Path(ref steps))
+                if matches!(
+                    steps.as_slice(),
+                    [
+                        PhysicalPathStep::Field(attrs),
+                        PhysicalPathStep::Index(0),
+                        PhysicalPathStep::Field(value)
+                    ] if attrs.as_ref() == "attrs" && value.as_ref() == "value"
+                )
         ));
     }
 
@@ -2001,18 +2093,17 @@ mod tests {
 
         assert!(matches!(
             predicate,
-            NdjsonDirectItemPredicate::ArrayElementCmpLit {
-                ref source_steps,
-                element: NdjsonDirectElement::First,
-                ref suffix_steps,
+            NdjsonDirectItemPredicate::CmpLit {
+                ref lhs,
                 op: BinOp::Eq,
                 lit: Val::Str(ref value),
             } if matches!(
-                source_steps.as_slice(),
-                [PhysicalPathStep::Field(name)] if name.as_ref() == "tags"
-            ) && matches!(
-                suffix_steps.as_slice(),
-                [PhysicalPathStep::Field(name)] if name.as_ref() == "name"
+                lhs.as_slice(),
+                [
+                    PhysicalPathStep::Field(tags),
+                    PhysicalPathStep::Index(0),
+                    PhysicalPathStep::Field(name)
+                ] if tags.as_ref() == "tags" && name.as_ref() == "name"
             ) && value.as_ref() == "sf"
         ));
     }

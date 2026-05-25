@@ -1859,7 +1859,7 @@ fn rows_stream_array_selector_path_filter_is_direct() {
     let report = engine
         .run_ndjson_with_report(
             Cursor::new(input),
-            r#"$.rows().filter(tags.first().name == "sf").filter(attrs.first().value).map(id)"#,
+            r#"$.rows().filter(tags[0].name == "sf").filter(attrs[0].value).map(id)"#,
             &mut out,
         )
         .expect("array selector path predicates should use direct item metadata");
