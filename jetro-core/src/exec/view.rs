@@ -2385,8 +2385,10 @@ where
     let suffix_start = plan.sort_stage + 1;
     let collect_suffix = terminal_collect_plan_from(body, suffix_start);
     let select_projection_suffix = terminal_projection_run(body, suffix_start).is_some();
+    let view_suffix = view_suffix_capabilities(body, suffix_start).is_some();
     if collect_suffix.is_none()
         && !select_projection_suffix
+        && !view_suffix
         && !body.suffix_can_run_with_materialized_source_env(suffix_start)
     {
         return None;
@@ -7580,6 +7582,64 @@ mod tests {
             stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
                 Arc::new(nested),
             )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn sort_barrier_admits_view_projection_filter_suffix() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":3,"name":"c"},{"id":1,"name":"a"},{"id":2,"name":"b"}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Sort(crate::exec::pipeline::SortSpec {
+                    key: Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                    descending: false,
+                }),
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Keys,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![
+                BodyKernel::FieldRead(Arc::from("id")),
+                BodyKernel::Generic,
+                BodyKernel::CmpLit {
+                    lhs: Box::new(BodyKernel::BuiltinCall {
+                        receiver: Box::new(BodyKernel::Current),
+                        call: crate::builtins::BuiltinCall::new(
+                            crate::builtins::BuiltinMethod::Len,
+                            crate::builtins::BuiltinArgs::None,
+                        ),
+                    }),
+                    op: BinOp::Gt,
+                    lit: Val::Int(0),
+                },
+            ],
             sink_kernels: Vec::new(),
         };
 
