@@ -1213,6 +1213,40 @@ mod tests {
     }
 
     #[test]
+    fn view_get_path_projects_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"meta":{"isbn":"old","flags":{"reviewed":false}}},{"meta":{"isbn":"dune","flags":{"reviewed":true}}},{"meta":{"isbn":"foundation","flags":{"reviewed":true}}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map(@.get_path("meta.isbn")).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!("foundation"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_has_path_filters_tape_receiver_without_materializing_root() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"old","meta":{}},{"title":"dune","meta":{"flags":{"reviewed":true}}},{"title":"draft","meta":{"flags":{}}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.filter(@.has_path("meta.flags.reviewed")).map(title)"#)
+            .unwrap();
+
+        assert_eq!(out, json!(["dune"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
