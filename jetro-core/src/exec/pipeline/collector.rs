@@ -10,7 +10,8 @@ use crate::data::value::{ObjVecData, Val};
 use crate::data::view::ValueView;
 
 use super::{
-    append_spread_val_pairs, BodyKernel, CollectLayout, ObjectKernel, ObjectKernelKey, RowProgram,
+    append_spread_val_pairs_for_mode, BodyKernel, CollectLayout, ObjectKernel, ObjectKernelKey,
+    RowProgram,
 };
 
 /// Output collector for the terminal stage of a pipeline.
@@ -187,8 +188,8 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries().len());
     for entry in object.entries() {
-        if matches!(entry.key_kernel(), ObjectKernelKey::Spread) {
-            append_spread_val_pairs(&mut pairs, eval(entry.value(), item, vm)?);
+        if let ObjectKernelKey::Spread(mode) = entry.key_kernel() {
+            append_spread_val_pairs_for_mode(&mut pairs, eval(entry.value(), item, vm)?, *mode);
             continue;
         }
         if let Some(cond) = entry.cond() {
@@ -203,7 +204,7 @@ where
                 let value = eval(kernel, item, vm)?;
                 Arc::from(crate::util::val_to_key(&value).as_str())
             }
-            ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
+            ObjectKernelKey::Spread(_) => unreachable!("spread entries are handled above"),
         };
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {

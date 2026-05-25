@@ -3820,13 +3820,13 @@ where
         pipeline::BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries().len());
             for entry in object.entries() {
-                if matches!(entry.key_kernel(), pipeline::ObjectKernelKey::Spread) {
+                if let pipeline::ObjectKernelKey::Spread(mode) = entry.key_kernel() {
                     match eval_frontier_kernel_with_vm(item, entry.value(), vm)? {
                         pipeline::ViewKernelValue::View(view) => {
-                            append_frontier_spread_view_pairs(&mut pairs, view)?
+                            append_frontier_spread_view_pairs_for_mode(&mut pairs, view, *mode)?
                         }
                         pipeline::ViewKernelValue::Owned(value) => {
-                            pipeline::append_spread_val_pairs(&mut pairs, value)
+                            pipeline::append_spread_val_pairs_for_mode(&mut pairs, value, *mode)
                         }
                     }
                     continue;
@@ -3842,7 +3842,7 @@ where
                         let value = eval_frontier_value_kernel_with_vm(kernel, item, vm)?;
                         Arc::from(crate::util::val_to_key(&value).as_str())
                     }
-                    pipeline::ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
+                    pipeline::ObjectKernelKey::Spread(_) => unreachable!("spread entries are handled above"),
                 };
                 let value = eval_frontier_value_kernel_with_vm(entry.value(), item, vm)?;
                 if entry.omits_null() && value.is_null() {
@@ -5124,6 +5124,27 @@ where
         pairs.push((key, pipeline::view_kernel_view_to_owned(child)));
     }
     Some(())
+}
+
+fn append_frontier_spread_view_pairs_for_mode<'a, V>(
+    pairs: &mut Vec<(Arc<str>, Val)>,
+    view: V,
+    mode: pipeline::ObjectSpreadMode,
+) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match mode {
+        pipeline::ObjectSpreadMode::Shallow => append_frontier_spread_view_pairs(pairs, view),
+        pipeline::ObjectSpreadMode::Deep => {
+            pipeline::append_spread_val_pairs_for_mode(
+                pairs,
+                pipeline::view_kernel_view_to_owned(view),
+                mode,
+            );
+            Some(())
+        }
+    }
 }
 
 fn append_frontier_array_spread_view_items<'a, V>(out: &mut Vec<Val>, view: V) -> Option<()>

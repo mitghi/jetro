@@ -338,8 +338,17 @@ pub enum ObjectKernelKey {
     Static(Arc<str>),
     /// A computed key evaluated against the current row and coerced via `val_to_key`.
     Dynamic(BodyKernel),
-    /// A shallow object spread; `value` is evaluated and merged if it is an object.
-    Spread,
+    /// An object spread; `value` is evaluated and merged if it is an object.
+    Spread(ObjectSpreadMode),
+}
+
+/// Object spread merge mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectSpreadMode {
+    /// One-level key overwrite semantics.
+    Shallow,
+    /// Recursive object merge and array concatenation semantics.
+    Deep,
 }
 
 /// Positional selector used by `BodyKernel::ArraySelect`.
@@ -497,7 +506,7 @@ impl ObjectKernelEntry {
     pub(crate) fn static_key(&self) -> Option<&Arc<str>> {
         match &self.key {
             ObjectKernelKey::Static(key) => Some(key),
-            ObjectKernelKey::Dynamic(_) | ObjectKernelKey::Spread => None,
+            ObjectKernelKey::Dynamic(_) | ObjectKernelKey::Spread(_) => None,
         }
     }
 
@@ -536,7 +545,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => FieldDemand::None,
             Self::Dynamic(kernel) => kernel.field_demand(),
-            Self::Spread => FieldDemand::None,
+            Self::Spread(_) => FieldDemand::None,
         }
     }
 
@@ -544,7 +553,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => true,
             Self::Dynamic(kernel) => kernel.is_view_native(),
-            Self::Spread => true,
+            Self::Spread(_) => true,
         }
     }
 
@@ -552,7 +561,7 @@ impl ObjectKernelKey {
         match self {
             Self::Static(_) => false,
             Self::Dynamic(kernel) => kernel.mentions_any_field_like_ident(names),
-            Self::Spread => false,
+            Self::Spread(_) => false,
         }
     }
 }
@@ -609,9 +618,27 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
                 if matches!(value, BodyKernel::Generic) {
                     return BodyKernel::Generic;
                 }
-                (ObjectKernelKey::Spread, value, None, false, false)
+                (
+                    ObjectKernelKey::Spread(ObjectSpreadMode::Shallow),
+                    value,
+                    None,
+                    false,
+                    false,
+                )
             }
-            _ => return BodyKernel::Generic,
+            ObjField::SpreadDeep(value) => {
+                let value = BodyKernel::classify_expr(value);
+                if matches!(value, BodyKernel::Generic) {
+                    return BodyKernel::Generic;
+                }
+                (
+                    ObjectKernelKey::Spread(ObjectSpreadMode::Deep),
+                    value,
+                    None,
+                    false,
+                    false,
+                )
+            }
         };
         entries.push(ObjectKernelEntry {
             key,
@@ -1342,9 +1369,27 @@ impl BodyKernel {
                             if matches!(value, BodyKernel::Generic) {
                                 return Self::Generic;
                             }
-                            (ObjectKernelKey::Spread, value, None, false, false)
+                            (
+                                ObjectKernelKey::Spread(ObjectSpreadMode::Shallow),
+                                value,
+                                None,
+                                false,
+                                false,
+                            )
                         }
-                        _ => return Self::Generic,
+                        crate::vm::CompiledObjEntry::SpreadDeep(prog) => {
+                            let value = BodyKernel::classify(prog);
+                            if matches!(value, BodyKernel::Generic) {
+                                return Self::Generic;
+                            }
+                            (
+                                ObjectKernelKey::Spread(ObjectSpreadMode::Deep),
+                                value,
+                                None,
+                                false,
+                                false,
+                            )
+                        }
                     };
                     out.push(ObjectKernelEntry {
                         key,
@@ -2277,8 +2322,8 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries.len());
     for entry in object.entries.iter() {
-        if matches!(entry.key, ObjectKernelKey::Spread) {
-            append_spread_val_pairs(&mut pairs, eval(&entry.value)?);
+        if let ObjectKernelKey::Spread(mode) = entry.key {
+            append_spread_val_pairs_for_mode(&mut pairs, eval(&entry.value)?, mode);
             continue;
         }
         if let Some(cond) = &entry.cond {
@@ -2292,7 +2337,7 @@ where
             ObjectKernelKey::Dynamic(kernel) => {
                 Arc::from(crate::util::val_to_key(&eval(kernel)?).as_str())
             }
-            ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
+            ObjectKernelKey::Spread(_) => unreachable!("spread entries are handled above"),
         };
         let value = eval(&entry.value)?;
         if (entry.optional || entry.omit_null) && value.is_null() {
@@ -2301,6 +2346,21 @@ where
         pairs.push((key, value));
     }
     Ok(Val::ObjSmall(pairs.into()))
+}
+
+pub(crate) fn append_spread_val_pairs_for_mode(
+    pairs: &mut Vec<(Arc<str>, Val)>,
+    value: Val,
+    mode: ObjectSpreadMode,
+) {
+    match mode {
+        ObjectSpreadMode::Shallow => append_spread_val_pairs(pairs, value),
+        ObjectSpreadMode::Deep => {
+            let base = Val::obj(pairs_to_index_map(std::mem::take(pairs)));
+            let merged = crate::util::deep_merge_concat(base, normalize_spread_object(value));
+            append_spread_val_pairs(pairs, merged);
+        }
+    }
 }
 
 pub(crate) fn append_spread_val_pairs(pairs: &mut Vec<(Arc<str>, Val)>, value: Val) {
@@ -2316,6 +2376,21 @@ pub(crate) fn append_spread_val_pairs(pairs: &mut Vec<(Arc<str>, Val)>, value: V
             }
         }
         _ => {}
+    }
+}
+
+fn pairs_to_index_map(pairs: Vec<(Arc<str>, Val)>) -> indexmap::IndexMap<Arc<str>, Val> {
+    let mut map = indexmap::IndexMap::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        map.insert(key, value);
+    }
+    map
+}
+
+fn normalize_spread_object(value: Val) -> Val {
+    match value {
+        Val::ObjSmall(pairs) => Val::obj(pairs_to_index_map(pairs.iter().cloned().collect())),
+        other => other,
     }
 }
 
@@ -2974,10 +3049,14 @@ where
         BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
-                if matches!(entry.key, ObjectKernelKey::Spread) {
+                if let ObjectKernelKey::Spread(mode) = entry.key {
                     match eval_view_kernel_inner(&entry.value, item, vm)? {
-                        ViewKernelValue::View(view) => append_spread_view_pairs(&mut pairs, view)?,
-                        ViewKernelValue::Owned(value) => append_spread_val_pairs(&mut pairs, value),
+                        ViewKernelValue::View(view) => {
+                            append_spread_view_pairs_for_mode(&mut pairs, view, mode)?
+                        }
+                        ViewKernelValue::Owned(value) => {
+                            append_spread_val_pairs_for_mode(&mut pairs, value, mode)
+                        }
                     }
                     continue;
                 }
@@ -2997,7 +3076,7 @@ where
                             view_kernel_value_to_owned(eval_view_kernel_inner(kernel, item, vm)?);
                         Arc::from(crate::util::val_to_key(&value).as_str())
                     }
-                    ObjectKernelKey::Spread => unreachable!("spread entries are handled above"),
+                    ObjectKernelKey::Spread(_) => unreachable!("spread entries are handled above"),
                 };
                 let value = match eval_view_kernel_inner(&entry.value, item, vm)? {
                     ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
@@ -3206,6 +3285,23 @@ where
     Some(())
 }
 
+fn append_spread_view_pairs_for_mode<'a, V>(
+    pairs: &mut Vec<(Arc<str>, Val)>,
+    view: V,
+    mode: ObjectSpreadMode,
+) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match mode {
+        ObjectSpreadMode::Shallow => append_spread_view_pairs(pairs, view),
+        ObjectSpreadMode::Deep => {
+            append_spread_val_pairs_for_mode(pairs, view_kernel_view_to_owned(view), mode);
+            Some(())
+        }
+    }
+}
+
 fn append_array_spread_view_items<'a, V>(out: &mut Vec<Val>, view: V) -> Option<()>
 where
     V: ValueView<'a> + 'a,
@@ -3243,7 +3339,7 @@ mod tests {
 
     use super::{
         eval_view_kernel, ArrayKernelElem, BodyKernel, CollectLayout, FStringKernel,
-        FStringKernelPart, ObjectKernelKey, ViewKernelValue,
+        FStringKernelPart, ObjectKernelKey, ObjectSpreadMode, ViewKernelValue,
     };
 
     fn key_call(method: BuiltinMethod, key: &str) -> BodyKernel {
@@ -3772,7 +3868,7 @@ mod tests {
         assert!(!object.has_static_layout());
         assert!(matches!(
             object.entries()[0].key_kernel(),
-            ObjectKernelKey::Spread
+            ObjectKernelKey::Spread(ObjectSpreadMode::Shallow)
         ));
         assert!(kernel.is_view_native(), "{kernel:#?}");
         assert!(matches!(kernel.collect_layout(), CollectLayout::Values));
@@ -3784,6 +3880,38 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"isbn":"978","price":20,"extra":"ok"})
+        );
+    }
+
+    #[test]
+    fn deep_object_spread_projection_stays_view_native() {
+        let expr = parse(r#"{...base, ...**delta}"#).expect("parse deep object spread projection");
+        let program = Compiler::compile(&expr, "deep-object-spread");
+        let kernel = BodyKernel::classify(&program);
+
+        let BodyKernel::Object(object) = &kernel else {
+            panic!("expected object kernel, got {kernel:#?}");
+        };
+        assert!(!object.has_static_layout());
+        assert!(matches!(
+            object.entries()[1].key_kernel(),
+            ObjectKernelKey::Spread(ObjectSpreadMode::Deep)
+        ));
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let json = serde_json::json!({
+            "base": {"meta": {"tags": ["sf"], "score": 1}, "name": "Dune"},
+            "delta": {"meta": {"tags": ["classic"], "year": 1965}}
+        });
+        let val = Val::from(&json);
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
+            .expect("deep object spread projection output");
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({
+                "meta": {"tags": ["sf", "classic"], "score": 1, "year": 1965},
+                "name": "Dune"
+            })
         );
     }
 
