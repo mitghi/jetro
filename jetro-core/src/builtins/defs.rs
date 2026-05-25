@@ -144,6 +144,8 @@ impl Builtin for Find {
             BuiltinCategory::StreamingFilter,
             BuiltinCardinality::Filtering,
         )
+        .view_native()
+        .view_stage(BuiltinViewStage::Filter)
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::FilterLike)
         .expr_stage(BuiltinExprStage::Filter)
@@ -1345,6 +1347,8 @@ impl Builtin for FindFirst {
             BuiltinCategory::StreamingFilter,
             BuiltinCardinality::Filtering,
         )
+        .view_native()
+        .view_stage(BuiltinViewStage::Filter)
         .cost(10.0)
         .demand_law(BuiltinDemandLaw::FilterLike)
         .expr_stage(BuiltinExprStage::Filter)

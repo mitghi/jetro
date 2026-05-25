@@ -284,6 +284,14 @@ mod spec_tests {
             Some(BuiltinViewStage::Filter)
         );
         assert_eq!(
+            view_stage(id(BuiltinMethod::Find)),
+            Some(BuiltinViewStage::Filter)
+        );
+        assert_eq!(
+            view_stage(id(BuiltinMethod::FindFirst)),
+            Some(BuiltinViewStage::Filter)
+        );
+        assert_eq!(
             view_stage(id(BuiltinMethod::Compact)),
             Some(BuiltinViewStage::Compact)
         );
