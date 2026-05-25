@@ -991,6 +991,10 @@ where
                 .collect(),
         )
     }
+
+    fn into_rows(self) -> Vec<FrontierRow<V>> {
+        self.selected.into_iter().collect()
+    }
 }
 
 fn run_frontier_rows_select_one_suffix<'a, V, I>(
@@ -2688,27 +2692,33 @@ where
         terminal_collect_prefix_from(&body.stages[suffix_start..prefix_end], body, suffix_start)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..prefix_end], &body.sink);
-    if let pipeline::Sink::SelectMany { from_end, .. } = body.sink {
-        let mut selected = Vec::new();
+    if let pipeline::Sink::SelectMany { n, from_end } = body.sink {
+        let mut select_many = FrontierSelectMany::new(n, from_end, source_reversed);
+        let drive_demand = if from_end && !source_reversed {
+            PullDemand::All
+        } else {
+            source_demand
+        };
         if let Err(err) = drive_frontier_iter(
             rows.iter().cloned(),
             &prefix,
             &body.stage_kernels,
-            source_demand,
+            drive_demand,
             vm,
-            |item, vm| {
-                selected.push(eval_owned_scalar_or_value_kernel_with_vm(
-                    item,
-                    &project_kernel,
-                    vm,
-                )?);
-                Some(Ok(ViewRowAction::Emit))
-            },
+            |item, _vm| Some(Ok(select_many.observe(item))),
         )? {
             return Some(Err(err));
         }
-        if from_end && source_reversed {
-            selected.reverse();
+        let mut selected = Vec::new();
+        for row in select_many.into_rows() {
+            selected.push(eval_owned_scalar_or_value_kernel_with_vm(
+                &row,
+                &project_kernel,
+                vm,
+            )?);
+        }
+        if n == 1 {
+            return Some(Ok(selected.into_iter().next().unwrap_or(Val::Null)));
         }
         return Some(Ok(Val::Arr(Arc::new(selected))));
     }
@@ -5221,6 +5231,50 @@ mod tests {
             PullDemand::All,
             &[],
             &[],
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"id": 3}, {"id": 4}])
+        );
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+    #[test]
+    fn sorted_select_many_projection_selects_rows_before_projecting() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1},{"id":2},{"id":3},{"id":4}]"#.to_vec(),
+        )
+        .unwrap();
+        let rows: Vec<_> = TapeView::root(&tape)
+            .array_iter()
+            .unwrap()
+            .map(super::FrontierRow::Borrowed)
+            .collect();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: true,
+            },
+            stage_kernels: vec![BodyKernel::Current],
+            sink_kernels: Vec::new(),
+        };
+        let mut vm = VM::new();
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_sorted_rows_terminal_select_projection_suffix(
+            &rows,
+            &body,
+            0,
+            false,
             &mut vm,
         )
         .unwrap()
