@@ -3307,13 +3307,59 @@ fn numeric_scan_apply_stream(
     Ok(crate::exec::pipeline::StageFlow::Continue(opt_float_val(out)))
 }
 
+#[inline]
+fn numeric_lag_spec() -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::Lag)
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::OneToOne,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
+}
+
 /// `lag(n)` — element shifted by N positions.
 pub(crate) struct Lag;
 impl Builtin for Lag {
     const METHOD: BuiltinMethod = BuiltinMethod::Lag;
     const NAME: &'static str = "lag";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_lag_spec()
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let Some(n) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        let current = opt_float_val(numeric_val(&item));
+        if n == 0 {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(current));
+        }
+        let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+        let out = if buffer.len() >= n {
+            buffer.pop_front().unwrap_or(crate::data::value::Val::Null)
+        } else {
+            crate::data::value::Val::Null
+        };
+        buffer.push_back(current);
+        Ok(crate::exec::pipeline::StageFlow::Continue(out))
     }
     #[inline]
     fn apply_args(

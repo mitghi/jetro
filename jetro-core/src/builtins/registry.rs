@@ -3788,6 +3788,10 @@ mod tests {
             ))
         );
         assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::Lag)),
+            Some(BuiltinViewStage::Lag)
+        );
+        assert_eq!(
             view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
             Some(BuiltinViewStage::Chunk)
         );

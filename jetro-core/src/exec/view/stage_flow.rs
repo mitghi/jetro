@@ -262,6 +262,7 @@ where
         pipeline::ViewStageCapability::Enumerate => None,
         pipeline::ViewStageCapability::Pairwise => None,
         pipeline::ViewStageCapability::NumericScan(_) => None,
+        pipeline::ViewStageCapability::Lag { .. } => None,
         pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,

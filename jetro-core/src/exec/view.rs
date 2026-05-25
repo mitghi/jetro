@@ -2465,6 +2465,24 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::Lag { offset } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_lag_frontier_row(
+            item,
+            offset,
+            stage_idx,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Chunk { width } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -3992,6 +4010,49 @@ where
     };
     drive_owned_child(
         optional_float_value(out),
+        next_stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn drive_lag_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    offset: usize,
+    stage_idx: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let current = optional_float_value(numeric_view_value(&item));
+    let out = if offset == 0 {
+        current
+    } else {
+        let buffer = op_state.get_mut(stage_idx)?.deque();
+        let out = if buffer.len() >= offset {
+            buffer.pop_front().unwrap_or(Val::Null)
+        } else {
+            Val::Null
+        };
+        buffer.push_back(current);
+        out
+    };
+    drive_owned_child(
+        out,
         next_stage_idx,
         stages,
         op_state,
@@ -7420,6 +7481,32 @@ mod tests {
             assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
             assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
         }
+    }
+
+    #[test]
+    fn terminal_collect_lag_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Lag,
+                value: 2,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([null, null, 1.0, 3.0, null])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
