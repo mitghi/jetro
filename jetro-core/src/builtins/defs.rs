@@ -2540,6 +2540,10 @@ impl Builtin for Rename {
     const NAME: &'static str = "rename";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Rename)
+            .demand_law(BuiltinViewValueProjection::Rename.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

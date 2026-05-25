@@ -1326,6 +1326,15 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Rename => {
+            let BuiltinArgs::Val(renames) = args else {
+                return None;
+            };
+            return Some(match view_rename(&view, renames) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1417,6 +1426,24 @@ where
         out.insert(key, view_to_owned(value));
     }
     Some(out)
+}
+
+fn view_rename<'a, V>(view: &V, renames: &Val) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let renames = renames.as_object()?;
+    let mut out = view_object_to_map(view)?;
+    for (old, new_val) in renames.iter() {
+        if let Some(value) = out.shift_remove(old.as_ref()) {
+            let new_key = new_val
+                .as_str_ref()
+                .map(Arc::<str>::from)
+                .unwrap_or_else(|| Arc::clone(old));
+            out.insert(new_key, value);
+        }
+    }
+    Some(Val::obj(out))
 }
 
 fn view_invert<'a, V>(view: &V) -> Option<Val>
@@ -4366,6 +4393,7 @@ mod tests {
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
             ),
+            (BuiltinMethod::Rename, BuiltinViewValueProjection::Rename),
             (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
             (
@@ -6471,6 +6499,7 @@ mod tests {
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
             ),
+            (BuiltinMethod::Rename, BuiltinViewValueProjection::Rename),
             (
                 BuiltinMethod::SnakeCase,
                 BuiltinViewValueProjection::SnakeCase,
@@ -6578,7 +6607,8 @@ mod tests {
                 "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}],
                 "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]},
                 "merge_base": {"a": 1, "b": 2},
-                "defaults_base": {"a": null, "b": 2}
+                "defaults_base": {"a": null, "b": 2},
+                "rename_base": {"a": 1, "b": 2, "c": 3}
             }));
             let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view)
@@ -6716,6 +6746,14 @@ mod tests {
                 "defaults_base"
             ),
             &Val::from(&serde_json::json!({"a": 10, "b": 2, "c": 3}))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::Rename,
+                BuiltinArgs::Val(Val::from(&serde_json::json!({"a": "z", "missing": "x"}))),
+                "rename_base"
+            ),
+            &Val::from(&serde_json::json!({"b": 2, "c": 3, "z": 1}))
         ));
         assert_view_eq(
             BuiltinMethod::Pick,

@@ -932,6 +932,8 @@ pub enum BuiltinViewValueProjection {
     Merge,
     /// Fill missing or null receiver object keys from an owned defaults object.
     Defaults,
+    /// Rename receiver object keys from an owned `{old: new}` object.
+    Rename,
     /// Convert to camelCase.
     CamelCase,
     /// Uppercase first character and lowercase the rest.
@@ -1015,6 +1017,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::PascalCase
             | BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
+            | BuiltinViewValueProjection::Rename
             | BuiltinViewValueProjection::Repeat
             | BuiltinViewValueProjection::ReverseStr
             | BuiltinViewValueProjection::SnakeCase

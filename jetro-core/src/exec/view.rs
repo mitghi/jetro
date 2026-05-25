@@ -7940,6 +7940,42 @@ mod tests {
     }
 
     #[test]
+    fn view_rename_builds_objects_from_tape_without_materializing_receiver() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[{"a":1,"b":2},{"a":3,"c":4}]"#.to_vec())
+                .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Rename,
+                    crate::builtins::BuiltinArgs::Val(Val::from(
+                        &serde_json::json!({"a": "z", "missing": "x"}),
+                    )),
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"b": 2, "z": 1}, {"c": 4, "z": 3}])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn nested_receiver_plan_runs_on_tape_view_without_materializing_rows() {
         let tape = crate::data::tape::TapeData::parse(br#"[[1,2,3],[4,5]]"#.to_vec()).unwrap();
         let nested = Plan {
