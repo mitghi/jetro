@@ -736,6 +736,24 @@ impl ViewSinkCapability {
             Self::SelectMany { .. } => ViewMaterialization::SinkOutputRows,
         }
     }
+
+    /// Result for an empty input stream when the capability fully describes it.
+    pub(crate) fn empty_stream_result(&self) -> Option<Val> {
+        match self {
+            Self::Collect => Some(Val::arr(Vec::new())),
+            Self::Builtin { accumulator, .. } => accumulator.empty_stream_result(),
+            Self::Nth { .. } | Self::ArgExtreme { .. } => Some(Val::Null),
+            Self::Predicate { op, .. } => op.empty_stream_result(),
+            Self::Membership { op, .. } => Some(op.empty_stream_result()),
+            Self::SelectMany { n, .. } => {
+                if *n <= 1 {
+                    Some(Val::Null)
+                } else {
+                    Some(Val::arr(Vec::new()))
+                }
+            }
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -1034,6 +1052,69 @@ mod tests {
             }
             .materialization(),
             ViewMaterialization::SinkOutputRows
+        );
+    }
+
+    #[test]
+    fn view_sink_capability_describes_empty_stream_results() {
+        assert_eq!(
+            serde_json::Value::from(ViewSinkCapability::Collect.empty_stream_result().unwrap()),
+            serde_json::json!([])
+        );
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Count,
+                predicate_kernel: Some(0),
+                project_kernel: None,
+                materialization: ViewMaterialization::Never,
+            }
+            .empty_stream_result(),
+            Some(Val::Int(0))
+        );
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Numeric,
+                predicate_kernel: None,
+                project_kernel: Some(0),
+                materialization: ViewMaterialization::SinkNumericInput,
+            }
+            .empty_stream_result(),
+            None
+        );
+        assert_eq!(
+            ViewSinkCapability::Predicate {
+                op: BuiltinPredicateSink::All,
+                predicate_kernel: 0,
+            }
+            .empty_stream_result(),
+            Some(Val::Bool(true))
+        );
+        assert_eq!(
+            ViewSinkCapability::Membership {
+                op: BuiltinMembershipSink::Index,
+                target: ViewMembershipTarget::Literal(Val::Int(3)),
+            }
+            .empty_stream_result(),
+            Some(Val::Null)
+        );
+        assert_eq!(
+            ViewSinkCapability::SelectMany {
+                n: 1,
+                from_end: false,
+                source_reversed: false,
+            }
+            .empty_stream_result(),
+            Some(Val::Null)
+        );
+        assert_eq!(
+            serde_json::Value::from(ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: false,
+                source_reversed: false,
+            }
+            .empty_stream_result()
+            .unwrap()),
+            serde_json::json!([])
         );
     }
 

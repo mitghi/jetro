@@ -872,26 +872,7 @@ where
     if let Some(op) = body_sink.reducer_spec().and_then(|spec| spec.numeric_op()) {
         return Some(op.empty());
     }
-    match sink {
-        pipeline::ViewSinkCapability::Builtin {
-            accumulator,
-            predicate_kernel: None,
-            project_kernel: None,
-            ..
-        } => accumulator.empty_stream_result(),
-        pipeline::ViewSinkCapability::Collect => Some(Val::arr(Vec::new())),
-        pipeline::ViewSinkCapability::Nth { .. } => Some(Val::Null),
-        pipeline::ViewSinkCapability::ArgExtreme { .. } => Some(Val::Null),
-        pipeline::ViewSinkCapability::SelectMany { n, .. } => {
-            if *n <= 1 {
-                Some(Val::Null)
-            } else {
-                Some(Val::arr(Vec::new()))
-            }
-        }
-        pipeline::ViewSinkCapability::Membership { op, .. } => Some(op.empty_stream_result()),
-        _ => None,
-    }
+    sink.empty_stream_result()
 }
 
 fn cardinality_after_deterministic_stages<'a, V>(
