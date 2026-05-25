@@ -3762,6 +3762,11 @@ mod tests {
         assert_eq!(view_stage(explode), Some(BuiltinViewStage::Explode));
         assert!(demand_is_conservative_barrier(explode));
 
+        assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
+            Some(BuiltinViewStage::Chunk)
+        );
+
         for method in [BuiltinMethod::Unique, BuiltinMethod::UniqueBy] {
             let id = BuiltinId::from_method(method);
             assert_eq!(demand_law(id), BuiltinDemandLaw::UniqueLike, "{method:?}");

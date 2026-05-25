@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use crate::{data::view::ValueView, exec::pipeline};
+use crate::{data::value::Val, data::view::ValueView, exec::pipeline};
 
 use super::key::ViewKey;
 
@@ -34,6 +34,8 @@ pub(super) enum ViewStageState {
     Flag(bool),
     /// A set of seen keys, used by `Distinct` to filter duplicate rows.
     Keys(HashSet<ViewKey>),
+    /// Owned buffered values, used by bounded-state emitting stages.
+    Values(Vec<Val>),
 }
 
 impl ViewStageState {
@@ -67,6 +69,16 @@ impl ViewStageState {
         match self {
             Self::Flag(value) => value,
             _ => unreachable!("flag state was initialized"),
+        }
+    }
+
+    pub(super) fn values(&mut self) -> &mut Vec<Val> {
+        if !matches!(self, Self::Values(_)) {
+            *self = Self::Values(Vec::new());
+        }
+        match self {
+            Self::Values(value) => value,
+            _ => unreachable!("values state was initialized"),
         }
     }
 }
@@ -216,6 +228,7 @@ where
         pipeline::ViewStageCapability::FlatMap { .. } => None,
         pipeline::ViewStageCapability::Flatten { .. } => None,
         pipeline::ViewStageCapability::Explode { .. } => None,
+        pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,
     }
 }
