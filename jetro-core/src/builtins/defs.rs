@@ -2496,6 +2496,10 @@ impl Builtin for DeepMerge {
     const NAME: &'static str = "deep_merge";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::DeepMerge)
+            .demand_law(BuiltinViewValueProjection::DeepMerge.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

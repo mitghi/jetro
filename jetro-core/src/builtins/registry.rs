@@ -1317,6 +1317,12 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::DeepMerge => {
+            let BuiltinArgs::Val(other) = args else {
+                return None;
+            };
+            return Some(ViewProjectionResult::Owned(view_deep_merge(&view, other)));
+        }
         BuiltinViewValueProjection::Merge | BuiltinViewValueProjection::Defaults => {
             let BuiltinArgs::Val(other) = args else {
                 return None;
@@ -1412,6 +1418,51 @@ where
             }
         }
         _ => return None,
+    }
+    Some(Val::obj(out))
+}
+
+fn view_deep_merge<'a, V>(view: &V, other: &Val) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    let Some(other) = other.as_object() else {
+        return other.clone();
+    };
+    view_deep_merge_object(view, other).unwrap_or_else(|| Val::obj(other.clone()))
+}
+
+fn view_deep_merge_value<'a, V>(view: V, other: &Val) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    let Some(other) = other.as_object() else {
+        return other.clone();
+    };
+    view_deep_merge_object(&view, other).unwrap_or_else(|| Val::obj(other.clone()))
+}
+
+fn view_deep_merge_object<'a, V>(
+    view: &V,
+    other: &indexmap::IndexMap<Arc<str>, Val>,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let base_len = view.object_len()?;
+    let mut out = indexmap::IndexMap::with_capacity(base_len.saturating_add(other.len()));
+    for (key, value) in view.object_iter()? {
+        if !other.contains_key(key.as_ref()) {
+            out.insert(key, view_to_owned(value));
+        }
+    }
+    for (key, value) in other.iter() {
+        let merged = if view.has_key(key.as_ref()).unwrap_or(false) {
+            view_deep_merge_value(view.field(key.as_ref()), value)
+        } else {
+            value.clone()
+        };
+        out.insert(Arc::clone(key), merged);
     }
     Some(Val::obj(out))
 }
@@ -4353,6 +4404,10 @@ mod tests {
             (BuiltinMethod::Center, BuiltinViewValueProjection::Center),
             (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
+                BuiltinMethod::DeepMerge,
+                BuiltinViewValueProjection::DeepMerge,
+            ),
+            (
                 BuiltinMethod::Defaults,
                 BuiltinViewValueProjection::Defaults,
             ),
@@ -6468,6 +6523,10 @@ mod tests {
             ),
             (BuiltinMethod::Dedent, BuiltinViewValueProjection::Dedent),
             (
+                BuiltinMethod::DeepMerge,
+                BuiltinViewValueProjection::DeepMerge,
+            ),
+            (
                 BuiltinMethod::Defaults,
                 BuiltinViewValueProjection::Defaults,
             ),
@@ -6606,6 +6665,7 @@ mod tests {
                 "indent": "  a\n    b",
                 "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}],
                 "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]},
+                "deep_merge_base": {"a": {"x": 1}, "b": 2},
                 "merge_base": {"a": 1, "b": 2},
                 "defaults_base": {"a": null, "b": 2},
                 "rename_base": {"a": 1, "b": 2, "c": 3}
@@ -6730,6 +6790,14 @@ mod tests {
                 "true": "c",
                 "[\"x\"]": "d"
             }))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::DeepMerge,
+                BuiltinArgs::Val(Val::from(&serde_json::json!({"a": {"y": 3}, "c": 4}))),
+                "deep_merge_base"
+            ),
+            &Val::from(&serde_json::json!({"b": 2, "a": {"x": 1, "y": 3}, "c": 4}))
         ));
         assert!(crate::util::vals_deep_eq(
             &apply_field(

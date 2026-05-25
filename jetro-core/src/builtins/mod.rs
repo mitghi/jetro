@@ -928,6 +928,8 @@ pub enum BuiltinViewValueProjection {
     FromPairs,
     /// Swap object keys and values, coercing values to object keys.
     Invert,
+    /// Recursively merge an owned value argument into the receiver value.
+    DeepMerge,
     /// Shallow-merge an owned object argument into the receiver object.
     Merge,
     /// Fill missing or null receiver object keys from an owned defaults object.
@@ -1002,6 +1004,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Capitalize
             | BuiltinViewValueProjection::Center
             | BuiltinViewValueProjection::Dedent
+            | BuiltinViewValueProjection::DeepMerge
             | BuiltinViewValueProjection::Defaults
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
