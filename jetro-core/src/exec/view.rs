@@ -1372,6 +1372,27 @@ where
         return Some(find_one.finish_result());
     }
 
+    if let pipeline::ViewSinkCapability::SelectMany {
+        n,
+        from_end,
+        source_reversed,
+    } = sink
+    {
+        let mut select_many = FrontierSelectMany::new(n, from_end, source_reversed);
+        if let Err(err) = drive_view_frontier(
+            source,
+            pipeline::SourceCapabilities::VIEW_ARRAY,
+            &capabilities.stages,
+            &body.stage_kernels,
+            source_demand,
+            vm,
+            |item, _vm| Some(Ok(select_many.observe(item))),
+        )? {
+            return Some(Err(err));
+        }
+        return Some(Ok(select_many.finish()));
+    }
+
     if let Err(err) = drive_view_frontier(
         source,
         pipeline::SourceCapabilities::VIEW_ARRAY,
