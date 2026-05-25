@@ -373,6 +373,14 @@ pub(crate) trait ValueView<'a>: Clone {
             _ => None,
         }
     }
+    /// Navigate a sequence of object fields without materialising intermediate values.
+    fn field_chain(&self, keys: &[Arc<str>]) -> Self {
+        let mut cur = self.clone();
+        for key in keys {
+            cur = cur.field(key.as_ref());
+        }
+        cur
+    }
     /// Return the array child at a known in-range non-negative index.
     fn array_child(&self, idx: usize) -> Self {
         self.index(idx as i64)

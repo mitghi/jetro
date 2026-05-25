@@ -2243,9 +2243,7 @@ where
     match kernel {
         BodyKernel::Current => numeric_from_json_view(item.scalar()),
         BodyKernel::FieldRead(key) => numeric_from_json_view(item.field(key).scalar()),
-        BodyKernel::FieldChain(keys) => {
-            numeric_from_json_view(walk_view_fields(item.clone(), keys.as_ref()).scalar())
-        }
+        BodyKernel::FieldChain(keys) => numeric_from_json_view(item.field_chain(keys).scalar()),
         BodyKernel::Const(Val::Int(value)) => Some(NumericKernelValue::Int(*value)),
         BodyKernel::Const(Val::Float(value)) => Some(NumericKernelValue::Float(*value)),
         BodyKernel::Binary { lhs, op, rhs } => {
@@ -2564,10 +2562,7 @@ where
     match kernel {
         BodyKernel::Current => Some(ViewKernelValue::View(item.clone())),
         BodyKernel::FieldRead(key) => Some(ViewKernelValue::View(item.field(key))),
-        BodyKernel::FieldChain(keys) => Some(ViewKernelValue::View(walk_view_fields(
-            item.clone(),
-            keys.as_ref(),
-        ))),
+        BodyKernel::FieldChain(keys) => Some(ViewKernelValue::View(item.field_chain(keys))),
         BodyKernel::ConstBool(value) => Some(ViewKernelValue::Owned(Val::Bool(*value))),
         BodyKernel::Const(value) => Some(ViewKernelValue::Owned(value.clone())),
         BodyKernel::FString(fstring) => {
@@ -2750,7 +2745,7 @@ where
             )))
         }
         BodyKernel::FieldChainCmpLit(keys, op, lit) => {
-            let lhs = walk_view_fields(item.clone(), keys.as_ref());
+            let lhs = item.field_chain(keys);
             Some(ViewKernelValue::Owned(Val::Bool(
                 crate::util::json_cmp_binop(
                     lhs.scalar(),
@@ -2764,17 +2759,6 @@ where
         ))),
         BodyKernel::Generic => None,
     }
-}
-
-#[inline]
-fn walk_view_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
-where
-    V: ValueView<'a> + 'a,
-{
-    for key in keys {
-        cur = cur.field(key.as_ref());
-    }
-    cur
 }
 
 /// Evaluates `lhs op rhs` using JSON-view comparison semantics, returning the boolean result.

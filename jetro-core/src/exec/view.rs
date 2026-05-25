@@ -177,14 +177,11 @@ where
 /// Navigates a field-key sequence on `cur`, calling `ValueView::field` for each
 /// key and returning the deepest resolved view. If a step returns a null-like
 /// view, traversal continues with that null view.
-pub(crate) fn walk_fields<'a, V>(mut cur: V, keys: &[Arc<str>]) -> V
+pub(crate) fn walk_fields<'a, V>(cur: V, keys: &[Arc<str>]) -> V
 where
     V: ValueView<'a> + 'a,
 {
-    for key in keys {
-        cur = cur.field(key.as_ref());
-    }
-    cur
+    cur.field_chain(keys)
 }
 
 /// Top-level view-pipeline runner using caller-owned VM state for fallback suffixes
