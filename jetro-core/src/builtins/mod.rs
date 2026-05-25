@@ -622,6 +622,8 @@ pub enum BuiltinArgs {
     Str(Arc<str>),
     /// A pre-parsed dot/bracket path used by hot path helpers.
     Path(Arc<[PathSeg]>),
+    /// Multiple pre-parsed dot/bracket paths used by bulk path helpers.
+    PathList(Vec<Arc<[PathSeg]>>),
     /// A pre-parsed dot/bracket path plus an owned value payload.
     PathVal { path: Arc<[PathSeg]>, value: Val },
     /// Two string arguments (needle + replacement, pattern + replacement).
@@ -938,6 +940,8 @@ pub enum BuiltinViewValueProjection {
     SetPath,
     /// Delete a nested dot/bracket path from an object or array value.
     DelPath,
+    /// Delete multiple nested dot/bracket paths from an object or array value.
+    DelPaths,
     /// Flatten nested object keys into a separator-joined object.
     FlattenKeys,
     /// Rebuild nested object keys from a separator-joined object.
@@ -1017,6 +1021,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Center
             | BuiltinViewValueProjection::Dedent
             | BuiltinViewValueProjection::DelPath
+            | BuiltinViewValueProjection::DelPaths
             | BuiltinViewValueProjection::DeepMerge
             | BuiltinViewValueProjection::Defaults
             | BuiltinViewValueProjection::FlattenKeys
@@ -3516,6 +3521,13 @@ impl BuiltinCall {
             (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(del_path_apply(recv, p))
             }
+            (BuiltinMethod::DelPaths, BuiltinArgs::PathList(paths)) => {
+                let mut out = recv.clone();
+                for path in paths {
+                    out = del_path_impl(out, path);
+                }
+                return Some(out);
+            }
             (BuiltinMethod::SetPath, BuiltinArgs::PathVal { path, value }) => {
                 return Some(set_path_impl(recv.clone(), path, value.clone()));
             }
@@ -3780,6 +3792,13 @@ impl BuiltinCall {
                     method,
                     BuiltinArgs::Path(parse_path_segs(path.as_ref()).into()),
                 )
+            }
+            BuiltinMethod::DelPaths => {
+                let mut paths = Vec::with_capacity(arg_len);
+                for idx in 0..arg_len {
+                    paths.push(parse_path_segs(args.str(idx)?.as_ref()).into());
+                }
+                Self::new(method, BuiltinArgs::PathList(paths))
             }
             BuiltinMethod::HasAll => Self::new(method, BuiltinArgs::Val(args.val(0)?)),
             BuiltinMethod::Has
@@ -4895,10 +4914,9 @@ where
         BuiltinMethod::DelPaths => {
             let mut paths = Vec::with_capacity(args.len());
             for idx in 0..args.len() {
-                paths.push(str_arg!(idx)?);
+                paths.push(parse_path_segs(str_arg!(idx)?.as_ref()).into());
             }
-            return del_paths_apply(&recv, &paths)
-                .ok_or_else(|| EvalError("del_paths: builtin unsupported".into()));
+            BuiltinCall::new(method, BuiltinArgs::PathList(paths))
         }
         _ => {
             return Err(EvalError(format!(

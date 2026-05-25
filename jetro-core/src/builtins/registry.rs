@@ -1356,6 +1356,15 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::DelPaths => {
+            let BuiltinArgs::PathList(paths) = args else {
+                return None;
+            };
+            if paths.is_empty() {
+                return Some(ViewProjectionResult::View(view));
+            }
+            return Some(ViewProjectionResult::Owned(view_del_paths(&view, paths)));
+        }
         BuiltinViewValueProjection::FlattenKeys => {
             let BuiltinArgs::Str(sep) = args else {
                 return None;
@@ -1631,6 +1640,21 @@ where
             Some(Val::arr(out))
         }
     }
+}
+
+fn view_del_paths<'a, V>(view: &V, paths: &[Arc<[super::PathSeg]>]) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut out = match paths.first() {
+        Some(path) if path.is_empty() => Val::Null,
+        Some(path) => view_del_path(view, path).unwrap_or_else(|| view_to_owned(view.clone())),
+        None => view_to_owned(view.clone()),
+    };
+    for path in paths.iter().skip(1) {
+        out = crate::builtins::del_path_impl(out, path);
+    }
+    out
 }
 
 fn resolve_view_path_index(index: i64, len: usize) -> Option<usize> {
@@ -4734,6 +4758,7 @@ mod tests {
                 BuiltinViewValueProjection::Defaults,
             ),
             (BuiltinMethod::DelPath, BuiltinViewValueProjection::DelPath),
+            (BuiltinMethod::DelPaths, BuiltinViewValueProjection::DelPaths),
             (
                 BuiltinMethod::FlattenKeys,
                 BuiltinViewValueProjection::FlattenKeys,

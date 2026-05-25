@@ -457,17 +457,6 @@ pub fn set_path_apply(recv: &Val, path: &str, value: &Val) -> Option<Val> {
     Some(set_path_impl(recv.clone(), &segs, value.clone()))
 }
 
-/// Deletes multiple dot/bracket paths from `recv` sequentially, returning the final result.
-#[inline]
-pub fn del_paths_apply(recv: &Val, paths: &[Arc<str>]) -> Option<Val> {
-    let mut out = recv.clone();
-    for path in paths {
-        let segs = parse_path_segs(path.as_ref());
-        out = del_path_impl(out, &segs);
-    }
-    Some(out)
-}
-
 /// Collapses a nested object into a flat object using `sep`-joined key paths (e.g. `"a.b.c": v`).
 #[inline]
 pub fn flatten_keys_apply(recv: &Val, sep: &str) -> Option<Val> {
