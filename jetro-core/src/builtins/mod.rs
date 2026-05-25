@@ -1030,6 +1030,9 @@ impl BuiltinViewValueProjection {
     pub(crate) const fn demand_law(self) -> BuiltinDemandLaw {
         match self {
             BuiltinViewValueProjection::Slice => BuiltinDemandLaw::Slice,
+            BuiltinViewValueProjection::GroupShape | BuiltinViewValueProjection::ZipShape => {
+                BuiltinDemandLaw::OrderBarrier
+            }
             BuiltinViewValueProjection::CamelCase
             | BuiltinViewValueProjection::Capitalize
             | BuiltinViewValueProjection::Center
@@ -1042,7 +1045,6 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::FromJson
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
-            | BuiltinViewValueProjection::GroupShape
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
             | BuiltinViewValueProjection::Implode
@@ -1072,8 +1074,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::StripPrefix
             | BuiltinViewValueProjection::StripSuffix
             | BuiltinViewValueProjection::UrlDecode
-            | BuiltinViewValueProjection::UrlEncode
-            | BuiltinViewValueProjection::ZipShape => BuiltinDemandLaw::MapLike,
+            | BuiltinViewValueProjection::UrlEncode => BuiltinDemandLaw::MapLike,
             BuiltinViewValueProjection::Includes => BuiltinDemandLaw::PredicateMapLike,
         }
     }
@@ -1609,6 +1610,8 @@ pub enum BuiltinViewStage {
     Distinct,
     /// Keyed reduce stage (groups, counts, or indexes by key).
     KeyedReduce,
+    /// Split rows into truthy/falsy predicate buckets.
+    Partition,
     /// Set membership filter against a static argument list.
     SetFilter(BuiltinViewSetFilter),
     /// Set union with a static argument list.
@@ -2466,6 +2469,7 @@ impl BuiltinViewStage {
             | Self::DropWhile
             | Self::Distinct
             | Self::KeyedReduce
+            | Self::Partition
             | Self::SetFilter(_)
             | Self::SetUnion
             | Self::JoinString
@@ -2494,6 +2498,7 @@ impl BuiltinViewStage {
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce
+            | Self::Partition
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
@@ -2552,6 +2557,7 @@ impl BuiltinViewStage {
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
+            Self::Partition => BuiltinCardinality::Barrier,
             Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
@@ -2572,7 +2578,7 @@ impl BuiltinViewStage {
     #[inline]
     pub fn materialization(self) -> BuiltinViewMaterialization {
         match self {
-            Self::KeyedReduce => BuiltinViewMaterialization::StageFinalValue,
+            Self::KeyedReduce | Self::Partition => BuiltinViewMaterialization::StageFinalValue,
             Self::Filter
             | Self::Compact
             | Self::RemoveValue
@@ -2639,6 +2645,7 @@ impl BuiltinViewStage {
             | Self::ZipStatic
             | Self::ZipLongestStatic
             | Self::KeyedReduce
+            | Self::Partition
             | Self::AppendValue
             | Self::PrependValue => 10.0,
             Self::Take | Self::Skip => 0.5,
@@ -2670,6 +2677,7 @@ impl BuiltinViewStage {
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce
+            | Self::Partition
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic

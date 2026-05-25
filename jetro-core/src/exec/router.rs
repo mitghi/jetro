@@ -1193,6 +1193,26 @@ mod tests {
     }
 
     #[test]
+    fn view_partition_streams_tape_receiver_until_flush() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"old","active":false},{"title":"dune","active":true},{"title":"foundation","active":true},{"title":"draft","active":false}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.partition(active)"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                [{"title":"dune","active":true},{"title":"foundation","active":true}],
+                [{"title":"old","active":false},{"title":"draft","active":false}]
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

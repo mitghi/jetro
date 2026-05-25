@@ -1592,7 +1592,16 @@ impl Builtin for Partition {
     const METHOD: BuiltinMethod = BuiltinMethod::Partition;
     const NAME: &'static str = "partition";
     fn spec() -> BuiltinSpec {
-        barrier_default_spec().lambda_arg()
+        barrier_default_spec()
+            .lambda_arg()
+            .view_native()
+            .view_stage(BuiltinViewStage::Partition)
+            .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
+            .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
+            .expr_stage(BuiltinExprStage::ExprBuiltin)
+            .expr_payload(BuiltinExprPayload::PredicateScan)
+            .runtime_hook(BuiltinRuntimeHook::Barrier)
+            .lowering(BuiltinPipelineLowering::ExprArg)
     }
 }
 

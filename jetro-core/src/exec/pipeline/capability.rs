@@ -844,6 +844,11 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the key kernel.
         kernel: usize,
     },
+    /// Partition rows into two owned arrays by predicate result.
+    Partition {
+        /// Index into `stage_kernels` for the predicate kernel.
+        kernel: usize,
+    },
     /// Filter rows by structural membership in a static set.
     SetFilter {
         /// The set operation to apply.
@@ -933,6 +938,9 @@ impl ViewStageCapability {
                 values: Vec::new(),
             }),
             BuiltinViewStage::SetUnion => Some(Self::SetUnion { values: Vec::new() }),
+            BuiltinViewStage::Partition if kernel_is_view_native => Some(Self::Partition {
+                kernel: kernel_index,
+            }),
             BuiltinViewStage::JoinString => Some(Self::JoinString {
                 sep: std::sync::Arc::from(""),
             }),
@@ -976,6 +984,7 @@ impl ViewStageCapability {
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
+            Self::Partition { .. } => BuiltinViewStage::Partition,
             Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
             Self::SetUnion { .. } => BuiltinViewStage::SetUnion,
             Self::JoinString { .. } => BuiltinViewStage::JoinString,
@@ -1157,6 +1166,7 @@ impl ViewStageCapability {
             | Self::StringExpand { .. }
             | Self::Distinct { .. }
             | Self::KeyedReduce { .. }
+            | Self::Partition { .. }
             | Self::SetFilter { .. }
             | Self::SetUnion { .. }
             | Self::JoinString { .. }
@@ -1242,6 +1252,7 @@ impl ViewStageCapability {
                 | Self::StringExpand { .. }
                 | Self::Distinct { .. }
                 | Self::KeyedReduce { .. }
+                | Self::Partition { .. }
                 | Self::SetFilter { .. }
                 | Self::SetUnion { .. }
                 | Self::JoinString { .. }

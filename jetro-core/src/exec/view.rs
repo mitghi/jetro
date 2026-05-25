@@ -2472,6 +2472,20 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
+    if let pipeline::ViewStageCapability::Partition { kernel } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let keep = eval_frontier_filter_kernel_with_vm(&item, stage_kernels.get(kernel)?, vm)?;
+        let value = pipeline::view_kernel_view_to_owned(item);
+        let state = op_state.get_mut(stage_idx)?.partition();
+        if keep {
+            state.yes.push(value);
+        } else {
+            state.no.push(value);
+        }
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+
     if let pipeline::ViewStageCapability::AppendValue(_) = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4584,6 +4598,12 @@ where
             pipeline::ViewStageCapability::NumericFullInput(op) => {
                 let state = op_state.get_mut(stage_idx)?.numeric_full_input();
                 numeric_full_input_tail_values(op, state)
+            }
+            pipeline::ViewStageCapability::Partition { .. } => {
+                let state = op_state.get_mut(stage_idx)?.partition();
+                let yes = Val::arr(std::mem::take(&mut state.yes));
+                let no = Val::arr(std::mem::take(&mut state.no));
+                vec![yes, no]
             }
             pipeline::ViewStageCapability::AppendValue(ref value) => vec![value.clone()],
             pipeline::ViewStageCapability::PrependValue(ref value) => {

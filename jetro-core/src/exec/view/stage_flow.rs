@@ -36,6 +36,12 @@ pub(super) struct JoinStringState {
     pub count: usize,
 }
 
+#[derive(Default)]
+pub(super) struct PartitionState {
+    pub yes: Vec<Val>,
+    pub no: Vec<Val>,
+}
+
 /// Per-element control flow for the view-domain stage loop, parameterised by
 /// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
@@ -76,6 +82,8 @@ pub(super) enum ViewStageState {
     StaticStructuralSet(Box<StaticStructuralSetState>),
     /// String accumulator for join stages.
     JoinString(Box<JoinStringState>),
+    /// Two output buckets for `partition`.
+    Partition(Box<PartitionState>),
 }
 
 impl ViewStageState {
@@ -194,6 +202,16 @@ impl ViewStageState {
         match self {
             Self::JoinString(value) => value,
             _ => unreachable!("join string state was initialized"),
+        }
+    }
+
+    pub(super) fn partition(&mut self) -> &mut PartitionState {
+        if !matches!(self, Self::Partition(_)) {
+            *self = Self::Partition(Box::default());
+        }
+        match self {
+            Self::Partition(value) => value,
+            _ => unreachable!("partition state was initialized"),
         }
     }
 }
@@ -360,6 +378,7 @@ where
         pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::ObjectLambda { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
+        pipeline::ViewStageCapability::Partition { .. } => None,
         pipeline::ViewStageCapability::SetUnion { .. } => None,
         pipeline::ViewStageCapability::JoinString { .. } => None,
         pipeline::ViewStageCapability::ZipStatic { .. } => None,
