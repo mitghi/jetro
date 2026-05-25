@@ -437,7 +437,7 @@ impl<'a> TapeRowSource<'a> {
         tape: &'a crate::data::tape::TapeData,
         keys: &[Arc<str>],
     ) -> Self {
-        let Some(idx) = tape_walk_field_chain(tape, keys) else {
+        let Some(idx) = tape.object_field_chain_value(0, keys) else {
             return Self::Missing;
         };
         Self::from_tape_index(tape, idx)
@@ -628,20 +628,6 @@ pub(super) fn resolved_array_like_rows(recv: Val) -> Option<Rows<'static>> {
 
 fn objvec_row(data: &ObjVecData, row: usize) -> Val {
     data.row_val(row)
-}
-
-// Returns the tape index of the final node after walking `keys`, or `None` if any key is missing.
-fn tape_walk_field_chain(tape: &crate::data::tape::TapeData, keys: &[Arc<str>]) -> Option<usize> {
-    let mut cur = 0usize;
-    for key in keys {
-        cur = tape_field(tape, cur, key.as_ref())?;
-    }
-    Some(cur)
-}
-
-// Scans the tape object at `idx` for `key` and returns the tape index of its value, or `None` when absent.
-fn tape_field(tape: &crate::data::tape::TapeData, idx: usize, key: &str) -> Option<usize> {
-    tape.object_field_value(idx, key)
 }
 
 #[cfg(test)]

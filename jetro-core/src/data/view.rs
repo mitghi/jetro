@@ -1007,6 +1007,20 @@ impl<'a> ValueView<'a> for TapeView<'a> {
     }
 
     #[inline]
+    fn field_chain(&self, keys: &[Arc<str>]) -> Self {
+        let Self::Node { tape, idx } = self else {
+            return Self::Missing;
+        };
+        if let Some(field_idx) = tape.object_field_chain_value(*idx, keys) {
+            return Self::Node {
+                tape,
+                idx: field_idx,
+            };
+        }
+        Self::Missing
+    }
+
+    #[inline]
     fn has_key(&self, key: &str) -> Option<bool> {
         let Self::Node { tape, idx } = self else {
             return None;
@@ -1296,6 +1310,20 @@ impl<'a> ValueView<'a> for TapeScratchView<'a> {
             return Self::Missing;
         };
         if let Some(Some(field_idx)) = tape_field_idx(*tape, *idx, key) {
+            return Self::Node {
+                tape,
+                idx: field_idx,
+            };
+        }
+        Self::Missing
+    }
+
+    #[inline]
+    fn field_chain(&self, keys: &[Arc<str>]) -> Self {
+        let Self::Node { tape, idx } = self else {
+            return Self::Missing;
+        };
+        if let Some(field_idx) = tape.object_field_chain_value(*idx, keys) {
             return Self::Node {
                 tape,
                 idx: field_idx,

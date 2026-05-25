@@ -411,6 +411,17 @@ impl TapeData {
         None
     }
 
+    pub(crate) fn object_field_chain_value(
+        &self,
+        mut idx: usize,
+        keys: &[Arc<str>],
+    ) -> Option<usize> {
+        for key in keys {
+            idx = self.object_field_value(idx, key.as_ref())?;
+        }
+        Some(idx)
+    }
+
     #[inline]
     pub(crate) fn object_fields(&self, idx: usize) -> Option<TapeObjectFields<'_>> {
         let TapeNode::Object { len, .. } = *self.nodes.get(idx)? else {
@@ -670,6 +681,17 @@ impl TapeScratch {
             cur += self.span(cur);
         }
         None
+    }
+
+    pub(crate) fn object_field_chain_value(
+        &self,
+        mut idx: usize,
+        keys: &[Arc<str>],
+    ) -> Option<usize> {
+        for key in keys {
+            idx = self.object_field_value(idx, key.as_ref())?;
+        }
+        Some(idx)
     }
 
     #[inline]
