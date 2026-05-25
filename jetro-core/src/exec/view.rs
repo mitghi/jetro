@@ -1382,6 +1382,19 @@ fn resolve_view_sink(
     Some(Ok(sink))
 }
 
+fn resolve_view_suffix_sink(
+    body: &pipeline::PipelineBody,
+    suffix: &ViewSuffixCapabilities,
+    suffix_start: usize,
+    source_reversed: bool,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<(pipeline::ViewSinkCapability, PullDemand), EvalError>> {
+    let demand = pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
+    let sink = suffix.sink.clone().for_source_demand(demand, source_reversed);
+    resolve_view_sink(sink, Some(base_env), vm).map(|result| result.map(|sink| (sink, demand)))
+}
+
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.
 /// Returns `Some(action)` indicating whether to `Emit`, `Skip`, or `Stop`;
 /// returns `None` when a kernel lookup fails (signals the view path is unusable).
@@ -1560,13 +1573,15 @@ where
 
     if pipeline::ViewStageCapability::prefix_forces_empty(&prefix.stages, &body.stage_kernels) {
         if let Some(suffix) = view_suffix {
-            let source_demand = pipeline::Pipeline::segment_pull_demand(
-                &body.stages[prefix.consumed_stages..],
-                &body.sink,
-            );
-            let sink = suffix.sink.clone().for_source_demand(source_demand, false);
-            let sink = match resolve_view_sink(sink, Some(base_env), vm) {
-                Some(Ok(sink)) => sink,
+            let (sink, suffix_demand) = match resolve_view_suffix_sink(
+                body,
+                &suffix,
+                prefix.consumed_stages,
+                false,
+                base_env,
+                vm,
+            ) {
+                Some(Ok(resolved)) => resolved,
                 Some(Err(err)) => return Some(Err(err)),
                 None => return None,
             };
@@ -1575,7 +1590,7 @@ where
                 body,
                 &suffix,
                 sink,
-                source_demand,
+                suffix_demand,
                 vm,
             );
         }
@@ -1608,13 +1623,15 @@ where
             return Some(Err(err));
         }
 
-        let suffix_demand = pipeline::Pipeline::segment_pull_demand(
-            &body.stages[prefix.consumed_stages..],
-            &body.sink,
-        );
-        let sink = suffix.sink.clone().for_source_demand(suffix_demand, false);
-        let sink = match resolve_view_sink(sink, Some(base_env), vm) {
-            Some(Ok(sink)) => sink,
+        let (sink, suffix_demand) = match resolve_view_suffix_sink(
+            body,
+            &suffix,
+            prefix.consumed_stages,
+            false,
+            base_env,
+            vm,
+        ) {
+            Some(Ok(resolved)) => resolved,
             Some(Err(err)) => return Some(Err(err)),
             None => return None,
         };
