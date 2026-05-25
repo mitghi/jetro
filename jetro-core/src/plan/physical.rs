@@ -10,10 +10,10 @@
 use std::sync::Arc;
 
 use crate::builtins::registry::{by_name as builtin_by_name, view_object_items_projection_call};
-use crate::builtins::BuiltinCall;
+use crate::builtins::{BuiltinCall, BuiltinViewStage};
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
-use crate::exec::pipeline::{Pipeline, Source};
+use crate::exec::pipeline::{BodyKernel, Pipeline, PipelineBody, Source, Stage};
 use crate::exec::structural::{StructuralPathStep, StructuralPlan};
 use crate::ir::physical::{
     BackendPlan, ExecutionFacts, NodeId, PhysicalArrayElem, PhysicalChainStep, PhysicalNode,
@@ -458,14 +458,28 @@ fn try_lower_pipeline_path_suffix(builder: &mut PlanBuilder, expr: &Expr) -> Opt
     }
     suffix.reverse();
     let prefix = Expr::Chain(base.clone(), steps[..split].to_vec());
-    let pipeline = lower_via_logical(&prefix).or_else(|| Pipeline::lower(&prefix))?;
-    if is_trivial_collect_pipeline(&pipeline) || is_scalar_unwrap_pipeline(&pipeline) {
-        return None;
-    }
-    let (source, mut body) = pipeline.into_source_body();
-    mask_active_local_stage_kernels(&mut body, builder);
-    let node = pipeline_parts_to_plan_node(source, body)?;
-    let base = builder.push(node);
+    let base = if let Some(pipeline) = lower_via_logical(&prefix).or_else(|| Pipeline::lower(&prefix))
+    {
+        if is_trivial_collect_pipeline(&pipeline) || is_scalar_unwrap_pipeline(&pipeline) {
+            return None;
+        }
+        let (source, mut body) = pipeline.into_source_body();
+        mask_active_local_stage_kernels(&mut body, builder);
+        if push_select_suffix_projection(&mut body, &suffix) {
+            let node = pipeline_parts_to_plan_node(source, body)?;
+            return Some(builder.push(node));
+        }
+        let node = pipeline_parts_to_plan_node(source, body)?;
+        builder.push(node)
+    } else if let Some((source, mut body)) = static_root_path_pipeline_parts(&prefix) {
+        if push_select_suffix_projection(&mut body, &suffix) {
+            return Some(builder.push(PlanNode::Pipeline { source, body }));
+        }
+        builder.push(PlanNode::Pipeline { source, body })
+    } else {
+        try_lower_object_items_pipeline(builder, &prefix)
+            .or_else(|| try_lower_static_root_path_pipeline(builder, &prefix))?
+    };
     Some(builder.push(PlanNode::Chain {
         base,
         steps: suffix,
@@ -480,6 +494,38 @@ fn physical_chain_path_step(step: &Step) -> Option<PhysicalChainStep> {
         Step::Index(idx) => Some(PhysicalChainStep::Index(*idx)),
         _ => None,
     }
+}
+
+fn push_select_suffix_projection(body: &mut PipelineBody, suffix: &[PhysicalChainStep]) -> bool {
+    if body.sink.single_element_selection().is_none() {
+        return false;
+    }
+    let Some((expr, keys)) = field_suffix_projection(suffix) else {
+        return false;
+    };
+    let program = Arc::new(Compiler::compile(&expr, "<select-suffix-projection>"));
+    body.stages.push(Stage::Map(program, BuiltinViewStage::Map));
+    body.stage_exprs.push(Some(Arc::new(expr)));
+    body.stage_kernels.push(BodyKernel::FieldChain(keys));
+    true
+}
+
+fn field_suffix_projection(
+    suffix: &[PhysicalChainStep],
+) -> Option<(Expr, Arc<[Arc<str>]>)> {
+    let mut steps = Vec::with_capacity(suffix.len());
+    let mut keys = Vec::with_capacity(suffix.len());
+    for step in suffix {
+        let PhysicalChainStep::Field(key) = step else {
+            return None;
+        };
+        keys.push(Arc::clone(key));
+        steps.push(Step::Field(key.to_string()));
+    }
+    if steps.is_empty() {
+        return None;
+    }
+    Some((Expr::Chain(Box::new(Expr::Current), steps), keys.into()))
 }
 
 /// Returns `true` when the pipeline has no stages and sinks straight to `Collect`,
@@ -1168,6 +1214,11 @@ fn static_root_path_prefix(steps: &[Step]) -> Option<(usize, Arc<[PhysicalPathSt
 }
 
 fn try_lower_static_root_path_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let (source, body) = static_root_path_pipeline_parts(expr)?;
+    Some(builder.push(PlanNode::Pipeline { source, body }))
+}
+
+fn static_root_path_pipeline_parts(expr: &Expr) -> Option<(PipelinePlanSource, PipelineBody)> {
     let Expr::Chain(base, steps) = expr else {
         return None;
     };
@@ -1185,10 +1236,7 @@ fn try_lower_static_root_path_pipeline(builder: &mut PlanBuilder, expr: &Expr) -
     if is_scalar_unwrap_body(&body) {
         return None;
     }
-    Some(builder.push(PlanNode::Pipeline {
-        source: PipelinePlanSource::RootPath { steps: path },
-        body,
-    }))
+    Some((PipelinePlanSource::RootPath { steps: path }, body))
 }
 
 fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
@@ -2074,6 +2122,39 @@ mod tests {
                 ));
             }
             _ => panic!("indexed array pipeline must stream from a static root path"),
+        }
+    }
+
+    #[test]
+    fn indexed_array_pipeline_path_suffix_keeps_root_path_pipeline_prefix() {
+        let plan = plan_query(r#"$.groups[0].items.first().id"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::RootPath { steps },
+                body,
+            } => {
+                assert!(matches!(
+                    steps.as_ref(),
+                    [
+                        PhysicalPathStep::Field(groups),
+                        PhysicalPathStep::Index(0),
+                        PhysicalPathStep::Field(items)
+                    ] if groups.as_ref() == "groups" && items.as_ref() == "items"
+                ));
+                assert!(matches!(
+                    body.stages.last(),
+                    Some(crate::exec::pipeline::Stage::Map(_, _))
+                ));
+                assert!(matches!(
+                    body.stage_kernels.last(),
+                    Some(BodyKernel::FieldChain(keys)) if keys.iter().map(|key| key.as_ref()).collect::<Vec<_>>() == ["id"]
+                ));
+                assert!(matches!(body.sink, crate::exec::pipeline::Sink::Terminal(_)));
+            }
+            _ => panic!("suffix projection must stay inside the root-path pipeline"),
         }
     }
 

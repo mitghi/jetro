@@ -1348,6 +1348,21 @@ mod tests {
     }
 
     #[test]
+    fn indexed_array_pipeline_suffix_streams_selected_row_from_static_root_path() {
+        let j = Jetro::from_bytes(
+            br#"{"groups":[{"items":[{"id":"a","payload":{"large":[1,2,3]}},{"id":"b"}]},{"items":[{"id":"c"}]}],"unused":{"large":[5,6,7,8]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.groups[0].items.first().id"#).unwrap();
+
+        assert_eq!(out, json!("a"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
