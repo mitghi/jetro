@@ -7947,6 +7947,44 @@ mod tests {
     }
 
     #[test]
+    fn view_unflatten_keys_walks_tape_object_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"a.b.c":1,"a.d":2},{"x.y":3,"z":4}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::UnflattenKeys,
+                    crate::builtins::BuiltinArgs::Str(Arc::from(".")),
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([
+                {"a": {"b": {"c": 1}, "d": 2}},
+                {"x": {"y": 3}, "z": 4}
+            ])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_merge_builds_objects_from_tape_without_materializing_receiver() {
         let tape =
             crate::data::tape::TapeData::parse(br#"[{"a":1,"b":2},{"a":3}]"#.to_vec()).unwrap();

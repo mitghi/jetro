@@ -1329,6 +1329,15 @@ where
             };
             return Some(ViewProjectionResult::Owned(view_flatten_keys(&view, sep)));
         }
+        BuiltinViewValueProjection::UnflattenKeys => {
+            let BuiltinArgs::Str(sep) = args else {
+                return None;
+            };
+            return Some(match view_unflatten_keys(&view, sep) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Merge | BuiltinViewValueProjection::Defaults => {
             let BuiltinArgs::Val(other) = args else {
                 return None;
@@ -1504,6 +1513,38 @@ fn view_flatten_keys_impl<'a, V>(
         return;
     }
     out.insert(Arc::from(prefix), view_to_owned(view.clone()));
+}
+
+fn view_unflatten_keys<'a, V>(view: &V, sep: &str) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut root = indexmap::IndexMap::new();
+    for (key, value) in view.object_iter()? {
+        let parts: Vec<&str> = key.split(sep).collect();
+        view_insert_nested_key(&mut root, &parts, view_to_owned(value));
+    }
+    Some(Val::obj(root))
+}
+
+fn view_insert_nested_key(
+    object: &mut indexmap::IndexMap<Arc<str>, Val>,
+    parts: &[&str],
+    value: Val,
+) {
+    let Some((head, tail)) = parts.split_first() else {
+        return;
+    };
+    if tail.is_empty() {
+        object.insert(Arc::from(*head), value);
+        return;
+    }
+    let entry = object
+        .entry(Arc::from(*head))
+        .or_insert_with(|| Val::obj(indexmap::IndexMap::new()));
+    if let Val::Obj(child) = entry {
+        view_insert_nested_key(Arc::make_mut(child), tail, value);
+    }
 }
 
 fn view_object_to_map<'a, V>(view: &V) -> Option<indexmap::IndexMap<Arc<str>, Val>>
@@ -4529,6 +4570,10 @@ mod tests {
                 BuiltinViewValueProjection::ToString,
             ),
             (
+                BuiltinMethod::UnflattenKeys,
+                BuiltinViewValueProjection::UnflattenKeys,
+            ),
+            (
                 BuiltinMethod::UrlDecode,
                 BuiltinViewValueProjection::UrlDecode,
             ),
@@ -6714,6 +6759,7 @@ mod tests {
                 "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]},
                 "deep_merge_base": {"a": {"x": 1}, "b": 2},
                 "flatten_keys_base": {"a": {"b": {"c": 1}, "d": 2}},
+                "unflatten_keys_base": {"a.b.c": 1, "a.d": 2},
                 "merge_base": {"a": 1, "b": 2},
                 "defaults_base": {"a": null, "b": 2},
                 "rename_base": {"a": 1, "b": 2, "c": 3}
@@ -6854,6 +6900,14 @@ mod tests {
                 "flatten_keys_base"
             ),
             &Val::from(&serde_json::json!({"a.b.c": 1, "a.d": 2}))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::UnflattenKeys,
+                BuiltinArgs::Str(std::sync::Arc::from(".")),
+                "unflatten_keys_base"
+            ),
+            &Val::from(&serde_json::json!({"a": {"b": {"c": 1}, "d": 2}}))
         ));
         assert!(crate::util::vals_deep_eq(
             &apply_field(

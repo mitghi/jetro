@@ -2922,6 +2922,10 @@ impl Builtin for UnflattenKeys {
     const NAME: &'static str = "unflatten_keys";
     fn spec() -> BuiltinSpec {
         path_indexed_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::UnflattenKeys)
+            .demand_law(BuiltinViewValueProjection::UnflattenKeys.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

@@ -932,6 +932,8 @@ pub enum BuiltinViewValueProjection {
     DeepMerge,
     /// Flatten nested object keys into a separator-joined object.
     FlattenKeys,
+    /// Rebuild nested object keys from a separator-joined object.
+    UnflattenKeys,
     /// Shallow-merge an owned object argument into the receiver object.
     Merge,
     /// Fill missing or null receiver object keys from an owned defaults object.
@@ -1031,6 +1033,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
             | BuiltinViewValueProjection::ToBase64
+            | BuiltinViewValueProjection::UnflattenKeys
             | BuiltinViewValueProjection::StripPrefix
             | BuiltinViewValueProjection::StripSuffix
             | BuiltinViewValueProjection::UrlDecode
