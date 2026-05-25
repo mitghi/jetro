@@ -3328,6 +3328,27 @@ fn numeric_lag_spec() -> BuiltinSpec {
     .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
 }
 
+#[inline]
+fn numeric_lead_spec() -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::Lead)
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::OneToOne,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::UsizeArg { min: 0 })
+}
+
 /// `lag(n)` — element shifted by N positions.
 pub(crate) struct Lag;
 impl Builtin for Lag {
@@ -3379,7 +3400,45 @@ impl Builtin for Lead {
     const METHOD: BuiltinMethod = BuiltinMethod::Lead;
     const NAME: &'static str = "lead";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_lead_spec()
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let Some(n) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+        };
+        let current = opt_float_val(numeric_val(&item));
+        if n == 0 {
+            return Ok(crate::exec::pipeline::StageFlow::Continue(current));
+        }
+        let seen = &mut ctx.stage_taken[ctx.stage_idx];
+        *seen = seen.saturating_add(1);
+        if *seen <= n {
+            return Ok(crate::exec::pipeline::StageFlow::SkipRow);
+        }
+        Ok(crate::exec::pipeline::StageFlow::Continue(current))
+    }
+    #[inline]
+    fn finish_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<Vec<crate::data::value::Val>, crate::data::context::EvalError> {
+        let Some(n) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+            return Ok(Vec::new());
+        };
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let seen = ctx.stage_taken[ctx.stage_idx];
+        let tail = n.min(seen);
+        Ok((0..tail).map(|_| crate::data::value::Val::Null).collect())
     }
     #[inline]
     fn apply_args(

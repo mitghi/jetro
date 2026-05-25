@@ -1317,6 +1317,7 @@ fn simd_lazy_numeric_scans_keep_public_semantics() {
     assert_eq!(j.collect("$.cummax()").unwrap(), json!([1.0, 3.0, 3.0, 3.0, 5.0]));
     assert_eq!(j.collect("$.cummin()").unwrap(), json!([1.0, 1.0, 1.0, 0.0, 0.0]));
     assert_eq!(j.collect("$.lag(2)").unwrap(), json!([null, null, 1.0, 3.0, null]));
+    assert_eq!(j.collect("$.lead(2)").unwrap(), json!([null, 0.0, 5.0, null, null]));
 }
 
 #[test]

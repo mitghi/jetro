@@ -1557,6 +1557,8 @@ pub enum BuiltinViewStage {
     NumericScan(BuiltinViewNumericScan),
     /// Numeric lag by a fixed row offset.
     Lag,
+    /// Numeric lead by a fixed row offset.
+    Lead,
     /// Non-overlapping fixed-size chunk stage.
     Chunk,
     /// Sliding fixed-size window stage.
@@ -2370,6 +2372,7 @@ impl BuiltinViewStage {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag
+            | Self::Lead
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2391,6 +2394,7 @@ impl BuiltinViewStage {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag
+            | Self::Lead
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
@@ -2432,7 +2436,7 @@ impl BuiltinViewStage {
             Self::Enumerate => BuiltinCardinality::OneToOne,
             Self::Pairwise => BuiltinCardinality::Filtering,
             Self::NumericScan(_) => BuiltinCardinality::OneToOne,
-            Self::Lag => BuiltinCardinality::OneToOne,
+            Self::Lag | Self::Lead => BuiltinCardinality::OneToOne,
             Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
@@ -2463,6 +2467,7 @@ impl BuiltinViewStage {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag
+            | Self::Lead
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2494,6 +2499,7 @@ impl BuiltinViewStage {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag
+            | Self::Lead
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2522,6 +2528,7 @@ impl BuiltinViewStage {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag
+            | Self::Lead
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => 1.0,

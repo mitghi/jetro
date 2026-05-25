@@ -783,6 +783,11 @@ pub(crate) enum ViewStageCapability {
         /// Number of previous rows to look back.
         offset: usize,
     },
+    /// Emit numeric values shifted forward by a bounded lead.
+    Lead {
+        /// Number of future rows to look forward.
+        offset: usize,
+    },
     /// Emit fixed-size owned chunks from a borrowed row stream.
     Chunk {
         /// Chunk width.
@@ -864,6 +869,7 @@ impl ViewStageCapability {
             BuiltinViewStage::Pairwise => Some(Self::Pairwise),
             BuiltinViewStage::NumericScan(op) => Some(Self::NumericScan(op)),
             BuiltinViewStage::Lag => Some(Self::Lag { offset: usize_arg? }),
+            BuiltinViewStage::Lead => Some(Self::Lead { offset: usize_arg? }),
             BuiltinViewStage::Chunk => Some(Self::Chunk { width: usize_arg? }),
             BuiltinViewStage::Window => Some(Self::Window { width: usize_arg? }),
             BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
@@ -893,6 +899,7 @@ impl ViewStageCapability {
             Self::Pairwise => BuiltinViewStage::Pairwise,
             Self::NumericScan(op) => BuiltinViewStage::NumericScan(*op),
             Self::Lag { .. } => BuiltinViewStage::Lag,
+            Self::Lead { .. } => BuiltinViewStage::Lead,
             Self::Chunk { .. } => BuiltinViewStage::Chunk,
             Self::Window { .. } => BuiltinViewStage::Window,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
@@ -931,6 +938,7 @@ impl ViewStageCapability {
                 | Self::Enumerate
                 | Self::NumericScan(_)
                 | Self::Lag { .. }
+                | Self::Lead { .. }
         )
             && self.view_stage().preserves_cardinality()
     }
@@ -1048,6 +1056,7 @@ impl ViewStageCapability {
             | Self::Pairwise
             | Self::NumericScan(_)
             | Self::Lag { .. }
+            | Self::Lead { .. }
             | Self::Chunk { .. }
             | Self::Window { .. }
             | Self::StringExpand { .. }
@@ -1124,6 +1133,7 @@ impl ViewStageCapability {
                 | Self::Pairwise
                 | Self::NumericScan(_)
                 | Self::Lag { .. }
+                | Self::Lead { .. }
                 | Self::Chunk { .. }
                 | Self::Window { .. }
                 | Self::StringExpand { .. }
@@ -1653,29 +1663,35 @@ mod tests {
         }
         .view_capability(12, None)
         .unwrap();
+        let lead = Stage::UsizeBuiltin {
+            method: BuiltinMethod::Lead,
+            value: 2,
+        }
+        .view_capability(13, None)
+        .unwrap();
         let chunk = Stage::UsizeBuiltin {
             method: BuiltinMethod::Chunk,
             value: 2,
         }
-        .view_capability(13, None)
+        .view_capability(14, None)
         .unwrap();
         let window = Stage::UsizeBuiltin {
             method: BuiltinMethod::Window,
             value: 3,
         }
-        .view_capability(14, None)
+        .view_capability(15, None)
         .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(15, None)
+        .view_capability(16, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(16, None)
+        .view_capability(17, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1711,6 +1727,9 @@ mod tests {
         assert!(matches!(lag, ViewStageCapability::Lag { offset: 2 }));
         assert_eq!(lag.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(!lag.preserves_cardinality());
+        assert!(matches!(lead, ViewStageCapability::Lead { offset: 2 }));
+        assert_eq!(lead.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(!lead.preserves_cardinality());
         assert!(matches!(chunk, ViewStageCapability::Chunk { width: 2 }));
         assert_eq!(chunk.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(window, ViewStageCapability::Window { width: 3 }));

@@ -2483,6 +2483,24 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::Lead { offset } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_lead_frontier_row(
+            item,
+            offset,
+            stage_idx,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Chunk { width } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4064,6 +4082,54 @@ where
     )
 }
 
+fn drive_lead_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    offset: usize,
+    stage_idx: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let current = optional_float_value(numeric_view_value(&item));
+    if offset == 0 {
+        return drive_owned_child(
+            current,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+    let seen = op_state.get_mut(stage_idx)?.next_index().saturating_add(1);
+    if seen <= offset {
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+    drive_owned_child(
+        current,
+        next_stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
 fn numeric_view_value<'a, V>(item: &FrontierRow<V>) -> Option<f64>
 where
     V: FrontierBaseView<'a>,
@@ -4134,32 +4200,50 @@ where
     F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     for stage_idx in 0..stages.len() {
-        let pipeline::ViewStageCapability::Chunk { .. } = stages[stage_idx] else {
-            continue;
+        let mut tail_values = match stages[stage_idx] {
+            pipeline::ViewStageCapability::Chunk { .. } => {
+                let buffer = op_state.get_mut(stage_idx)?.values();
+                if buffer.is_empty() {
+                    continue;
+                }
+                vec![Val::arr(std::mem::take(buffer))]
+            }
+            pipeline::ViewStageCapability::Lead { offset } => {
+                if offset == 0 {
+                    continue;
+                }
+                let emitted = match op_state.get_mut(stage_idx)? {
+                    ViewStageState::Counter(value) => *value,
+                    _ => 0,
+                };
+                let tail = offset.min(emitted);
+                if tail == 0 {
+                    continue;
+                }
+                vec![Val::Null; tail]
+            }
+            _ => continue,
         };
-        let buffer = op_state.get_mut(stage_idx)?.values();
-        if buffer.is_empty() {
-            continue;
-        }
-        let chunk = Val::arr(std::mem::take(buffer));
-        let flow = match drive_owned_child(
-            chunk,
-            stage_idx + 1,
-            stages,
-            op_state,
-            stage_kernels,
-            source_demand,
-            emitted_outputs,
-            vm,
-            observe,
-        )? {
-            Ok(flow) => flow,
-            Err(err) => return Some(Err(err)),
-        };
-        if matches!(flow, ViewDriveFlow::Stop)
-            || source_demand.output_satisfied_by(*emitted_outputs)
-        {
-            break;
+        for value in tail_values.drain(..) {
+            let flow = match drive_owned_child(
+                value,
+                stage_idx + 1,
+                stages,
+                op_state,
+                stage_kernels,
+                source_demand,
+                emitted_outputs,
+                vm,
+                observe,
+            )? {
+                Ok(flow) => flow,
+                Err(err) => return Some(Err(err)),
+            };
+            if matches!(flow, ViewDriveFlow::Stop)
+                || source_demand.output_satisfied_by(*emitted_outputs)
+            {
+                return Some(Ok(()));
+            }
         }
     }
     Some(Ok(()))
@@ -7505,6 +7589,32 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!([null, null, 1.0, 3.0, null])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_lead_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Lead,
+                value: 2,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([null, 0.0, 5.0, null, null])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
