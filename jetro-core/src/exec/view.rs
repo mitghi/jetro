@@ -7834,6 +7834,41 @@ mod tests {
     }
 
     #[test]
+    fn view_invert_builds_objects_from_tape_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"a":"one","b":2},{"c":true,"d":["x"]}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::BuiltinCall {
+                receiver: Box::new(BodyKernel::Current),
+                call: crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Invert,
+                    crate::builtins::BuiltinArgs::None,
+                ),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"one": "a", "2": "b"}, {"true": "c", "[\"x\"]": "d"}])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn nested_receiver_plan_runs_on_tape_view_without_materializing_rows() {
         let tape = crate::data::tape::TapeData::parse(br#"[[1,2,3],[4,5]]"#.to_vec()).unwrap();
         let nested = Plan {

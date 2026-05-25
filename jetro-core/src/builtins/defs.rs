@@ -2402,6 +2402,10 @@ impl Builtin for Invert {
     const NAME: &'static str = "invert";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Invert)
+            .demand_law(BuiltinViewValueProjection::Invert.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

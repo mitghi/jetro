@@ -926,6 +926,8 @@ pub enum BuiltinViewScalarOp {
 pub enum BuiltinViewValueProjection {
     /// Convert `[key, value]` / `{key, val}` pairs into an object.
     FromPairs,
+    /// Swap object keys and values, coercing values to object keys.
+    Invert,
     /// Convert to camelCase.
     CamelCase,
     /// Uppercase first character and lowercase the rest.
@@ -998,6 +1000,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
+            | BuiltinViewValueProjection::Invert
             | BuiltinViewValueProjection::Indent
             | BuiltinViewValueProjection::KebabCase
             | BuiltinViewValueProjection::Or

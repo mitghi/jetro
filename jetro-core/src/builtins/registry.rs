@@ -1305,6 +1305,12 @@ where
             }
             return view_from_pairs(&view).map(ViewProjectionResult::Owned);
         }
+        BuiltinViewValueProjection::Invert => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return view_invert(&view).map(ViewProjectionResult::Owned);
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1355,6 +1361,40 @@ where
         out.insert(Arc::from(key), value);
     }
     Some(Val::obj(out))
+}
+
+fn view_invert<'a, V>(view: &V) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let len = view.object_len()?;
+    let mut out = indexmap::IndexMap::with_capacity(len);
+    for (key, value) in view.object_iter()? {
+        out.insert(view_key_from_value(&value), Val::Str(key));
+    }
+    Some(Val::obj(out))
+}
+
+fn view_key_from_value<'a, V>(view: &V) -> Arc<str>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Str(value) => Arc::from(value),
+        JsonView::Int(value) => Arc::from(value.to_string()),
+        JsonView::UInt(value) => Arc::from(value.to_string()),
+        JsonView::Float(value) => Arc::from(value.to_string()),
+        JsonView::Bool(value) => Arc::from(value.to_string()),
+        JsonView::Null => Arc::from("null"),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
+            let mut out = String::new();
+            if write_json_view(view, &mut out).is_some() {
+                Arc::from(out)
+            } else {
+                Arc::from("")
+            }
+        }
+    }
 }
 
 fn view_to_owned<'a, V>(view: V) -> Val
@@ -4247,6 +4287,7 @@ mod tests {
                 BuiltinViewValueProjection::Includes,
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
+            (BuiltinMethod::Invert, BuiltinViewValueProjection::Invert),
             (
                 BuiltinMethod::KebabCase,
                 BuiltinViewValueProjection::KebabCase,
@@ -6348,6 +6389,7 @@ mod tests {
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
+            (BuiltinMethod::Invert, BuiltinViewValueProjection::Invert),
             (
                 BuiltinMethod::KebabCase,
                 BuiltinViewValueProjection::KebabCase,
@@ -6461,7 +6503,8 @@ mod tests {
                 "case": "hello WORLD",
                 "words": "Hello world_test",
                 "indent": "  a\n    b",
-                "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}]
+                "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}],
+                "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]}
             }));
             let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view)
@@ -6574,6 +6617,15 @@ mod tests {
         assert!(crate::util::vals_deep_eq(
             &apply_field(BuiltinMethod::FromPairs, BuiltinArgs::None, "pairs"),
             &Val::from(&serde_json::json!({"a": 1, "b": 2, "c": null}))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(BuiltinMethod::Invert, BuiltinArgs::None, "invertible"),
+            &Val::from(&serde_json::json!({
+                "one": "a",
+                "2": "b",
+                "true": "c",
+                "[\"x\"]": "d"
+            }))
         ));
         assert_view_eq(
             BuiltinMethod::Pick,
