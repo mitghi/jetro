@@ -272,23 +272,26 @@ impl<'a> Rows<'a> {
             }
             SourceAccessMode::IndexedSuffix(count) => match self {
                 Self::Borrowed(rows) => {
-                    let start = rows.len().saturating_sub(count);
+                    let start = access.suffix_start(rows.len()).unwrap_or(0);
                     RowsIter::Borrowed(rows[start..].iter())
                 }
                 Self::Shared(rows) => {
                     let end = rows.len();
-                    let index = end.saturating_sub(count);
+                    let index = access.suffix_start(end).unwrap_or(0);
                     RowsIter::Shared { rows, index, end }
                 }
                 Self::Owned(rows) => {
-                    let start = rows.len().saturating_sub(count);
+                    let start = access.suffix_start(rows.len()).unwrap_or(0);
                     RowsIter::OwnedSkipTake(rows.into_iter().skip(start).take(count))
                 }
             },
             SourceAccessMode::ForwardBounded(limit) => match self {
-                Self::Borrowed(rows) => RowsIter::Borrowed(rows[..rows.len().min(limit)].iter()),
+                Self::Borrowed(rows) => {
+                    let end = access.bounded_forward_end(rows.len()).unwrap_or(rows.len());
+                    RowsIter::Borrowed(rows[..end].iter())
+                }
                 Self::Shared(rows) => {
-                    let end = rows.len().min(limit);
+                    let end = access.bounded_forward_end(rows.len()).unwrap_or(rows.len());
                     RowsIter::Shared {
                         rows,
                         index: 0,
@@ -366,7 +369,9 @@ impl<'a> ValRowSource<'a> {
             }
             (Self::ObjVec(data), SourceAccessMode::IndexedSuffix(count)) => {
                 let end = data.nrows();
-                let index = end.saturating_sub(count);
+                let index = SourceAccessMode::IndexedSuffix(count)
+                    .suffix_start(end)
+                    .unwrap_or(0);
                 ValRowsIter::ObjVec { data, index, end }
             }
             (Self::ObjVec(data), SourceAccessMode::ForwardBounded(limit)) if limit == 0 => {
@@ -374,7 +379,9 @@ impl<'a> ValRowSource<'a> {
                 ValRowsIter::Empty
             }
             (Self::ObjVec(data), SourceAccessMode::ForwardBounded(limit)) => {
-                let end = data.nrows().min(limit);
+                let end = SourceAccessMode::ForwardBounded(limit)
+                    .bounded_forward_end(data.nrows())
+                    .unwrap_or(data.nrows());
                 ValRowsIter::ObjVec {
                     data,
                     index: 0,
@@ -486,7 +493,9 @@ impl<'a> TapeRowSource<'a> {
                 .unwrap_or(TapeRowsIter::Empty),
             SourceAccessMode::IndexedSuffix(count) => match self {
                 Self::Array { tape, first, len } => {
-                    let skip = len.saturating_sub(count);
+                    let skip = SourceAccessMode::IndexedSuffix(count)
+                        .suffix_start(len)
+                        .unwrap_or(0);
                     let cur = tape.array_child_start(first, len, skip).unwrap_or(first);
                     TapeRowsIter::Array {
                         tape,
@@ -500,7 +509,9 @@ impl<'a> TapeRowSource<'a> {
             SourceAccessMode::ForwardBounded(limit) => match self {
                 Self::Array { tape, first, len } => TapeRowsIter::Array {
                     tape,
-                    remaining: len.min(limit),
+                    remaining: SourceAccessMode::ForwardBounded(limit)
+                        .bounded_forward_end(len)
+                        .unwrap_or(len),
                     cur: first,
                 },
                 Self::Single(view) if limit > 0 => TapeRowsIter::Single(Some(view).into_iter()),

@@ -252,6 +252,19 @@ impl SourceAccessMode {
         }
     }
 
+    /// Returns the one-past-end row index for bounded-forward access against a source length.
+    pub(crate) fn bounded_forward_end(self, len: usize) -> Option<usize> {
+        self.forward_bound().map(|limit| len.min(limit))
+    }
+
+    /// Returns the starting row index for suffix access against a source length.
+    pub(crate) fn suffix_start(self, len: usize) -> Option<usize> {
+        match self {
+            Self::IndexedSuffix(count) => Some(len.saturating_sub(count)),
+            _ => None,
+        }
+    }
+
     /// Demand that should be handed to a row iterator after this access mode has been selected.
     pub(crate) fn iterator_demand(self, requested: PullDemand) -> PullDemand {
         match self {
