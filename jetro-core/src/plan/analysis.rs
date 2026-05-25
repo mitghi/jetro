@@ -560,6 +560,7 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
         std::mem::discriminant(op).hash(h);
         match op {
             Opcode::PushInt(n) => n.hash(h),
+            Opcode::PushFloat(n) => n.to_bits().hash(h),
             Opcode::PushStr(s) => s.as_bytes().hash(h),
             Opcode::PushBool(b) => b.hash(h),
             Opcode::GetField(k)
@@ -567,8 +568,29 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
             | Opcode::Descendant(k)
             | Opcode::LoadIdent(k) => k.as_bytes().hash(h),
             Opcode::GetIndex(i) => i.hash(h),
+            Opcode::GetSlice(start, end, step) => {
+                start.hash(h);
+                end.hash(h);
+                step.hash(h);
+            }
+            Opcode::Quantifier(kind) => std::mem::discriminant(kind).hash(h),
+            Opcode::FieldChain(chain) => {
+                for key in chain.keys.iter() {
+                    key.as_bytes().hash(h);
+                }
+            }
+            Opcode::CastOp(ty) => std::mem::discriminant(ty).hash(h),
+            Opcode::KindCheck { ty, negate } => {
+                std::mem::discriminant(ty).hash(h);
+                negate.hash(h);
+            }
             Opcode::CallMethod(c) | Opcode::CallOptMethod(c) => {
                 (c.method as u8).hash(h);
+                c.name.as_bytes().hash(h);
+                c.demand_max_keep.hash(h);
+                for arg in c.orig_args.iter() {
+                    format!("{arg:?}").hash(h);
+                }
                 for p in c.sub_progs.iter() {
                     hash_ops(&p.ops, h);
                 }
@@ -581,6 +603,41 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
             Opcode::IfElse { then_, else_ } => {
                 hash_ops(&then_.ops, h);
                 hash_ops(&else_.ops, h);
+            }
+            Opcode::TryExpr { body, default } => {
+                hash_ops(&body.ops, h);
+                hash_ops(&default.ops, h);
+            }
+            Opcode::LetExpr { name, body } => {
+                name.as_bytes().hash(h);
+                hash_ops(&body.ops, h);
+            }
+            Opcode::BindLamCurrent { name, body } => {
+                name.as_ref().map(|name| name.as_bytes()).hash(h);
+                hash_ops(&body.ops, h);
+            }
+            Opcode::PipelineRun { base, steps } => {
+                hash_ops(&base.ops, h);
+                for step in steps.iter() {
+                    std::mem::discriminant(step).hash(h);
+                    match step {
+                        crate::vm::CompiledPipeStep::Forward(program) => {
+                            hash_ops(&program.ops, h);
+                        }
+                        crate::vm::CompiledPipeStep::BindName(name) => name.as_bytes().hash(h),
+                        crate::vm::CompiledPipeStep::BindObj(spec) => {
+                            for field in spec.fields.iter() {
+                                field.as_bytes().hash(h);
+                            }
+                            spec.rest.as_ref().map(|name| name.as_bytes()).hash(h);
+                        }
+                        crate::vm::CompiledPipeStep::BindArr(names) => {
+                            for name in names.iter() {
+                                name.as_bytes().hash(h);
+                            }
+                        }
+                    }
+                }
             }
             Opcode::RootChain(chain) => {
                 for k in chain.iter() {
@@ -653,6 +710,44 @@ fn hash_ops(ops: &[Opcode], h: &mut impl std::hash::Hasher) {
                     sp.hash(h);
                     hash_ops(&p.ops, h);
                 }
+            }
+            Opcode::FString(parts) => {
+                for part in parts.iter() {
+                    std::mem::discriminant(part).hash(h);
+                    match part {
+                        crate::vm::CompiledFSPart::Lit(s) => s.as_bytes().hash(h),
+                        crate::vm::CompiledFSPart::Interp { prog, fmt } => {
+                            hash_ops(&prog.ops, h);
+                            format!("{fmt:?}").hash(h);
+                        }
+                    }
+                }
+            }
+            Opcode::ListComp(spec) | Opcode::SetComp(spec) => {
+                for var in spec.vars.iter() {
+                    var.as_bytes().hash(h);
+                }
+                hash_ops(&spec.expr.ops, h);
+                hash_ops(&spec.iter.ops, h);
+                if let Some(cond) = &spec.cond {
+                    hash_ops(&cond.ops, h);
+                }
+            }
+            Opcode::DictComp(spec) => {
+                for var in spec.vars.iter() {
+                    var.as_bytes().hash(h);
+                }
+                hash_ops(&spec.key.ops, h);
+                hash_ops(&spec.val.ops, h);
+                hash_ops(&spec.iter.ops, h);
+                if let Some(cond) = &spec.cond {
+                    hash_ops(&cond.ops, h);
+                }
+            }
+            Opcode::PatchEval(patch) => format!("{patch:?}").hash(h),
+            Opcode::UpdateBatchEval(update) => format!("{update:?}").hash(h),
+            Opcode::Match(m) | Opcode::DeepMatchAll(m) | Opcode::DeepMatchFirst(m) => {
+                format!("{m:?}").hash(h);
             }
             _ => {}
         }

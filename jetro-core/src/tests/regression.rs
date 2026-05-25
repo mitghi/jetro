@@ -1364,6 +1364,23 @@ mod tests {
     }
 
     #[test]
+    fn analysis_program_signature_includes_opcode_payloads() {
+        use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::program_signature;
+
+        let as_array = Compiler::compile_str("$.tag as array").unwrap();
+        let as_null = Compiler::compile_str("$.tag as null").unwrap();
+        assert_ne!(program_signature(&as_array), program_signature(&as_null));
+
+        let kind_number = Compiler::compile_str("$.tag kind number").unwrap();
+        let kind_not_number = Compiler::compile_str("$.tag kind not number").unwrap();
+        assert_ne!(
+            program_signature(&kind_number),
+            program_signature(&kind_not_number)
+        );
+    }
+
+    #[test]
     fn dead_let_eliminated() {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
@@ -2550,6 +2567,18 @@ mod tests {
 
         let r = vm_query("$.s as int * 2", &doc).unwrap();
         assert_eq!(r, json!(20));
+    }
+
+    #[test]
+    fn object_cast_entries_do_not_dedup_different_cast_types() {
+        let doc = json!({"tag": "sf"});
+
+        let r = vm_query(
+            r#"{tags: $.tag as array, gone: $.tag as null, text: $.tag as string}"#,
+            &doc,
+        )
+        .unwrap();
+        assert_eq!(r, json!({"tags": ["sf"], "gone": null, "text": "sf"}));
     }
 
     #[test]
