@@ -17,7 +17,7 @@ use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
 use crate::vm::Program;
 
-use super::{MembershipSinkTarget, PipelineBody, Stage};
+use super::{BodyKernel, MembershipSinkTarget, PipelineBody, Stage};
 
 /// Describes how a source can be traversed without materialising the full row set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -569,6 +569,18 @@ pub(crate) enum ViewStageCapability {
     Skip(usize),
 }
 
+/// Deterministic source-access effect of a view stage when its predicate kernel
+/// is compile-time constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewStageConstantEffect {
+    /// Keep the stage in the source-access prefix.
+    Keep,
+    /// Drop the stage because it accepts every row.
+    NoOp,
+    /// Replace the suffix with an empty stream.
+    Empty,
+}
+
 impl ViewStageCapability {
     /// Constructs a `ViewStageCapability` from `BuiltinViewStage` metadata; returns `None` when incompatible.
     pub(crate) fn from_stage_metadata(
@@ -645,6 +657,39 @@ impl ViewStageCapability {
     /// Returns true when every stage in a prefix preserves input/output cardinality.
     pub(crate) fn all_preserve_cardinality(stages: &[Self]) -> bool {
         stages.iter().all(Self::preserves_cardinality)
+    }
+
+    /// Returns the deterministic source-access effect for stages with
+    /// compile-time constant predicate kernels.
+    pub(crate) fn constant_access_effect(
+        &self,
+        stage_kernels: &[BodyKernel],
+    ) -> ViewStageConstantEffect {
+        match self {
+            Self::Filter { kernel } | Self::TakeWhile { kernel } => {
+                match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                    Some(true) => ViewStageConstantEffect::NoOp,
+                    Some(false) => ViewStageConstantEffect::Empty,
+                    None => ViewStageConstantEffect::Keep,
+                }
+            }
+            Self::DropWhile { kernel } => {
+                match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
+                    Some(true) => ViewStageConstantEffect::Empty,
+                    Some(false) => ViewStageConstantEffect::NoOp,
+                    None => ViewStageConstantEffect::Keep,
+                }
+            }
+            _ => ViewStageConstantEffect::Keep,
+        }
+    }
+}
+
+fn constant_kernel_truthy(kernel: &BodyKernel) -> Option<bool> {
+    match kernel {
+        BodyKernel::ConstBool(value) => Some(*value),
+        BodyKernel::Const(value) => Some(crate::util::is_truthy(value)),
+        _ => None,
     }
 }
 
@@ -1179,6 +1224,40 @@ mod tests {
             materialization: ViewMaterialization::SinkFinalRow,
         }
         .selects_from_end());
+    }
+
+    #[test]
+    fn view_stage_capability_describes_constant_access_effects() {
+        assert_eq!(
+            ViewStageCapability::Filter { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::ConstBool(true)]),
+            super::ViewStageConstantEffect::NoOp
+        );
+        assert_eq!(
+            ViewStageCapability::Filter { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::ConstBool(false)]),
+            super::ViewStageConstantEffect::Empty
+        );
+        assert_eq!(
+            ViewStageCapability::TakeWhile { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::Const(Val::Int(1))]),
+            super::ViewStageConstantEffect::NoOp
+        );
+        assert_eq!(
+            ViewStageCapability::DropWhile { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::ConstBool(true)]),
+            super::ViewStageConstantEffect::Empty
+        );
+        assert_eq!(
+            ViewStageCapability::DropWhile { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::ConstBool(false)]),
+            super::ViewStageConstantEffect::NoOp
+        );
+        assert_eq!(
+            ViewStageCapability::Map { kernel: 0 }
+                .constant_access_effect(&[BodyKernel::ConstBool(false)]),
+            super::ViewStageConstantEffect::Keep
+        );
     }
 
     #[test]

@@ -1023,20 +1023,20 @@ fn source_access_stages<'a>(
 ) -> Cow<'a, [pipeline::ViewStageCapability]> {
     let mut rewritten: Option<Vec<pipeline::ViewStageCapability>> = None;
     for (idx, stage) in stages.iter().enumerate() {
-        match constant_stage_access_effect(stage, stage_kernels) {
-            ConstantStageAccessEffect::Keep => {
+        match stage.constant_access_effect(stage_kernels) {
+            pipeline::ViewStageConstantEffect::Keep => {
                 if let Some(out) = rewritten.as_mut() {
                     out.push(stage.clone());
                 }
             }
-            ConstantStageAccessEffect::NoOp => {
+            pipeline::ViewStageConstantEffect::NoOp => {
                 if rewritten.is_none() {
                     let mut out = Vec::with_capacity(stages.len());
                     out.extend_from_slice(&stages[..idx]);
                     rewritten = Some(out);
                 }
             }
-            ConstantStageAccessEffect::Empty => {
+            pipeline::ViewStageConstantEffect::Empty => {
                 let mut out = rewritten.unwrap_or_else(|| {
                     let mut out = Vec::with_capacity(idx + 1);
                     out.extend_from_slice(&stages[..idx]);
@@ -1048,36 +1048,6 @@ fn source_access_stages<'a>(
         }
     }
     rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
-}
-
-enum ConstantStageAccessEffect {
-    Keep,
-    NoOp,
-    Empty,
-}
-
-fn constant_stage_access_effect(
-    stage: &pipeline::ViewStageCapability,
-    stage_kernels: &[pipeline::BodyKernel],
-) -> ConstantStageAccessEffect {
-    match stage {
-        pipeline::ViewStageCapability::Filter { kernel }
-        | pipeline::ViewStageCapability::TakeWhile { kernel } => {
-            match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
-                Some(true) => ConstantStageAccessEffect::NoOp,
-                Some(false) => ConstantStageAccessEffect::Empty,
-                None => ConstantStageAccessEffect::Keep,
-            }
-        }
-        pipeline::ViewStageCapability::DropWhile { kernel } => {
-            match stage_kernels.get(*kernel).and_then(constant_kernel_truthy) {
-                Some(true) => ConstantStageAccessEffect::Empty,
-                Some(false) => ConstantStageAccessEffect::NoOp,
-                None => ConstantStageAccessEffect::Keep,
-            }
-        }
-        _ => ConstantStageAccessEffect::Keep,
-    }
 }
 
 fn resolve_view_sink(

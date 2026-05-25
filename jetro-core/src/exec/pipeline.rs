@@ -47,7 +47,7 @@ pub(crate) use capability::{
     index_from_end, view_capabilities, view_never_materializing_stage_capability,
     view_never_materializing_stage_range, view_prefix_capabilities, SourceAccessMode,
     SourceCapabilities, ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
-    ViewSinkCapability, ViewStageCapability,
+    ViewSinkCapability, ViewStageCapability, ViewStageConstantEffect,
 };
 pub(crate) use collector::{TerminalCollector, TerminalMapCollector};
 pub(crate) use common::{
