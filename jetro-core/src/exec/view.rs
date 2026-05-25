@@ -1213,12 +1213,11 @@ where
         let len = source.array_len()?;
         return match access.indexed_access(len)? {
             pipeline::SourceIndexedAccess::Single(idx) => {
-                let items = std::iter::once(source.index(idx as i64));
+                let items = std::iter::once(source.array_child(idx));
                 drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
             }
             pipeline::SourceIndexedAccess::Range { start, end } => {
-                let indexed_source = source.clone();
-                let items = (start..end).map(move |idx| indexed_source.index(idx as i64));
+                let items = source.array_child_range_iter(start, end);
                 drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
             }
             pipeline::SourceIndexedAccess::Empty => Some(Ok(())),

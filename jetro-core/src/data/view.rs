@@ -365,6 +365,22 @@ pub(crate) trait ValueView<'a>: Clone {
             _ => None,
         }
     }
+    /// Return the array child at a known in-range non-negative index.
+    fn array_child(&self, idx: usize) -> Self {
+        self.index(idx as i64)
+    }
+    /// Return an iterator over a known in-range half-open array child range.
+    fn array_child_range_iter(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Box<dyn Iterator<Item = Self> + 'a>
+    where
+        Self: 'a,
+    {
+        let source = self.clone();
+        Box::new((start..end).map(move |idx| source.array_child(idx)))
+    }
     /// Navigate into the named field of an object node, returning `Null` if absent.
     fn field(&self, key: &str) -> Self;
     /// Return whether the current object has `key`, or `None` if the current node is not an object.
