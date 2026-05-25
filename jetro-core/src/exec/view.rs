@@ -874,19 +874,11 @@ where
     }
     match sink {
         pipeline::ViewSinkCapability::Builtin {
-            accumulator: crate::builtins::BuiltinSinkAccumulator::ApproxDistinct,
+            accumulator,
             predicate_kernel: None,
             project_kernel: None,
             ..
-        } => Some(Val::Int(0)),
-        pipeline::ViewSinkCapability::Builtin {
-            accumulator: crate::builtins::BuiltinSinkAccumulator::Count,
-            ..
-        } => Some(Val::Int(0)),
-        pipeline::ViewSinkCapability::Builtin {
-            accumulator: crate::builtins::BuiltinSinkAccumulator::SelectOne(_),
-            ..
-        } => Some(Val::Null),
+        } => accumulator.empty_stream_result(),
         pipeline::ViewSinkCapability::Collect => Some(Val::arr(Vec::new())),
         pipeline::ViewSinkCapability::Nth { .. } => Some(Val::Null),
         pipeline::ViewSinkCapability::ArgExtreme { .. } => Some(Val::Null),
@@ -3918,6 +3910,34 @@ mod tests {
         assert_eq!(distinct_source.scalar_reads(), 0);
         assert_eq!(distinct_source.array_iter_reads(), 0);
         assert_eq!(distinct_source.materialize_reads(), 0);
+
+        let count_source = CountingView::root(&[1, 2, 3]);
+        let count_body = PipelineBody {
+            sink: Sink::Reducer(ReducerSpec::count()),
+            ..distinct_body
+        };
+
+        let count = super::run_full(count_source.clone(), &count_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, Val::Int(0));
+        assert_eq!(count_source.scalar_reads(), 0);
+        assert_eq!(count_source.array_iter_reads(), 0);
+        assert_eq!(count_source.materialize_reads(), 0);
+
+        let first_source = CountingView::root(&[1, 2, 3]);
+        let first_body = PipelineBody {
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            ..count_body
+        };
+
+        let first = super::run_full(first_source.clone(), &first_body)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first, Val::Null);
+        assert_eq!(first_source.scalar_reads(), 0);
+        assert_eq!(first_source.array_iter_reads(), 0);
+        assert_eq!(first_source.materialize_reads(), 0);
     }
 
     #[test]

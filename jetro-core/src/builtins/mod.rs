@@ -1695,6 +1695,16 @@ impl BuiltinSinkAccumulator {
             _ => None,
         }
     }
+
+    /// Result for an empty input stream when no numeric reducer state is needed.
+    #[inline]
+    pub(crate) fn empty_stream_result(self) -> Option<Val> {
+        match self {
+            Self::Count | Self::ApproxDistinct => Some(Val::Int(0)),
+            Self::SelectOne(_) => Some(Val::Null),
+            Self::Numeric => None,
+        }
+    }
 }
 
 /// The keyed-reduction algorithm used by `group_by` / `count_by` / `index_by`.
