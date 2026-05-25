@@ -2425,6 +2425,29 @@ where
             }
             Some(pipeline::ViewKernelValue::Owned(Val::Str(Arc::from(out))))
         }
+        pipeline::BodyKernel::NestedArrayCount { source, predicate } => Some(
+            pipeline::ViewKernelValue::Owned(eval_frontier_nested_array_count_with_vm(
+                item,
+                source,
+                predicate.as_deref(),
+                vm,
+            )?),
+        ),
+        pipeline::BodyKernel::NestedArrayReducer {
+            source,
+            predicate,
+            map,
+            op,
+        } => Some(pipeline::ViewKernelValue::Owned(
+            eval_frontier_nested_array_reducer_with_vm(
+                item,
+                source,
+                predicate.as_deref(),
+                map.as_deref(),
+                *op,
+                vm,
+            )?,
+        )),
         pipeline::BodyKernel::BuiltinCall { receiver, call } => {
             match eval_frontier_kernel_with_vm(item, receiver, vm)? {
                 pipeline::ViewKernelValue::View(view) => {
@@ -2550,6 +2573,110 @@ where
             Some(Box::new(items.into_iter().map(FrontierRow::Owned)))
         }
     }
+}
+
+fn eval_frontier_nested_array_count_with_vm<'a, V>(
+    item: &FrontierRow<V>,
+    source: &pipeline::BodyKernel,
+    predicate: Option<&pipeline::BodyKernel>,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    match eval_frontier_kernel_with_vm(item, source, vm)? {
+        pipeline::ViewKernelValue::View(view) => {
+            if predicate.is_none() {
+                return Some(Val::Int(view.array_len().unwrap_or(0) as i64));
+            }
+            let mut count = 0i64;
+            let mut iter = view.array_iter()?;
+            iter.try_for_each(|child| {
+                if eval_frontier_filter_kernel_with_vm(&child, predicate?, vm)? {
+                    count += 1;
+                }
+                Some(())
+            })?;
+            Some(Val::Int(count))
+        }
+        pipeline::ViewKernelValue::Owned(value) => {
+            let Some(items) = value.as_vals() else {
+                return Some(Val::Int(0));
+            };
+            let mut count = 0i64;
+            for child in items.iter() {
+                let child: FrontierRow<V> = FrontierRow::Owned(child.clone());
+                if predicate
+                    .map(|predicate| eval_frontier_filter_kernel_with_vm(&child, predicate, vm))
+                    .unwrap_or(Some(true))?
+                {
+                    count += 1;
+                }
+            }
+            Some(Val::Int(count))
+        }
+    }
+}
+
+fn eval_frontier_nested_array_reducer_with_vm<'a, V>(
+    item: &FrontierRow<V>,
+    source: &pipeline::BodyKernel,
+    predicate: Option<&pipeline::BodyKernel>,
+    map: Option<&pipeline::BodyKernel>,
+    op: pipeline::NumOp,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    let mut acc_i = 0i64;
+    let mut acc_f = 0.0f64;
+    let mut floated = false;
+    let mut min_f = f64::INFINITY;
+    let mut max_f = f64::NEG_INFINITY;
+    let mut n_obs = 0usize;
+
+    let mut observe = |child: FrontierRow<V>, vm: &mut VM| -> Option<()> {
+        if predicate
+            .map(|predicate| eval_frontier_filter_kernel_with_vm(&child, predicate, vm))
+            .unwrap_or(Some(true))?
+        {
+            let value = match map {
+                Some(map) => eval_frontier_value_kernel_with_vm(map, &child, vm)?,
+                None => pipeline::view_kernel_view_to_owned(child),
+            };
+            pipeline::num_fold(
+                &mut acc_i,
+                &mut acc_f,
+                &mut floated,
+                &mut min_f,
+                &mut max_f,
+                &mut n_obs,
+                op,
+                &value,
+            );
+        }
+        Some(())
+    };
+
+    match eval_frontier_kernel_with_vm(item, source, vm)? {
+        pipeline::ViewKernelValue::View(view) => {
+            let mut iter = view.array_iter()?;
+            iter.try_for_each(|child| observe(child, vm))?;
+        }
+        pipeline::ViewKernelValue::Owned(value) => {
+            let Some(items) = value.as_vals() else {
+                return Some(op.empty());
+            };
+            for child in items.iter() {
+                observe(FrontierRow::<V>::Owned(child.clone()), vm)?;
+            }
+        }
+    }
+
+    Some(pipeline::num_finalise(
+        op, acc_i, acc_f, floated, min_f, max_f, n_obs,
+    ))
 }
 
 fn eval_owned_scalar_or_value_kernel_with_vm<'a, V>(
@@ -6856,6 +6983,59 @@ mod tests {
             serde_json::Value::from(out),
             serde_json::json!(["id=2, name=bb", "id=1, name=a", "id=3, name=ccc"])
         );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_nested_array_kernels_recurse_into_child_views() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[[[1,10],[0,20],[3,30]],[[0,5],[4,6]]]"#.to_vec(),
+        )
+        .unwrap();
+        let first = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let first_for_sum = first.clone();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Array(
+                vec![
+                    BodyKernel::NestedArrayCount {
+                        source: Box::new(BodyKernel::Current),
+                        predicate: Some(Box::new(BodyKernel::NestedPlan(Arc::new(
+                            NestedPlanKernel::new(Arc::new(first)),
+                        )))),
+                    },
+                    BodyKernel::NestedArrayReducer {
+                        source: Box::new(BodyKernel::Current),
+                        predicate: None,
+                        map: Some(Box::new(BodyKernel::NestedPlan(Arc::new(
+                            NestedPlanKernel::new(Arc::new(first_for_sum)),
+                        )))),
+                        op: NumOp::Sum,
+                    },
+                ]
+                .into(),
+            )],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_terminal_collect(TapeView::root(&tape), &body, &mut VM::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([[2, 4], [1, 4]]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
