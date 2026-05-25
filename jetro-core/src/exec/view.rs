@@ -658,29 +658,7 @@ fn run_buffered_rows_view_suffix<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
-    if let Some(out) = run_frontier_rows_select_one_suffix(
-        rows.iter().cloned(),
-        &suffix.stages,
-        &sink,
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_find_one_suffix(
-        rows.iter().cloned(),
-        &suffix.stages,
-        &sink,
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_arg_extreme_suffix(
+    if let Some(out) = run_frontier_rows_specialized_sink_suffix(
         rows.iter().cloned(),
         &suffix.stages,
         sink.clone(),
@@ -844,6 +822,55 @@ where
     }
 
     Some(Ok(extreme.finish()))
+}
+
+fn run_frontier_rows_specialized_sink_suffix<'a, V, I>(
+    rows: I,
+    stages: &[pipeline::ViewStageCapability],
+    sink: pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+    stage_kernels: &[pipeline::BodyKernel],
+    sink_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    I: IntoIterator<Item = FrontierRow<V>>,
+{
+    if select_one_sink_contract(&sink).is_some() {
+        return run_frontier_rows_select_one_suffix(
+            rows,
+            stages,
+            &sink,
+            source_demand,
+            stage_kernels,
+            sink_kernels,
+            vm,
+        );
+    }
+    if find_one_predicate_kernel(&sink).is_some() {
+        return run_frontier_rows_find_one_suffix(
+            rows,
+            stages,
+            &sink,
+            source_demand,
+            stage_kernels,
+            sink_kernels,
+            vm,
+        );
+    }
+    if sink.arg_extreme_contract().is_some() {
+        return run_frontier_rows_arg_extreme_suffix(
+            rows,
+            stages,
+            sink,
+            source_demand,
+            stage_kernels,
+            sink_kernels,
+            vm,
+        );
+    }
+    None
 }
 
 fn run_frontier_rows_select_one_suffix<'a, V, I>(
@@ -2516,29 +2543,7 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
-    if let Some(out) = run_frontier_rows_select_one_suffix(
-        rows.iter().cloned(),
-        &suffix.stages,
-        &sink,
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_find_one_suffix(
-        rows.iter().cloned(),
-        &suffix.stages,
-        &sink,
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_arg_extreme_suffix(
+    if let Some(out) = run_frontier_rows_specialized_sink_suffix(
         rows.iter().cloned(),
         &suffix.stages,
         sink.clone(),
@@ -2661,32 +2666,10 @@ where
     ) {
         return Some(out);
     }
-    if let Some(out) = run_frontier_rows_arg_extreme_suffix(
+    if let Some(out) = run_frontier_rows_specialized_sink_suffix(
         ordered.iter().cloned(),
         &suffix.stages,
         sink.clone(),
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_select_one_suffix(
-        ordered.iter().cloned(),
-        &suffix.stages,
-        &sink,
-        source_demand,
-        &body.stage_kernels,
-        &body.sink_kernels,
-        vm,
-    ) {
-        return Some(out);
-    }
-    if let Some(out) = run_frontier_rows_find_one_suffix(
-        ordered.iter().cloned(),
-        &suffix.stages,
-        &sink,
         source_demand,
         &body.stage_kernels,
         &body.sink_kernels,
