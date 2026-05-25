@@ -1151,7 +1151,7 @@ fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Op
             _ => break,
         }
     }
-    if field_end == 0 || field_end >= steps.len() {
+    if field_end >= steps.len() {
         return None;
     }
     let Step::Method(name, args) = &steps[field_end] else {
@@ -1869,6 +1869,29 @@ mod tests {
                 ))
             )),
             _ => panic!("entries().first() must stream object items from a field-chain source"),
+        }
+    }
+
+    #[test]
+    fn root_object_item_projection_lowers_as_empty_field_chain_pipeline() {
+        let plan = plan_query(r#"$.values().first()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { keys },
+                body,
+            } => {
+                assert!(keys.is_empty());
+                assert!(matches!(
+                    body.stages.first(),
+                    Some(crate::exec::pipeline::Stage::ObjectItems(
+                        crate::builtins::BuiltinViewObjectProjection::Values
+                    ))
+                ));
+            }
+            _ => panic!("root values().first() must stream root object items"),
         }
     }
 

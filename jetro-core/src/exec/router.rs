@@ -1267,6 +1267,21 @@ mod tests {
     }
 
     #[test]
+    fn root_view_object_values_first_streams_object_items_from_tape() {
+        let j = Jetro::from_bytes(
+            br#"{"name":"Ada","bio":{"large":[1,2,3,4]},"city":"London"}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.values().first()"#).unwrap();
+
+        assert_eq!(out, json!("Ada"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_entries_first_streams_only_selected_entry_from_tape() {
         let j = Jetro::from_bytes(
             br#"{"profile":{"name":"Ada","bio":{"large":[1,2,3,4]},"city":"London"},"unused":{"large":[5,6,7,8]}}"#.to_vec(),
