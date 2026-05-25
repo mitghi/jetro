@@ -886,67 +886,26 @@ where
     if !deterministic_cardinality_supported(stages, stage_kernels) {
         return None;
     }
-    let JsonView::ArrayLen(mut count) = source.scalar() else {
+    let JsonView::ArrayLen(count) = source.scalar() else {
         return None;
     };
-    for stage in stages {
-        match stage {
-            pipeline::ViewStageCapability::BuiltinProjection { .. }
-            | pipeline::ViewStageCapability::Map { .. } => {}
-            pipeline::ViewStageCapability::Take(n) => {
-                count = count.min(*n);
-            }
-            pipeline::ViewStageCapability::Skip(n) => {
-                count = count.saturating_sub(*n);
-            }
-            pipeline::ViewStageCapability::Filter { kernel } => {
-                if !constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
-                    count = 0;
-                }
-            }
-            pipeline::ViewStageCapability::TakeWhile { kernel } => {
-                if !constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
-                    count = 0;
-                }
-            }
-            pipeline::ViewStageCapability::DropWhile { kernel } => {
-                if constant_kernel_truthy(stage_kernels.get(*kernel)?)? {
-                    count = 0;
-                }
-            }
-            pipeline::ViewStageCapability::Compact
-            | pipeline::ViewStageCapability::RemoveValue(_)
-            | pipeline::ViewStageCapability::FlatMap { .. }
-            | pipeline::ViewStageCapability::StringExpand { .. }
-            | pipeline::ViewStageCapability::Distinct { .. }
-            | pipeline::ViewStageCapability::KeyedReduce { .. } => return None,
-        }
-    }
-    Some(count)
+    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(
+        stages,
+        stage_kernels,
+        count,
+    )
 }
 
 fn deterministic_cardinality_supported(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> bool {
-    stages.iter().all(|stage| match stage {
-        pipeline::ViewStageCapability::BuiltinProjection { .. }
-        | pipeline::ViewStageCapability::Map { .. }
-        | pipeline::ViewStageCapability::Take(_)
-        | pipeline::ViewStageCapability::Skip(_) => true,
-        pipeline::ViewStageCapability::Filter { kernel }
-        | pipeline::ViewStageCapability::TakeWhile { kernel }
-        | pipeline::ViewStageCapability::DropWhile { kernel } => stage_kernels
-            .get(*kernel)
-            .and_then(constant_kernel_truthy)
-            .is_some(),
-        pipeline::ViewStageCapability::Compact
-        | pipeline::ViewStageCapability::RemoveValue(_)
-        | pipeline::ViewStageCapability::FlatMap { .. }
-        | pipeline::ViewStageCapability::StringExpand { .. }
-        | pipeline::ViewStageCapability::Distinct { .. }
-        | pipeline::ViewStageCapability::KeyedReduce { .. } => false,
-    })
+    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(
+        stages,
+        stage_kernels,
+        0,
+    )
+    .is_some()
 }
 
 fn deterministic_prefix_is_empty<'a, V>(
@@ -957,56 +916,14 @@ fn deterministic_prefix_is_empty<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    deterministic_prefix_forces_empty(stages, stage_kernels)
+    pipeline::ViewStageCapability::prefix_forces_empty(stages, stage_kernels)
 }
 
 fn deterministic_prefix_forces_empty(
     stages: &[pipeline::ViewStageCapability],
     stage_kernels: &[pipeline::BodyKernel],
 ) -> bool {
-    let mut upper_bound = None::<usize>;
-    for stage in stages {
-        match stage {
-            pipeline::ViewStageCapability::Take(n) => {
-                if *n == 0 {
-                    return true;
-                }
-                upper_bound = Some(upper_bound.map_or(*n, |bound| bound.min(*n)));
-            }
-            pipeline::ViewStageCapability::Skip(n) => {
-                if upper_bound.is_some_and(|bound| *n >= bound) {
-                    return true;
-                }
-                upper_bound = upper_bound.map(|bound| bound.saturating_sub(*n));
-            }
-            pipeline::ViewStageCapability::Filter { kernel }
-            | pipeline::ViewStageCapability::TakeWhile { kernel } => {
-                if matches!(
-                    stage_kernels.get(*kernel).and_then(constant_kernel_truthy),
-                    Some(false)
-                ) {
-                    return true;
-                }
-            }
-            pipeline::ViewStageCapability::DropWhile { kernel } => {
-                if matches!(
-                    stage_kernels.get(*kernel).and_then(constant_kernel_truthy),
-                    Some(true)
-                ) {
-                    return true;
-                }
-            }
-            pipeline::ViewStageCapability::BuiltinProjection { .. }
-            | pipeline::ViewStageCapability::Map { .. } => {}
-            pipeline::ViewStageCapability::Compact
-            | pipeline::ViewStageCapability::RemoveValue(_)
-            | pipeline::ViewStageCapability::FlatMap { .. }
-            | pipeline::ViewStageCapability::StringExpand { .. }
-            | pipeline::ViewStageCapability::Distinct { .. }
-            | pipeline::ViewStageCapability::KeyedReduce { .. } => return false,
-        }
-    }
-    false
+    pipeline::ViewStageCapability::prefix_forces_empty(stages, stage_kernels)
 }
 
 fn constant_kernel_truthy(kernel: &pipeline::BodyKernel) -> Option<bool> {

@@ -683,6 +683,83 @@ impl ViewStageCapability {
             _ => ViewStageConstantEffect::Keep,
         }
     }
+
+    /// Applies this stage's deterministic cardinality effect to `count`.
+    /// Returns `None` when the stage can change cardinality in a data-dependent way.
+    pub(crate) fn deterministic_cardinality_after(
+        &self,
+        stage_kernels: &[BodyKernel],
+        count: usize,
+    ) -> Option<usize> {
+        match self {
+            Self::BuiltinProjection { .. } | Self::Map { .. } => Some(count),
+            Self::Take(n) => Some(count.min(*n)),
+            Self::Skip(n) => Some(count.saturating_sub(*n)),
+            Self::Filter { kernel } | Self::TakeWhile { kernel } => {
+                let keep = constant_kernel_truthy(stage_kernels.get(*kernel)?)?;
+                Some(if keep { count } else { 0 })
+            }
+            Self::DropWhile { kernel } => {
+                let drop_all = constant_kernel_truthy(stage_kernels.get(*kernel)?)?;
+                Some(if drop_all { 0 } else { count })
+            }
+            Self::Compact
+            | Self::RemoveValue(_)
+            | Self::FlatMap { .. }
+            | Self::StringExpand { .. }
+            | Self::Distinct { .. }
+            | Self::KeyedReduce { .. } => None,
+        }
+    }
+
+    /// Applies deterministic cardinality effects for a stage prefix.
+    pub(crate) fn deterministic_prefix_cardinality_after(
+        stages: &[Self],
+        stage_kernels: &[BodyKernel],
+        mut count: usize,
+    ) -> Option<usize> {
+        for stage in stages {
+            count = stage.deterministic_cardinality_after(stage_kernels, count)?;
+        }
+        Some(count)
+    }
+
+    /// Returns true when deterministic prefix analysis proves no row can survive.
+    pub(crate) fn prefix_forces_empty(stages: &[Self], stage_kernels: &[BodyKernel]) -> bool {
+        let mut upper_bound = None::<usize>;
+        for stage in stages {
+            match stage {
+                Self::Take(n) => {
+                    if *n == 0 {
+                        return true;
+                    }
+                    upper_bound = Some(upper_bound.map_or(*n, |bound| bound.min(*n)));
+                }
+                Self::Skip(n) => {
+                    if upper_bound.is_some_and(|bound| *n >= bound) {
+                        return true;
+                    }
+                    upper_bound = upper_bound.map(|bound| bound.saturating_sub(*n));
+                }
+                Self::Filter { .. } | Self::TakeWhile { .. } | Self::DropWhile { .. } => {
+                    if matches!(
+                        stage.constant_access_effect(stage_kernels),
+                        ViewStageConstantEffect::Empty
+                    ) {
+                        return true;
+                    }
+                }
+                Self::BuiltinProjection { .. } | Self::Map { .. } => {}
+                Self::Compact
+                | Self::RemoveValue(_)
+                | Self::FlatMap { .. }
+                | Self::StringExpand { .. }
+                | Self::Distinct { .. }
+                | Self::KeyedReduce { .. } => return false,
+            }
+        }
+        false
+    }
 }
 
 fn constant_kernel_truthy(kernel: &BodyKernel) -> Option<bool> {
@@ -1258,6 +1335,42 @@ mod tests {
                 .constant_access_effect(&[BodyKernel::ConstBool(false)]),
             super::ViewStageConstantEffect::Keep
         );
+    }
+
+    #[test]
+    fn view_stage_capability_tracks_deterministic_cardinality() {
+        let stages = [
+            ViewStageCapability::Map { kernel: 0 },
+            ViewStageCapability::Take(5),
+            ViewStageCapability::Skip(2),
+            ViewStageCapability::Filter { kernel: 1 },
+        ];
+        let kernels = [BodyKernel::Current, BodyKernel::ConstBool(true)];
+        assert_eq!(
+            ViewStageCapability::deterministic_prefix_cardinality_after(&stages, &kernels, 10),
+            Some(3)
+        );
+
+        let false_filter = [ViewStageCapability::Filter { kernel: 0 }];
+        assert_eq!(
+            ViewStageCapability::deterministic_prefix_cardinality_after(
+                &false_filter,
+                &[BodyKernel::ConstBool(false)],
+                10,
+            ),
+            Some(0)
+        );
+        assert!(ViewStageCapability::prefix_forces_empty(
+            &false_filter,
+            &[BodyKernel::ConstBool(false)]
+        ));
+
+        let unsupported = [ViewStageCapability::Compact];
+        assert_eq!(
+            ViewStageCapability::deterministic_prefix_cardinality_after(&unsupported, &[], 10),
+            None
+        );
+        assert!(!ViewStageCapability::prefix_forces_empty(&unsupported, &[]));
     }
 
     #[test]
