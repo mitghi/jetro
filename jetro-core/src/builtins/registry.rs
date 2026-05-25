@@ -1787,20 +1787,13 @@ where
         return None;
     }
 
-    fn key_from_value(value: Val) -> Arc<str> {
-        match value {
-            Val::Str(value) => value,
-            other => Arc::from(crate::util::val_to_key(&other)),
-        }
-    }
-
     let len = view.array_len()?;
     if fields.len() >= 3 {
         let mut out: indexmap::IndexMap<Arc<str>, indexmap::IndexMap<Arc<str>, Val>> =
             indexmap::IndexMap::new();
         for item in view.array_iter()? {
-            let row = key_from_value(item.field(fields[0].as_ref()).materialize());
-            let col = key_from_value(item.field(fields[1].as_ref()).materialize());
+            let row = view_to_key(&item.field(fields[0].as_ref()))?;
+            let col = view_to_key(&item.field(fields[1].as_ref()))?;
             let value = item.field(fields[2].as_ref()).materialize();
             out.entry(row).or_default().insert(col, value);
         }
@@ -1813,11 +1806,30 @@ where
 
     let mut out = indexmap::IndexMap::with_capacity(len);
     for item in view.array_iter()? {
-        let key = key_from_value(item.field(fields[0].as_ref()).materialize());
+        let key = view_to_key(&item.field(fields[0].as_ref()))?;
         let value = item.field(fields[1].as_ref()).materialize();
         out.insert(key, value);
     }
     Some(Val::obj(out))
+}
+
+fn view_to_key<'a, V>(view: &V) -> Option<Arc<str>>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::Str(value) => Some(Arc::from(value)),
+        JsonView::Int(value) => Some(Arc::from(itoa::Buffer::new().format(value))),
+        JsonView::UInt(value) => Some(Arc::from(itoa::Buffer::new().format(value))),
+        JsonView::Float(value) => Some(Arc::from(ryu::Buffer::new().format(value))),
+        JsonView::Bool(value) => Some(Arc::from(if value { "true" } else { "false" })),
+        JsonView::Null => Some(Arc::from("null")),
+        JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
+            let mut out = String::new();
+            write_json_view(view, &mut out)?;
+            Some(Arc::from(out))
+        }
+    }
 }
 
 fn view_shallow_merge<'a, V>(
