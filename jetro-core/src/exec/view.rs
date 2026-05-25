@@ -3417,21 +3417,16 @@ where
 {
     if let pipeline::BodyKernel::NestedPlan(plan) = kernel {
         if let Some(body) = plan.receiver_view_body() {
-            let rows = match item {
+            return match item {
                 FrontierRow::Borrowed(view) => {
-                    collect_receiver_nested_body_views(view.clone(), &body, vm)?
+                    let rows = collect_receiver_nested_body_views(view.clone(), &body, vm)?;
+                    Some(Box::new(rows.into_iter()))
                 }
                 FrontierRow::Owned(value) => {
                     let value = plan.run(value.clone()).ok()?;
-                    value
-                        .into_vals()
-                        .ok()?
-                        .into_iter()
-                        .map(FrontierRow::Owned)
-                        .collect()
+                    owned_array_rows(value)
                 }
             };
-            return Some(Box::new(rows.into_iter()));
         }
     }
     match eval_frontier_kernel_with_vm(item, kernel, vm)? {
