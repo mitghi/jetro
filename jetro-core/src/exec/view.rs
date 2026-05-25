@@ -284,7 +284,9 @@ where
         source_demand
     };
     let sink_source_reversed = source_reversed && !selective_reversed_suffix_last;
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, sink_source_reversed);
+    let sink = suffix
+        .sink
+        .for_source_demand(source_demand, sink_source_reversed);
     let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -361,7 +363,7 @@ where
     let suffix = view_suffix_capabilities(body, suffix_start)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
-    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, false);
+    let sink = suffix.sink.clone().for_source_demand(source_demand, false);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -518,7 +520,7 @@ where
     let suffix = view_suffix_capabilities(body, suffix_start)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
-    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, false);
+    let sink = suffix.sink.clone().for_source_demand(source_demand, false);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -672,8 +674,7 @@ where
     );
     let source_access = pipeline::SourceCapabilities::VIEW_ARRAY
         .choose_view_access(source_demand, access_stages.as_ref());
-    let sink = view_suffix_sink_for_demand(
-        capabilities.sink,
+    let sink = capabilities.sink.for_source_demand(
         source_demand,
         matches!(source_access, pipeline::SourceAccessMode::Reverse { .. }),
     );
@@ -1996,7 +1997,7 @@ where
     let suffix = view_suffix_capabilities(body, suffix_start)?;
     let source_demand =
         pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
-    let sink = view_suffix_sink_for_demand(suffix.sink, source_demand, false);
+    let sink = suffix.sink.for_source_demand(source_demand, false);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -2040,7 +2041,10 @@ where
         plan.descending
     };
     let source_reversed = ordered_descending != plan.descending;
-    let sink = view_suffix_sink_for_demand(suffix.sink.clone(), source_demand, source_reversed);
+    let sink = suffix
+        .sink
+        .clone()
+        .for_source_demand(source_demand, source_reversed);
     let sink = match resolve_view_sink(sink, Some(base_env), vm) {
         Some(Ok(sink)) => sink,
         Some(Err(err)) => return Some(Err(err)),
@@ -2125,14 +2129,6 @@ where
     }
 
     Some(sink_acc.finish_result(false))
-}
-
-fn view_suffix_sink_for_demand(
-    sink: pipeline::ViewSinkCapability,
-    source_demand: PullDemand,
-    source_reversed: bool,
-) -> pipeline::ViewSinkCapability {
-    sink.for_source_demand(source_demand, source_reversed)
 }
 
 /// Plan produced when a `Sort` barrier is detected. Records the view-domain
@@ -4112,7 +4108,7 @@ mod tests {
             source_reversed: false,
         };
 
-        let adjusted = super::view_suffix_sink_for_demand(sink, PullDemand::LastInput(2), true);
+        let adjusted = sink.for_source_demand(PullDemand::LastInput(2), true);
 
         assert!(matches!(
             adjusted,
