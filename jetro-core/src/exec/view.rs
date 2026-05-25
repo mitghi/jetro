@@ -3820,6 +3820,11 @@ where
         pipeline::BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries().len());
             for entry in object.entries() {
+                if let Some(cond) = entry.cond() {
+                    if !eval_frontier_filter_kernel_with_vm(item, cond, vm)? {
+                        continue;
+                    }
+                }
                 let value = eval_frontier_value_kernel_with_vm(entry.value(), item, vm)?;
                 if entry.omits_null() && value.is_null() {
                     continue;

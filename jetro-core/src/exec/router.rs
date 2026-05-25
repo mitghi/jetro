@@ -1427,6 +1427,29 @@ mod tests {
     }
 
     #[test]
+    fn guarded_object_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"title":"a","isbn":"x","active":true,"payload":{"large":[1,2,3]}},{"title":"b","isbn":"y","active":false,"payload":{"large":[4,5,6]}}],"unused":{"large":[7,8,9]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map({title, isbn: isbn when active})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"title": "a", "isbn": "x"},
+                {"title": "b"}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn object_shape_pipeline_child_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"meta":{"version":3}}"#.to_vec(),

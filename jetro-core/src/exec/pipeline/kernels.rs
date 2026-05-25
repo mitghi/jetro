@@ -303,6 +303,8 @@ pub struct ObjectKernelEntry {
     key: Arc<str>,
     // kernel used to compute the value for this key
     value: BodyKernel,
+    // optional guard; falsy skips this entry
+    cond: Option<BodyKernel>,
     // when true, a null result causes this entry to be silently omitted
     optional: bool,
     // when true, null values are omitted regardless of the optional flag
@@ -405,6 +407,15 @@ impl ObjectKernel {
     ) -> bool {
         let start = cells.len();
         for entry in self.entries.iter() {
+            if let Some(cond) = &entry.cond {
+                let keep = eval_native_kernel_with_vm(cond, item, vm)
+                    .map(|value| crate::util::is_truthy(&value))
+                    .unwrap_or(false);
+                if !keep {
+                    cells.truncate(start);
+                    return false;
+                }
+            }
             let value = eval_native_kernel_with_vm(&entry.value, item, vm).unwrap_or(Val::Null);
             if (entry.optional || entry.omit_null) && value.is_null() {
                 cells.truncate(start);
@@ -425,7 +436,13 @@ impl ObjectKernel {
     /// Returns the source-row field payload needed to evaluate every value entry.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         self.entries.iter().fold(FieldDemand::None, |need, entry| {
-            need.merge(entry.value.field_demand())
+            need.merge(entry.value.field_demand()).merge(
+                entry
+                    .cond
+                    .as_ref()
+                    .map(BodyKernel::field_demand)
+                    .unwrap_or(FieldDemand::None),
+            )
         })
     }
 }
@@ -437,6 +454,10 @@ impl ObjectKernelEntry {
 
     pub(crate) fn value(&self) -> &BodyKernel {
         &self.value
+    }
+
+    pub(crate) fn cond(&self) -> Option<&BodyKernel> {
+        self.cond.as_ref()
     }
 
     pub(crate) fn optional(&self) -> bool {
@@ -455,10 +476,11 @@ impl ObjectKernelEntry {
 fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
     let mut entries = Vec::with_capacity(fields.len());
     for field in fields {
-        let (key, value, optional, omit_null) = match field {
+        let (key, value, cond, optional, omit_null) = match field {
             ObjField::Short(name) => (
                 Arc::from(name.as_str()),
                 BodyKernel::FieldRead(Arc::from(name.as_str())),
+                None,
                 false,
                 true,
             ),
@@ -466,19 +488,30 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
                 key,
                 val,
                 optional,
-                cond: None,
+                cond,
             } => {
                 let value = BodyKernel::classify_expr(val);
                 if matches!(value, BodyKernel::Generic) {
                     return BodyKernel::Generic;
                 }
-                (Arc::from(key.as_str()), value, *optional, false)
+                let cond = match cond {
+                    Some(cond) => {
+                        let cond = BodyKernel::classify_expr(cond);
+                        if matches!(cond, BodyKernel::Generic) {
+                            return BodyKernel::Generic;
+                        }
+                        Some(cond)
+                    }
+                    None => None,
+                };
+                (Arc::from(key.as_str()), value, cond, *optional, false)
             }
             _ => return BodyKernel::Generic,
         };
         entries.push(ObjectKernelEntry {
             key,
             value,
+            cond,
             optional,
             omit_null,
         });
@@ -934,7 +967,13 @@ impl BodyKernel {
             Self::Object(object) => object
                 .entries
                 .iter()
-                .any(|entry| entry.value.mentions_any_field_like_ident(names)),
+                .any(|entry| {
+                    entry.value.mentions_any_field_like_ident(names)
+                        || entry
+                            .cond
+                            .as_ref()
+                            .is_some_and(|cond| cond.mentions_any_field_like_ident(names))
+                }),
             Self::Array(items) => items
                 .iter()
                 .any(|item| item.mentions_any_field_like_ident(names)),
@@ -986,7 +1025,10 @@ impl BodyKernel {
             Self::Object(object) => object
                 .entries
                 .iter()
-                .all(|entry| entry.value.is_view_native()),
+                .all(|entry| {
+                    entry.value.is_view_native()
+                        && entry.cond.as_ref().is_none_or(BodyKernel::is_view_native)
+                }),
             Self::Array(items) => items.iter().all(Self::is_view_native),
             Self::NestedArrayReducer {
                 source,
@@ -1100,10 +1142,11 @@ impl BodyKernel {
             [Opcode::MakeObj(entries)] => {
                 let mut out = Vec::with_capacity(entries.len());
                 for entry in entries.iter() {
-                    let (key, value, optional, omit_null) = match entry {
+                    let (key, value, cond, optional, omit_null) = match entry {
                         crate::vm::CompiledObjEntry::Short { name, .. } => (
                             Arc::clone(name),
                             BodyKernel::FieldRead(Arc::clone(name)),
+                            None,
                             false,
                             true,
                         ),
@@ -1111,13 +1154,23 @@ impl BodyKernel {
                             key,
                             prog,
                             optional,
-                            cond: None,
+                            cond,
                         } => {
                             let value = BodyKernel::classify(prog);
                             if matches!(value, BodyKernel::Generic) {
                                 return Self::Generic;
                             }
-                            (Arc::clone(key), value, *optional, false)
+                            let cond = match cond {
+                                Some(cond) => {
+                                    let cond = BodyKernel::classify(cond);
+                                    if matches!(cond, BodyKernel::Generic) {
+                                        return Self::Generic;
+                                    }
+                                    Some(cond)
+                                }
+                                None => None,
+                            };
+                            (Arc::clone(key), value, cond, *optional, false)
                         }
                         crate::vm::CompiledObjEntry::KvPath {
                             key,
@@ -1128,13 +1181,14 @@ impl BodyKernel {
                             let Some(value) = classify_kv_path(steps) else {
                                 return Self::Generic;
                             };
-                            (Arc::clone(key), value, *optional, false)
+                            (Arc::clone(key), value, None, *optional, false)
                         }
                         _ => return Self::Generic,
                     };
                     out.push(ObjectKernelEntry {
                         key,
                         value,
+                        cond,
                         optional,
                         omit_null,
                     });
@@ -2030,6 +2084,12 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries.len());
     for entry in object.entries.iter() {
+        if let Some(cond) = &entry.cond {
+            let keep = crate::util::is_truthy(&eval(cond)?);
+            if !keep {
+                continue;
+            }
+        }
         let value = eval(&entry.value)?;
         if (entry.optional || entry.omit_null) && value.is_null() {
             continue;
@@ -2683,6 +2743,15 @@ where
         BodyKernel::Object(object) => {
             let mut pairs = Vec::with_capacity(object.entries.len());
             for entry in object.entries.iter() {
+                if let Some(cond) = &entry.cond {
+                    let keep = match eval_view_kernel_inner(cond, item, vm)? {
+                        ViewKernelValue::View(view) => view.scalar().truthy(),
+                        ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
+                    };
+                    if !keep {
+                        continue;
+                    }
+                }
                 let value = match eval_view_kernel_inner(&entry.value, item, vm)? {
                     ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
                     ViewKernelValue::Owned(value) => value,
@@ -3479,6 +3548,18 @@ mod tests {
         assert!(std::ptr::eq(first, second));
         assert!(matches!(first.source(), super::NestedViewSource::FieldChain(_)));
         assert!(first.body().can_run_with_view());
+    }
+
+    #[test]
+    fn guarded_object_field_classifies_as_view_native() {
+        let expr = parse("{id, isbn: isbn when active}").expect("parse guarded object");
+        let kernel = BodyKernel::classify_expr(&expr);
+
+        let BodyKernel::Object(object) = kernel else {
+            panic!("expected object kernel");
+        };
+        assert!(object.entries()[1].cond().is_some());
+        assert!(BodyKernel::Object(object).is_view_native());
     }
 
     #[test]

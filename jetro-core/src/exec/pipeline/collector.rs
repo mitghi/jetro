@@ -185,6 +185,12 @@ where
 {
     let mut pairs = Vec::with_capacity(object.entries().len());
     for entry in object.entries() {
+        if let Some(cond) = entry.cond() {
+            let keep = eval(cond, item, vm).map(|value| crate::util::is_truthy(&value))?;
+            if !keep {
+                continue;
+            }
+        }
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
             continue;
@@ -207,6 +213,13 @@ where
 {
     let start = cells.len();
     for entry in object.entries() {
+        if let Some(cond) = entry.cond() {
+            let keep = eval(cond, item, vm).map(|value| crate::util::is_truthy(&value))?;
+            if !keep {
+                cells.truncate(start);
+                return Some(false);
+            }
+        }
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
             cells.truncate(start);
