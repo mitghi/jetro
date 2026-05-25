@@ -854,6 +854,19 @@ impl ViewStageCapability {
         }
     }
 
+    /// Resolves a single-row positional pull against a reversed source when
+    /// the view prefix preserves semantic row positions. Returns `None` when
+    /// the prefix can change cardinality or the demand does not select exactly
+    /// one row.
+    pub(crate) fn reversed_single_access_after_prefix(
+        source_demand: PullDemand,
+        stages: &[Self],
+        source_len: usize,
+    ) -> Option<SourceIndexedAccess> {
+        Self::all_preserve_cardinality(stages).then_some(())?;
+        SourceAccessMode::reversed_single_access_for_demand(source_demand, source_len)
+    }
+
     /// Returns the deterministic source-access effect for stages with
     /// compile-time constant predicate kernels.
     pub(crate) fn constant_access_effect(
@@ -1416,8 +1429,8 @@ mod tests {
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget, NumOp,
         PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
-        ViewMaterialization, ViewMembershipTarget, ViewOutputMode, ViewSinkCapability,
-        ViewStageCapability,
+        SourceIndexedAccess, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+        ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
     use crate::plan::demand::PullDemand;
@@ -2099,6 +2112,22 @@ mod tests {
                 4
             ),
             4
+        );
+        assert_eq!(
+            ViewStageCapability::reversed_single_access_after_prefix(
+                PullDemand::NthInput(2),
+                &preserving,
+                5
+            ),
+            Some(SourceIndexedAccess::Single(2))
+        );
+        assert_eq!(
+            ViewStageCapability::reversed_single_access_after_prefix(
+                PullDemand::NthInput(2),
+                &selective,
+                5
+            ),
+            None
         );
     }
 

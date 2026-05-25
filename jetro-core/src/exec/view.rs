@@ -623,18 +623,18 @@ where
     V: FrontierBaseView<'a>,
     F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
-    if !pipeline::ViewStageCapability::all_preserve_cardinality(stages) {
-        return None;
-    }
     let JsonView::ArrayLen(len) = source.scalar() else {
         return None;
     };
-    let idx =
-        match pipeline::SourceAccessMode::reversed_single_access_for_demand(source_demand, len)? {
-            pipeline::SourceIndexedAccess::Single(idx) => idx,
-            pipeline::SourceIndexedAccess::Empty => return Some(Ok(())),
-            pipeline::SourceIndexedAccess::Range { .. } => return None,
-        };
+    let idx = match pipeline::ViewStageCapability::reversed_single_access_after_prefix(
+        source_demand,
+        stages,
+        len,
+    )? {
+        pipeline::SourceIndexedAccess::Single(idx) => idx,
+        pipeline::SourceIndexedAccess::Empty => return Some(Ok(())),
+        pipeline::SourceIndexedAccess::Range { .. } => return None,
+    };
     let items = std::iter::once(source.index(idx as i64));
     drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
 }
