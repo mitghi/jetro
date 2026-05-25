@@ -2463,6 +2463,21 @@ mod tests {
     }
 
     #[test]
+    fn view_array_spread_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"head":"a","tags":["sf","hugo"],"tail":"z"},{"head":"b","tags":["new"],"tail":"y"}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.data.map([head, ...tags, tail])"#).unwrap();
+
+        assert_eq!(out, json!([["a", "sf", "hugo", "z"], ["b", "new", "y"]]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_sort_string_predicate_map_last_stays_borrowed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"prod","score":100},{"name":"skip_test","score":90},{"name":"answer","score":80}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

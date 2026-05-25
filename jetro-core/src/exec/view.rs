@@ -3859,6 +3859,27 @@ where
             }
             Some(pipeline::ViewKernelValue::Owned(Val::arr(out)))
         }
+        pipeline::BodyKernel::ArraySpread(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                match item_kernel {
+                    pipeline::ArrayKernelElem::Value(kernel) => {
+                        out.push(eval_frontier_value_kernel_with_vm(kernel, item, vm)?);
+                    }
+                    pipeline::ArrayKernelElem::Spread(kernel) => {
+                        match eval_frontier_kernel_with_vm(item, kernel, vm)? {
+                            pipeline::ViewKernelValue::View(view) => {
+                                append_frontier_array_spread_view_items(&mut out, view)?
+                            }
+                            pipeline::ViewKernelValue::Owned(value) => {
+                                pipeline::append_array_spread_val_items(&mut out, value)
+                            }
+                        }
+                    }
+                }
+            }
+            Some(pipeline::ViewKernelValue::Owned(Val::arr(out)))
+        }
         pipeline::BodyKernel::FString(fstring) => {
             let mut out = String::with_capacity(fstring.base_capacity());
             for part in fstring.parts() {
@@ -5101,6 +5122,20 @@ where
 {
     for (key, child) in view.object_iter()? {
         pairs.push((key, pipeline::view_kernel_view_to_owned(child)));
+    }
+    Some(())
+}
+
+fn append_frontier_array_spread_view_items<'a, V>(out: &mut Vec<Val>, view: V) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let Some(children) = view.array_iter() else {
+        out.push(pipeline::view_kernel_view_to_owned(view));
+        return Some(());
+    };
+    for child in children {
+        out.push(pipeline::view_kernel_view_to_owned(child));
     }
     Some(())
 }

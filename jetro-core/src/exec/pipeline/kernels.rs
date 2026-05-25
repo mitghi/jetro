@@ -178,6 +178,8 @@ pub enum BodyKernel {
     Object(ObjectKernel),
     /// Evaluates an array literal by evaluating each item kernel.
     Array(Arc<[BodyKernel]>),
+    /// Evaluates an array literal that contains one or more spread elements.
+    ArraySpread(Arc<[ArrayKernelElem]>),
     /// Runs a nested array reducer such as `items.map(qty * price).sum()` without
     /// materialising the outer row.
     NestedArrayReducer {
@@ -287,6 +289,24 @@ pub enum FStringKernelPart {
     Lit(Arc<str>),
     /// A sub-kernel whose result is formatted and appended to the output string.
     Interp(BodyKernel),
+}
+
+/// One element in an array literal kernel.
+#[derive(Debug, Clone)]
+pub enum ArrayKernelElem {
+    /// Push the evaluated value as one array element.
+    Value(BodyKernel),
+    /// Spread the evaluated value using VM-compatible array spread semantics.
+    Spread(BodyKernel),
+}
+
+impl ArrayKernelElem {
+    #[inline]
+    fn kernel(&self) -> &BodyKernel {
+        match self {
+            Self::Value(kernel) | Self::Spread(kernel) => kernel,
+        }
+    }
 }
 
 /// Pre-classified kernel for an object-literal expression; bypasses the VM's object-construction opcodes.
@@ -608,17 +628,38 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
 
 fn classify_array_expr(elems: &[crate::parse::ast::ArrayElem]) -> BodyKernel {
     let mut out = Vec::with_capacity(elems.len());
+    let mut spread = false;
     for elem in elems {
-        let crate::parse::ast::ArrayElem::Expr(expr) = elem else {
-            return BodyKernel::Generic;
+        let (expr, is_spread) = match elem {
+            crate::parse::ast::ArrayElem::Expr(expr) => (expr, false),
+            crate::parse::ast::ArrayElem::Spread(expr) => {
+                spread = true;
+                (expr, true)
+            }
         };
         let item = BodyKernel::classify_expr(expr);
         if matches!(item, BodyKernel::Generic) {
             return BodyKernel::Generic;
         }
-        out.push(item);
+        if is_spread {
+            out.push(ArrayKernelElem::Spread(item));
+        } else {
+            out.push(ArrayKernelElem::Value(item));
+        }
     }
-    BodyKernel::Array(out.into())
+    if spread {
+        BodyKernel::ArraySpread(out.into())
+    } else {
+        BodyKernel::Array(
+            out.into_iter()
+                .map(|elem| match elem {
+                    ArrayKernelElem::Value(kernel) => kernel,
+                    ArrayKernelElem::Spread(_) => unreachable!("spread tracked above"),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
 }
 
 fn classify_fstring_expr(parts: &[crate::parse::ast::FStringPart]) -> BodyKernel {
@@ -1004,6 +1045,9 @@ impl BodyKernel {
             Self::Array(items) => items.iter().fold(FieldDemand::None, |need, item| {
                 need.merge(item.field_demand())
             }),
+            Self::ArraySpread(items) => items.iter().fold(FieldDemand::None, |need, item| {
+                need.merge(item.kernel().field_demand())
+            }),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -1060,6 +1104,9 @@ impl BodyKernel {
             Self::Array(items) => items
                 .iter()
                 .any(|item| item.mentions_any_field_like_ident(names)),
+            Self::ArraySpread(items) => items
+                .iter()
+                .any(|item| item.kernel().mentions_any_field_like_ident(names)),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -1111,6 +1158,7 @@ impl BodyKernel {
                     && entry.cond.as_ref().is_none_or(BodyKernel::is_view_native)
             }),
             Self::Array(items) => items.iter().all(Self::is_view_native),
+            Self::ArraySpread(items) => items.iter().all(|item| item.kernel().is_view_native()),
             Self::NestedArrayReducer {
                 source,
                 predicate,
@@ -1147,6 +1195,7 @@ impl BodyKernel {
             | Self::FString(_)
             | Self::Object(_)
             | Self::Array(_)
+            | Self::ArraySpread(_)
             | Self::NestedArrayReducer { .. }
             | Self::NestedArrayCount { .. }
             | Self::NestedPlan(_)
@@ -1311,17 +1360,32 @@ impl BodyKernel {
             }
             [Opcode::MakeArr(items)] => {
                 let mut out = Vec::with_capacity(items.len());
+                let mut has_spread = false;
                 for (program, spread) in items.iter() {
-                    if *spread {
-                        return Self::Generic;
-                    }
                     let item = BodyKernel::classify(program);
                     if matches!(item, BodyKernel::Generic) {
                         return Self::Generic;
                     }
-                    out.push(item);
+                    if *spread {
+                        has_spread = true;
+                        out.push(ArrayKernelElem::Spread(item));
+                    } else {
+                        out.push(ArrayKernelElem::Value(item));
+                    }
                 }
-                return Self::Array(out.into());
+                return if has_spread {
+                    Self::ArraySpread(out.into())
+                } else {
+                    Self::Array(
+                        out.into_iter()
+                            .map(|elem| match elem {
+                                ArrayKernelElem::Value(kernel) => kernel,
+                                ArrayKernelElem::Spread(_) => unreachable!("spread tracked above"),
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )
+                };
             }
             [Opcode::FString(parts)] => {
                 let mut out = Vec::with_capacity(parts.len());
@@ -2023,6 +2087,23 @@ fn eval_native_kernel_with_vm(
             }
             Ok(Val::arr(out))
         }
+        BodyKernel::ArraySpread(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                match item_kernel {
+                    ArrayKernelElem::Value(kernel) => {
+                        out.push(eval_native_kernel_with_vm(kernel, item, vm)?)
+                    }
+                    ArrayKernelElem::Spread(kernel) => {
+                        append_array_spread_val_items(
+                            &mut out,
+                            eval_native_kernel_with_vm(kernel, item, vm)?,
+                        );
+                    }
+                }
+            }
+            Ok(Val::arr(out))
+        }
         BodyKernel::NestedArrayReducer {
             source,
             predicate,
@@ -2235,6 +2316,17 @@ pub(crate) fn append_spread_val_pairs(pairs: &mut Vec<(Arc<str>, Val)>, value: V
             }
         }
         _ => {}
+    }
+}
+
+pub(crate) fn append_array_spread_val_items(out: &mut Vec<Val>, value: Val) {
+    match value {
+        Val::Arr(items) => out.extend(items.iter().cloned()),
+        Val::IntVec(items) => out.extend(items.iter().copied().map(Val::Int)),
+        Val::FloatVec(items) => out.extend(items.iter().copied().map(Val::Float)),
+        Val::StrVec(items) => out.extend(items.iter().cloned().map(Val::Str)),
+        Val::StrSliceVec(items) => out.extend(items.iter().cloned().map(Val::StrSlice)),
+        other => out.push(other),
     }
 }
 
@@ -2929,6 +3021,29 @@ where
             }
             Some(ViewKernelValue::Owned(Val::arr(out)))
         }
+        BodyKernel::ArraySpread(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                match item_kernel {
+                    ArrayKernelElem::Value(kernel) => {
+                        out.push(view_kernel_value_to_owned(eval_view_kernel_inner(
+                            kernel, item, vm,
+                        )?));
+                    }
+                    ArrayKernelElem::Spread(kernel) => {
+                        match eval_view_kernel_inner(kernel, item, vm)? {
+                            ViewKernelValue::View(view) => {
+                                append_array_spread_view_items(&mut out, view)?
+                            }
+                            ViewKernelValue::Owned(value) => {
+                                append_array_spread_val_items(&mut out, value)
+                            }
+                        }
+                    }
+                }
+            }
+            Some(ViewKernelValue::Owned(Val::arr(out)))
+        }
         BodyKernel::NestedArrayReducer {
             source,
             predicate,
@@ -3091,6 +3206,20 @@ where
     Some(())
 }
 
+fn append_array_spread_view_items<'a, V>(out: &mut Vec<Val>, view: V) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let Some(children) = view.array_iter() else {
+        out.push(view_kernel_view_to_owned(view));
+        return Some(());
+    };
+    for child in children {
+        out.push(view_kernel_view_to_owned(child));
+    }
+    Some(())
+}
+
 /// Evaluates `lhs op rhs` using JSON-view comparison semantics, returning the boolean result.
 #[inline]
 pub fn eval_cmp_op(lhs: &Val, op: crate::parse::ast::BinOp, rhs: &Val) -> bool {
@@ -3113,8 +3242,8 @@ mod tests {
     use crate::parse::parser::parse;
 
     use super::{
-        eval_view_kernel, BodyKernel, CollectLayout, FStringKernel, FStringKernelPart,
-        ObjectKernelKey, ViewKernelValue,
+        eval_view_kernel, ArrayKernelElem, BodyKernel, CollectLayout, FStringKernel,
+        FStringKernelPart, ObjectKernelKey, ViewKernelValue,
     };
 
     fn key_call(method: BuiltinMethod, key: &str) -> BodyKernel {
@@ -3655,6 +3784,30 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"isbn":"978","price":20,"extra":"ok"})
+        );
+    }
+
+    #[test]
+    fn array_spread_projection_stays_view_native() {
+        let expr = parse(r#"[head, ...tags, tail]"#).expect("parse array spread projection");
+        let program = Compiler::compile(&expr, "array-spread");
+        let kernel = BodyKernel::classify(&program);
+
+        let BodyKernel::ArraySpread(items) = &kernel else {
+            panic!("expected spread array kernel, got {kernel:#?}");
+        };
+        assert!(matches!(items[0], ArrayKernelElem::Value(_)));
+        assert!(matches!(items[1], ArrayKernelElem::Spread(_)));
+        assert!(matches!(items[2], ArrayKernelElem::Value(_)));
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let json = serde_json::json!({"head":"a","tags":["sf","hugo"],"tail":"z"});
+        let val = Val::from(&json);
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
+            .expect("array spread projection output");
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!(["a", "sf", "hugo", "z"])
         );
     }
 
