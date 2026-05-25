@@ -1142,9 +1142,7 @@ fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredic
 }
 
 fn direct_item_path_expr(expr: &Expr) -> Option<NdjsonPhysicalPath> {
-    crate::exec::pipeline::BodyKernel::classify_expr(expr)
-        .field_path_keys()
-        .map(|keys| physical_field_keys_to_path_steps(&keys))
+    kernel_to_physical_path(&crate::exec::pipeline::BodyKernel::classify_expr(expr))
 }
 
 fn literal_val_expr(expr: &Expr) -> Option<Val> {
@@ -2105,6 +2103,30 @@ mod tests {
                     PhysicalPathStep::Field(name)
                 ] if tags.as_ref() == "tags" && name.as_ref() == "name"
             ) && value.as_ref() == "sf"
+        ));
+    }
+
+    #[test]
+    fn recognizes_array_find_indexed_truthy_path_predicate() {
+        let expr =
+            crate::parse::parser::parse(r#"@.groups.find(@.tags[0].name)"#).expect("parse");
+        let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
+            direct_array_any_predicate_expr(&expr)
+        else {
+            panic!("expected array-any predicate");
+        };
+
+        assert!(matches!(
+            predicate,
+            NdjsonDirectItemPredicate::Path(ref steps)
+                if matches!(
+                    steps.as_slice(),
+                    [
+                        PhysicalPathStep::Field(tags),
+                        PhysicalPathStep::Index(0),
+                        PhysicalPathStep::Field(name)
+                    ] if tags.as_ref() == "tags" && name.as_ref() == "name"
+                )
         ));
     }
 
