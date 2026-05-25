@@ -924,6 +924,8 @@ pub enum BuiltinViewScalarOp {
 /// materialising the receiver by traversing borrowed child views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewValueProjection {
+    /// Convert `[key, value]` / `{key, val}` pairs into an object.
+    FromPairs,
     /// Convert to camelCase.
     CamelCase,
     /// Uppercase first character and lowercase the rest.
@@ -992,6 +994,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Capitalize
             | BuiltinViewValueProjection::Center
             | BuiltinViewValueProjection::Dedent
+            | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape

@@ -1299,6 +1299,12 @@ where
                 &view, target,
             ))));
         }
+        BuiltinViewValueProjection::FromPairs => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return view_from_pairs(&view).map(ViewProjectionResult::Owned);
+        }
         BuiltinViewValueProjection::ToString => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1313,6 +1319,49 @@ where
         }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn view_from_pairs<'a, V>(view: &V) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let len = view.array_len()?;
+    let mut out = indexmap::IndexMap::with_capacity(len);
+    for item in view.array_iter()? {
+        if item.array_len() == Some(2) {
+            if let JsonView::Str(key) = item.index(0).scalar() {
+                out.insert(Arc::from(key), view_to_owned(item.index(1)));
+            }
+            continue;
+        }
+
+        let key_view = if item.has_key("key").unwrap_or(false) {
+            item.field("key")
+        } else {
+            item.field("k")
+        };
+        let JsonView::Str(key) = key_view.scalar() else {
+            continue;
+        };
+        let value = if item.has_key("val").unwrap_or(false) {
+            view_to_owned(item.field("val"))
+        } else if item.has_key("value").unwrap_or(false) {
+            view_to_owned(item.field("value"))
+        } else if item.has_key("v").unwrap_or(false) {
+            view_to_owned(item.field("v"))
+        } else {
+            Val::Null
+        };
+        out.insert(Arc::from(key), value);
+    }
+    Some(Val::obj(out))
+}
+
+fn view_to_owned<'a, V>(view: V) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    crate::data::view::scalar_view_to_owned_val(view.scalar()).unwrap_or_else(|| view.materialize())
 }
 
 fn view_includes_value<'a, V>(view: &V, target: &Val) -> bool
@@ -4184,6 +4233,7 @@ mod tests {
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
+            (BuiltinMethod::FromPairs, BuiltinViewValueProjection::FromPairs),
             (
                 BuiltinMethod::HtmlEscape,
                 BuiltinViewValueProjection::HtmlEscape,
@@ -6288,6 +6338,7 @@ mod tests {
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
+            (BuiltinMethod::FromPairs, BuiltinViewValueProjection::FromPairs),
             (
                 BuiltinMethod::HtmlEscape,
                 BuiltinViewValueProjection::HtmlEscape,
@@ -6409,7 +6460,8 @@ mod tests {
                 "html": "a &lt; b &amp; c",
                 "case": "hello WORLD",
                 "words": "Hello world_test",
-                "indent": "  a\n    b"
+                "indent": "  a\n    b",
+                "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}]
             }));
             let view = ValView::new(&doc).field(field);
             match apply_view_projection(BuiltinId::from_method(method), &args, view)
@@ -6519,6 +6571,10 @@ mod tests {
                 {"key": "nested", "val": {"x": 7}},
             ]),
         );
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(BuiltinMethod::FromPairs, BuiltinArgs::None, "pairs"),
+            &Val::from(&serde_json::json!({"a": 1, "b": 2, "c": null}))
+        ));
         assert_view_eq(
             BuiltinMethod::Pick,
             BuiltinArgs::StrVec(vec![

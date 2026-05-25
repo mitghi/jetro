@@ -15,7 +15,7 @@ use super::{
     BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
     BuiltinStringPairStage, BuiltinStructural, BuiltinViewObjectProjection, BuiltinViewScalarOp,
-    BuiltinViewStage, BuiltinViewStringExpand,
+    BuiltinViewStage, BuiltinViewStringExpand, BuiltinViewValueProjection,
 };
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
@@ -2384,6 +2384,10 @@ impl Builtin for FromPairs {
     const NAME: &'static str = "from_pairs";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::FromPairs)
+            .demand_law(BuiltinViewValueProjection::FromPairs.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
