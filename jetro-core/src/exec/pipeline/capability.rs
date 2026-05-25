@@ -772,6 +772,10 @@ pub(crate) enum ViewStageCapability {
         /// Field to replace with each array element.
         field: std::sync::Arc<str>,
     },
+    /// Emit `{index, value}` rows from a borrowed row stream.
+    Enumerate,
+    /// Emit adjacent owned pairs from a borrowed row stream.
+    Pairwise,
     /// Emit fixed-size owned chunks from a borrowed row stream.
     Chunk {
         /// Chunk width.
@@ -849,6 +853,8 @@ impl ViewStageCapability {
                 kernel: kernel_index,
             }),
             BuiltinViewStage::Flatten => Some(Self::Flatten { depth: usize_arg? }),
+            BuiltinViewStage::Enumerate => Some(Self::Enumerate),
+            BuiltinViewStage::Pairwise => Some(Self::Pairwise),
             BuiltinViewStage::Chunk => Some(Self::Chunk { width: usize_arg? }),
             BuiltinViewStage::Window => Some(Self::Window { width: usize_arg? }),
             BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
@@ -874,6 +880,8 @@ impl ViewStageCapability {
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::Flatten { .. } => BuiltinViewStage::Flatten,
             Self::Explode { .. } => BuiltinViewStage::Explode,
+            Self::Enumerate => BuiltinViewStage::Enumerate,
+            Self::Pairwise => BuiltinViewStage::Pairwise,
             Self::Chunk { .. } => BuiltinViewStage::Chunk,
             Self::Window { .. } => BuiltinViewStage::Window,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
@@ -906,7 +914,8 @@ impl ViewStageCapability {
 
     /// Returns true when this view stage emits exactly one row for every input row.
     pub(crate) fn preserves_cardinality(&self) -> bool {
-        !matches!(self, Self::StringExpand { .. }) && self.view_stage().preserves_cardinality()
+        !matches!(self, Self::StringExpand { .. } | Self::Enumerate)
+            && self.view_stage().preserves_cardinality()
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.
@@ -1018,6 +1027,8 @@ impl ViewStageCapability {
             | Self::FlatMap { .. }
             | Self::Flatten { .. }
             | Self::Explode { .. }
+            | Self::Enumerate
+            | Self::Pairwise
             | Self::Chunk { .. }
             | Self::Window { .. }
             | Self::StringExpand { .. }
@@ -1090,6 +1101,8 @@ impl ViewStageCapability {
                 | Self::FlatMap { .. }
                 | Self::Flatten { .. }
                 | Self::Explode { .. }
+                | Self::Enumerate
+                | Self::Pairwise
                 | Self::Chunk { .. }
                 | Self::Window { .. }
                 | Self::StringExpand { .. }
@@ -1595,29 +1608,41 @@ mod tests {
         }
         .view_capability(8, None)
         .unwrap();
+        let enumerate = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Enumerate,
+            crate::builtins::BuiltinArgs::None,
+        ))
+        .view_capability(9, None)
+        .unwrap();
+        let pairwise = Stage::Builtin(crate::builtins::BuiltinCall::new(
+            BuiltinMethod::Pairwise,
+            crate::builtins::BuiltinArgs::None,
+        ))
+        .view_capability(10, None)
+        .unwrap();
         let chunk = Stage::UsizeBuiltin {
             method: BuiltinMethod::Chunk,
             value: 2,
         }
-        .view_capability(9, None)
+        .view_capability(11, None)
         .unwrap();
         let window = Stage::UsizeBuiltin {
             method: BuiltinMethod::Window,
             value: 3,
         }
-        .view_capability(10, None)
+        .view_capability(12, None)
         .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(11, None)
+        .view_capability(13, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(12, None)
+        .view_capability(14, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1639,6 +1664,11 @@ mod tests {
         assert_eq!(flatten.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert!(matches!(explode, ViewStageCapability::Explode { .. }));
         assert_eq!(explode.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(matches!(enumerate, ViewStageCapability::Enumerate));
+        assert_eq!(enumerate.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(!enumerate.preserves_cardinality());
+        assert!(matches!(pairwise, ViewStageCapability::Pairwise));
+        assert_eq!(pairwise.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(chunk, ViewStageCapability::Chunk { width: 2 }));
         assert_eq!(chunk.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(window, ViewStageCapability::Window { width: 3 }));

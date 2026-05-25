@@ -879,6 +879,8 @@ pub enum BuiltinDemandLaw {
     Chunk,
     /// Sliding window; bounded output demand maps to a bounded input prefix.
     Window,
+    /// Adjacent pair demand; equivalent to a fixed width-2 sliding window.
+    Pairwise,
     /// Only the first element is needed; translates any downstream demand to `FirstInput(1)`.
     First,
     /// The last element is needed; requires all ordered input.
@@ -1547,6 +1549,10 @@ pub enum BuiltinViewStage {
     Flatten,
     /// Object-field array explosion stage.
     Explode,
+    /// Pair each row with its zero-based stream index.
+    Enumerate,
+    /// Adjacent pair stage.
+    Pairwise,
     /// Non-overlapping fixed-size chunk stage.
     Chunk,
     /// Sliding fixed-size window stage.
@@ -2343,6 +2349,8 @@ impl BuiltinViewStage {
             | Self::FlatMap
             | Self::Flatten
             | Self::Explode
+            | Self::Enumerate
+            | Self::Pairwise
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2359,9 +2367,12 @@ impl BuiltinViewStage {
         match self {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
             Self::FlatMap | Self::Flatten => BuiltinViewOutputMode::BorrowedSubviews,
-            Self::Explode | Self::Chunk | Self::Window | Self::KeyedReduce => {
-                BuiltinViewOutputMode::EmitsOwnedValue
-            }
+            Self::Explode
+            | Self::Enumerate
+            | Self::Pairwise
+            | Self::Chunk
+            | Self::Window
+            | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
             | Self::Compact
             | Self::RemoveValue
@@ -2397,6 +2408,8 @@ impl BuiltinViewStage {
             Self::Filter | Self::Compact | Self::RemoveValue => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap | Self::Flatten | Self::Explode => BuiltinCardinality::Expanding,
+            Self::Enumerate => BuiltinCardinality::OneToOne,
+            Self::Pairwise => BuiltinCardinality::Filtering,
             Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
@@ -2423,6 +2436,8 @@ impl BuiltinViewStage {
             | Self::FlatMap
             | Self::Flatten
             | Self::Explode
+            | Self::Enumerate
+            | Self::Pairwise
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2450,6 +2465,8 @@ impl BuiltinViewStage {
             | Self::FlatMap
             | Self::Flatten
             | Self::Explode
+            | Self::Enumerate
+            | Self::Pairwise
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2474,6 +2491,8 @@ impl BuiltinViewStage {
             | Self::FlatMap
             | Self::Flatten
             | Self::Explode
+            | Self::Enumerate
+            | Self::Pairwise
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => 1.0,

@@ -1107,7 +1107,27 @@ impl Builtin for Enumerate {
             BuiltinCategory::StreamingOneToOne,
             BuiltinCardinality::OneToOne,
         )
+        .view_native()
+        .view_stage(BuiltinViewStage::Enumerate)
+        .demand_law(BuiltinDemandLaw::MapLike)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .lowering(BuiltinPipelineLowering::Nullary)
         .cost(10.0)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let index = ctx.stage_taken[ctx.stage_idx];
+        ctx.stage_taken[ctx.stage_idx] = index.saturating_add(1);
+        Ok(crate::exec::pipeline::StageFlow::Continue(
+            crate::util::obj2("index", crate::data::value::Val::Int(index as i64), "value", item),
+        ))
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -1126,9 +1146,42 @@ impl Builtin for Pairwise {
     fn spec() -> BuiltinSpec {
         BuiltinSpec::new(
             BuiltinCategory::StreamingOneToOne,
-            BuiltinCardinality::OneToOne,
+            BuiltinCardinality::Filtering,
         )
+        .view_native()
+        .view_stage(BuiltinViewStage::Pairwise)
+        .demand_law(BuiltinDemandLaw::Pairwise)
+        .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+        .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+        .pipeline_shape(BuiltinPipelineShape::new(
+            BuiltinCardinality::Filtering,
+            false,
+            2.0,
+            1.0,
+        ))
+        .lowering(BuiltinPipelineLowering::Nullary)
         .cost(10.0)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        let buffer = &mut ctx.stage_window_buffers[ctx.stage_idx];
+        buffer.push_back(item);
+        while buffer.len() > 2 {
+            buffer.pop_front();
+        }
+        if buffer.len() < 2 {
+            return Ok(crate::exec::pipeline::StageFlow::SkipRow);
+        }
+        Ok(crate::exec::pipeline::StageFlow::Continue(
+            crate::data::value::Val::arr(buffer.iter().cloned().collect()),
+        ))
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

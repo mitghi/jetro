@@ -521,6 +521,17 @@ pub(crate) fn propagate_demand(id: BuiltinId, arg: BuiltinDemandArg, downstream:
             }
             BuiltinDemandArg::None => Demand::all(ValueNeed::Whole),
         },
+        BuiltinDemandLaw::Pairwise => Demand {
+            pull: match downstream.pull {
+                PullDemand::FirstInput(k) | PullDemand::UntilOutput(k) => {
+                    PullDemand::FirstInput(k.saturating_add(1))
+                }
+                PullDemand::NthInput(i) => PullDemand::FirstInput(i.saturating_add(2)),
+                PullDemand::All | PullDemand::LastInput(_) => PullDemand::All,
+            },
+            value: downstream.value.merge(ValueNeed::Whole),
+            order: true,
+        },
         BuiltinDemandLaw::First => Demand::first(downstream.value),
         BuiltinDemandLaw::Last => Demand {
             pull: PullDemand::LastInput(1),
@@ -3762,6 +3773,14 @@ mod tests {
         assert_eq!(view_stage(explode), Some(BuiltinViewStage::Explode));
         assert!(demand_is_conservative_barrier(explode));
 
+        assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::Enumerate)),
+            Some(BuiltinViewStage::Enumerate)
+        );
+        assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::Pairwise)),
+            Some(BuiltinViewStage::Pairwise)
+        );
         assert_eq!(
             view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
             Some(BuiltinViewStage::Chunk)

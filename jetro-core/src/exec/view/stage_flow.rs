@@ -93,6 +93,13 @@ impl ViewStageState {
             _ => unreachable!("deque state was initialized"),
         }
     }
+
+    pub(super) fn next_index(&mut self) -> usize {
+        let value = self.counter();
+        let out = *value;
+        *value = value.saturating_add(1);
+        out
+    }
 }
 
 /// Applies a single view-domain stage to `item`, returning the appropriate
@@ -240,6 +247,8 @@ where
         pipeline::ViewStageCapability::FlatMap { .. } => None,
         pipeline::ViewStageCapability::Flatten { .. } => None,
         pipeline::ViewStageCapability::Explode { .. } => None,
+        pipeline::ViewStageCapability::Enumerate => None,
+        pipeline::ViewStageCapability::Pairwise => None,
         pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,

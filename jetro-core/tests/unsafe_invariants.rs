@@ -1292,6 +1292,23 @@ fn simd_json_ndjson_basic() {
     let warns = j.collect(r#"$.filter(level == "warn").map(id)"#).unwrap();
     assert_eq!(warns, json!([2]));
 }
+
+#[test]
+fn simd_lazy_enumerate_and_pairwise_keep_public_semantics() {
+    let j = Jetro::from_bytes(br#"["a","b","c"]"#.to_vec()).unwrap();
+    assert_eq!(
+        j.collect("$.enumerate()").unwrap(),
+        json!([
+            {"index": 0, "value": "a"},
+            {"index": 1, "value": "b"},
+            {"index": 2, "value": "c"}
+        ])
+    );
+
+    let nums = Jetro::from_bytes(br#"[1,2,3,4]"#.to_vec()).unwrap();
+    assert_eq!(nums.collect("$.pairwise()").unwrap(), json!([[1, 2], [2, 3], [3, 4]]));
+}
+
 #[test]
 fn simd_json_invalid_falls_back_with_helpful_error() {
     let bad = b"{ this is not json ".to_vec();
