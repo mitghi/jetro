@@ -1,5 +1,3 @@
-
-
 #[cfg(test)]
 mod examples {
     use crate::{compile::compiler, parse::parser, vm, vm::VM};
@@ -12,7 +10,6 @@ mod examples {
         Ok(vm.execute(&program, doc)?)
     }
 
-    
     fn world() -> Value {
         json!({
             "users": [
@@ -119,10 +116,8 @@ mod examples {
         vm_query(expr, &world()).expect(expr)
     }
 
-    
     #[test]
     fn nav_field() {
-        
         assert_eq!(q("$.config.app.name"), json!("Jetro Demo"));
     }
 
@@ -133,13 +128,11 @@ mod examples {
 
     #[test]
     fn nav_index_negative() {
-        
         assert_eq!(q("$.users[-1].name"), json!("Dave"));
     }
 
     #[test]
     fn nav_slice() {
-        
         let r = q("$.users[1:3].map(name)");
         assert_eq!(r, json!(["Bob", "Carol"]));
     }
@@ -152,7 +145,6 @@ mod examples {
 
     #[test]
     fn nav_descendant() {
-        
         let r = q("$..color");
         let arr = r.as_array().unwrap();
         assert!(arr.contains(&json!("red")));
@@ -162,7 +154,6 @@ mod examples {
 
     #[test]
     fn nav_optional_field_null_safe() {
-        
         let doc = json!({"user": null});
         assert_eq!(vm_query("$.user?.name", &doc).unwrap(), json!(null));
     }
@@ -170,14 +161,13 @@ mod examples {
     #[test]
     fn nav_optional_chain() {
         let doc = json!({"users": [{"id": 1}, {"id": 2, "profile": {"bio": "hi"}}]});
-        
+
         let r = vm_query("$.users[0].profile?.bio", &doc).unwrap();
         assert_eq!(r, json!(null));
         let r2 = vm_query("$.users[1].profile?.bio", &doc).unwrap();
         assert_eq!(r2, json!("hi"));
     }
 
-    
     #[test]
     fn filter_gt() {
         let r = q("$.users.filter(score > 80).map(name)");
@@ -210,7 +200,6 @@ mod examples {
 
     #[test]
     fn filter_fuzzy() {
-        
         let r = q("$.products.filter(name ~= \"widget\").map(id)");
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -218,7 +207,6 @@ mod examples {
 
     #[test]
     fn filter_includes() {
-        
         let r = q("$.products.filter(tags.includes(\"sale\")).map(name)");
         let arr = r.as_array().unwrap();
         assert!(arr.contains(&json!("Widget A")));
@@ -227,7 +215,6 @@ mod examples {
 
     #[test]
     fn filter_kind_number() {
-        
         let r = q("$.mixed_types.filter(v kind number)");
         assert_eq!(r.as_array().unwrap().len(), 1);
     }
@@ -262,7 +249,6 @@ mod examples {
         assert_eq!(r.as_array().unwrap().len(), 1);
     }
 
-    
     #[test]
     fn map_pluck_field() {
         assert_eq!(
@@ -291,7 +277,7 @@ mod examples {
     fn map_computed() {
         let r = q("$.products.map({name, in_stock: stock > 0})");
         let arr = r.as_array().unwrap();
-        assert_eq!(arr[2]["in_stock"], json!(false)); 
+        assert_eq!(arr[2]["in_stock"], json!(false));
         assert_eq!(arr[0]["in_stock"], json!(true));
     }
 
@@ -299,12 +285,11 @@ mod examples {
     fn map_lambda() {
         let r = q("$.numbers.ints.map(lambda n: n * n)");
         let arr = r.as_array().unwrap();
-        assert_eq!(arr[0], json!(9)); 
+        assert_eq!(arr[0], json!(9));
     }
 
     #[test]
     fn map_nested_field() {
-        
         let r = q("$.products.map({name, color: meta.color})");
         let arr = r.as_array().unwrap();
         assert_eq!(arr[0]["color"], json!("red"));
@@ -312,14 +297,12 @@ mod examples {
 
     #[test]
     fn flat_map_basic() {
-        
         let r = q("$.orders.flat_map(items)");
         let arr = r.as_array().unwrap();
-        
+
         assert_eq!(arr.len(), 5);
     }
 
-    
     #[test]
     fn agg_len() {
         assert_eq!(q("$.users.len()"), json!(4));
@@ -341,7 +324,7 @@ mod examples {
     fn agg_avg_field() {
         let r = q("$.users.avg(score)");
         let v = r.as_f64().unwrap();
-        
+
         assert!((v - 79.0).abs() < 0.1);
     }
 
@@ -353,7 +336,6 @@ mod examples {
 
     #[test]
     fn agg_count_with_predicate() {
-        
         assert_eq!(q("$.users.count(active == true)"), json!(3));
     }
 
@@ -386,25 +368,23 @@ mod examples {
 
     #[test]
     fn agg_index_by() {
-        
         let r = q("$.users.index_by(id)");
         let obj = r.as_object().unwrap();
         assert_eq!(obj.len(), 4);
         assert_eq!(obj["1"]["name"], json!("Alice"));
     }
 
-    
     #[test]
     fn arr_sort_asc() {
         let r = q("$.users.sort(score).map(name)");
         let arr = r.as_array().unwrap();
-        assert_eq!(arr[0], json!("Dave")); 
+        assert_eq!(arr[0], json!("Dave"));
     }
 
     #[test]
     fn arr_sort_desc() {
         let r = q("$.users.sort(-score).map(name)");
-        assert_eq!(r.as_array().unwrap()[0], json!("Alice")); 
+        assert_eq!(r.as_array().unwrap()[0], json!("Alice"));
     }
 
     #[test]
@@ -417,14 +397,14 @@ mod examples {
     fn arr_reverse() {
         let r = q("$.numbers.ints.reverse()");
         let arr = r.as_array().unwrap();
-        assert_eq!(arr[0], json!(3)); 
+        assert_eq!(arr[0], json!(3));
     }
 
     #[test]
     fn arr_unique() {
         let r = q("$.numbers.ints.unique()");
         let arr = r.as_array().unwrap();
-        
+
         assert_eq!(arr.len(), 7);
     }
 
@@ -468,7 +448,6 @@ mod examples {
 
     #[test]
     fn arr_nth() {
-        
         assert_eq!(q("$.users.nth(2).name"), json!("Carol"));
     }
 
@@ -501,7 +480,6 @@ mod examples {
         );
     }
 
-    
     #[test]
     fn iter_enumerate() {
         let r = q("$.products[0:2].enumerate()");
@@ -572,10 +550,9 @@ mod examples {
         let doc = json!({"a": [1,2,3], "b": ["x","y"]});
         let r = vm_query("$.a.zip_longest($.b)", &doc).unwrap();
         assert_eq!(r.as_array().unwrap().len(), 3);
-        assert_eq!(r[2][1], json!(null)); 
+        assert_eq!(r[2][1], json!(null));
     }
 
-    
     #[test]
     fn set_diff() {
         let r = q("$.sets.alpha.diff($.sets.beta)");
@@ -595,7 +572,6 @@ mod examples {
         assert_eq!(arr.len(), 7);
     }
 
-    
     #[test]
     fn obj_keys_values_entries() {
         let r = q("$.config.flags.keys()");
@@ -607,7 +583,7 @@ mod examples {
 
         let e = q("$.config.flags.entries()");
         let entries = e.as_array().unwrap();
-        
+
         assert!(entries.iter().any(|e| e[0] == json!("dark_mode")));
     }
 
@@ -628,7 +604,6 @@ mod examples {
 
     #[test]
     fn obj_merge() {
-        
         let doc = json!({"a": {"x": 1, "y": 2}, "b": {"y": 99, "z": 3}});
         let r = vm_query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["y"], json!(99));
@@ -711,14 +686,12 @@ mod examples {
 
     #[test]
     fn obj_pivot() {
-        
         let r = q("$.pivot_data.pivot(\"region\", \"product\", \"sales\")");
         let obj = r.as_object().unwrap();
         assert_eq!(obj["north"]["A"], json!(100));
         assert_eq!(obj["south"]["A"], json!(150));
     }
 
-    
     #[test]
     fn path_get() {
         assert_eq!(q("$.nested.get_path(\"a.b.c.value\")"), json!(42));
@@ -728,7 +701,7 @@ mod examples {
     fn path_set() {
         let r = q("$.nested.set_path(\"a.b.d\", 999)");
         assert_eq!(r["a"]["b"]["d"], json!(999));
-        assert_eq!(r["a"]["b"]["c"]["value"], json!(42)); 
+        assert_eq!(r["a"]["b"]["c"]["value"], json!(42));
     }
 
     #[test]
@@ -759,7 +732,6 @@ mod examples {
         assert_eq!(r["config"]["debug"], json!(false));
     }
 
-    
     #[test]
     fn str_case() {
         let s = "$.strings.padded";
@@ -886,7 +858,7 @@ mod examples {
             json!(false)
         );
         let r = vm_query("$.s.scan(\"l\")", &doc).unwrap();
-        
+
         assert_eq!(r.as_array().unwrap().len(), 3);
     }
 
@@ -900,7 +872,6 @@ mod examples {
 
     #[test]
     fn str_base64() {
-        
         assert_eq!(q("$.strings.b64.from_base64()"), json!("hello world"));
         let doc = json!({"s": "hello world"});
         assert_eq!(
@@ -920,7 +891,6 @@ mod examples {
 
     #[test]
     fn str_html_unescape() {
-        
         let r = q("$.strings.html.html_unescape()");
         assert_eq!(r, json!("<h1>Hello & World</h1>"));
     }
@@ -935,7 +905,6 @@ mod examples {
         assert!(round.as_str().unwrap().contains("\"x\""));
     }
 
-    
     #[test]
     fn type_method() {
         assert_eq!(q("$.numbers.ints[0].type()"), json!("number"));
@@ -946,7 +915,6 @@ mod examples {
         assert_eq!(q("$.events[0].error.type()"), json!("null"));
     }
 
-    
     #[test]
     fn null_or_default() {
         let doc = json!({"user": {"name": "Alice", "phone": null}});
@@ -969,7 +937,6 @@ mod examples {
 
     #[test]
     fn null_coalesce_operator() {
-        
         let doc = json!({"a": null, "b": null, "c": 42});
         assert_eq!(vm_query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!(42));
         assert_eq!(vm_query("$.c ?| $.a", &doc).unwrap(), json!(42));
@@ -981,7 +948,6 @@ mod examples {
         assert_eq!(r, json!(6));
     }
 
-    
     #[test]
     fn comp_list_basic() {
         let r = q("[u.name for u in $.users]");
@@ -996,11 +962,10 @@ mod examples {
 
     #[test]
     fn comp_list_transform() {
-        
         let r = q("[u.name.upper() for u in $.users if u.active == true]");
         let arr = r.as_array().unwrap();
         assert!(arr.contains(&json!("ALICE")));
-        assert!(!arr.iter().any(|v| *v == json!("CAROL"))); 
+        assert!(!arr.iter().any(|v| *v == json!("CAROL")));
     }
 
     #[test]
@@ -1016,27 +981,24 @@ mod examples {
         let r = q("{u.name: u.score for u in $.users if u.active}");
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("Alice"));
-        assert!(!obj.contains_key("Carol")); 
+        assert!(!obj.contains_key("Carol"));
     }
 
     #[test]
     fn comp_set_unique() {
-        
         let r = q("{u.role for u in $.users}");
         let arr = r.as_array().unwrap();
-        
+
         assert_eq!(arr.len(), 3);
     }
 
     #[test]
     fn comp_gen_lazy() {
-        
         let r = q("(u.score for u in $.users if u.active)");
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
 
-    
     #[test]
     fn let_simple() {
         let r = q("let admins = $.users.filter(role == \"admin\") in admins.len()");
@@ -1062,7 +1024,6 @@ mod examples {
         assert_eq!(r["pending"], json!(2));
     }
 
-    
     #[test]
     fn pipe_to_method() {
         assert_eq!(q("$.users | len"), json!(4));
@@ -1070,7 +1031,6 @@ mod examples {
 
     #[test]
     fn pipe_chain() {
-        
         let r = q("$.products | filter(price < 20) | map(name) | sort");
         let arr = r.as_array().unwrap();
         assert!(arr.contains(&json!("Widget A")));
@@ -1079,11 +1039,10 @@ mod examples {
     #[test]
     fn pipe_comprehension_then_method() {
         let r = q("(u.score for u in $.users if u.active) | sum");
-        
+
         assert_eq!(r, json!(228));
     }
 
-    
     #[test]
     fn bind_name() {
         let r = q("$.users -> users | {count: users.len(), first: users[0].name}");
@@ -1114,7 +1073,6 @@ mod examples {
         assert_eq!(r, json!(60));
     }
 
-    
     #[test]
     fn obj_literal_computed() {
         let r = q("{
@@ -1130,7 +1088,6 @@ mod examples {
 
     #[test]
     fn obj_optional_field() {
-        
         let doc = json!({"user": {"name": "Alice"}});
         let r = vm_query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
         assert_eq!(r["name"], json!("Alice"));
@@ -1139,7 +1096,6 @@ mod examples {
 
     #[test]
     fn obj_dynamic_key() {
-        
         let doc = json!({"prefix": "user", "val": 42});
         let r = vm_query("{[$.prefix]: $.val}", &doc).unwrap();
         assert_eq!(r["user"], json!(42));
@@ -1161,7 +1117,6 @@ mod examples {
         assert_eq!(r, json!([0, 1, 2, 3, 4, 5]));
     }
 
-    
     #[test]
     fn fstring_basic() {
         let doc = json!({"u": {"name": "Alice", "score": 95}});
@@ -1197,7 +1152,6 @@ mod examples {
         assert_eq!(r, json!("sum = 7"));
     }
 
-    
     #[test]
     fn global_coalesce() {
         let doc = json!({"a": null, "b": null, "c": "found"});
@@ -1241,11 +1195,8 @@ mod examples {
         assert_eq!(r.as_array().unwrap().len(), 4);
     }
 
-    
     #[test]
     fn method_set() {
-        
-        
         let doc = json!({"v": 1});
         assert_eq!(vm_query("$.v.set(42)", &doc).unwrap(), json!({"v": 42}));
         assert_eq!(vm_query("$.v | set(42)", &doc).unwrap(), json!(42));
@@ -1253,7 +1204,6 @@ mod examples {
 
     #[test]
     fn method_update() {
-        
         let doc = json!({"v": 10});
         assert_eq!(
             vm_query("$.v.update(lambda x: x * 3)", &doc).unwrap(),
@@ -1261,7 +1211,6 @@ mod examples {
         );
     }
 
-    
     #[test]
     fn arith_ops() {
         let doc = json!({"a": 10, "b": 3});
@@ -1286,11 +1235,8 @@ mod examples {
         assert_eq!(q("$.users.min(score).update(lambda x: -x)"), json!(-61));
     }
 
-    
     #[test]
     fn vm_path_cache_prefix_sharing() {
-        
-        
         let doc = world();
         let mut vm = VM::new();
 
@@ -1303,25 +1249,20 @@ mod examples {
         assert!((total - 99.47).abs() < 0.01);
         assert_eq!(r3, json!("red"));
 
-        
         let (compile_entries, path_entries) = vm.cache_stats();
         assert_eq!(compile_entries, 3);
-        
+
         assert!(path_entries > 0);
     }
 
     #[test]
     fn vm_descendant_caches_discovered_paths() {
-        
-        
         let doc = world();
         let mut vm = VM::new();
 
-        
         let colors = vm.run_str("$..color", &doc).unwrap();
         assert_eq!(colors.as_array().unwrap().len(), 4);
 
-        
         let r = vm.run_str("$.products[0].meta.color", &doc).unwrap();
         assert_eq!(r, json!("red"));
 
@@ -1337,13 +1278,11 @@ mod examples {
             vm.run_str("$.users.filter(active).len()", &doc).unwrap();
         }
         let (compile_entries, _) = vm.cache_stats();
-        assert_eq!(compile_entries, 1); 
+        assert_eq!(compile_entries, 1);
     }
 
-    
     #[test]
     fn complex_dashboard() {
-        
         let r = q(r#"{
             active_users: $.users.filter(active).len(),
             top_users: $.users.sort(-score).first(2).map({name, score}),
@@ -1360,7 +1299,6 @@ mod examples {
 
     #[test]
     fn complex_join_like() {
-        
         let r = q("let users_idx = $.users.index_by(id) in \
              $.orders.map({id, total, status, \
                            user: users_idx[to_string(user_id)].name})");
@@ -1371,7 +1309,6 @@ mod examples {
 
     #[test]
     fn complex_pipeline_reshape() {
-        
         let r = q("$.products \
              | filter(price < 30) \
              | sort(-price) \
@@ -1379,16 +1316,15 @@ mod examples {
              | map({id, name, price})");
         let arr = r.as_array().unwrap();
         assert!(arr.len() <= 3);
-        
+
         let first_price = arr[0]["price"].as_f64().unwrap();
         assert!(first_price < 30.0);
     }
 
     #[test]
     fn complex_nested_comprehension() {
-        
         let r = q("{o.id: o.items.len() for o in $.orders}");
-        assert_eq!(r["o1"], json!(2)); 
+        assert_eq!(r["o1"], json!(2));
         assert_eq!(r["o2"], json!(1));
     }
 
@@ -1397,9 +1333,9 @@ mod examples {
         let r = q("let active_ids = [u.id for u in $.users if u.active] in \
              [o.id for o in $.orders if active_ids.includes(o.user_id)]");
         let arr = r.as_array().unwrap();
-        
+
         assert!(arr.contains(&json!("o1")));
         assert!(arr.contains(&json!("o2")));
-        assert!(!arr.contains(&json!("o4"))); 
+        assert!(!arr.contains(&json!("o4")));
     }
 }

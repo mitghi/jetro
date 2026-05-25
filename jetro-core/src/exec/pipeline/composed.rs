@@ -337,10 +337,11 @@ fn run_barrier(
             let sorted = cmp::barrier_sort(buf, &key);
             cmp::barrier_unique_by(sorted, &key)
         }
-        Stage::ExprBuiltin { .. } if stage
-            .descriptor()
-            .and_then(|desc| desc.builtin_id())
-            .is_some_and(|id| builtin_keyed_reducer(id).is_some()) =>
+        Stage::ExprBuiltin { .. }
+            if stage
+                .descriptor()
+                .and_then(|desc| desc.builtin_id())
+                .is_some_and(|id| builtin_keyed_reducer(id).is_some()) =>
         {
             let id = stage.descriptor()?.builtin_id()?;
             let key = key_from_kernel(kernel)?;

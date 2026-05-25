@@ -1,6 +1,6 @@
 use crate::data::context::EvalError;
-use crate::util::{cmp_vals, is_truthy, zip_arrays};
 use crate::data::value::Val;
+use crate::util::{cmp_vals, is_truthy, zip_arrays};
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -786,11 +786,7 @@ where
 /// Returns the value at the point `cond` first becomes falsy. Errors if the
 /// guard never falsifies within the cap.
 #[inline]
-pub fn rec_cond_apply<F, G>(
-    mut recv: Val,
-    mut step: F,
-    mut cond: G,
-) -> Result<Val, EvalError>
+pub fn rec_cond_apply<F, G>(mut recv: Val, mut step: F, mut cond: G) -> Result<Val, EvalError>
 where
     F: FnMut(Val) -> Result<Val, EvalError>,
     G: FnMut(&Val) -> Result<Val, EvalError>,
@@ -940,7 +936,6 @@ pub fn hll_count_distinct(items: &[Val]) -> u64 {
     super::approx_distinct::count_distinct(items)
 }
 
-
 /// No-arg `group_shape()` — bucket an array of objects by their key-set
 /// shape. Each item's shape key is the sorted, comma-joined key list of
 /// the object; non-object items map to a sentinel `"<scalar>"` bucket.
@@ -960,10 +955,7 @@ pub fn group_shape_by_keys_apply(recv: Val) -> Option<Val> {
         };
         buckets.entry(key).or_default().push(item);
     }
-    let map: IndexMap<Arc<str>, Val> = buckets
-        .into_iter()
-        .map(|(k, v)| (k, Val::arr(v)))
-        .collect();
+    let map: IndexMap<Arc<str>, Val> = buckets.into_iter().map(|(k, v)| (k, Val::arr(v))).collect();
     Some(Val::obj(map))
 }
 
@@ -1174,12 +1166,9 @@ where
 pub fn keys_apply(recv: &Val) -> Val {
     match recv {
         Val::Obj(m) => Val::arr(m.keys().map(|k| Val::Str(k.clone())).collect()),
-        Val::ObjSmall(pairs) => Val::arr(
-            pairs
-                .iter()
-                .map(|(key, _)| Val::Str(key.clone()))
-                .collect(),
-        ),
+        Val::ObjSmall(pairs) => {
+            Val::arr(pairs.iter().map(|(key, _)| Val::Str(key.clone())).collect())
+        }
         _ => Val::arr(Vec::new()),
     }
 }

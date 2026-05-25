@@ -75,11 +75,7 @@ fn neq_inline_filter_in_chain() {
 #[test]
 fn neq_in_match_guard() {
     let doc = json!({"x": 5});
-    let r = vm_query(
-        "match $.x with { v when v != 0 -> v, _ -> -1 }",
-        &doc,
-    )
-    .unwrap();
+    let r = vm_query("match $.x with { v when v != 0 -> v, _ -> -1 }", &doc).unwrap();
     assert_eq!(r, json!(5));
     let zero = vm_query(
         "match $.x with { v when v != 0 -> v, _ -> -1 }",
@@ -172,4 +168,3 @@ fn neq_in_ternary_condition() {
         json!([99, 0, 99])
     );
 }
-

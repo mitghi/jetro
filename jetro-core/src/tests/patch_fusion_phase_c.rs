@@ -35,11 +35,7 @@ mod tests {
         // here we just lock the *result* matches the unfused semantics
         // so the depth-2 alias chain is wired through correctly.
         let doc = json!({"a": 1});
-        let r = vm_query(
-            r#"let x = $ in let y = x in patch y { c: 3 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $ in let y = x in patch y { c: 3 }"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "c": 3}));
     }
 
@@ -64,11 +60,7 @@ mod tests {
         // also lifts. Phase B's P3 fuses them; Phase C ensures the
         // multi-level alias scope above doesn't break that.
         let doc = json!({});
-        let r = vm_query(
-            r#"let x = $ in let y = x in $.a.set(1) | $.b.set(2)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $ in let y = x in $.a.set(1) | $.b.set(2)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2}));
     }
 
@@ -81,11 +73,7 @@ mod tests {
         // must materialise before the lambda enters. Result: outer write
         // fires once, then map runs against the post-write doc.
         let doc = json!({"items": [1, 2, 3]});
-        let r = vm_query(
-            r#"$.added.set(true) | $.items.map(lambda x: x + 1)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.added.set(true) | $.items.map(lambda x: x + 1)"#, &doc).unwrap();
         assert_eq!(r, json!([2, 3, 4]));
     }
 
@@ -97,11 +85,7 @@ mod tests {
         // post-write state. We use object iter elements so the body
         // expression doesn't depend on operator-overload ambiguity.
         let doc = json!({"list": [{"n": 10}, {"n": 20}, {"n": 30}]});
-        let r = vm_query(
-            r#"$.touched.set(true) | [x.n + 1 for x in $.list]"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.touched.set(true) | [x.n + 1 for x in $.list]"#, &doc).unwrap();
         assert_eq!(r, json!([11, 21, 31]));
     }
 
@@ -148,11 +132,7 @@ mod tests {
         // pipe form that first sets `a`, then reads `a`, then writes
         // the read value back into `b`.
         let doc = json!({"a": 5});
-        let r = vm_query(
-            r#"$.a.set(10) | @.a"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set(10) | @.a"#, &doc).unwrap();
         assert_eq!(r, json!(10));
     }
 
@@ -164,11 +144,7 @@ mod tests {
         // a method-call read; the `let init` lifts to a Patch which
         // P3 keeps in the let.
         let doc = json!({"a": 0});
-        let r = vm_query(
-            r#"let x = $.a.set(42) in x.a"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $.a.set(42) in x.a"#, &doc).unwrap();
         assert_eq!(r, json!(42));
     }
 
@@ -180,11 +156,7 @@ mod tests {
         // alias chain plus Phase B's pipe fuser cooperate. All three
         // ops target Root and end up in the final doc.
         let doc = json!({});
-        let r = vm_query(
-            r#"let x = $ in $.a.set(1) | $.b.set(2) | $.c.set(3)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $ in $.a.set(1) | $.b.set(2) | $.c.set(3)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2, "c": 3}));
     }
 
@@ -196,11 +168,7 @@ mod tests {
         // `lambda_writes_dont_leak_to_outer` to verify Phase C's
         // boundary flush didn't perturb lambda semantics.
         let doc = json!({"list": [{"id": 1}, {"id": 2}]});
-        let r = vm_query(
-            r#"$.list.map(lambda o: o.id.set(99))"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.list.map(lambda o: o.id.set(99))"#, &doc).unwrap();
         assert_eq!(r, json!([99, 99]));
     }
 

@@ -815,8 +815,7 @@ mod tests {
         let from_value = Jetro::from_bytes(data).unwrap();
         from_tape.reset_tape_materialized_subtrees();
 
-        let query =
-            r#"$.books.filter(@.meta.has_path("author.name")).map(@.meta.get_path("author.name").upper()).last()"#;
+        let query = r#"$.books.filter(@.meta.has_path("author.name")).map(@.meta.get_path("author.name").upper()).last()"#;
         let tape_out = from_tape.collect(query).unwrap();
         let value_out = from_value.collect(query).unwrap();
 
@@ -833,8 +832,7 @@ mod tests {
         let from_value = Jetro::from_bytes(data).unwrap();
         from_tape.reset_tape_materialized_subtrees();
 
-        let query =
-            r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "author").get_path("author.name")).take(2)"#;
+        let query = r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "author").get_path("author.name")).take(2)"#;
         let tape_out = from_tape.collect(query).unwrap();
         let value_out = from_value.collect(query).unwrap();
 
@@ -851,8 +849,7 @@ mod tests {
         let from_value = Jetro::from_bytes(data).unwrap();
         from_tape.reset_tape_materialized_subtrees();
 
-        let query =
-            r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "price").len()).last()"#;
+        let query = r#"$.books.filter(@.meta.has_key("isbn")).map(@.meta.pick("isbn", "price").len()).last()"#;
         let tape_out = from_tape.collect(query).unwrap();
         let value_out = from_value.collect(query).unwrap();
 
@@ -1921,8 +1918,7 @@ mod tests {
         let engine = JetroEngine::new();
         from_tape.reset_tape_materialized_subtrees();
 
-        let query =
-            r#"$.data.sort_by(-score).drop_while(name.contains("_test")).filter(price > 20).map(isbn).last()"#;
+        let query = r#"$.data.sort_by(-score).drop_while(name.contains("_test")).filter(price > 20).map(isbn).last()"#;
         let tape_out = from_tape.collect(query).unwrap();
         let value_out = engine.collect_value(doc, query).unwrap();
 
@@ -2205,8 +2201,7 @@ mod tests {
         let engine = JetroEngine::new();
         from_tape.reset_tape_materialized_subtrees();
 
-        let query =
-            r#"$.data.sort_by(-score).take(3).map(@.meta.get_path("author.name").trim().upper().byte_len()).sum()"#;
+        let query = r#"$.data.sort_by(-score).take(3).map(@.meta.get_path("author.name").trim().upper().byte_len()).sum()"#;
         let tape_out = from_tape.collect(query).unwrap();
         let value_out = engine.collect_value(doc, query).unwrap();
 

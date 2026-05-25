@@ -751,7 +751,10 @@ fn run_ndjson_with_report_keeps_row_local_route() {
 
     assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
     assert_eq!(report.route.kind.to_string(), "row-local");
-    assert_eq!(report.route.writer_path, Some(NdjsonWriterPathKind::ByteExpr));
+    assert_eq!(
+        report.route.writer_path,
+        Some(NdjsonWriterPathKind::ByteExpr)
+    );
     assert_eq!(report.stats.rows_scanned, 2);
     assert_eq!(report.stats.rows_emitted, 2);
     assert_eq!(report.stats.direct_project_rows, 2);
@@ -813,7 +816,10 @@ fn run_ndjson_file_limit_with_report_tracks_file_early_stop() {
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
-    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(
+        report.route.source.mode,
+        jetro_core::io::NdjsonSourceMode::File
+    );
     assert_eq!(report.stats.rows_scanned, 2);
     assert_eq!(report.stats.rows_emitted, 2);
 }
@@ -835,7 +841,10 @@ fn run_ndjson_file_with_report_returns_file_route_stats() {
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
-    assert_eq!(report.route.source.to_string(), "file+reverse+mmap+partitionable");
+    assert_eq!(
+        report.route.source.to_string(),
+        "file+reverse+mmap+partitionable"
+    );
     assert_eq!(report.stats.rows_scanned, 3);
     assert_eq!(report.stats.rows_emitted, 2);
 }
@@ -988,7 +997,10 @@ fn run_ndjson_source_with_report_dispatches_file_source() {
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(String::from_utf8(out).unwrap(), "1\n");
-    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(
+        report.route.source.mode,
+        jetro_core::io::NdjsonSourceMode::File
+    );
     assert_eq!(report.stats.rows_scanned, 1);
 }
 
@@ -1011,7 +1023,10 @@ not-json
         .expect("source limit report should dispatch to reader route");
 
     assert_eq!(String::from_utf8(out).unwrap(), "1\n2\n");
-    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::Reader);
+    assert_eq!(
+        report.route.source.mode,
+        jetro_core::io::NdjsonSourceMode::Reader
+    );
     assert_eq!(report.stats.rows_scanned, 2);
 }
 
@@ -1019,8 +1034,11 @@ not-json
 fn run_ndjson_file_with_report_covers_fanout_route() {
     let engine = JetroEngine::new();
     let path = temp_path("jetro-ndjson-fanout-report");
-    std::fs::write(&path, b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n")
-        .unwrap();
+    std::fs::write(
+        &path,
+        b"{\"id\":1,\"active\":true}\n{\"id\":2,\"active\":false}\n",
+    )
+    .unwrap();
     let mut out = Vec::new();
 
     let report = engine
@@ -1032,7 +1050,10 @@ fn run_ndjson_file_with_report_covers_fanout_route() {
         .expect("file-backed fanout report should run");
 
     let _ = std::fs::remove_file(&path);
-    assert_eq!(String::from_utf8(out).unwrap(), "{\"head\":1,\"total\":2}\n");
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "{\"head\":1,\"total\":2}\n"
+    );
     assert_eq!(report.route.kind.to_string(), "rows-fanout");
     assert_eq!(report.stats.rows_emitted, 1);
     assert_eq!(report.stats.rows_scanned, 2);
@@ -1374,13 +1395,17 @@ fn rows_stream_find_one_errors_on_zero_or_multiple_matches() {
     let mut none_out = Vec::new();
     let none = engine
         .run_ndjson(
-            Cursor::new(br#"{"active":false,"id":1}
-"#),
+            Cursor::new(
+                br#"{"active":false,"id":1}
+"#,
+            ),
             "$.rows().find_one($.active)",
             &mut none_out,
         )
         .expect_err("zero find_one matches should error");
-    assert!(none.to_string().contains("find_one: expected exactly one element, got 0"));
+    assert!(none
+        .to_string()
+        .contains("find_one: expected exactly one element, got 0"));
 
     let mut many_out = Vec::new();
     let many = engine
@@ -1735,7 +1760,11 @@ fn rows_stream_top_level_distinct_key_is_direct() {
     let mut out = Vec::new();
 
     let report = engine
-        .run_ndjson_with_report(Cursor::new(input), "$.rows().distinct_by(id).map(v)", &mut out)
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            "$.rows().distinct_by(id).map(v)",
+            &mut out,
+        )
         .expect("rows stream top-level distinct key should use row-local direct paths");
 
     assert_eq!(String::from_utf8(out).unwrap(), "\"a\"\n\"c\"\n");
@@ -1755,7 +1784,11 @@ fn rows_stream_top_level_filter_arg_is_direct() {
     let mut out = Vec::new();
 
     let report = engine
-        .run_ndjson_with_report(Cursor::new(input), "$.rows().filter(active).map(id)", &mut out)
+        .run_ndjson_with_report(
+            Cursor::new(input),
+            "$.rows().filter(active).map(id)",
+            &mut out,
+        )
         .expect("rows stream top-level filter arg should use row-local direct predicates");
 
     assert_eq!(String::from_utf8(out).unwrap(), "1\n3\n");
@@ -2072,7 +2105,10 @@ fn run_ndjson_matches_source_with_report_dispatches_file_source() {
         .expect("matches source report should run");
 
     let _ = std::fs::remove_file(&path);
-    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(
+        report.route.source.mode,
+        jetro_core::io::NdjsonSourceMode::File
+    );
     assert_eq!(report.stats.rows_scanned, 2);
     assert_eq!(report.stats.rows_emitted, 1);
 }
@@ -2523,7 +2559,10 @@ fn reverse_distinct_by_reports_shared_ndjson_execution_stats() {
 
     let _ = std::fs::remove_file(&path);
     assert_eq!(String::from_utf8(out).unwrap(), "3\n2\n");
-    assert_eq!(report.route.source.mode, jetro_core::io::NdjsonSourceMode::File);
+    assert_eq!(
+        report.route.source.mode,
+        jetro_core::io::NdjsonSourceMode::File
+    );
     assert_eq!(report.stats.rows_scanned, 3);
     assert_eq!(report.stats.rows_emitted, 2);
     assert_eq!(report.stats.duplicate_rows, 1);

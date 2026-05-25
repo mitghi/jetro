@@ -8,8 +8,7 @@ use super::ndjson_byte::{
 };
 use super::ndjson_direct::{
     direct_cmp_literal_predicate, direct_tape_predicate_for_expr, direct_tape_predicates_for_exprs,
-    direct_tape_row_path_for_expr, physical_paths_equal, NdjsonDirectPredicate,
-    NdjsonPhysicalPath,
+    direct_tape_row_path_for_expr, physical_paths_equal, NdjsonDirectPredicate, NdjsonPhysicalPath,
 };
 use super::ndjson_scan::for_each_framed_payload_in_range;
 use super::stream_exec::CompiledRowStream;

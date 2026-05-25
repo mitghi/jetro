@@ -158,11 +158,7 @@ mod tests {
         // analyzer must allocate a fresh scope id per lambda; if it
         // didn't, fusion could merge inner writes with outer.
         let doc = json!({"groups": [[1, 2], [3, 4]]});
-        let r = vm_query(
-            r#"$.groups.map(lambda g: g.map(lambda x: x + 10))"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.groups.map(lambda g: g.map(lambda x: x + 10))"#, &doc).unwrap();
         assert_eq!(r, json!([[11, 12], [13, 14]]));
     }
 
@@ -200,11 +196,7 @@ mod tests {
         // truthy at the op's source position. Document remains unchanged
         // for the field if guard is false.
         let doc = json!({"role": "admin", "active": false});
-        let r = vm_query(
-            r#"patch $ { active: true when $.role == "admin" }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { active: true when $.role == "admin" }"#, &doc).unwrap();
         assert_eq!(r, json!({"role": "admin", "active": true}));
     }
 
@@ -212,11 +204,7 @@ mod tests {
     fn conditional_skipped_when_falsy_keeps_field() {
         // inv 5: when guard is false, the field keeps its prior value.
         let doc = json!({"role": "user", "active": false});
-        let r = vm_query(
-            r#"patch $ { active: true when $.role == "admin" }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { active: true when $.role == "admin" }"#, &doc).unwrap();
         assert_eq!(r, json!({"role": "user", "active": false}));
     }
 
@@ -233,11 +221,7 @@ mod tests {
         // intermediate state, this test will fire and prompt a plan
         // update.
         let doc = json!({"id": 0, "flag": false});
-        let r = vm_query(
-            r#"patch $ { id: 7, flag: true when $.id > 5 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { id: 7, flag: true when $.id > 5 }"#, &doc).unwrap();
         assert_eq!(r, json!({"id": 7, "flag": false}));
     }
 
@@ -262,11 +246,7 @@ mod tests {
         // bases — `y.a.set(...)` — stay as method calls per the
         // chain-write classifier rule, so we test reads here.)
         let doc = json!({"a": 99});
-        let r = vm_query(
-            r#"let x = $ in let y = x in y.a"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $ in let y = x in y.a"#, &doc).unwrap();
         assert_eq!(r, json!(99));
     }
 
@@ -278,11 +258,7 @@ mod tests {
         // skips Ident bases). Both lift to `Patch{root:$}` and Phase B
         // fuses them into a single batched patch.
         let doc = json!({});
-        let r = vm_query(
-            r#"let x = $.a.set(1) in $.b.set(2)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $.a.set(1) in $.b.set(2)"#, &doc).unwrap();
         assert_eq!(r, json!({"a": 1, "b": 2}));
     }
 
@@ -295,11 +271,7 @@ mod tests {
         // v2 rules). So the entire let evaluates to `42` (scalar), not
         // a doc with the field updated. This test pins that contract.
         let doc = json!({"sub": {"k": 0}});
-        let r = vm_query(
-            r#"let x = $.sub in x.k.set(42)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"let x = $.sub in x.k.set(42)"#, &doc).unwrap();
         assert_eq!(r, json!(42));
     }
 
@@ -340,12 +312,7 @@ mod tests {
         let doc = json!({});
         let r = vm_query(&expr, &doc).unwrap();
         for i in 0..50 {
-            assert_eq!(
-                r[format!("k{}", i)],
-                json!(i * 2),
-                "field k{} mismatch",
-                i
-            );
+            assert_eq!(r[format!("k{}", i)], json!(i * 2), "field k{} mismatch", i);
         }
     }
 
@@ -355,11 +322,7 @@ mod tests {
         // make_mut walk down the common prefix `.a.b.c.d.e.f` and
         // diverge at the leaves `.g` / `.h`.
         let doc = json!({});
-        let r = vm_query(
-            r#"$.a.b.c.d.e.f.g.set(1) | $.a.b.c.d.e.f.h.set(2)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.b.c.d.e.f.g.set(1) | $.a.b.c.d.e.f.h.set(2)"#, &doc).unwrap();
         assert_eq!(
             r,
             json!({"a": {"b": {"c": {"d": {"e": {"f": {"g": 1, "h": 2}}}}}}})
@@ -402,11 +365,7 @@ mod tests {
         // all three in source order. The trie supports Replace + Delete
         // + Compute leaves.
         let doc = json!({"keep": 1, "drop": 2, "bump": 10});
-        let r = vm_query(
-            r#"patch $ { keep: 100, drop: DELETE, bump: @ + 5 }"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"patch $ { keep: 100, drop: DELETE, bump: @ + 5 }"#, &doc).unwrap();
         assert_eq!(r, json!({"keep": 100, "bump": 15}));
     }
 }

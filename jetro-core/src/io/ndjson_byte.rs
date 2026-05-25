@@ -1,9 +1,9 @@
 use super::ndjson::{write_i64, write_json_str, write_val_json};
 use super::ndjson_direct::{
-    direct_view_call_cmp_lit, direct_view_call_truthy, NdjsonDirectByteExpr,
-    NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
-    NdjsonDirectPathProjection, NdjsonDirectPredicate, NdjsonDirectProjectionValue,
-    NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
+    direct_view_call_cmp_lit, direct_view_call_truthy, NdjsonDirectByteExpr, NdjsonDirectBytePlan,
+    NdjsonDirectElement, NdjsonDirectItemPredicate, NdjsonDirectPathProjection,
+    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
+    NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
 use super::ndjson_hint::NdjsonObjectLayoutHint;
 use crate::builtins::{BuiltinCall, BuiltinRawJsonScalar, BuiltinViewObjectProjection};
@@ -446,7 +446,11 @@ pub(super) fn write_ndjson_hinted_tape_plan_row<W: Write>(
                         op,
                         value,
                     } => write_raw_json_stream_extreme_source(
-                        writer, source, key_steps, op.wants_max(), value,
+                        writer,
+                        source,
+                        key_steps,
+                        op.wants_max(),
+                        value,
                     ),
                 },
                 RawFieldValue::Missing => {
@@ -495,9 +499,7 @@ fn byte_stream_map_supported(map: &NdjsonDirectStreamMap) -> bool {
 fn byte_projection_value_supported(value: &NdjsonDirectProjectionValue) -> bool {
     match value.path_projection() {
         Some(NdjsonDirectPathProjection::Raw(_)) => true,
-        Some(NdjsonDirectPathProjection::Scalar { call, .. }) => {
-            byte_scalar_call_supported(call)
-        }
+        Some(NdjsonDirectPathProjection::Scalar { call, .. }) => byte_scalar_call_supported(call),
         None => match value {
             NdjsonDirectProjectionValue::Literal(_) => true,
             NdjsonDirectProjectionValue::Nested(plan) => tape_plan_can_write_byte_row(plan),
@@ -782,7 +784,9 @@ fn write_json_object_items_raw<W: Write>(
         }
         match projection {
             BuiltinViewObjectProjection::Keys => write_json_escaped_ascii_slice(writer, key)?,
-            BuiltinViewObjectProjection::Values => writer.write_all(&row[value_start..value_end])?,
+            BuiltinViewObjectProjection::Values => {
+                writer.write_all(&row[value_start..value_end])?
+            }
             BuiltinViewObjectProjection::Entries => {
                 writer.write_all(b"[")?;
                 write_json_escaped_ascii_slice(writer, key)?;
@@ -874,7 +878,10 @@ fn write_raw_scalar_call<W: Write>(
             "unsupported raw scalar call".to_string(),
         )));
     };
-    if call.raw_json_scalar().is_some_and(BuiltinRawJsonScalar::writes_view_len) {
+    if call
+        .raw_json_scalar()
+        .is_some_and(BuiltinRawJsonScalar::writes_view_len)
+    {
         let Some(len) = raw_json_view_len(view) else {
             return Err(JetroEngineError::Eval(crate::EvalError(
                 "unsupported raw len call".to_string(),
@@ -1755,18 +1762,16 @@ fn fold_raw_json_numeric(
         JsonView::Int(value) => crate::exec::pipeline::num_fold_i64(
             acc_i, acc_f, floated, min_f, max_f, n_obs, op, value,
         ),
-        JsonView::UInt(value) if value <= i64::MAX as u64 => {
-            crate::exec::pipeline::num_fold_i64(
-                acc_i,
-                acc_f,
-                floated,
-                min_f,
-                max_f,
-                n_obs,
-                op,
-                value as i64,
-            )
-        }
+        JsonView::UInt(value) if value <= i64::MAX as u64 => crate::exec::pipeline::num_fold_i64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as i64,
+        ),
         JsonView::UInt(value) => crate::exec::pipeline::num_fold_f64(
             acc_i,
             acc_f,
@@ -3153,12 +3158,8 @@ fn raw_json_projection_value_from_root_is_null_or_missing(
 ) -> Option<bool> {
     match value.path_projection() {
         Some(projection) => {
-            match raw_json_projection_value_from_root(
-                item,
-                root_fields,
-                spans,
-                projection.steps(),
-            ) {
+            match raw_json_projection_value_from_root(item, root_fields, spans, projection.steps())
+            {
                 RawFieldValue::Found(value) => Some(is_json_null(value)),
                 RawFieldValue::Missing => Some(true),
                 RawFieldValue::Fallback => None,
@@ -3543,7 +3544,13 @@ fn write_raw_json_tape_plan_value<W: Write>(
                     }
                     RawFieldValue::Fallback => return Ok(BytePlanWrite::Fallback),
                 };
-                write_raw_json_stream_extreme_source(writer, source, key_steps, op.wants_max(), value)
+                write_raw_json_stream_extreme_source(
+                    writer,
+                    source,
+                    key_steps,
+                    op.wants_max(),
+                    value,
+                )
             }
             _ => Ok(BytePlanWrite::Fallback),
         },

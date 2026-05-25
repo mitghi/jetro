@@ -13,9 +13,9 @@ use crate::{
     vm::Program,
 };
 
-use super::{eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
 #[cfg(test)]
 use super::eval_kernel;
+use super::{eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
 
 /// A compiled row-local expression that can evaluate on owned values or borrowed views.
 #[derive(Debug, Clone)]

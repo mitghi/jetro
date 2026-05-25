@@ -541,8 +541,7 @@ fn main() {
         let jetro = time_one(|| {
             let _ = run_jetro_cold("$.data.filter(active).map(score).sum()", doc);
         });
-        let jaq =
-            time_one(|| run_jaq_cold("[.data[] | select(.active) | .score] | add", doc));
+        let jaq = time_one(|| run_jaq_cold("[.data[] | select(.active) | .score] | add", doc));
         print_row("filter+map+sum", native, jetro, jaq);
     }
 
@@ -561,12 +560,8 @@ fn main() {
         let jetro = time_one(|| {
             let _ = run_jetro_cold("$.data.flat_map(items).filter(price > 50).len()", doc);
         });
-        let jaq = time_one(|| {
-            run_jaq_cold(
-                "[.data[] | .items[] | select(.price > 50)] | length",
-                doc,
-            )
-        });
+        let jaq =
+            time_one(|| run_jaq_cold("[.data[] | .items[] | select(.price > 50)] | length", doc));
         print_row("flat_map+filter+count", native, jetro, jaq);
     }
 
@@ -795,12 +790,8 @@ fn main() {
         let jetro = time_one(|| {
             let _ = run_jetro_cold("$.data.filter(active).map(score).avg()", doc);
         });
-        let jaq = time_one(|| {
-            run_jaq_cold(
-                "[.data[] | select(.active) | .score] | add / length",
-                doc,
-            )
-        });
+        let jaq =
+            time_one(|| run_jaq_cold("[.data[] | select(.active) | .score] | add / length", doc));
         print_row("filter+map+avg", native, jetro, jaq);
     }
 
@@ -843,8 +834,7 @@ fn main() {
                 .iter()
                 .take(50)
                 .map(|r| {
-                    let line_total: f64 =
-                        r.items.iter().map(|it| it.qty as f64 * it.price).sum();
+                    let line_total: f64 = r.items.iter().map(|it| it.qty as f64 * it.price).sum();
                     let last = r.events.last();
                     let last_event = match last {
                         Some(e) if e.kind == "delivered" => LastEvent {
@@ -932,6 +922,11 @@ fn main() {
               })
         "##;
         let jaq = time_one(|| run_jaq_cold(q, doc));
-        print_row("README showcase (3-filter+sort+take+match)", native, jetro, jaq);
+        print_row(
+            "README showcase (3-filter+sort+take+match)",
+            native,
+            jetro,
+            jaq,
+        );
     }
 }

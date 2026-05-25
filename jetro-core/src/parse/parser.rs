@@ -143,9 +143,15 @@ fn validate_has_array_rhs(expr: &Expr) -> Result<(), ParseError> {
                     }
                 }
             }
-            Expr::ListComp { expr, iter, cond, .. }
-            | Expr::GenComp { expr, iter, cond, .. }
-            | Expr::SetComp { expr, iter, cond, .. } => {
+            Expr::ListComp {
+                expr, iter, cond, ..
+            }
+            | Expr::GenComp {
+                expr, iter, cond, ..
+            }
+            | Expr::SetComp {
+                expr, iter, cond, ..
+            } => {
                 check(expr)?;
                 check(iter)?;
                 if let Some(cond) = cond {
@@ -713,10 +719,7 @@ fn parse_contains(pair: Pair<Rule>) -> Expr {
                 }
                 None => Step::Method("includes".to_string(), vec![Arg::Pos(rhs)]),
             };
-            Expr::Chain(
-                Box::new(lhs),
-                vec![method],
-            )
+            Expr::Chain(Box::new(lhs), vec![method])
         }
     }
 }
@@ -1604,10 +1607,7 @@ fn parse_primary(pair: Pair<Rule>) -> Expr {
                 .expect("bare_leading_field has a field_name child")
                 .as_str()
                 .to_string();
-            Expr::Chain(
-                Box::new(Expr::Current),
-                vec![Step::Field(name)],
-            )
+            Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name)])
         }
         Rule::ident => Expr::Ident(inner.as_str().to_string()),
         Rule::let_expr => parse_let(inner),

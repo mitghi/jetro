@@ -41,10 +41,7 @@ pub(crate) fn normalize_pipeline_arg_expr(expr: &Expr) -> Expr {
         Expr::Lambda { params, body } if params.len() == 1 => {
             substitute_current((**body).clone(), params[0].as_str())
         }
-        Expr::Ident(name) => Expr::Chain(
-            Box::new(Expr::Current),
-            vec![Step::Field(name.clone())],
-        ),
+        Expr::Ident(name) => Expr::Chain(Box::new(Expr::Current), vec![Step::Field(name.clone())]),
         Expr::Chain(base, _) if matches!(base.as_ref(), Expr::Current) => expr.clone(),
         other => other.clone(),
     }

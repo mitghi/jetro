@@ -1,7 +1,6 @@
 use super::ndjson_byte::visit_root_object_fields;
 use super::ndjson_direct::{
-    NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectProjectionValue,
-    NdjsonDirectTapePlan,
+    NdjsonDirectByteExpr, NdjsonDirectBytePlan, NdjsonDirectProjectionValue, NdjsonDirectTapePlan,
 };
 use crate::ir::physical::PhysicalPathStep;
 use std::sync::Arc;
@@ -330,7 +329,10 @@ impl NdjsonSchemaHints {
         let Some(root) = &self.root_object else {
             return false;
         };
-        root.stable_order && fields.into_iter().all(|field| root.slot_for(field).is_some())
+        root.stable_order
+            && fields
+                .into_iter()
+                .all(|field| root.slot_for(field).is_some())
     }
 }
 
@@ -449,22 +451,20 @@ impl NdjsonHintState {
         f: impl FnOnce(&NdjsonObjectLayoutHint, &NdjsonRootLayoutMatch<'a, '_>) -> R,
     ) -> Option<R> {
         let root = self.schema.root_object.as_ref()?;
-        let matched = match root.match_required_slots(
-            row,
-            &self.required_root_slots,
-            &mut self.span_scratch,
-        ) {
-            Some(matched) => matched,
-            None => {
-                self.stats.layout_misses += 1;
-                if self.stats.layout_misses > self.config.max_layout_misses {
-                    self.disabled = true;
-                    self.active = false;
-                    self.stats.disabled = true;
+        let matched =
+            match root.match_required_slots(row, &self.required_root_slots, &mut self.span_scratch)
+            {
+                Some(matched) => matched,
+                None => {
+                    self.stats.layout_misses += 1;
+                    if self.stats.layout_misses > self.config.max_layout_misses {
+                        self.disabled = true;
+                        self.active = false;
+                        self.stats.disabled = true;
+                    }
+                    return None;
                 }
-                return None;
-            }
-        };
+            };
         Some(f(root, &matched))
     }
 
@@ -624,8 +624,14 @@ mod tests {
             access,
         );
 
-        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::Learning);
-        assert_eq!(state.observe_row(br#"{"name":"b","id":2}"#), NdjsonHintDecision::Learning);
+        assert_eq!(
+            state.observe_row(br#"{"id":1,"name":"a"}"#),
+            NdjsonHintDecision::Learning
+        );
+        assert_eq!(
+            state.observe_row(br#"{"name":"b","id":2}"#),
+            NdjsonHintDecision::Learning
+        );
     }
 
     #[test]
@@ -641,8 +647,14 @@ mod tests {
         );
 
         assert_eq!(state.observe_row(br#"[]"#), NdjsonHintDecision::Learning);
-        assert_eq!(state.observe_row(br#"{"bad\nkey":1}"#), NdjsonHintDecision::Disabled);
-        assert_eq!(state.observe_row(br#"{"id":1}"#), NdjsonHintDecision::Disabled);
+        assert_eq!(
+            state.observe_row(br#"{"bad\nkey":1}"#),
+            NdjsonHintDecision::Disabled
+        );
+        assert_eq!(
+            state.observe_row(br#"{"id":1}"#),
+            NdjsonHintDecision::Disabled
+        );
         assert!(state.stats().disabled);
     }
 
@@ -662,7 +674,10 @@ mod tests {
             access,
         );
 
-        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(
+            state.observe_row(br#"{"id":1,"name":"a"}"#),
+            NdjsonHintDecision::UseHints
+        );
         assert!(state
             .with_root_layout_match(br#"{"name":"b","id":2}"#, |_, _| ())
             .is_none());
@@ -672,7 +687,10 @@ mod tests {
             .is_none());
         assert!(state.stats().disabled);
         assert_eq!(state.stats().layout_misses, 2);
-        assert_eq!(state.observe_row(br#"{"id":4,"name":"d"}"#), NdjsonHintDecision::Disabled);
+        assert_eq!(
+            state.observe_row(br#"{"id":4,"name":"d"}"#),
+            NdjsonHintDecision::Disabled
+        );
     }
 
     #[test]
@@ -696,20 +714,26 @@ mod tests {
             access,
         );
 
-        assert_eq!(state.observe_row(br#"{"id":1,"name":"a"}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(
+            state.observe_row(br#"{"id":1,"name":"a"}"#),
+            NdjsonHintDecision::UseHints
+        );
         assert_eq!(
             state.observe_row(br#"{"id":2,"name":"b","extra":{"large":true}}"#),
             NdjsonHintDecision::UseHints
         );
         let mut saw_name = false;
         assert!(state
-            .with_root_layout_match(br#"{"id":3,"name":"c","extra":{"large":true}}"#, |root, matched| {
-                assert_eq!(
-                    matched.value_at(root.slot_for("name").unwrap()),
-                    Some(&b"\"c\""[..])
-                );
-                saw_name = true;
-            })
+            .with_root_layout_match(
+                br#"{"id":3,"name":"c","extra":{"large":true}}"#,
+                |root, matched| {
+                    assert_eq!(
+                        matched.value_at(root.slot_for("name").unwrap()),
+                        Some(&b"\"c\""[..])
+                    );
+                    saw_name = true;
+                }
+            )
             .is_some());
         assert!(saw_name);
         assert_eq!(state.stats().layout_misses, 0);
@@ -731,9 +755,18 @@ mod tests {
             access,
         );
 
-        assert_eq!(state.observe_row(br#"{"id":1,"tail":{"x":1}}"#), NdjsonHintDecision::Learning);
-        assert_eq!(state.observe_row(br#"{"id":2,"tail":{"x":2}}"#), NdjsonHintDecision::UseHints);
-        assert_eq!(state.observe_row(br#"{"id":3,"tail":{"different":true}}"#), NdjsonHintDecision::UseHints);
+        assert_eq!(
+            state.observe_row(br#"{"id":1,"tail":{"x":1}}"#),
+            NdjsonHintDecision::Learning
+        );
+        assert_eq!(
+            state.observe_row(br#"{"id":2,"tail":{"x":2}}"#),
+            NdjsonHintDecision::UseHints
+        );
+        assert_eq!(
+            state.observe_row(br#"{"id":3,"tail":{"different":true}}"#),
+            NdjsonHintDecision::UseHints
+        );
         assert_eq!(state.stats().learned_rows, 2);
         assert_eq!(state.stats().hinted_rows, 2);
     }
@@ -749,7 +782,10 @@ mod tests {
         let matched = root
             .match_row(br#"{"id":3,"name":"c"}"#, &mut spans)
             .unwrap();
-        assert_eq!(matched.value_at(root.slot_for("id").unwrap()), Some(&b"3"[..]));
+        assert_eq!(
+            matched.value_at(root.slot_for("id").unwrap()),
+            Some(&b"3"[..])
+        );
         assert_eq!(
             matched.value_at(root.slot_for("name").unwrap()),
             Some(&b"\"c\""[..])

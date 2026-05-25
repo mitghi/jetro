@@ -118,7 +118,11 @@ fn single_field_cmp_lit(kernel: &BodyKernel) -> Option<(Arc<str>, crate::parse::
 
 // Builds per-column typed vectors from a flat row-major cell buffer.
 // Enables scalar loops in hot aggregation paths by avoiding per-element Val dispatch.
-fn build_typed_cols(cells: &[Val], stride: usize, nrows: usize) -> Vec<crate::data::value::ObjVecCol> {
+fn build_typed_cols(
+    cells: &[Val],
+    stride: usize,
+    nrows: usize,
+) -> Vec<crate::data::value::ObjVecCol> {
     use crate::data::value::ObjVecCol;
     let mut out: Vec<ObjVecCol> = Vec::with_capacity(stride);
     if stride == 0 || nrows == 0 {
@@ -247,18 +251,23 @@ impl Pipeline {
             return None;
         }
         if let Some((predicate, map)) = stage_kernel_pair(
-                &self.stages,
-                &self.stage_kernels,
-                BuiltinColumnarStage::Filter,
-                BuiltinColumnarStage::Map,
-            )
-        {
+            &self.stages,
+            &self.stage_kernels,
+            BuiltinColumnarStage::Filter,
+            BuiltinColumnarStage::Map,
+        ) {
             if let (Val::ObjVec(d), Some((pk, pop, plit)), Some(mk)) = (
                 &recv,
                 single_field_cmp_lit(predicate),
                 single_field_key(map),
             ) {
-                return objvec_typed_predicate_projection_collect(d, pk.as_ref(), pop, &plit, mk.as_ref());
+                return objvec_typed_predicate_projection_collect(
+                    d,
+                    pk.as_ref(),
+                    pop,
+                    &plit,
+                    mk.as_ref(),
+                );
             }
         }
         None
@@ -328,9 +337,8 @@ impl Pipeline {
             _ => return None,
         };
 
-        if let Some(k) =
-            stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
-                .and_then(single_field_key)
+        if let Some(k) = stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
+            .and_then(single_field_key)
         {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr.iter() {
@@ -374,8 +382,7 @@ impl Pipeline {
             BuiltinColumnarStage::Map,
         );
 
-        if let Some((predicate, map)) = predicate_projection
-        {
+        if let Some((predicate, map)) = predicate_projection {
             if let (Some((pks, pop, plit)), Some(mks)) =
                 (predicate.field_path_literal_cmp(), map.field_path_keys())
             {
@@ -390,9 +397,8 @@ impl Pipeline {
             }
         }
 
-        if let Some(ks) =
-            stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
-                .and_then(field_path_keys)
+        if let Some(ks) = stage_kernel(&self.stages, &self.stage_kernels, BuiltinColumnarStage::Map)
+            .and_then(field_path_keys)
         {
             let mut out = Vec::with_capacity(arr.len());
             let mut slots: Vec<Option<usize>> = vec![None; ks.len()];
@@ -414,7 +420,9 @@ impl Pipeline {
 
     /// Promotes a `Val::Arr` of uniform-shape objects to `ObjVecData`, returning
     /// the inner `Arc` directly. Returns `None` if promotion fails (e.g. mixed shapes).
-    pub fn try_promote_objvec_arr(arr: &Arc<Vec<Val>>) -> Option<Arc<crate::data::value::ObjVecData>> {
+    pub fn try_promote_objvec_arr(
+        arr: &Arc<Vec<Val>>,
+    ) -> Option<Arc<crate::data::value::ObjVecData>> {
         if let Some(Val::ObjVec(d)) = Self::try_promote_objvec(arr) {
             Some(d)
         } else {
@@ -723,7 +731,9 @@ fn and_chain_prog<'a>(
 }
 
 // Decodes a minimal `(field, literal, cmp)` opcode triple into a typed triple.
-fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
+fn decode_cmp_ops<'a>(
+    ops: &'a [crate::vm::Opcode],
+) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
     use crate::parse::ast::BinOp;
     use crate::vm::Opcode;
     let (field, lit_idx, cmp_idx) = match ops.len() {
@@ -757,7 +767,9 @@ fn decode_cmp_ops<'a>(ops: &'a [crate::vm::Opcode]) -> Option<(&'a str, crate::p
     Some((field, op, lit))
 }
 
-fn single_cmp_prog<'a>(prog: &'a crate::vm::Program) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
+fn single_cmp_prog<'a>(
+    prog: &'a crate::vm::Program,
+) -> Option<(&'a str, crate::parse::ast::BinOp, Val)> {
     decode_cmp_ops(prog.ops.as_ref())
 }
 
@@ -854,8 +866,8 @@ fn objvec_filter_count_slot(
     op: crate::parse::ast::BinOp,
     lit: &Val,
 ) -> Val {
-    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
+    use crate::parse::ast::BinOp as B;
 
     if let Some(cols) = &d.typed_cols {
         match (cols.get(slot), lit) {
@@ -936,8 +948,8 @@ fn objvec_filter_num_slots(
     map_slot: usize,
     op: NumOp,
 ) -> Val {
-    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
+    use crate::parse::ast::BinOp as B;
 
     if let Some(cols) = &d.typed_cols {
         // int-pred × int-map fast path avoids Val allocation entirely
@@ -1226,8 +1238,8 @@ fn objvec_filter_count_and_slots(
     d: &Arc<crate::data::value::ObjVecData>,
     leaves: &[(usize, crate::parse::ast::BinOp, Val)],
 ) -> Val {
-    use crate::parse::ast::BinOp as B;
     use crate::data::value::ObjVecCol;
+    use crate::parse::ast::BinOp as B;
 
     if let Some(cols) = &d.typed_cols {
         // local Checker avoids heap allocation and dynamic dispatch per predicate

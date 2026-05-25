@@ -1,5 +1,3 @@
-
-
 use jetro_core::Jetro;
 use serde_json::{json, Value};
 
@@ -69,14 +67,13 @@ fn as_array(v: &Value) -> &Vec<Value> {
     v.as_array().expect("expected array")
 }
 
-
 #[test]
 fn q1_project_nested_field() {
     let j = j(synth_doc());
     let out = j.collect("$.orders.map(customer.address.city)").unwrap();
     let arr = as_array(&out);
     assert_eq!(arr.len(), N_ORDERS);
-    
+
     let cities = [
         "Tokyo",
         "Berlin",
@@ -98,15 +95,14 @@ fn q2_project_then_unique() {
         .collect("$.orders.map(customer.address.country_code).unique()")
         .unwrap();
     let arr = as_array(&out);
-    assert_eq!(arr.len(), 6); 
+    assert_eq!(arr.len(), 6);
 }
-
 
 #[test]
 fn q3_filter_then_map_id() {
     let j = j(synth_doc());
     let out = j.collect("$.orders.filter(total > 500).map(id)").unwrap();
-    
+
     let arr = as_array(&out);
     assert!(!arr.is_empty());
     for v in arr {
@@ -130,7 +126,6 @@ fn q4_multi_cond_filter_count_matches_naive() {
     assert_eq!(out.as_i64().unwrap() as usize, naive);
 }
 
-
 #[test]
 fn q5_deep_find_broad_tree_eq_scan() {
     let doc = synth_doc();
@@ -140,7 +135,7 @@ fn q5_deep_find_broad_tree_eq_scan() {
     let q = r#"$..find(@.status == "shipped")"#;
     let t = j_tree.collect(q).unwrap();
     let s = j_scan.collect(q).unwrap();
-    
+
     assert_eq!(as_array(&t).len(), as_array(&s).len());
     assert!(!as_array(&t).is_empty());
 }
@@ -167,12 +162,11 @@ fn q7_deep_find_multi_predicate_and() {
     let t = as_array(&j_tree.collect(q).unwrap()).len();
     let s = as_array(&j_scan.collect(q).unwrap()).len();
     assert_eq!(t, s);
-    
+
     let q_broad = r#"$..find(@.status == "shipped")"#;
     let broad = as_array(&j_tree.collect(q_broad).unwrap()).len();
     assert!(t <= broad);
 }
-
 
 #[test]
 fn q8_deep_key_sum_tree_eq_scan() {
@@ -183,7 +177,7 @@ fn q8_deep_key_sum_tree_eq_scan() {
     let q = "$..total.sum()";
     let t = j_tree.collect(q).unwrap();
     let s = j_scan.collect(q).unwrap();
-    
+
     let tf = t.as_f64().expect("tree sum is number");
     let sf = s.as_f64().expect("scan sum is number");
     assert!((tf - sf).abs() < 1e-6, "tree {} vs scan {}", tf, sf);
@@ -202,13 +196,11 @@ fn q9_deep_key_extract_sku_count() {
     assert_eq!(t_len, N_ORDERS * ITEMS_PER_ORDER);
 }
 
-
 #[test]
 fn q10_group_by_status_partition() {
     let j = j(synth_doc());
     let out = j.collect("$.orders.group_by(status)").unwrap();
-    
-    
+
     let obj = out.as_object().expect("object keyed by group value");
     let mut total = 0usize;
     for (_k, bucket) in obj {
@@ -238,7 +230,7 @@ fn q11_count_by_region() {
     let obj = out.as_object().expect("object");
     let total: i64 = obj.values().map(|v| v.as_i64().unwrap()).sum();
     assert_eq!(total as usize, N_ORDERS);
-    assert_eq!(obj.len(), 5); 
+    assert_eq!(obj.len(), 5);
 }
 
 #[test]
@@ -270,7 +262,6 @@ fn q15_max_matches_naive() {
     assert!((out.as_f64().unwrap() - naive).abs() < 1e-6);
 }
 
-
 #[test]
 fn q13_list_comp_equivalent_to_filter_map() {
     let doc = synth_doc();
@@ -284,8 +275,6 @@ fn q13_list_comp_equivalent_to_filter_map() {
 
 #[test]
 fn q14_pick_projects_and_renames() {
-    
-    
     let j = j(synth_doc());
     let out = j
         .collect("$.orders.map(customer).pick(uid: id, who: name)")
@@ -300,7 +289,6 @@ fn q14_pick_projects_and_renames() {
     assert!(!first.contains_key("name"));
 }
 
-
 #[test]
 fn q16_set_deep_address_replaces_leaf_obj() {
     let j = j(synth_doc());
@@ -309,7 +297,7 @@ fn q16_set_deep_address_replaces_leaf_obj() {
     ).unwrap();
     let city = &out["orders"][0]["customer"]["address"]["city"];
     assert_eq!(city.as_str(), Some("Remote"));
-    
+
     let city2 = &out["orders"][1]["customer"]["address"]["city"];
     assert_ne!(city2.as_str(), Some("Remote"));
 }
@@ -329,10 +317,9 @@ fn q18_set_deep_items_array_resets() {
     let j = j(synth_doc());
     let out = j.collect("$.orders[0].items[0].price.set(0)").unwrap();
     assert_eq!(out["orders"][0]["items"][0]["price"].as_i64(), Some(0));
-    
+
     assert_ne!(out["orders"][0]["items"][1]["price"].as_i64(), Some(0));
 }
-
 
 #[test]
 fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
@@ -340,7 +327,7 @@ fn route_c_scan_agrees_with_tree_walker_on_chained_find() {
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc);
     let j_scan = Jetro::from_bytes(bytes).unwrap();
-    
+
     let q = "$..total.sum()";
     let t = j_tree.collect(q).unwrap().as_f64().unwrap();
     let s = j_scan.collect(q).unwrap().as_f64().unwrap();
@@ -388,12 +375,10 @@ fn deep_find_numeric_range_tree_eq_scan() {
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc.clone());
     let j_scan = Jetro::from_bytes(bytes).unwrap();
-    
-    
+
     for q in [
         "$..find(@.total > 500)",
         "$..find(@.qty < 3)",
-        
         "$..find(500 < @.total)",
     ] {
         let t = as_array(&j_tree.collect(q).unwrap()).len();
@@ -401,7 +386,7 @@ fn deep_find_numeric_range_tree_eq_scan() {
         assert_eq!(t, s, "query {}: tree {} vs scan {}", q, t, s);
         assert!(t > 0, "query {} returned empty", q);
     }
-    
+
     let orders = doc["orders"].as_array().unwrap();
     let naive_total_gte_500 = orders
         .iter()
@@ -427,8 +412,6 @@ fn deep_find_numeric_range_tree_eq_scan() {
 
 #[test]
 fn deep_find_then_count_and_aggregate_projection() {
-    
-    
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc.clone());
@@ -443,7 +426,7 @@ fn deep_find_then_count_and_aggregate_projection() {
     ] {
         let t = j_tree.collect(q).unwrap();
         let s = j_scan.collect(q).unwrap();
-        
+
         let eps = 1e-6_f64;
         let tf = t.as_f64();
         let sf = s.as_f64();
@@ -462,8 +445,6 @@ fn deep_find_then_count_and_aggregate_projection() {
 
 #[test]
 fn deep_find_then_map_field_direct_extract() {
-    
-    
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc.clone());
@@ -476,8 +457,7 @@ fn deep_find_then_map_field_direct_extract() {
         let t: Vec<Value> = as_array(&j_tree.collect(q).unwrap()).clone();
         let s: Vec<Value> = as_array(&j_scan.collect(q).unwrap()).clone();
         assert_eq!(t.len(), s.len(), "len differs for {}", q);
-        
-        
+
         let mut ts: Vec<String> = t.iter().map(|v| v.to_string()).collect();
         let mut ss: Vec<String> = s.iter().map(|v| v.to_string()).collect();
         ts.sort();
@@ -488,8 +468,6 @@ fn deep_find_then_map_field_direct_extract() {
 
 #[test]
 fn deep_find_mixed_eq_cmp_tree_eq_scan() {
-    
-    
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc.clone());
@@ -509,8 +487,6 @@ fn deep_find_mixed_eq_cmp_tree_eq_scan() {
 
 #[test]
 fn descendant_first_early_exit_matches_tree() {
-    
-    
     let doc = synth_doc();
     let bytes = serde_json::to_vec(&doc).unwrap();
     let j_tree = j(doc.clone());
@@ -527,8 +503,7 @@ fn descendant_first_early_exit_matches_tree() {
             q
         );
     }
-    
-    
+
     let first_sku = j_scan.collect("$..sku.first()").unwrap();
     assert!(first_sku.as_str().unwrap_or("").starts_with("SKU-"));
 }

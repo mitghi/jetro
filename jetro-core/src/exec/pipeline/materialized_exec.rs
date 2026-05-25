@@ -19,8 +19,8 @@ use super::row_source;
 use super::sink_accumulator::SinkAccumulator;
 use super::{
     apply_item_in_env, cmp_val_total, compute_strategies_with_kernels,
-    eval_kernel_view_first_with_vm, eval_kernel_with_vm, is_truthy, BodyKernel, Pipeline,
-    LateProjection, PipelineBody, Sink, Source, SourceAccessMode, Stage, StageFlow, StageStrategy,
+    eval_kernel_view_first_with_vm, eval_kernel_with_vm, is_truthy, BodyKernel, LateProjection,
+    Pipeline, PipelineBody, Sink, Source, SourceAccessMode, Stage, StageFlow, StageStrategy,
     TerminalMapCollector,
 };
 
@@ -235,8 +235,9 @@ where
     let mut stage_unique_seen: Vec<crate::util::StructuralValueSet> = (0..pipeline.stages.len())
         .map(|_| crate::util::StructuralValueSet::default())
         .collect();
-    let mut stage_window_buffers: Vec<std::collections::VecDeque<Val>> =
-        (0..pipeline.stages.len()).map(|_| Default::default()).collect();
+    let mut stage_window_buffers: Vec<std::collections::VecDeque<Val>> = (0..pipeline.stages.len())
+        .map(|_| Default::default())
+        .collect();
     let mut sink_acc = SinkAccumulator::new(&pipeline.sink);
     let membership_target = match &pipeline.sink {
         Sink::Membership(spec) => Some(eval_membership_target(spec, vm, &loop_env)?),
@@ -439,7 +440,9 @@ fn process_stream_item<'a>(
                         )? {
                             StreamItemFlow::Continue => {}
                             StreamItemFlow::Stop => return Ok(StreamItemFlow::Stop),
-                            StreamItemFlow::Return(value) => return Ok(StreamItemFlow::Return(value)),
+                            StreamItemFlow::Return(value) => {
+                                return Ok(StreamItemFlow::Return(value))
+                            }
                         }
                     }
                     return Ok(StreamItemFlow::Continue);
@@ -479,7 +482,9 @@ fn process_stream_item<'a>(
             &item,
             membership_target.expect("membership target exists"),
         ),
-        Sink::ArgExtreme(_) => observe_arg_extreme_sink_item(pipeline, item, sink_acc, vm, loop_env)?,
+        Sink::ArgExtreme(_) => {
+            observe_arg_extreme_sink_item(pipeline, item, sink_acc, vm, loop_env)?
+        }
         Sink::Reducer(_) => match observe_reducer_item(pipeline, item, sink_acc, vm, loop_env)? {
             ReducerItemFlow::Observed => false,
             ReducerItemFlow::Skipped => return Ok(StreamItemFlow::Continue),

@@ -71,7 +71,9 @@ pub fn compute_strategies_with_kernels(
                     }
                 }
                 PullDemand::NthInput(_) | PullDemand::All => {}
-                PullDemand::FirstInput(_) | PullDemand::UntilOutput(_) | PullDemand::LastInput(_) => {}
+                PullDemand::FirstInput(_)
+                | PullDemand::UntilOutput(_)
+                | PullDemand::LastInput(_) => {}
             }
         }
         demand = stage.upstream_demand(demand);
@@ -90,7 +92,9 @@ mod cost_guard_tests {
 
     use crate::data::value::Val;
 
-    use super::{bounded_sort_is_worthwhile, predicate_is_order_prefix, BodyKernel, BinOp, Program};
+    use super::{
+        bounded_sort_is_worthwhile, predicate_is_order_prefix, BinOp, BodyKernel, Program,
+    };
 
     #[test]
     fn bounded_sort_cost_guard_rejects_empty_limits() {

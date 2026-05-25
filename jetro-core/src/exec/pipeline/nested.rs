@@ -3,10 +3,7 @@
 //! Lowering creates a `Plan`; executors use this module to run that plan against
 //! the current row without depending back on the lowering module.
 
-use crate::{
-    data::context::EvalError,
-    data::value::Val,
-};
+use crate::{data::context::EvalError, data::value::Val};
 
 use super::{Pipeline, PipelineBody, Plan, Source};
 

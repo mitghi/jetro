@@ -12,9 +12,7 @@ use crate::builtins::registry::{
 use crate::builtins::{BuiltinArgs, BuiltinMethod};
 use crate::data::value::Val;
 use crate::parse::ast::Arg;
-use crate::vm::{
-    CompiledCall, FieldChainData, Opcode, Program,
-};
+use crate::vm::{CompiledCall, FieldChainData, Opcode, Program};
 
 fn make_noarg_call(method: BuiltinMethod, name: &str) -> Opcode {
     Opcode::CallMethod(Arc::new(CompiledCall {
@@ -221,9 +219,7 @@ pub(crate) fn pass_strength_reduce(ops: Vec<Opcode>) -> Vec<Opcode> {
                         && terminal_selection_position(next.id()).is_some() =>
                 {
                     terminal_selection_position(next.id())
-                        .and_then(|position| {
-                            terminal_selection_rewrite(prev.id(), position)
-                        })
+                        .and_then(|position| terminal_selection_rewrite(prev.id(), position))
                         .map(make_noarg_builtin_call)
                 }
                 (_, Opcode::CallMethod(next))
@@ -264,7 +260,9 @@ pub(crate) fn pass_field_chain(ops: Vec<Opcode>) -> Vec<Opcode> {
                     it.next();
                     chain.push(k);
                 }
-                out.push(Opcode::FieldChain(Arc::new(FieldChainData::new(chain.into()))));
+                out.push(Opcode::FieldChain(Arc::new(FieldChainData::new(
+                    chain.into(),
+                ))));
                 continue;
             }
             out.push(op);
@@ -371,51 +369,135 @@ pub(crate) fn pass_const_fold(ops: Vec<Opcode>) -> Vec<Opcode> {
         }
         if i + 2 < ops.len() {
             let folded = match (&ops[i], &ops[i + 1], &ops[i + 2]) {
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) => Some(Opcode::PushInt(a + b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Sub) => Some(Opcode::PushInt(a - b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mul) => Some(Opcode::PushInt(a * b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mod) if *b != 0 => Some(Opcode::PushInt(a % b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => Some(Opcode::PushFloat(*a as f64 / *b as f64)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Add) => Some(Opcode::PushFloat(a + b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Sub) => Some(Opcode::PushFloat(a - b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Mul) => Some(Opcode::PushFloat(a * b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => Some(Opcode::PushFloat(a / b)),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) => Some(Opcode::PushFloat(*a as f64 + b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Add) => Some(Opcode::PushFloat(a + *b as f64)),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Sub) => Some(Opcode::PushFloat(*a as f64 - b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Sub) => Some(Opcode::PushFloat(a - *b as f64)),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Mul) => Some(Opcode::PushFloat(*a as f64 * b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Mul) => Some(Opcode::PushFloat(a * *b as f64)),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => Some(Opcode::PushFloat(*a as f64 / b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => Some(Opcode::PushFloat(a / *b as f64)),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) => Some(Opcode::PushBool((*a as f64) < *b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lt) => Some(Opcode::PushBool(*a < (*b as f64))),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gt) => Some(Opcode::PushBool((*a as f64) > *b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gt) => Some(Opcode::PushBool(*a > (*b as f64))),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lte) => Some(Opcode::PushBool((*a as f64) <= *b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lte) => Some(Opcode::PushBool(*a <= (*b as f64))),
-                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gte) => Some(Opcode::PushBool((*a as f64) >= *b)),
-                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) => Some(Opcode::PushBool(*a >= (*b as f64))),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) => Some(Opcode::PushBool(a < b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lte) => Some(Opcode::PushBool(a <= b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gt) => Some(Opcode::PushBool(a > b)),
-                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gte) => Some(Opcode::PushBool(a >= b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) => Some(Opcode::PushBool(a == b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) => Some(Opcode::PushBool(a != b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lt) => Some(Opcode::PushBool(a < b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lte) => Some(Opcode::PushBool(a <= b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gt) => Some(Opcode::PushBool(a > b)),
-                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gte) => Some(Opcode::PushBool(a >= b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Eq) => Some(Opcode::PushBool(a == b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) => Some(Opcode::PushBool(a != b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lt) => Some(Opcode::PushBool(a < b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lte) => Some(Opcode::PushBool(a <= b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gt) => Some(Opcode::PushBool(a > b)),
-                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gte) => Some(Opcode::PushBool(a >= b)),
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Add) => {
+                    Some(Opcode::PushInt(a + b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Sub) => {
+                    Some(Opcode::PushInt(a - b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mul) => {
+                    Some(Opcode::PushInt(a * b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Mod) if *b != 0 => {
+                    Some(Opcode::PushInt(a % b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => {
+                    Some(Opcode::PushFloat(*a as f64 / *b as f64))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Add) => {
+                    Some(Opcode::PushFloat(a + b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Sub) => {
+                    Some(Opcode::PushFloat(a - b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Mul) => {
+                    Some(Opcode::PushFloat(a * b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => {
+                    Some(Opcode::PushFloat(a / b))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Add) => {
+                    Some(Opcode::PushFloat(*a as f64 + b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Add) => {
+                    Some(Opcode::PushFloat(a + *b as f64))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Sub) => {
+                    Some(Opcode::PushFloat(*a as f64 - b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Sub) => {
+                    Some(Opcode::PushFloat(a - *b as f64))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Mul) => {
+                    Some(Opcode::PushFloat(*a as f64 * b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Mul) => {
+                    Some(Opcode::PushFloat(a * *b as f64))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Div) if *b != 0.0 => {
+                    Some(Opcode::PushFloat(*a as f64 / b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Div) if *b != 0 => {
+                    Some(Opcode::PushFloat(a / *b as f64))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lt) => {
+                    Some(Opcode::PushBool((*a as f64) < *b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lt) => {
+                    Some(Opcode::PushBool(*a < (*b as f64)))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gt) => {
+                    Some(Opcode::PushBool((*a as f64) > *b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gt) => {
+                    Some(Opcode::PushBool(*a > (*b as f64)))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Lte) => {
+                    Some(Opcode::PushBool((*a as f64) <= *b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Lte) => {
+                    Some(Opcode::PushBool(*a <= (*b as f64)))
+                }
+                (Opcode::PushInt(a), Opcode::PushFloat(b), Opcode::Gte) => {
+                    Some(Opcode::PushBool((*a as f64) >= *b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushInt(b), Opcode::Gte) => {
+                    Some(Opcode::PushBool(*a >= (*b as f64)))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lt) => {
+                    Some(Opcode::PushBool(a < b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Lte) => {
+                    Some(Opcode::PushBool(a <= b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gt) => {
+                    Some(Opcode::PushBool(a > b))
+                }
+                (Opcode::PushFloat(a), Opcode::PushFloat(b), Opcode::Gte) => {
+                    Some(Opcode::PushBool(a >= b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Eq) => {
+                    Some(Opcode::PushBool(a == b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Neq) => {
+                    Some(Opcode::PushBool(a != b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lt) => {
+                    Some(Opcode::PushBool(a < b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Lte) => {
+                    Some(Opcode::PushBool(a <= b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gt) => {
+                    Some(Opcode::PushBool(a > b))
+                }
+                (Opcode::PushInt(a), Opcode::PushInt(b), Opcode::Gte) => {
+                    Some(Opcode::PushBool(a >= b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Eq) => {
+                    Some(Opcode::PushBool(a == b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Neq) => {
+                    Some(Opcode::PushBool(a != b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lt) => {
+                    Some(Opcode::PushBool(a < b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Lte) => {
+                    Some(Opcode::PushBool(a <= b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gt) => {
+                    Some(Opcode::PushBool(a > b))
+                }
+                (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Gte) => {
+                    Some(Opcode::PushBool(a >= b))
+                }
                 (Opcode::PushStr(a), Opcode::PushStr(b), Opcode::Add) => {
                     Some(Opcode::PushStr(Arc::<str>::from(format!("{}{}", a, b))))
                 }
-                (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) => Some(Opcode::PushBool(a == b)),
+                (Opcode::PushBool(a), Opcode::PushBool(b), Opcode::Eq) => {
+                    Some(Opcode::PushBool(a == b))
+                }
                 _ => None,
             };
             if let Some(folded) = folded {

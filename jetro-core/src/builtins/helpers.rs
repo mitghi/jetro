@@ -173,7 +173,11 @@ pub(crate) fn csv_emit(val: &Val, sep: &str) -> String {
 /// header in order from the row's object (missing keys become empty cells).
 /// Non-object rows fall through to `csv_cell` per element of the header set
 /// (positional alignment).
-pub(crate) fn csv_emit_with_headers(val: &Val, sep: &str, headers: &[std::sync::Arc<str>]) -> String {
+pub(crate) fn csv_emit_with_headers(
+    val: &Val,
+    sep: &str,
+    headers: &[std::sync::Arc<str>],
+) -> String {
     let mut out = String::new();
     // Header line.
     let mut first = true;
@@ -216,8 +220,7 @@ pub(crate) fn csv_emit_with_headers(val: &Val, sep: &str, headers: &[std::sync::
 
 #[inline]
 fn csv_cell_str(s: &str, sep: &str) -> String {
-    let needs_quote =
-        s.contains('\n') || s.contains('"') || s.contains(sep);
+    let needs_quote = s.contains('\n') || s.contains('"') || s.contains(sep);
     if !needs_quote {
         return s.to_string();
     }

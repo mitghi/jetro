@@ -1,7 +1,7 @@
 use super::ndjson_byte::{
-    collect_constant_stream_single_field, constant_stream_single_field,
-    raw_json_byte_path_value, validate_constant_stream_single_field,
-    validate_constant_stream_single_field_fast, BytePlanWrite, RawFieldValue,
+    collect_constant_stream_single_field, constant_stream_single_field, raw_json_byte_path_value,
+    validate_constant_stream_single_field, validate_constant_stream_single_field_fast,
+    BytePlanWrite, RawFieldValue,
 };
 use super::ndjson_direct::NdjsonDirectTapePlan;
 use crate::JetroEngineError;
@@ -71,8 +71,7 @@ impl NdjsonConstantStreamCache {
             &self.values,
             &self.ranges,
             &self.prefixes,
-        )
-            || validate_constant_stream_single_field(source, field, &self.values)
+        ) || validate_constant_stream_single_field(source, field, &self.values)
         {
             writer.write_all(&self.output)?;
             Ok(Some(BytePlanWrite::Done))

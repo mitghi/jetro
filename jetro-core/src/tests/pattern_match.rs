@@ -65,8 +65,7 @@ fn parses_object_pattern() {
 
 #[test]
 fn parses_object_open_pattern() {
-    let (_, arms) =
-        parse_match(r#"match $.u with { {role: "admin", ...*} -> 1, _ -> 0 }"#);
+    let (_, arms) = parse_match(r#"match $.u with { {role: "admin", ...*} -> 1, _ -> 0 }"#);
     let Pat::Obj { rest, .. } = &arms[0].pat else {
         panic!("expected Obj pattern");
     };
@@ -104,8 +103,7 @@ fn parses_kind_bind_pattern() {
 
 #[test]
 fn parses_guard_arm() {
-    let (_, arms) =
-        parse_match(r#"match $.x with { n when n > 10 -> "big", _ -> "small" }"#);
+    let (_, arms) = parse_match(r#"match $.x with { n when n > 10 -> "big", _ -> "small" }"#);
     assert!(arms[0].guard.is_some());
     assert!(arms[1].guard.is_none());
 }
@@ -139,7 +137,10 @@ fn runtime_literal_dispatch() {
 fn runtime_int_literal_dispatch() {
     let src = br#"{"n": 42}"#;
     assert_eq!(
-        run(src, r#"match $.n with { 1 -> "one", 42 -> "answer", _ -> "?" }"#),
+        run(
+            src,
+            r#"match $.n with { 1 -> "one", 42 -> "answer", _ -> "?" }"#
+        ),
         json!("answer")
     );
 }
@@ -179,10 +180,7 @@ fn runtime_array_rest_binding() {
 #[test]
 fn runtime_kind_bind() {
     let src = br#"{"v": "hello"}"#;
-    let v = run(
-        src,
-        r#"match $.v with { s: string -> s, _ -> "other" }"#,
-    );
+    let v = run(src, r#"match $.v with { s: string -> s, _ -> "other" }"#);
     assert_eq!(v, json!("hello"));
 }
 
@@ -216,7 +214,10 @@ fn runtime_bind_captures_value() {
 fn runtime_no_arm_match_is_error() {
     let err = run_err(br#"{"x": 1}"#, r#"match $.x with { 99 -> 0 }"#);
     assert!(err.contains("match"), "got: {err}");
-    assert!(err.contains("no arm matched") || err.contains("no arm"), "got: {err}");
+    assert!(
+        err.contains("no arm matched") || err.contains("no arm"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -415,9 +416,18 @@ fn runtime_shared_first_key_dispatch() {
     // The compiler hoists the `ObjCheck + LoadField` for that key out of
     // every per-arm prologue; correctness here exercises the shared path.
     let cases = [
-        (br#"{"u": {"role": "admin", "id": 1}}"# as &[u8], json!({"k": "admin", "n": 1})),
-        (br#"{"u": {"role": "user",  "id": 2}}"#, json!({"k": "user", "n": 2})),
-        (br#"{"u": {"role": "guest", "id": 3}}"#, json!({"k": "guest", "n": 0})),
+        (
+            br#"{"u": {"role": "admin", "id": 1}}"# as &[u8],
+            json!({"k": "admin", "n": 1}),
+        ),
+        (
+            br#"{"u": {"role": "user",  "id": 2}}"#,
+            json!({"k": "user", "n": 2}),
+        ),
+        (
+            br#"{"u": {"role": "guest", "id": 3}}"#,
+            json!({"k": "guest", "n": 0}),
+        ),
     ];
     for (src, expected) in cases {
         let v = run(
@@ -579,12 +589,12 @@ fn runtime_arr_length_share_with_trailing_catchall() {
 fn runtime_non_exhaustive_error_includes_value_snippet() {
     // The trailing `Fail` op renders a short snippet of the scrutinee
     // alongside its kind so users can spot the offending value.
-    let err = run_err(
-        br#"{"x": 7}"#,
-        r#"match $.x with { 1 -> "a", 2 -> "b" }"#,
-    );
+    let err = run_err(br#"{"x": 7}"#, r#"match $.x with { 1 -> "a", 2 -> "b" }"#);
     assert!(err.contains("no arm matched"), "{err}");
-    assert!(err.contains("7"), "expected scrutinee value in error: {err}");
+    assert!(
+        err.contains("7"),
+        "expected scrutinee value in error: {err}"
+    );
 }
 
 #[test]
@@ -933,11 +943,13 @@ fn view_domain_runtime_runs_against_borrowed_view() {
 
     // Build the AST and locate the embedded `Match` opcode by compiling
     // the expression and inspecting its op stream.
-    let expr = parse(r#"match @ with {
+    let expr = parse(
+        r#"match @ with {
         {role: "admin", id: i} -> {sort: "admin", n: i},
         {role: "user", id: i}  -> {sort: "user", n: i},
         {role: r}              -> {sort: r, n: 0}
-    }"#)
+    }"#,
+    )
     .expect("parse");
     let prog = Compiler::compile(&expr, "match-view-test");
     let cm = prog
@@ -1211,9 +1223,7 @@ fn match_runtimes_agree_on_canonical_corpus() {
 
 #[test]
 fn parses_object_pattern_with_named_rest() {
-    let (_, arms) = parse_match(
-        r#"match $.u with { {a: x, c: y, ...*rest} -> rest, _ -> {} }"#,
-    );
+    let (_, arms) = parse_match(r#"match $.u with { {a: x, c: y, ...*rest} -> rest, _ -> {} }"#);
     let Pat::Obj { fields, rest } = &arms[0].pat else {
         panic!("expected Obj pattern");
     };

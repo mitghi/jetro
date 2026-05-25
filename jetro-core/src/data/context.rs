@@ -21,7 +21,6 @@ impl std::fmt::Display for EvalError {
 
 impl std::error::Error for EvalError {}
 
-
 /// Saved-state token for the hot-loop lambda binding protocol.
 /// `push_lam` returns one; `pop_lam` consumes it. Avoids full `Env` clone
 /// per iteration — only `current` and the single named binding are swapped.

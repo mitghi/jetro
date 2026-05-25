@@ -861,15 +861,16 @@ impl<'a> ValueView<'a> for ValView<'a> {
     #[inline]
     fn object_iter(&self) -> Option<Box<dyn Iterator<Item = (Arc<str>, Self)> + 'a>> {
         match self {
-            Self::Borrowed(Val::Obj(map)) => Some(Box::new(
-                map.iter()
-                    .map(|(key, value)| (Arc::clone(key), Self::Borrowed(value))),
-            )),
-            Self::Borrowed(Val::ObjSmall(pairs)) => Some(Box::new(
-                pairs
-                    .iter()
-                    .map(|(key, value)| (Arc::clone(key), Self::Borrowed(value))),
-            )),
+            Self::Borrowed(Val::Obj(map)) => {
+                Some(Box::new(map.iter().map(|(key, value)| {
+                    (Arc::clone(key), Self::Borrowed(value))
+                })))
+            }
+            Self::Borrowed(Val::ObjSmall(pairs)) => {
+                Some(Box::new(pairs.iter().map(|(key, value)| {
+                    (Arc::clone(key), Self::Borrowed(value))
+                })))
+            }
             Self::Borrowed(_) => None,
             Self::Owned(Val::Obj(map)) => {
                 let entries = map

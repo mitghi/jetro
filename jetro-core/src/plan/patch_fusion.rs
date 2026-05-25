@@ -625,7 +625,9 @@ fn expr_reads_update_focus(expr: &Expr) -> bool {
         Expr::Chain(base, steps) => {
             expr_reads_update_focus(base)
                 || steps.iter().any(|step| match step {
-                    Step::DynIndex(expr) | Step::InlineFilter(expr) => expr_reads_update_focus(expr),
+                    Step::DynIndex(expr) | Step::InlineFilter(expr) => {
+                        expr_reads_update_focus(expr)
+                    }
                     Step::Method(_, args) | Step::OptMethod(_, args) => {
                         args.iter().any(arg_reads_update_focus)
                     }
@@ -649,8 +651,7 @@ fn expr_reads_update_focus(expr: &Expr) -> bool {
         | Expr::Cast { expr: inner, .. } => expr_reads_update_focus(inner),
         Expr::Object(fields) => fields.iter().any(|field| match field {
             ObjField::Kv { val, cond, .. } => {
-                expr_reads_update_focus(val)
-                    || cond.as_ref().is_some_and(expr_reads_update_focus)
+                expr_reads_update_focus(val) || cond.as_ref().is_some_and(expr_reads_update_focus)
             }
             ObjField::Dynamic { key, val } => {
                 expr_reads_update_focus(key) || expr_reads_update_focus(val)
@@ -756,10 +757,7 @@ fn arg_reads_update_focus(arg: &Arg) -> bool {
 }
 
 fn match_arm_reads_update_focus(arm: &crate::parse::ast::MatchArm) -> bool {
-    arm.guard
-        .as_ref()
-        .is_some_and(expr_reads_update_focus)
-        || expr_reads_update_focus(&arm.body)
+    arm.guard.as_ref().is_some_and(expr_reads_update_focus) || expr_reads_update_focus(&arm.body)
 }
 
 // ---------------------------------------------------------------------------
@@ -927,7 +925,6 @@ impl FuseCtx {
         a.next_scope = self.next_scope;
         a
     }
-
 }
 
 /// Walk the expression bottom-up, fusing where shapes match. Most
@@ -2019,5 +2016,4 @@ mod tests {
         let r = ctx.canonical_root(&Expr::Ident("n0".to_string()));
         assert_eq!(r, RootRef::Root);
     }
-
 }

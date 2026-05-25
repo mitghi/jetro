@@ -165,7 +165,6 @@ mod list {
         assert_eq!(out, json!(["Ada", "Bob"]));
     }
 
-
     #[test]
     fn two_var_destructure_arrays_of_pairs() {
         // `for k, v in [[..],[..]]` binds first/second elements.
@@ -209,7 +208,6 @@ mod list {
         assert_eq!(out, json!(["b", "c"]));
     }
 
-
     #[test]
     fn object_source_yields_entries() {
         // Iterating an object produces `{key, value}` records.
@@ -224,7 +222,6 @@ mod list {
         let out = vm_query("[e.key for e in $.o]", &doc).unwrap();
         assert_eq!(out, json!(["a", "b"]));
     }
-
 
     #[test]
     fn iter_via_let_binding() {
@@ -310,11 +307,7 @@ mod dict {
     #[test]
     fn two_var_swap_kv() {
         // Build a value→key inverse.
-        let out = vm_query(
-            r#"{v: k for [k, v] in [["x",1],["y",2]]}"#,
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query(r#"{v: k for [k, v] in [["x",1],["y",2]]}"#, &json!(null)).unwrap();
         assert_eq!(out, json!({"1": "x", "2": "y"}));
     }
 
@@ -342,11 +335,7 @@ mod dict {
     #[test]
     fn duplicate_keys_last_wins() {
         // Two pairs collapse to one (last value wins).
-        let out = vm_query(
-            r#"{k: v for [k, v] in [["a",1],["a",2]]}"#,
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query(r#"{k: v for [k, v] in [["a",1],["a",2]]}"#, &json!(null)).unwrap();
         assert_eq!(out, json!({"a": 2}));
     }
 
@@ -360,11 +349,7 @@ mod dict {
     #[test]
     fn conditional_via_ternary_in_value() {
         let doc = json!({"xs": [1, 2, 3]});
-        let out = vm_query(
-            r#"{n: "yes" if n > 1 else "no" for n in $.xs}"#,
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query(r#"{n: "yes" if n > 1 else "no" for n in $.xs}"#, &doc).unwrap();
         assert_eq!(out, json!({"1": "no", "2": "yes", "3": "yes"}));
     }
 }
@@ -404,8 +389,11 @@ mod set {
 
     #[test]
     fn multi_if_clauses() {
-        let out = vm_query("{n*n for n in [1,2,3,4,5,6] if n > 1 if n < 5}", &json!(null))
-            .unwrap();
+        let out = vm_query(
+            "{n*n for n in [1,2,3,4,5,6] if n > 1 if n < 5}",
+            &json!(null),
+        )
+        .unwrap();
         assert_eq!(out, json!([4, 9, 16]));
     }
 }
@@ -461,11 +449,7 @@ mod misc {
     #[test]
     fn comprehension_inside_method_arg() {
         let doc = json!({"xs": [1, 2, 3, 4]});
-        let out = vm_query(
-            "[n for n in $.xs if n > 1].len()",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("[n for n in $.xs if n > 1].len()", &doc).unwrap();
         assert_eq!(out, json!(3));
     }
 
@@ -486,22 +470,14 @@ mod misc {
     #[test]
     fn dict_comp_then_entries_chain() {
         let doc = json!({"xs": [1, 2, 3]});
-        let out = vm_query(
-            "{n: n*n for n in $.xs}.entries().count()",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("{n: n*n for n in $.xs}.entries().count()", &doc).unwrap();
         assert_eq!(out, json!(3));
     }
 
     #[test]
     fn comp_var_shadows_outer_let() {
         // Inner `n` shadows outer `n`.
-        let out = vm_query(
-            "let n = 100 in [n for n in [1,2,3]]",
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query("let n = 100 in [n for n in [1,2,3]]", &json!(null)).unwrap();
         assert_eq!(out, json!([1, 2, 3]));
     }
 
@@ -520,11 +496,7 @@ mod misc {
     fn comp_as_pipeline_source() {
         // Comprehension feeds a pipeline.
         let doc = json!({"xs": [1, 2, 3, 4, 5]});
-        let out = vm_query(
-            "[n*2 for n in $.xs if n > 2].map(@ + 1)",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("[n*2 for n in $.xs if n > 2].map(@ + 1)", &doc).unwrap();
         assert_eq!(out, json!([7, 9, 11]));
     }
 
@@ -542,11 +514,7 @@ mod misc {
     #[test]
     fn comp_in_let_body_inherits_root() {
         let doc = json!({"xs": [10, 20, 30]});
-        let out = vm_query(
-            "let f = (x => x + 1) in [n for n in $.xs]",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("let f = (x => x + 1) in [n for n in $.xs]", &doc).unwrap();
         assert_eq!(out, json!([10, 20, 30]));
     }
 

@@ -1,5 +1,3 @@
-
-
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -13,9 +11,7 @@ use serde_json::{json, Value};
 const WARMUP: usize = 3;
 const ITERS: usize = 20;
 
-
 const TOLERANCE: f64 = 1.25;
-
 
 const NOISE_FLOOR_US: u128 = 500;
 
@@ -111,8 +107,6 @@ fn synth_doc(n_orders: usize, items_per_order: usize) -> Value {
 }
 
 fn result_hash(v: &Value) -> u64 {
-    
-    
     let bytes = serde_json::to_vec(v).unwrap();
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -132,7 +126,7 @@ fn measure_us<F: FnMut() -> Value>(mut f: F) -> (u128, u64) {
         samples.push(t.elapsed().as_micros());
     }
     samples.sort();
-    
+
     (samples[0], hash)
 }
 
@@ -151,7 +145,6 @@ struct Baseline {
 }
 
 fn baseline_path() -> PathBuf {
-    
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("bench_baseline.json");
     p
@@ -246,8 +239,7 @@ fn main() {
         let ratio = e.best_us as f64 / b.best_us.max(1) as f64;
         let hash_ok = e.result_hash == b.result_hash;
         let abs_delta = e.best_us.saturating_sub(b.best_us);
-        
-        
+
         let perf_ok = hash_only || ratio <= TOLERANCE || abs_delta < NOISE_FLOOR_US;
         let flag = match (perf_ok, hash_ok) {
             (true, true) => "  ok",

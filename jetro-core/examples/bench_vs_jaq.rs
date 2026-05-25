@@ -1,5 +1,3 @@
-
-
 use jetro_core::Jetro;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -81,7 +79,7 @@ struct Stats {
 }
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
-    let _ = f(); 
+    let _ = f();
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
@@ -101,7 +99,6 @@ fn show(label: &str, s: Stats) {
         label, s.best, s.median, s.mean
     );
 }
-
 
 fn compile_jaq(
     code: &str,
@@ -130,7 +127,6 @@ fn run_jaq(
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
 
-
 fn bench(
     label: &str,
     jetro_tree: &Jetro,
@@ -143,7 +139,6 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    
     let t = sample(|| {
         let _ = jetro_tree.collect(jetro_q).unwrap();
     });
@@ -195,7 +190,6 @@ fn main() {
     let j_tree = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
 
-    
     let jaq_input: JaqVal = jaq_read::parse_single(&bytes).unwrap();
 
     bench(

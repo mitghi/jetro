@@ -2272,12 +2272,14 @@ mod tests {
         );
         assert_eq!(Sink::Nth(0).empty_stream_result(), Some(Val::Null));
         assert_eq!(
-            serde_json::Value::from(Sink::SelectMany {
-                n: 2,
-                from_end: false,
-            }
-            .empty_stream_result()
-            .unwrap()),
+            serde_json::Value::from(
+                Sink::SelectMany {
+                    n: 2,
+                    from_end: false,
+                }
+                .empty_stream_result()
+                .unwrap()
+            ),
             serde_json::json!([])
         );
     }

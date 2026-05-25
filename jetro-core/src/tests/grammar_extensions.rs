@@ -94,9 +94,18 @@ mod slice_step {
     fn step1_unchanged() {
         // The hot path for step==1 must produce identical output to the
         // pre-step implementation.
-        assert_eq!(vm_query("$.xs[0:5]", &xs()).unwrap(), json!([1, 2, 3, 4, 5]));
-        assert_eq!(vm_query("$.xs[2:7]", &xs()).unwrap(), json!([3, 4, 5, 6, 7]));
-        assert_eq!(vm_query("$.xs[5:]", &xs()).unwrap(), json!([6, 7, 8, 9, 10]));
+        assert_eq!(
+            vm_query("$.xs[0:5]", &xs()).unwrap(),
+            json!([1, 2, 3, 4, 5])
+        );
+        assert_eq!(
+            vm_query("$.xs[2:7]", &xs()).unwrap(),
+            json!([3, 4, 5, 6, 7])
+        );
+        assert_eq!(
+            vm_query("$.xs[5:]", &xs()).unwrap(),
+            json!([6, 7, 8, 9, 10])
+        );
         assert_eq!(vm_query("$.xs[:3]", &xs()).unwrap(), json!([1, 2, 3]));
     }
 
@@ -186,11 +195,7 @@ mod lambda_destructure {
 
     #[test]
     fn arrow_pair_destructure() {
-        let out = vm_query(
-            "[1,2,3,4].pairwise().map(([a,b]) => b - a)",
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query("[1,2,3,4].pairwise().map(([a,b]) => b - a)", &json!(null)).unwrap();
         assert_eq!(out, json!([1, 1, 1]));
     }
 
@@ -217,22 +222,14 @@ mod lambda_destructure {
 
     #[test]
     fn three_element_destructure() {
-        let out = vm_query(
-            "[[1,2,3]].map(([a,b,c]) => a+b+c)",
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query("[[1,2,3]].map(([a,b,c]) => a+b+c)", &json!(null)).unwrap();
         assert_eq!(out, json!([6]));
     }
 
     #[test]
     fn destructure_with_filter() {
         let doc = json!({"pairs":[["a",1],["b",2],["c",3]]});
-        let out = vm_query(
-            "$.pairs.filter(([k,v]) => v >= 2).map(([k,v]) => k)",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("$.pairs.filter(([k,v]) => v >= 2).map(([k,v]) => k)", &doc).unwrap();
         assert_eq!(out, json!(["b", "c"]));
     }
 
@@ -240,11 +237,7 @@ mod lambda_destructure {
     fn lambda_keyword_form_destructure() {
         // `lambda` keyword form should also accept array-pattern destructure.
         let doc = json!({"pairs":[["a",1],["b",2]]});
-        let out = vm_query(
-            "$.pairs.map(lambda [k,v]: v)",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("$.pairs.map(lambda [k,v]: v)", &doc).unwrap();
         assert_eq!(out, json!([1, 2]));
     }
 
@@ -252,11 +245,7 @@ mod lambda_destructure {
     fn destructure_inside_group_by() {
         // Idiomatic group_by → entries → destructure pipeline.
         let doc = json!({"items":[{"k":"a","v":1},{"k":"a","v":2},{"k":"b","v":3}]});
-        let out = vm_query(
-            "[e for e in $.items.group_by(@.k).entries()]",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("[e for e in $.items.group_by(@.k).entries()]", &doc).unwrap();
         // entries() shape currently double-wraps (separate bug); just check
         // that the destructure path doesn't crash on the wrapped result.
         let _ = out;
@@ -266,22 +255,14 @@ mod lambda_destructure {
     fn ident_and_array_param_mixed() {
         // 1-arg destructure: behaves identically to single-ident in
         // user-visible semantics.
-        let out = vm_query(
-            "[[1,2],[3,4]].map(([a,b]) => a*b)",
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query("[[1,2],[3,4]].map(([a,b]) => a*b)", &json!(null)).unwrap();
         assert_eq!(out, json!([2, 12]));
     }
 
     #[test]
     fn nested_destructure_inside_filter() {
         let doc = json!({"xs":[[1,10],[2,20],[3,30]]});
-        let out = vm_query(
-            "$.xs.filter(([a,b]) => b > 15).map(([a,b]) => a)",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("$.xs.filter(([a,b]) => b > 15).map(([a,b]) => a)", &doc).unwrap();
         assert_eq!(out, json!([2, 3]));
     }
 
@@ -289,12 +270,8 @@ mod lambda_destructure {
     fn destructure_inside_sort_key() {
         // sort with destructure projection.
         let doc = json!({"xs":[[2,"b"],[1,"a"],[3,"c"]]});
-        let out = vm_query(
-            "$.xs.sort(([n,s]) => n)",
-            &doc,
-        )
-        .unwrap();
-        assert_eq!(out, json!([[1,"a"],[2,"b"],[3,"c"]]));
+        let out = vm_query("$.xs.sort(([n,s]) => n)", &doc).unwrap();
+        assert_eq!(out, json!([[1, "a"], [2, "b"], [3, "c"]]));
     }
 }
 

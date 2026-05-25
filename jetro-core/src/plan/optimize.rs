@@ -88,7 +88,10 @@ pub(crate) mod rules {
         fn apply(&self, plan: LogicalPlan) -> Result<LogicalPlan, LogicalPlan> {
             // Match Take(1, Sort(...)) or First(Sort(...))
             // Track which outer form we had so we can rebuild correctly on Err.
-            enum Outer { Take1, First }
+            enum Outer {
+                Take1,
+                First,
+            }
             let (outer, inner) = match plan {
                 LogicalPlan::Take { n: 1, input } => (Outer::Take1, input),
                 LogicalPlan::First(input) => (Outer::First, input),
@@ -96,7 +99,10 @@ pub(crate) mod rules {
             };
 
             match *inner {
-                LogicalPlan::Sort { input: sort_input, spec } => {
+                LogicalPlan::Sort {
+                    input: sort_input,
+                    spec,
+                } => {
                     // Only collapse when there is no key expression (identity sort).
                     // A keyed sort changes semantics — we cannot simply emit Min/Max
                     // which operate on the raw value, not the key projection.
@@ -108,7 +114,10 @@ pub(crate) mod rules {
                         }
                     } else {
                         // Cannot collapse — rebuild the original outer node with sort inside.
-                        let rebuilt_sort = LogicalPlan::Sort { input: sort_input, spec };
+                        let rebuilt_sort = LogicalPlan::Sort {
+                            input: sort_input,
+                            spec,
+                        };
                         let rebuilt = match outer {
                             Outer::Take1 => LogicalPlan::Take {
                                 n: 1,
@@ -151,7 +160,11 @@ pub(crate) mod rules {
                     }
                 }
                 LogicalPlan::Take { n: n1, input } => {
-                    if let LogicalPlan::Take { n: n2, input: inner } = *input {
+                    if let LogicalPlan::Take {
+                        n: n2,
+                        input: inner,
+                    } = *input
+                    {
                         Ok(LogicalPlan::Take {
                             n: n1.min(n2),
                             input: inner,
@@ -202,10 +215,8 @@ pub(crate) mod rules {
                         if is_independent_predicate(&predicate)
                             && is_safe_projection_for_swap(&projection_for_subst)
                         {
-                            let new_predicate = substitute_current_with_expr(
-                                predicate,
-                                &projection_for_subst,
-                            );
+                            let new_predicate =
+                                substitute_current_with_expr(predicate, &projection_for_subst);
                             return Ok(LogicalPlan::Map {
                                 input: Box::new(LogicalPlan::Filter {
                                     input: map_input,
@@ -246,7 +257,9 @@ pub(crate) mod rules {
             Expr::Chain(base, steps) => {
                 use crate::parse::ast::Step;
                 let base_ok = is_independent_predicate(base);
-                let steps_ok = steps.iter().all(|s| matches!(s, Step::Field(_) | Step::Index(_)));
+                let steps_ok = steps
+                    .iter()
+                    .all(|s| matches!(s, Step::Field(_) | Step::Index(_)));
                 base_ok && steps_ok
             }
             // Compound expressions — recurse
@@ -324,9 +337,9 @@ pub(crate) mod rules {
                 let new_steps = steps
                     .into_iter()
                     .map(|s| match s {
-                        Step::DynIndex(e) => Step::DynIndex(Box::new(
-                            substitute_current_with_expr(*e, replacement),
-                        )),
+                        Step::DynIndex(e) => {
+                            Step::DynIndex(Box::new(substitute_current_with_expr(*e, replacement)))
+                        }
                         Step::InlineFilter(e) => Step::InlineFilter(Box::new(
                             substitute_current_with_expr(*e, replacement),
                         )),
@@ -340,9 +353,9 @@ pub(crate) mod rules {
                 op,
                 Box::new(substitute_current_with_expr(*rhs, replacement)),
             ),
-            Expr::UnaryNeg(inner) => Expr::UnaryNeg(Box::new(substitute_current_with_expr(
-                *inner, replacement,
-            ))),
+            Expr::UnaryNeg(inner) => {
+                Expr::UnaryNeg(Box::new(substitute_current_with_expr(*inner, replacement)))
+            }
             Expr::Not(inner) => {
                 Expr::Not(Box::new(substitute_current_with_expr(*inner, replacement)))
             }

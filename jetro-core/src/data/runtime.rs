@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-use crate::parse::ast::{Arg, Expr};
 use crate::data::context::{Env, EvalError};
-use crate::ir::physical::PipelinePlanSource;
-use crate::exec::pipeline::{self, PipelineBody};
 use crate::data::value::Val;
+use crate::exec::pipeline::{self, PipelineBody};
+use crate::ir::physical::PipelinePlanSource;
+use crate::parse::ast::{Arg, Expr};
 use crate::vm::{CompiledCall, VM};
 
 /// Allows `physical_eval`'s `ExecCtx` to hand a pipeline-source resolution
@@ -198,7 +198,6 @@ pub(crate) fn eval_compiled_arg(
     if let Some(idx) = arg_index(call.orig_args.as_ref(), arg) {
         return eval_compiled_arg_at(vm, call, idx, env);
     }
-
 
     let expr = match arg {
         Arg::Pos(expr) | Arg::Named(_, expr) => expr,

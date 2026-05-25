@@ -8,7 +8,6 @@ mod tests {
     use super::super::common::{books, vm_query};
     use serde_json::json;
 
-    
     #[test]
     fn field_access() {
         let doc = books();
@@ -67,7 +66,6 @@ mod tests {
         assert_eq!(r, json!(null));
     }
 
-    
     #[test]
     fn filter_simple() {
         let doc = books();
@@ -101,7 +99,6 @@ mod tests {
         assert_eq!(arr.len(), 2);
     }
 
-    
     #[test]
     fn map_pluck() {
         let doc = books();
@@ -136,7 +133,6 @@ mod tests {
         assert_eq!(arr[1]["expensive"], json!(false));
     }
 
-    
     #[test]
     fn len() {
         let doc = books();
@@ -189,7 +185,6 @@ mod tests {
         assert_eq!(r.as_array().unwrap()[0], json!("Dune"));
     }
 
-    
     #[test]
     fn or_default() {
         let doc = json!({"user": {}});
@@ -248,7 +243,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn kind_number() {
         let doc = json!({"items": [{"v": 1}, {"v": "x"}, {"v": null}]});
@@ -263,7 +257,6 @@ mod tests {
         assert_eq!(r, json!([{"v": 1}]));
     }
 
-    
     #[test]
     fn list_comp_basic() {
         let doc = books();
@@ -295,7 +288,6 @@ mod tests {
         assert_eq!(arr.len(), 2);
     }
 
-    
     #[test]
     fn lambda_update() {
         let doc = json!({"prices": [10, 20, 30]});
@@ -303,7 +295,6 @@ mod tests {
         assert_eq!(r, json!([20, 40, 60]));
     }
 
-    
     #[test]
     fn let_binding() {
         let doc = books();
@@ -327,7 +318,6 @@ mod tests {
         assert_eq!(arr[1], json!("1984"));
     }
 
-    
     #[test]
     fn enumerate() {
         let doc = json!({"items": ["a", "b", "c"]});
@@ -405,7 +395,6 @@ mod tests {
         assert_eq!(r, json!([2, 4, 6]));
     }
 
-    
     #[test]
     fn coalesce() {
         let doc = json!({"a": null, "b": null, "c": 42});
@@ -438,7 +427,6 @@ mod tests {
         assert_eq!(arr.len(), 4);
     }
 
-    
     #[test]
     fn object_construction() {
         let doc = books();
@@ -471,13 +459,12 @@ mod tests {
     fn optional_field_omitted() {
         let doc = json!({"user": {"name": "Alice"}});
         let _r = vm_query("$.user.map({name, email?})", &doc);
-        
+
         let r2 = vm_query("{name: $.user.name, email?: $.user.email}", &doc).unwrap();
         assert!(r2.get("email").is_none());
         assert_eq!(r2["name"], json!("Alice"));
     }
 
-    
     #[test]
     fn pipe_to_method() {
         let doc = books();
@@ -496,7 +483,6 @@ mod tests {
         assert_eq!(r, json!(2));
     }
 
-    
     #[test]
     fn null_coalesce_basic() {
         let doc = json!({"a": null, "b": 42});
@@ -515,11 +501,10 @@ mod tests {
         assert_eq!(vm_query("$.a ?| $.b ?| $.c", &doc).unwrap(), json!("found"));
     }
 
-    
     #[test]
     fn bind_simple_name() {
         let doc = books();
-        
+
         let r = vm_query(
             "$.store.books -> books | {count: books.len(), first: books[0].title}",
             &doc,
@@ -551,7 +536,6 @@ mod tests {
         assert_eq!(r, json!(60));
     }
 
-    
     #[test]
     fn object_spread() {
         let doc = json!({"base": {"a": 1, "b": 2}, "extra": {"c": 3}});
@@ -569,7 +553,6 @@ mod tests {
         assert_eq!(r["b"], json!(99));
     }
 
-    
     #[test]
     fn array_spread() {
         let doc = json!({"a": [1, 2], "b": [3, 4]});
@@ -584,7 +567,6 @@ mod tests {
         assert_eq!(r, json!([1, 2, 3, 4]));
     }
 
-    
     #[test]
     fn fstring_basic() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
@@ -606,7 +588,6 @@ mod tests {
         assert_eq!(r, json!("Hello ALICE!"));
     }
 
-    
     #[test]
     fn str_upper_lower() {
         let doc = json!({"s": "Hello World"});
@@ -656,7 +637,7 @@ mod tests {
     #[test]
     fn str_replace() {
         let doc = json!({"s": "foo foo foo"});
-        
+
         assert_eq!(
             vm_query("$.s.replace(\"foo\", \"bar\")", &doc).unwrap(),
             json!("bar foo foo")
@@ -770,7 +751,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn pick_fields() {
         let doc = json!({"user": {"name": "Alice", "age": 30, "password": "secret"}});
@@ -798,7 +778,6 @@ mod tests {
 
     #[test]
     fn merge_objects() {
-        
         let doc = json!({"a": {"x": 1}, "b": {"y": 2}});
         let r = vm_query("$.a | merge($.b)", &doc).unwrap();
         assert_eq!(r["x"], json!(1));
@@ -873,14 +852,13 @@ mod tests {
         let pairs = vm_query("$.obj.to_pairs()", &doc).unwrap();
         let arr = pairs.as_array().unwrap();
         assert_eq!(arr.len(), 2);
-        
+
         let pairs_doc = json!({"pairs": pairs});
         let restored = vm_query("$.pairs.from_pairs()", &pairs_doc).unwrap();
         assert_eq!(restored["a"], json!(1));
         assert_eq!(restored["b"], json!(2));
     }
 
-    
     #[test]
     fn get_path_op() {
         let doc = json!({"a": {"b": {"c": 42}}});
@@ -931,7 +909,6 @@ mod tests {
         assert_eq!(r["a"]["d"], json!(2));
     }
 
-    
     #[test]
     fn set_diff() {
         let doc = json!({"a": [1, 2, 3, 4], "b": [2, 4]});
@@ -956,7 +933,6 @@ mod tests {
         assert!(arr.contains(&json!(5)));
     }
 
-    
     #[test]
     fn type_method() {
         let doc = json!({"n": 42, "s": "hello", "a": [1], "o": {}, "b": true, "z": null});
@@ -977,11 +953,10 @@ mod tests {
         assert!(serialized.as_str().unwrap().contains("\"x\""));
     }
 
-    
     #[test]
     fn inline_filter_basic() {
         let doc = books();
-        
+
         let r = vm_query("$.store.books{price > 10}", &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -991,8 +966,7 @@ mod tests {
     #[test]
     fn quantifier_first() {
         let doc = books();
-        
-        
+
         let r = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(r["title"], json!("Dune"));
     }
@@ -1007,7 +981,7 @@ mod tests {
     #[test]
     fn quantifier_one_error() {
         let doc = books();
-        
+
         let r = vm_query("$.store.books{price > 10}!", &doc);
         assert!(r.is_err());
     }
@@ -1015,7 +989,7 @@ mod tests {
     #[test]
     fn descend_all_inline_filter() {
         let doc = books();
-        
+
         let r = vm_query("$.store..{title == \"1984\"}!.title", &doc).unwrap();
         assert_eq!(r, json!("1984"));
     }
@@ -1023,20 +997,19 @@ mod tests {
     #[test]
     fn descend_all_collect() {
         let doc = json!({"a": {"b": 1, "c": 2}, "d": 3});
-        
+
         let r = vm_query("$..", &doc).unwrap();
         let arr = r.as_array().unwrap();
-        
+
         assert!(arr.len() > 1);
     }
 
-    
     #[test]
     fn fusion_drop_noop_before_len() {
         use crate::builtins::BuiltinMethod;
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
-        
+
         let p1 = Compiler::compile_str("$.xs.sort().len()").unwrap();
         let sort_ct = p1
             .ops
@@ -1049,7 +1022,6 @@ mod tests {
             p1.ops
         );
 
-        
         let p2 = Compiler::compile_str("$.xs.map(@ * 2).count()").unwrap();
         let map_ct = p2
             .ops
@@ -1073,8 +1045,6 @@ mod tests {
 
     #[test]
     fn fusion_map_filter_unfused_after_pipeline_migration() {
-        
-        
         use crate::compile::compiler::Compiler;
         let prog = Compiler::compile_str("$.xs.map(@ * 2).filter(@ > 5)").unwrap();
         let dbg = format!("{:?}", prog.ops);
@@ -1096,8 +1066,7 @@ mod tests {
     fn fusion_field_chain_opcode_emitted() {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
-        
-        
+
         let prog = Compiler::compile_str("$.items.first().a.b.c").unwrap();
         let has_fc = prog
             .ops
@@ -1120,8 +1089,7 @@ mod tests {
     fn fusion_opt_field_absorbed_into_field_chain() {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
-        
-        
+
         let prog = Compiler::compile_str("$.items.first()?.a?.b?.c").unwrap();
         let has_fc = prog
             .ops
@@ -1153,7 +1121,6 @@ mod tests {
         assert_eq!(r, json!(42));
     }
 
-    
     #[test]
     fn try_bare_missing_field_uses_default() {
         let r = vm_query("try $.a.b.c else 0", &json!({})).unwrap();
@@ -1176,17 +1143,15 @@ mod tests {
 
     #[test]
     fn try_catches_eval_error() {
-        
         let r = vm_query(r#"try ('bad' | from_json) else null"#, &json!(null)).unwrap();
         assert!(r.is_null());
     }
 
     #[test]
     fn try_chain_right_associative() {
-        
         let r = vm_query("try $.a else try $.b else 'c'", &json!({"b": "B"})).unwrap();
         assert_eq!(r, json!("B"));
-        
+
         let r = vm_query("try $.a else try $.b else 'c'", &json!({})).unwrap();
         assert_eq!(r, json!("c"));
     }
@@ -1209,7 +1174,6 @@ mod tests {
 
     #[test]
     fn try_zero_is_not_null() {
-        
         let r = vm_query("try 0 else 99", &json!(null)).unwrap();
         assert_eq!(r, json!(0));
     }
@@ -1231,7 +1195,7 @@ mod tests {
     fn try_constant_body_folds_at_compile_time() {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
-        
+
         let prog = Compiler::compile_str("try 42 else 0").unwrap();
         let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
         assert!(
@@ -1239,7 +1203,7 @@ mod tests {
             "constant non-null try should fold; ops: {:?}",
             prog.ops
         );
-        
+
         let prog = Compiler::compile_str("try null else 7").unwrap();
         let has_try = prog.ops.iter().any(|o| matches!(o, Opcode::TryExpr { .. }));
         assert!(
@@ -1249,7 +1213,6 @@ mod tests {
         );
     }
 
-    
     #[test]
     fn redundant_reverse_eliminated() {
         use crate::builtins::BuiltinMethod;
@@ -1291,16 +1254,15 @@ mod tests {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("false and $.expensive.deeply.nested").unwrap();
-        
+
         let has_and = prog.ops.iter().any(|o| matches!(o, Opcode::AndOp(_)));
         assert!(!has_and, "false and _ should fold to just PushBool(false)");
     }
 
-    
     #[test]
     fn find_first_matches_semantics() {
         let doc = books();
-        
+
         let fused = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(fused["title"], json!("Dune"));
     }
@@ -1319,7 +1281,6 @@ mod tests {
         assert!(r.is_err());
     }
 
-    
     #[test]
     fn kind_check_literal_fold_int() {
         use crate::compile::compiler::Compiler;
@@ -1359,8 +1320,8 @@ mod tests {
 
     #[test]
     fn analysis_infer_result_type() {
-        use crate::plan::analysis::{infer_result_type, VType};
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::{infer_result_type, VType};
         let p = Compiler::compile_str("42 + 1").unwrap();
         let av = infer_result_type(&p);
         assert_eq!(av.ty, VType::Int);
@@ -1372,8 +1333,8 @@ mod tests {
 
     #[test]
     fn analysis_count_ident_uses() {
-        use crate::plan::analysis::count_ident_uses;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::count_ident_uses;
         let p = Compiler::compile_str("let x = 10 in x + x + 1").unwrap();
         assert_eq!(count_ident_uses(&p, "x"), 2);
         let p = Compiler::compile_str("let y = 10 in 42").unwrap();
@@ -1382,8 +1343,8 @@ mod tests {
 
     #[test]
     fn analysis_collect_accessed_fields() {
-        use crate::plan::analysis::collect_accessed_fields;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::collect_accessed_fields;
         let p = Compiler::compile_str("$.store.books.map(@.title)").unwrap();
         let fields = collect_accessed_fields(&p);
         assert!(fields.iter().any(|f| f.as_ref() == "store"));
@@ -1393,8 +1354,8 @@ mod tests {
 
     #[test]
     fn analysis_program_signature_stable() {
-        use crate::plan::analysis::program_signature;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::program_signature;
         let a = Compiler::compile_str("$.x.y + 1").unwrap();
         let b = Compiler::compile_str("$.x.y + 1").unwrap();
         assert_eq!(program_signature(&a), program_signature(&b));
@@ -1472,12 +1433,13 @@ mod tests {
 
     #[test]
     fn fusion_topn_opcode() {
-        
-        
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.nums.sort()[0:3]").unwrap();
-        let has_slice = prog.ops.iter().any(|o| matches!(o, Opcode::GetSlice(_, _, _)));
+        let has_slice = prog
+            .ops
+            .iter()
+            .any(|o| matches!(o, Opcode::GetSlice(_, _, _)));
         assert!(
             has_slice,
             "sort+[0:n] should still emit GetSlice in opcode path"
@@ -1493,8 +1455,8 @@ mod tests {
 
     #[test]
     fn analysis_monotonicity_sort() {
-        use crate::plan::analysis::{infer_monotonicity, Monotonicity};
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::{infer_monotonicity, Monotonicity};
         let p = Compiler::compile_str("$.x.sort()").unwrap();
         assert_eq!(infer_monotonicity(&p), Monotonicity::Asc);
         let p = Compiler::compile_str("$.x.sort().reverse()").unwrap();
@@ -1503,8 +1465,8 @@ mod tests {
 
     #[test]
     fn analysis_cost_nonzero() {
-        use crate::plan::analysis::program_cost;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::program_cost;
         let cheap = Compiler::compile_str("42").unwrap();
         let expensive =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).sort()").unwrap();
@@ -1513,8 +1475,8 @@ mod tests {
 
     #[test]
     fn analysis_selectivity_score() {
-        use crate::plan::analysis::selectivity_score;
         use crate::parse::parser::parse;
+        use crate::plan::analysis::selectivity_score;
         let eq = parse("x == 1").unwrap();
         let lt = parse("x < 1").unwrap();
         let t = parse("true").unwrap();
@@ -1524,15 +1486,14 @@ mod tests {
 
     #[test]
     fn analysis_escapes_doc() {
-        use crate::plan::analysis::escapes_doc;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::escapes_doc;
         let p = Compiler::compile_str("42").unwrap();
         assert!(!escapes_doc(&p));
         let p = Compiler::compile_str("$.x").unwrap();
         assert!(escapes_doc(&p));
     }
 
-    
     #[test]
     fn fusion_filter_first_semantics() {
         let doc = books();
@@ -1543,8 +1504,6 @@ mod tests {
 
     #[test]
     fn fusion_filter_map_sum_opcode() {
-        
-        
         use crate::compile::compiler::Compiler;
         let prog =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.price).sum()").unwrap();
@@ -1593,7 +1552,6 @@ mod tests {
         assert_eq!(fused, plain);
     }
 
-    
     #[test]
     fn fusion_map_first_last_semantics() {
         let doc = books();
@@ -1611,8 +1569,6 @@ mod tests {
 
     #[test]
     fn fusion_filter_map_first_opcode() {
-        
-        
         use crate::compile::compiler::Compiler;
         let prog =
             Compiler::compile_str("$.books.filter(@.price > 10).map(@.title).first()").unwrap();
@@ -1649,8 +1605,7 @@ mod tests {
     fn const_fold_string_concat_and_cmp() {
         use crate::compile::compiler::Compiler;
         use crate::vm::{CompiledPipeStep, Opcode};
-        
-        
+
         fn collect_all_ops(ops: &[Opcode], out: &mut Vec<Opcode>) {
             for o in ops {
                 out.push(o.clone());
@@ -1698,8 +1653,7 @@ mod tests {
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
         let prog = Compiler::compile_str("$.books.filter(@.price > 10).last()").unwrap();
-        
-        
+
         let has = prog.ops.iter().any(|o|
             matches!(o, Opcode::CallMethod(c) if c.method == crate::builtins::BuiltinMethod::Last));
         assert!(
@@ -1821,8 +1775,6 @@ mod tests {
 
     #[test]
     fn field_chain_ics_hit_across_shape_uniform_items() {
-        
-        
         let doc = json!({
             "xs": [
                 {"a": {"b": {"c": 1}}, "tag": "k"},
@@ -1837,7 +1789,6 @@ mod tests {
 
     #[test]
     fn descendant_first_tree_walker_early_exit() {
-        
         let doc = json!({
             "id": 1,
             "child": {"id": 2, "grand": {"id": 3}},
@@ -1873,8 +1824,6 @@ mod tests {
 
     #[test]
     fn descendant_quantifier_first_tree_walker() {
-        
-        
         let doc = json!({"id": 1, "nested": {"id": 2}});
         let r = vm_query("$..id!", &doc);
         if let Ok(v) = r {
@@ -1884,8 +1833,6 @@ mod tests {
 
     #[test]
     fn fusion_sort_by_first_emits_argextreme() {
-        
-        
         use crate::builtins::BuiltinMethod;
         use crate::compile::compiler::Compiler;
         use crate::vm::Opcode;
@@ -1964,14 +1911,13 @@ mod tests {
         let prog = Compiler::compile_str("$.xs.sort(n).first()").unwrap();
         let mut vm = VM::new();
         let v = vm.run_str("$.xs.sort(n).first()", &doc).unwrap();
-        
+
         assert_eq!(v, json!({"n": -1, "id": 2}));
 
         let v = vm.run_str("$.xs.sort(n).last()", &doc).unwrap();
-        
+
         assert_eq!(v, json!({"n": 3, "id": 3}));
 
-        
         use crate::builtins::BuiltinMethod;
         use crate::vm::Opcode;
         let has_sort = prog.ops.iter().any(|o| {
@@ -2013,7 +1959,7 @@ mod tests {
     #[test]
     fn fusion_reorder_aggregate_semantics() {
         let doc = books();
-        
+
         let a = vm_query("$.store.books.sort(price).min(price)", &doc).unwrap();
         let b = vm_query("$.store.books.min(price)", &doc).unwrap();
         assert_eq!(a, b);
@@ -2040,12 +1986,12 @@ mod tests {
 
     #[test]
     fn analysis_dedup_subprograms() {
-        use crate::plan::analysis::dedup_subprograms;
         use crate::compile::compiler::Compiler;
-        
+        use crate::plan::analysis::dedup_subprograms;
+
         let prog = Compiler::compile_str("[$.a.b + 1, $.a.b + 1]").unwrap();
         let deduped = dedup_subprograms(&prog);
-        
+
         use crate::vm::Opcode;
         use std::sync::Arc;
         let arcs: Vec<Arc<crate::vm::Program>> = deduped
@@ -2067,8 +2013,8 @@ mod tests {
 
     #[test]
     fn analysis_find_common_subexprs() {
-        use crate::plan::analysis::find_common_subexprs;
         use crate::compile::compiler::Compiler;
+        use crate::plan::analysis::find_common_subexprs;
         let prog = Compiler::compile_str("[$.x.y, $.x.y, $.z]").unwrap();
         let cs = find_common_subexprs(&prog);
         assert!(
@@ -2103,8 +2049,8 @@ mod tests {
 
     #[test]
     fn analysis_expr_uses_ident() {
-        use crate::plan::analysis::expr_uses_ident;
         use crate::parse::parser::parse;
+        use crate::plan::analysis::expr_uses_ident;
         let e = parse("x + 1").unwrap();
         assert!(expr_uses_ident(&e, "x"));
         assert!(!expr_uses_ident(&e, "y"));
@@ -2114,8 +2060,8 @@ mod tests {
 
     #[test]
     fn analysis_fold_kind_check_helper() {
-        use crate::plan::analysis::{fold_kind_check, VType};
         use crate::parse::ast::KindType;
+        use crate::plan::analysis::{fold_kind_check, VType};
         assert_eq!(
             fold_kind_check(VType::Int, KindType::Number, false),
             Some(true)
@@ -2131,10 +2077,7 @@ mod tests {
         assert_eq!(fold_kind_check(VType::Unknown, KindType::Str, false), None);
     }
 
-    
     fn big_store() -> serde_json::Value {
-        
-        
         json!({
             "store": {
                 "books": [
@@ -2165,8 +2108,6 @@ mod tests {
 
     #[test]
     fn optimized_deep_filter_map_map_fusion() {
-        
-        
         let doc = big_store();
         let q = "$.store.books \
                  .filter(price >= 8.0 and price <= 12.0 and rating >= 4.2) \
@@ -2176,27 +2117,24 @@ mod tests {
         let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 3);
-        
+
         let grosses: Vec<f64> = arr.iter().map(|v| v["gross"].as_f64().unwrap()).collect();
         let mut sorted = grosses.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(grosses, sorted);
-        
+
         assert!(grosses.iter().all(|&g| g >= 8.0 && g <= 12.0));
     }
 
     #[test]
     fn optimized_filter_sum_fusion_with_kind_check() {
-        
-        
         let doc = big_store();
         let q = "$.store.books \
                  .filter(price kind number and genre == \"sci-fi\") \
                  .sum(price)";
         let r = vm_query(q, &doc).unwrap();
         let total = r.as_f64().unwrap();
-        
-        
+
         let expected =
             12.99 + 9.99 + 13.25 + 8.75 + 9.25 + 8.00 + 7.50 + 9.00 + 10.00 + 8.25 + 12.00 + 14.50;
         assert!(
@@ -2209,8 +2147,6 @@ mod tests {
 
     #[test]
     fn optimized_nested_let_with_cse_and_avg() {
-        
-        
         let doc = big_store();
         let q = "let sci = $.store.books.filter(genre == \"sci-fi\") in \
                  {\
@@ -2225,14 +2161,12 @@ mod tests {
         assert!(r["avg_rating"].as_f64().unwrap() > 4.0);
         let top = r["top_rated"].as_array().unwrap();
         assert_eq!(top.len(), 3);
-        
+
         assert_eq!(top[0], json!("Project Hail Mary"));
     }
 
     #[test]
     fn optimized_find_quantifier_fusion_short_circuit() {
-        
-        
         let doc = big_store();
         let q = "$.store.books.filter(rating > 4.5 and id == 19).first()";
         let r = vm_query(q, &doc).unwrap();
@@ -2242,8 +2176,6 @@ mod tests {
 
     #[test]
     fn optimized_group_then_aggregate_complex_reshape() {
-        
-        
         let doc = big_store();
         let q = "$.store.books \
                  .filter(rating >= 4.0) \
@@ -2254,9 +2186,9 @@ mod tests {
                  .reverse()";
         let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
-        assert!(arr.len() >= 3); 
+        assert!(arr.len() >= 3);
         let genres: Vec<&str> = arr.iter().map(|v| v["genre"].as_str().unwrap()).collect();
-        
+
         let mut u = genres.clone();
         u.sort();
         u.dedup();
@@ -2265,19 +2197,17 @@ mod tests {
 
     #[test]
     fn optimized_map_flatten_fusion_with_unique() {
-        
-        
         let doc = big_store();
         let q = "$.store.books.map(tags).flatten().unique().sort()";
         let r = vm_query(q, &doc).unwrap();
         let tags = r.as_array().unwrap();
-        
+
         let strs: Vec<&str> = tags.iter().map(|v| v.as_str().unwrap()).collect();
         let mut s = strs.clone();
         s.sort();
         s.dedup();
         assert_eq!(s, strs);
-        
+
         assert!(strs.contains(&"sci-fi"));
         assert!(strs.contains(&"dystopia"));
         assert!(strs.contains(&"cyberpunk"));
@@ -2285,22 +2215,17 @@ mod tests {
 
     #[test]
     fn optimized_filter_take_while_fusion() {
-        
-        
         let doc = big_store();
-        
+
         let q = "$.store.books.filter(price > 5.0).takewhile(price < 12.0).map(title)";
         let r = vm_query(q, &doc).unwrap();
         let titles = r.as_array().unwrap();
-        
-        
+
         assert_eq!(titles.len(), 0);
     }
 
     #[test]
     fn optimized_deep_chain_with_comprehension_and_fstring() {
-        
-        
         let doc = big_store();
         let q = "[f\"{b.title} (${b.price})\" \
                  for b in $.store.books \
@@ -2308,7 +2233,7 @@ mod tests {
                  and b.author.born >= 1940]";
         let r = vm_query(q, &doc).unwrap();
         let items = r.as_array().unwrap();
-        
+
         assert!(items.len() >= 3);
         for s in items {
             let t = s.as_str().unwrap();
@@ -2318,8 +2243,6 @@ mod tests {
 
     #[test]
     fn optimized_let_chained_pipelines_with_aggregation() {
-        
-        
         let doc = big_store();
         let q = "let books = $.store.books in \
                  let cheap = books.filter(price < 10.0) in \
@@ -2340,14 +2263,12 @@ mod tests {
         assert!(r["expensive_count"].as_i64().unwrap() > 0);
         assert!(r["delta"].as_f64().unwrap() > 0.0);
         assert!(r["price_range"].as_f64().unwrap() > 5.0);
-        
+
         assert_eq!(r["top_author"], json!("Andy Weir"));
     }
 
     #[test]
     fn optimized_const_fold_across_arithmetic_and_comparisons() {
-        
-        
         let doc = big_store();
         let q = "$.store.books \
                  .filter((1 + 2) * 3 == 9 and not (5 < 3) and price > 11.0) \
@@ -2364,7 +2285,6 @@ mod tests {
         assert!(titles.iter().any(|t| t == "Project Hail Mary"));
     }
 
-    
     #[test]
     #[ignore]
     fn bench_fusion_vs_naive() {
@@ -2372,7 +2292,6 @@ mod tests {
         use crate::vm::VM;
         use std::time::Instant;
 
-        
         let mut books = Vec::with_capacity(2000);
         let genres = ["sci-fi", "dystopia", "cyberpunk", "classic"];
         for i in 0..2000 {
@@ -2399,7 +2318,6 @@ mod tests {
 
         let iters = 50;
         for q in pipelines {
-            
             let mut vm = VM::new();
             vm.set_pass_config(PassConfig::default());
             let start = Instant::now();
@@ -2408,7 +2326,6 @@ mod tests {
             }
             let fused = start.elapsed();
 
-            
             let mut vm = VM::new();
             vm.set_pass_config(PassConfig::none());
             let start = Instant::now();
@@ -2433,18 +2350,15 @@ mod tests {
         let doc = big_store();
         let q = "$.store.books.filter(price > 10).map(title).sort()";
 
-        
         let r1 = vm.run_str(q, &doc).unwrap();
         let (n1, _) = vm.cache_stats();
         assert!(n1 >= 1);
 
-        
         vm.set_pass_config(PassConfig::none());
         let r2 = vm.run_str(q, &doc).unwrap();
         let (n2, _) = vm.cache_stats();
         assert_eq!(n2, n1 + 1, "separate cache entry per config");
 
-        
         assert_eq!(r1, r2);
     }
 
@@ -2456,21 +2370,20 @@ mod tests {
         let _ = vm.run_str("$.a", &doc).unwrap();
         let _ = vm.run_str("$.b", &doc).unwrap();
         assert_eq!(vm.cache_stats().0, 2);
-        
+
         let _ = vm.run_str("$.a", &doc).unwrap();
         let _ = vm.run_str("$.c", &doc).unwrap();
         assert_eq!(vm.cache_stats().0, 2, "cap enforced");
-        
+
         let _ = vm.run_str("$.a", &doc).unwrap();
         assert_eq!(vm.cache_stats().0, 2);
-        
+
         let _ = vm.run_str("$.b", &doc).unwrap();
         assert_eq!(vm.cache_stats().0, 2);
     }
 
     #[test]
     fn optimized_equi_join_hash_probe() {
-        
         let doc = json!({
             "books": [
                 {"title": "Dune",       "author_name": "Frank Herbert"},
@@ -2487,7 +2400,7 @@ mod tests {
         let q = "$.books.equi_join($.authors, \"author_name\", \"name\")";
         let r = vm_query(q, &doc).unwrap();
         let rows = r.as_array().unwrap();
-        assert_eq!(rows.len(), 3); 
+        assert_eq!(rows.len(), 3);
         for row in rows {
             assert!(row.get("title").is_some());
             assert!(row.get("nationality").is_some());
@@ -2497,8 +2410,6 @@ mod tests {
 
     #[test]
     fn optimized_pipeline_stress_many_stages() {
-        
-        
         let doc = big_store();
         let q = "$.store.books \
                  .filter(rating >= 4.0) \
@@ -2514,7 +2425,7 @@ mod tests {
         let r = vm_query(q, &doc).unwrap();
         let arr = r.as_array().unwrap();
         assert_eq!(arr.len(), 5);
-        
+
         let mut last = f64::MAX;
         for it in arr {
             assert!(it.get("title").is_some());
@@ -2524,7 +2435,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn pipe_alias_long() {
         let doc = books();
@@ -2578,7 +2488,7 @@ mod tests {
     #[test]
     fn multi_binding_let_nested_ref() {
         let doc = books();
-        
+
         let r = vm_query("let a = 10, b = a * 2 in b", &doc).unwrap();
         assert_eq!(r, json!(20));
     }
@@ -2601,8 +2511,6 @@ mod tests {
 
     #[test]
     fn arrow_lambda_multi_param() {
-        
-        
         let doc = json!({"nums": [3, 1, 4, 1, 5, 9, 2, 6]});
         let r = vm_query("$.nums.sort((a, b) => a < b)", &doc).unwrap();
         assert_eq!(r, json!([1, 1, 2, 3, 4, 5, 6, 9]));
@@ -2639,7 +2547,7 @@ mod tests {
     #[test]
     fn cast_chain_with_arithmetic() {
         let doc = json!({"s": "10"});
-        
+
         let r = vm_query("$.s as int * 2", &doc).unwrap();
         assert_eq!(r, json!(20));
     }
@@ -2647,7 +2555,7 @@ mod tests {
     #[test]
     fn dyn_field_string_key() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
-        
+
         let r = vm_query("let k = \"name\" in $.user.{k}", &doc).unwrap();
         assert_eq!(r, json!("Alice"));
     }
@@ -2674,7 +2582,6 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    
     #[test]
     fn map_shape_basic() {
         let doc = books();
@@ -2730,7 +2637,6 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn when_field_included_true() {
         let doc = json!({"name": "Alice", "email": "a@x.com", "verified": true});
@@ -2760,7 +2666,7 @@ mod tests {
                 {"name": "B", "active": false, "role": "user"},
             ]
         });
-        
+
         let r = vm_query("$.users[*] => {name, role: role when active}", &doc).unwrap();
         assert_eq!(
             r,
@@ -2778,14 +2684,13 @@ mod tests {
         assert_eq!(r, json!({"grade": "pass"}));
     }
 
-    
     #[test]
     fn spread_deep_merges_nested_objects() {
         let doc = json!({
             "base": {"x": {"p": 1, "q": 2}, "y": 10},
             "over": {"x": {"q": 99, "r": 3}, "z": 20},
         });
-        
+
         let r = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
         assert_eq!(
             r,
@@ -2805,7 +2710,7 @@ mod tests {
         });
         let shallow = vm_query("{...$.base, ...$.over}", &doc).unwrap();
         let deep = vm_query("{...**$.base, ...**$.over}", &doc).unwrap();
-        
+
         assert_eq!(shallow, json!({"x": {"q": 2}}));
         assert_eq!(deep, json!({"x": {"p": 1, "q": 2}}));
     }
@@ -2830,8 +2735,6 @@ mod tests {
         assert_eq!(r, json!({"name": "Bob", "info": {"nested": 1}}));
     }
 
-
-    
     fn saas() -> serde_json::Value {
         json!({
             "org": "acme",
@@ -2924,10 +2827,10 @@ mod tests {
     #[test]
     fn tier1_deep_shape_email_keys() {
         let doc = saas();
-        
+
         let r = vm_query(r#"$.deep_shape({email})"#, &doc).unwrap();
         let arr = r.as_array().unwrap();
-        
+
         assert_eq!(arr.len(), 5);
     }
 
@@ -3008,7 +2911,6 @@ mod tests {
         assert_eq!(arr.len(), 2);
     }
 
-    
     #[test]
     fn tier1_chain_set_field() {
         let doc = json!({"user": {"name": "Alice", "age": 30}});
@@ -3024,7 +2926,7 @@ mod tests {
             r.pointer("/teams/0/projects/0/name").unwrap(),
             &json!("API")
         );
-        
+
         assert_eq!(
             r.pointer("/teams/0/projects/1/name").unwrap(),
             &json!("runtime")
@@ -3063,7 +2965,7 @@ mod tests {
     #[test]
     fn tier1_chain_descendant_set() {
         let doc = saas();
-        
+
         let r = vm_query(r#"$..status.set("closed")"#, &doc).unwrap();
         let statuses: Vec<&serde_json::Value> = r
             .pointer("/teams/0/projects/0/tasks")
@@ -3116,7 +3018,6 @@ mod tests {
 
     #[test]
     fn tier1_non_root_set_is_method_call() {
-        
         let doc = json!({"x": 1});
         let r = vm_query(r#"$.x | set(99)"#, &doc).unwrap();
         assert_eq!(r, json!(99));
@@ -3124,15 +3025,12 @@ mod tests {
 
     #[test]
     fn tier1_descendant_still_works() {
-        
         let doc = books();
         let r = vm_query("$..title", &doc).unwrap();
         let titles = r.as_array().unwrap();
         assert!(titles.contains(&json!("Dune")));
     }
 
-
-    
     #[test]
     fn range_one_arg() {
         let doc = json!({});
@@ -3206,7 +3104,7 @@ mod tests {
     #[test]
     fn range_composes_with_map_sum() {
         let doc = json!({});
-        
+
         assert_eq!(vm_query("range(1, 10).sum()", &doc).unwrap(), json!(45));
     }
 }

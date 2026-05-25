@@ -19,7 +19,6 @@
 use super::common::vm_query;
 use serde_json::json;
 
-
 #[test]
 fn string_escape_newline() {
     assert_eq!(
@@ -30,10 +29,7 @@ fn string_escape_newline() {
 
 #[test]
 fn string_escape_tab() {
-    assert_eq!(
-        vm_query("\"a\\tb\".len()", &json!(null)).unwrap(),
-        json!(3)
-    );
+    assert_eq!(vm_query("\"a\\tb\".len()", &json!(null)).unwrap(), json!(3));
 }
 
 #[test]
@@ -58,7 +54,6 @@ fn string_escape_unknown_preserved_for_regex() {
         json!(true)
     );
 }
-
 
 #[test]
 fn has_method_array_present() {
@@ -92,7 +87,6 @@ fn has_method_string_substring() {
     );
 }
 
-
 #[test]
 fn remove_at_form_negatives() {
     let doc = json!({"xs": [1, -1, 2, -2, 3]});
@@ -115,12 +109,8 @@ fn remove_lambda_form() {
 fn remove_value_form_unchanged() {
     // Pure-literal arg keeps the value-equality semantics.
     let doc = json!({"xs": [1, 0, 2, 0, 3]});
-    assert_eq!(
-        vm_query("$.xs.remove(0)", &doc).unwrap(),
-        json!([1, 2, 3])
-    );
+    assert_eq!(vm_query("$.xs.remove(0)", &doc).unwrap(), json!([1, 2, 3]));
 }
-
 
 #[test]
 fn missing_single_key_boolean() {
@@ -149,7 +139,6 @@ fn missing_all_absent() {
     );
 }
 
-
 #[test]
 fn update_increments_nested() {
     let doc = json!({"counters": {"visits": 10}});
@@ -167,7 +156,6 @@ fn update_double_deep() {
         json!({"a": {"b": {"c": 84}}})
     );
 }
-
 
 #[test]
 fn get_path_slash_separator() {
@@ -214,7 +202,6 @@ fn has_path_slash_works() {
     );
 }
 
-
 #[test]
 fn dedent_two_spaces() {
     assert_eq!(
@@ -231,7 +218,6 @@ fn dedent_preserves_extra_indent() {
     );
 }
 
-
 #[test]
 fn now_returns_positive_int() {
     let v = vm_query("now()", &json!(null)).unwrap();
@@ -244,7 +230,6 @@ fn now_in_patch() {
     let v = vm_query("patch $ {ts: now()}", &json!({})).unwrap();
     assert!(v["ts"].as_i64().unwrap() > 0);
 }
-
 
 #[test]
 fn enumerate_on_path_yields_records() {
@@ -274,7 +259,6 @@ fn pairwise_then_diff() {
     );
 }
 
-
 #[test]
 fn zip_shape_object_to_rows() {
     let doc = json!({"o": {"names": ["a", "b"], "ages": [1, 2]}});
@@ -301,7 +285,6 @@ fn zip_shape_broadcasts_scalar() {
     assert_eq!(r[1]["tag"], json!("x"));
 }
 
-
 #[test]
 fn group_shape_buckets_by_keyset() {
     let doc = json!({
@@ -311,7 +294,6 @@ fn group_shape_buckets_by_keyset() {
     assert_eq!(r["id"].as_array().unwrap().len(), 1);
     assert_eq!(r["id,name"].as_array().unwrap().len(), 2);
 }
-
 
 #[test]
 fn partition_returns_tuple() {
@@ -388,7 +370,6 @@ fn partition_chained_path_source() {
     assert_eq!(r[0].as_array().unwrap().len(), 2);
     assert_eq!(r[1].as_array().unwrap().len(), 1);
 }
-
 
 #[test]
 fn approx_count_distinct_small_exact() {

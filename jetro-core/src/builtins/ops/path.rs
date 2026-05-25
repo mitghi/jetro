@@ -1,5 +1,5 @@
-use crate::util::val_key;
 use crate::data::value::Val;
+use crate::util::val_key;
 use indexmap::IndexMap;
 use std::sync::Arc;
 

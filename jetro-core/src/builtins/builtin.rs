@@ -133,5 +133,4 @@ pub(crate) trait Builtin {
     ) -> Option<Result<(), EvalError>> {
         None
     }
-
 }

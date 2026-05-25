@@ -56,7 +56,9 @@ impl<'a> TerminalCollector<'a> {
         V: ValueView<'v> + 'v,
     {
         match self {
-            Self::Values(values) => values.push(eval_view_program_value_with_vm(item, program, vm)?),
+            Self::Values(values) => {
+                values.push(eval_view_program_value_with_vm(item, program, vm)?)
+            }
             Self::UniformObject(collector) => collector.push_view_row_with_vm(item, vm)?,
         }
         Some(())
@@ -108,11 +110,7 @@ impl<'a> UniformObjectCollector<'a> {
             .object
             .eval_view_row_cells_with_vm(item, &mut self.cells, vm)?
         {
-            self.flush_cells_to_rows_with(eval_view_object_value_with_vm(
-                item,
-                self.object,
-                vm,
-            )?);
+            self.flush_cells_to_rows_with(eval_view_object_value_with_vm(item, self.object, vm)?);
         }
         Some(())
     }
@@ -123,7 +121,10 @@ impl<'a> UniformObjectCollector<'a> {
             return;
         }
 
-        if !self.object.eval_val_row_cells_with_vm(item, &mut self.cells, vm) {
+        if !self
+            .object
+            .eval_val_row_cells_with_vm(item, &mut self.cells, vm)
+        {
             self.flush_cells_to_rows_with(self.object.eval_val_with_vm(item, vm));
         }
     }

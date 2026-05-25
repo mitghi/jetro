@@ -32,10 +32,26 @@ fn assert_three_forms_equiv(arrow: &str, lam: &str, at_form: &str, doc: &Value) 
     let a_eng = run_engine(arrow, doc);
     let l_eng = run_engine(lam, doc);
     let r_eng = run_engine(at_form, doc);
-    assert_eq!(a_vm, l_vm, "arrow vs lambda differ (vm): {} | {}", arrow, lam);
-    assert_eq!(a_vm, r_vm, "arrow vs @-form differ (vm): {} | {}", arrow, at_form);
-    assert_eq!(a_eng, l_eng, "arrow vs lambda differ (engine): {} | {}", arrow, lam);
-    assert_eq!(a_eng, r_eng, "arrow vs @-form differ (engine): {} | {}", arrow, at_form);
+    assert_eq!(
+        a_vm, l_vm,
+        "arrow vs lambda differ (vm): {} | {}",
+        arrow, lam
+    );
+    assert_eq!(
+        a_vm, r_vm,
+        "arrow vs @-form differ (vm): {} | {}",
+        arrow, at_form
+    );
+    assert_eq!(
+        a_eng, l_eng,
+        "arrow vs lambda differ (engine): {} | {}",
+        arrow, lam
+    );
+    assert_eq!(
+        a_eng, r_eng,
+        "arrow vs @-form differ (engine): {} | {}",
+        arrow, at_form
+    );
     assert_eq!(a_vm, a_eng, "vm vs engine differ for arrow `{}`", arrow);
 }
 
@@ -211,11 +227,7 @@ fn nested_or_op_rhs_uses_param() {
 #[test]
 fn nested_coalesce_rhs_uses_param() {
     let doc = json!({"xs":[{"a":1},{"b":2},{"a":3}]});
-    assert_both(
-        "$.xs.map(r => r.a ?? r.b ?? 0)",
-        &doc,
-        &json!([1, 2, 3]),
-    );
+    assert_both("$.xs.map(r => r.a ?? r.b ?? 0)", &doc, &json!([1, 2, 3]));
 }
 
 #[test]
@@ -309,22 +321,14 @@ fn shadow_let_shadows_lambda_param() {
 fn shadow_root_field_named_like_param_not_substituted() {
     // doc has top-level `r` field; inside `r => $.r` the `$.r` is the root field, not the lambda.
     let doc = json!({"r": "doc-r", "xs": [1, 2]});
-    assert_both(
-        "$.xs.map(r => $.r)",
-        &doc,
-        &json!(["doc-r", "doc-r"]),
-    );
+    assert_both("$.xs.map(r => $.r)", &doc, &json!(["doc-r", "doc-r"]));
 }
 
 #[test]
 fn shadow_doc_field_with_param_name_is_ignored() {
     // doc has `r` field but `.map(r => r)` binds the lambda param, returning each xs element.
     let doc = json!({"r": "doc-r", "xs": [10, 20]});
-    assert_both(
-        "$.xs.map(r => r)",
-        &doc,
-        &json!([10, 20]),
-    );
+    assert_both("$.xs.map(r => r)", &doc, &json!([10, 20]));
 }
 
 // -----------------------------------------------------------------------------
@@ -343,7 +347,9 @@ fn tape_named_lambda_field_read_via_engine() {
 fn tape_named_lambda_dyn_index_via_engine() {
     let bytes = br#"{"posts":[{"author":"anon"},{"author":"person1"}],"realnames":{"anon":"Anonymous Coward","person1":"Person McPherson"}}"#.to_vec();
     let j = crate::Jetro::from_bytes(bytes).unwrap();
-    let v: Value = j.collect("$.posts.map(p => $.realnames[p.author])").unwrap();
+    let v: Value = j
+        .collect("$.posts.map(p => $.realnames[p.author])")
+        .unwrap();
     assert_eq!(v, json!(["Anonymous Coward", "Person McPherson"]));
 }
 
@@ -378,11 +384,7 @@ fn builtins_find_named_lambda() {
 #[test]
 fn builtins_find_no_match_returns_null() {
     let doc = json!({"xs": [{"score": 5}, {"score": 7}]});
-    assert_both(
-        "$.xs.find(r => r.score > 100)",
-        &doc,
-        &json!(null),
-    );
+    assert_both("$.xs.find(r => r.score > 100)", &doc, &json!(null));
 }
 
 #[test]
@@ -398,29 +400,17 @@ fn builtins_find_all_named_lambda() {
 
 #[test]
 fn builtins_any_named_lambda() {
-    assert_both(
-        "$.xs.any(r => r.score > 25)",
-        &xs_scores(),
-        &json!(true),
-    );
+    assert_both("$.xs.any(r => r.score > 25)", &xs_scores(), &json!(true));
 }
 
 #[test]
 fn builtins_all_named_lambda() {
-    assert_both(
-        "$.xs.all(r => r.score > 5)",
-        &xs_scores(),
-        &json!(true),
-    );
+    assert_both("$.xs.all(r => r.score > 5)", &xs_scores(), &json!(true));
 }
 
 #[test]
 fn builtins_count_named_lambda() {
-    assert_both(
-        "$.xs.count(r => r.score > 15)",
-        &xs_scores(),
-        &json!(3),
-    );
+    assert_both("$.xs.count(r => r.score > 15)", &xs_scores(), &json!(3));
 }
 
 #[test]
@@ -571,16 +561,8 @@ fn sort_two_arg_lambda_form_comparator() {
 #[test]
 fn sort_two_arg_arrow_and_lambda_agree() {
     let doc = sortable_doc();
-    assert_both(
-        "$.xs.sort((a, b) => a < b)",
-        &doc,
-        &json!([1, 2, 3]),
-    );
-    assert_both(
-        "$.xs.sort(lambda a, b: a < b)",
-        &doc,
-        &json!([1, 2, 3]),
-    );
+    assert_both("$.xs.sort((a, b) => a < b)", &doc, &json!([1, 2, 3]));
+    assert_both("$.xs.sort(lambda a, b: a < b)", &doc, &json!([1, 2, 3]));
 }
 
 // -----------------------------------------------------------------------------
@@ -632,11 +614,7 @@ fn first_class_lambda_chained_through_pipeline() {
     // pre-existing path-collect divergence between vm and engine paths
     // that is unrelated to lambda lowering. The let-bound chain must
     // produce the same result as the equivalent inline form.
-    let inlined = vm_query(
-        "$.xs.map(x => x * 2).filter(x => x > 4)",
-        &doc,
-    )
-    .unwrap();
+    let inlined = vm_query("$.xs.map(x => x * 2).filter(x => x > 4)", &doc).unwrap();
     let with_let = vm_query(
         "let dbl = (x => x * 2) in let big = (x => x > 4) in $.xs.map(dbl).filter(big)",
         &doc,
@@ -664,10 +642,7 @@ fn first_class_lambda_shadowed_by_non_lambda_let() {
     // The macro-expansion pass refuses to inline a non-lambda init, so
     // `.map(f)` resolves `f` at runtime via `env.get_var` and the map
     // body becomes the constant `99` for every row.
-    let res = run_engine(
-        "let f = (x => x * 2) in let f = 99 in $.xs.map(f)",
-        &doc,
-    );
+    let res = run_engine("let f = (x => x * 2) in let f = 99 in $.xs.map(f)", &doc);
     assert_eq!(res, json!([99, 99]));
 }
 
@@ -861,11 +836,7 @@ fn edge_empty_array_named_lambda_map() {
 
 #[test]
 fn edge_single_elem_array_named_lambda() {
-    assert_both(
-        "$.xs.map(r => r * 2)",
-        &json!({"xs": [7]}),
-        &json!([14]),
-    );
+    assert_both("$.xs.map(r => r * 2)", &json!({"xs": [7]}), &json!([14]));
 }
 
 #[test]
@@ -918,21 +889,13 @@ fn edge_named_lambda_with_chain_of_methods() {
 #[test]
 fn edge_named_lambda_param_used_multiple_times_in_body() {
     let doc = json!({"xs": [3, 4]});
-    assert_both(
-        "$.xs.map(r => r * r + r)",
-        &doc,
-        &json!([12, 20]),
-    );
+    assert_both("$.xs.map(r => r * r + r)", &doc, &json!([12, 20]));
 }
 
 #[test]
 fn edge_named_lambda_unused_param() {
     let doc = json!({"xs": [1, 2, 3]});
-    assert_both(
-        "$.xs.map(r => 42)",
-        &doc,
-        &json!([42, 42, 42]),
-    );
+    assert_both("$.xs.map(r => 42)", &doc, &json!([42, 42, 42]));
 }
 
 // -----------------------------------------------------------------------------
@@ -949,14 +912,18 @@ fn tape_doc() -> Vec<u8> {
 #[test]
 fn tape_named_lambda_filter() {
     let j = crate::Jetro::from_bytes(tape_doc()).unwrap();
-    let v: Value = j.collect("$.users.filter(u => u.age > 28).map(u => u.name)").unwrap();
+    let v: Value = j
+        .collect("$.users.filter(u => u.age > 28).map(u => u.name)")
+        .unwrap();
     assert_eq!(v, json!(["Alice"]));
 }
 
 #[test]
 fn tape_named_lambda_fstring() {
     let j = crate::Jetro::from_bytes(tape_doc()).unwrap();
-    let v: Value = j.collect("$.users.map(u => f\"{u.name}<{u.id}>\")").unwrap();
+    let v: Value = j
+        .collect("$.users.map(u => f\"{u.name}<{u.id}>\")")
+        .unwrap();
     assert_eq!(v, json!(["Alice<u1>", "Bob<u2>"]));
 }
 
@@ -1180,11 +1147,7 @@ fn map_field_arith_then_filter() {
 #[test]
 fn body_returning_lambda_value_is_null() {
     let doc = json!({"xs": [1, 2]});
-    assert_both(
-        "$.xs.map(r => (x => x))",
-        &doc,
-        &json!([null, null]),
-    );
+    assert_both("$.xs.map(r => (x => x))", &doc, &json!([null, null]));
 }
 
 // -----------------------------------------------------------------------------
@@ -1209,11 +1172,7 @@ fn multi_arg_param_used_in_arithmetic() {
     // `b > a`, so `a` (the smaller) comes first → ascending. Confirms
     // both params resolve in an arithmetic body, with `b` substituted to
     // `Current` and `a` resolved through the env-var path.
-    assert_both(
-        "$.xs.sort((a, b) => (b - a) > 0)",
-        &doc,
-        &json!([1, 2, 3]),
-    );
+    assert_both("$.xs.sort((a, b) => (b - a) > 0)", &doc, &json!([1, 2, 3]));
 }
 
 // -----------------------------------------------------------------------------

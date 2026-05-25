@@ -82,7 +82,6 @@ impl VType {
             _ => VType::Unknown,
         }
     }
-
 }
 
 /// Nullness lattice element tracking whether a value can ever be `null`.
@@ -369,10 +368,9 @@ pub fn method_result_type(m: BuiltinMethod) -> AbstractVal {
         Len | Count | Sum | ApproxCountDistinct | IndexOf | LastIndexOf | ByteLen | ParseInt
         | Ceil | Floor | Round => AbstractVal::scalar(VType::Int),
         // Boolean-returning methods.
-        Any | All | Has | HasAll | HasKey | Missing | Includes | StartsWith | EndsWith | IsBlank
-        | IsNumeric | IsAlpha | IsAscii | ParseBool | ReMatch | ContainsAny | ContainsAll => {
-            AbstractVal::scalar(VType::Bool)
-        }
+        Any | All | Has | HasAll | HasKey | Missing | Includes | StartsWith | EndsWith
+        | IsBlank | IsNumeric | IsAlpha | IsAscii | ParseBool | ReMatch | ContainsAny
+        | ContainsAll => AbstractVal::scalar(VType::Bool),
         // String-returning methods.
         Upper | Lower | Capitalize | TitleCase | Trim | TrimLeft | TrimRight | ToString
         | ToJson | ToBase64 | FromBase64 | UrlEncode | UrlDecode | HtmlEscape | HtmlUnescape
@@ -778,8 +776,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
                 PipeStep::Bind(bt) => match bt {
                     BindTarget::Name(n) => n == name,
                     BindTarget::Obj { fields, rest } => {
-                        fields.iter().any(|f| f == name)
-                            || rest.as_ref().is_some_and(|r| r == name)
+                        fields.iter().any(|f| f == name) || rest.as_ref().is_some_and(|r| r == name)
                     }
                     BindTarget::Arr(ns) => ns.iter().any(|n| n == name),
                 },
@@ -809,8 +806,7 @@ pub fn expr_uses_ident(expr: &crate::parse::ast::Expr, name: &str) -> bool {
             if vars.iter().any(|v| v == name) {
                 return false; // `name` is shadowed by the comprehension binding.
             }
-            expr_uses_ident(expr, name)
-                || cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
+            expr_uses_ident(expr, name) || cond.as_ref().is_some_and(|c| expr_uses_ident(c, name))
         }
         Expr::DictComp {
             key,

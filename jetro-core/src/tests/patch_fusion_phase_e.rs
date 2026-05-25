@@ -120,11 +120,7 @@ mod tests {
         // unpatched original. Verifies the fused Patch's root (the
         // lambda binding `o`) carries through to map's output.
         let doc = json!({"xs": [{"v": 1}, {"v": 2}]});
-        let r = vm_query(
-            r#"$.xs.map(lambda o: o.a.set(10) | o.b.set(20))"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.xs.map(lambda o: o.a.set(10) | o.b.set(20))"#, &doc).unwrap();
         // Each output element has the new keys plus the original `v`.
         assert_eq!(
             r,
@@ -144,11 +140,7 @@ mod tests {
         // the post-first-write state; the second stage rewrites onto
         // it. Result still contains both writes.
         let doc = json!({"xs": [{"v": 1}]});
-        let r = vm_query(
-            r#"$.xs.map(lambda o: o.a.set(o.v + 100) | o)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.xs.map(lambda o: o.a.set(o.v + 100) | o)"#, &doc).unwrap();
         // Single-write lambda body: o.a.set(...) returns the rhs (101)
         // by v1 chain semantics (the pipe stage reads `o` not the
         // patched doc). The final stage `| o` is a read of the binding.
@@ -206,11 +198,7 @@ mod tests {
         // handle this since the source is recursed before the iter
         // scope opens. The body sees the post-write source.
         let doc = json!({});
-        let r = vm_query(
-            r#"[x for x in ($.a.set(1) | $.b.set(2)).keys()]"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"[x for x in ($.a.set(1) | $.b.set(2)).keys()]"#, &doc).unwrap();
         // After the fused write, $ has keys [a, b]; comprehension
         // emits each key.
         assert_eq!(r, json!(["a", "b"]));
@@ -229,11 +217,7 @@ mod tests {
         // — the regression here is that the optimizer doesn't swallow
         // the read-as-flush boundary.
         let doc = json!({"a": null, "list": [1, 2], "b": null});
-        let r = vm_query(
-            r#"$.a.set(1) | $.list.map(lambda x: x + 100)"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.a.set(1) | $.list.map(lambda x: x + 100)"#, &doc).unwrap();
         // First write applies to $; map reads $.list and produces
         // [101, 102]; the pipeline's value is the map result.
         assert_eq!(r, json!([101, 102]));
@@ -248,11 +232,7 @@ mod tests {
         // chain-method form. Phase E's speculative-lift-then-revert
         // rule must restore the original Chain when no fusion fired.
         let doc = json!({"list": [{"id": 1}, {"id": 2}]});
-        let r = vm_query(
-            r#"$.list.map(lambda o: o.id.set(99))"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"$.list.map(lambda o: o.id.set(99))"#, &doc).unwrap();
         assert_eq!(r, json!([99, 99]));
     }
 
@@ -261,11 +241,7 @@ mod tests {
         // Same single-write revert in comprehension body: result is
         // the rhs of the set, not a patched object.
         let doc = json!({"xs": [{"v": 1}, {"v": 2}]});
-        let r = vm_query(
-            r#"[o.v.set(100) for o in $.xs]"#,
-            &doc,
-        )
-        .unwrap();
+        let r = vm_query(r#"[o.v.set(100) for o in $.xs]"#, &doc).unwrap();
         assert_eq!(r, json!([100, 100]));
     }
 }

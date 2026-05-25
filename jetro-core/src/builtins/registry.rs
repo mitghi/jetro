@@ -1322,7 +1322,10 @@ where
     match view.scalar() {
         JsonView::ArrayLen(_) => view
             .array_iter()
-            .map(|iter| iter.into_iter().any(|item| view_matches_value(&item, target)))
+            .map(|iter| {
+                iter.into_iter()
+                    .any(|item| view_matches_value(&item, target))
+            })
             .unwrap_or(false),
         JsonView::ObjectLen(_) => target
             .as_str()
@@ -4169,7 +4172,10 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
-            (BuiltinMethod::Includes, BuiltinViewValueProjection::Includes),
+            (
+                BuiltinMethod::Includes,
+                BuiltinViewValueProjection::Includes,
+            ),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (
                 BuiltinMethod::KebabCase,

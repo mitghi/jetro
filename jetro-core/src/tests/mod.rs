@@ -11,9 +11,27 @@
 pub(crate) mod common;
 
 #[cfg(test)]
+mod builtin_migrations;
+#[cfg(test)]
 mod chain_write;
 #[cfg(test)]
+mod comprehensions;
+#[cfg(test)]
 mod deep_search;
+#[cfg(test)]
+mod dyn_index_lambda;
+#[cfg(test)]
+mod entries_wrap;
+#[cfg(test)]
+mod examples;
+#[cfg(test)]
+mod grammar_extensions;
+#[cfg(test)]
+mod has_probe;
+#[cfg(test)]
+mod lambda_forms;
+#[cfg(test)]
+mod neq_grammar;
 #[cfg(test)]
 mod patch_fusion_phase_c;
 #[cfg(test)]
@@ -21,30 +39,12 @@ mod patch_fusion_phase_e;
 #[cfg(test)]
 mod patch_fusion_soundness;
 #[cfg(test)]
-mod examples;
-#[cfg(test)]
 mod pattern_match;
 #[cfg(test)]
 mod regression;
 #[cfg(test)]
-mod dyn_index_lambda;
-#[cfg(test)]
-mod lambda_forms;
-#[cfg(test)]
-mod neq_grammar;
-#[cfg(test)]
-mod comprehensions;
-#[cfg(test)]
-mod grammar_extensions;
-#[cfg(test)]
 mod strslice_arith;
-#[cfg(test)]
-mod entries_wrap;
-#[cfg(test)]
-mod builtin_migrations;
-#[cfg(test)]
-mod v0_5_5_quickfixes;
 #[cfg(test)]
 mod tape_parity;
 #[cfg(test)]
-mod has_probe;
+mod v0_5_5_quickfixes;

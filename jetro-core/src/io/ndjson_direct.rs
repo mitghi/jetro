@@ -185,7 +185,9 @@ impl<'a> Iterator for NdjsonDirectStreamMapValues<'a> {
         match &mut self.inner {
             NdjsonDirectStreamMapValuesInner::One(value) => value.take(),
             NdjsonDirectStreamMapValuesInner::Array(items) => items.next(),
-            NdjsonDirectStreamMapValuesInner::Object(fields) => fields.next().map(|field| &field.value),
+            NdjsonDirectStreamMapValuesInner::Object(fields) => {
+                fields.next().map(|field| &field.value)
+            }
         }
     }
 }
@@ -280,8 +282,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && call.is_raw_json_scalar_call() =>
-        {
+        } if !*optional && call.is_raw_json_scalar_call() => {
             let value = direct_byte_expr_from_receiver(&plan, *receiver)?;
             Some(NdjsonDirectBytePlan::Expr(
                 NdjsonDirectByteExpr::ScalarCall {
@@ -294,8 +295,7 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             receiver,
             call,
             optional,
-        } if !*optional && call.is_direct_object_items_call() =>
-        {
+        } if !*optional && call.is_direct_object_items_call() => {
             let projection = call.direct_object_items_projection()?;
             let steps = root_path_steps(&plan, *receiver)?;
             byte_path_has_root_field(&steps)
@@ -308,10 +308,9 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
                 },
             ))
         }
-        PlanNode::Pipeline {
-            source,
-            body,
-        } => direct_byte_plain_sink_pipeline_plan(plan, source, body),
+        PlanNode::Pipeline { source, body } => {
+            direct_byte_plain_sink_pipeline_plan(plan, source, body)
+        }
         _ => {
             if let Some((source_steps, element)) = direct_array_element_source(&plan, *root) {
                 if !byte_path_has_root_field(&source_steps) {
@@ -660,9 +659,11 @@ fn direct_tape_plan_for_node(
     id: crate::ir::physical::NodeId,
 ) -> Option<NdjsonDirectTapePlan> {
     if let PlanNode::Chain { base, steps } = plan.node(id) {
-        if let Some(plan) =
-            direct_tape_sort_extreme_plan_for_node(plan, *base, physical_steps_to_path_steps(steps)?)
-        {
+        if let Some(plan) = direct_tape_sort_extreme_plan_for_node(
+            plan,
+            *base,
+            physical_steps_to_path_steps(steps)?,
+        ) {
             return Some(plan);
         }
         let (source_steps, element) = direct_array_element_source(plan, *base)?;
@@ -685,8 +686,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if call.is_direct_view_scalar_call() =>
-        {
+        } if call.is_direct_view_scalar_call() => {
             if let Some(steps) = node_path_steps(plan, *receiver) {
                 return Some(NdjsonDirectTapePlan::ViewScalarCall {
                     steps,
@@ -709,8 +709,7 @@ fn direct_tape_plan_for_node(
             receiver,
             call,
             optional,
-        } if !*optional && call.is_direct_object_items_call() =>
-        {
+        } if !*optional && call.is_direct_object_items_call() => {
             let projection = call.direct_object_items_projection()?;
             Some(NdjsonDirectTapePlan::ObjectItems {
                 steps: node_path_steps(plan, *receiver)?,
@@ -1005,9 +1004,7 @@ fn direct_tape_predicate_from_kernel(
     kernel: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectPredicate> {
     match kernel {
-        crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit }
-            if op.is_scalar_comparison() =>
-        {
+        crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit } if op.is_scalar_comparison() => {
             if let Some((source_steps, element, suffix_steps, call)) =
                 direct_array_element_scalar_call_from_kernel(lhs)
             {
@@ -1061,8 +1058,9 @@ fn direct_item_predicate_from_expr(expr: &Expr) -> Option<NdjsonDirectItemPredic
         Expr::Str(value) => Some(NdjsonDirectItemPredicate::Literal(Val::Str(Arc::from(
             value.as_str(),
         )))),
-        Expr::Current | Expr::Ident(_) | Expr::Chain(_, _) => direct_item_path_expr(expr)
-            .map(NdjsonDirectItemPredicate::Path),
+        Expr::Current | Expr::Ident(_) | Expr::Chain(_, _) => {
+            direct_item_path_expr(expr).map(NdjsonDirectItemPredicate::Path)
+        }
         Expr::BinOp(lhs, op @ (BinOp::And | BinOp::Or), rhs) => {
             Some(NdjsonDirectItemPredicate::Binary {
                 lhs: Box::new(direct_item_predicate_from_expr(lhs)?),
@@ -1219,23 +1217,22 @@ fn direct_tape_numeric_stream_plan(
     body: &crate::exec::pipeline::PipelineBody,
 ) -> Option<NdjsonDirectTapePlan> {
     let stream = direct_stream_shape(body)?;
-    let (op, predicate, suffix_steps) = if let Some((_projection, op)) =
-        body.sink.projected_numeric_reducer()
-    {
-        if stream.map.is_some() {
+    let (op, predicate, suffix_steps) =
+        if let Some((_projection, op)) = body.sink.projected_numeric_reducer() {
+            if stream.map.is_some() {
+                return None;
+            }
+            (
+                op,
+                stream.predicate,
+                kernel_to_physical_path(body.sink_kernels.first()?)?,
+            )
+        } else if let Some(op) = body.sink.identity_numeric_reducer() {
+            let suffix_steps = direct_stream_map_path(stream.map?)?;
+            (op, stream.predicate, suffix_steps)
+        } else {
             return None;
-        }
-        (
-            op,
-            stream.predicate,
-            kernel_to_physical_path(body.sink_kernels.first()?)?,
-        )
-    } else if let Some(op) = body.sink.identity_numeric_reducer() {
-        let suffix_steps = direct_stream_map_path(stream.map?)?;
-        (op, stream.predicate, suffix_steps)
-    } else {
-        return None;
-    };
+        };
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate,
@@ -1271,11 +1268,9 @@ fn direct_tape_positional_stream_plan(
 ) -> Option<NdjsonDirectTapePlan> {
     let want_last = body.sink.select_one_wants_last()?;
     let stream = direct_stream_shape(body)?;
-    let map = stream
-        .map
-        .unwrap_or(NdjsonDirectStreamMap::Value(NdjsonDirectProjectionValue::Path(
-            Vec::new(),
-        )));
+    let map = stream.map.unwrap_or(NdjsonDirectStreamMap::Value(
+        NdjsonDirectProjectionValue::Path(Vec::new()),
+    ));
     Some(NdjsonDirectTapePlan::Stream(NdjsonDirectStreamPlan {
         source_steps: pipeline_source_to_steps(plan, source)?,
         predicate: stream.predicate,
@@ -1292,9 +1287,7 @@ struct DirectStreamShape {
     map: Option<NdjsonDirectStreamMap>,
 }
 
-fn direct_stream_shape(
-    body: &crate::exec::pipeline::PipelineBody,
-) -> Option<DirectStreamShape> {
+fn direct_stream_shape(body: &crate::exec::pipeline::PipelineBody) -> Option<DirectStreamShape> {
     let mut predicate = None;
     let mut map = None;
     for (idx, stage) in body.stages.iter().enumerate() {
@@ -1373,9 +1366,9 @@ fn direct_container_plan_from_kernel(
                 .map(direct_projection_value_from_kernel)
                 .collect::<Option<Vec<_>>>()?,
         )),
-        crate::exec::pipeline::BodyKernel::Object(object) => {
-            Some(NdjsonDirectTapePlan::Object(direct_object_fields_from_kernel(object)?))
-        }
+        crate::exec::pipeline::BodyKernel::Object(object) => Some(NdjsonDirectTapePlan::Object(
+            direct_object_fields_from_kernel(object)?,
+        )),
         _ => None,
     }
 }
@@ -1403,9 +1396,7 @@ fn direct_item_predicate_from_kernel(
         crate::exec::pipeline::BodyKernel::Or(items) => {
             combine_direct_item_predicate_kernels(items, crate::parse::ast::BinOp::Or)
         }
-        crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit }
-            if op.is_scalar_comparison() =>
-        {
+        crate::exec::pipeline::BodyKernel::CmpLit { lhs, op, lit } if op.is_scalar_comparison() => {
             if let Some((source_steps, element, suffix_steps, call)) =
                 direct_array_element_scalar_call_from_kernel(lhs)
             {
@@ -1438,10 +1429,7 @@ fn direct_item_predicate_from_kernel(
                 });
             }
             let (suffix_steps, call) = direct_scalar_call_from_kernel(kernel)?;
-            Some(NdjsonDirectItemPredicate::ViewScalarCall {
-                suffix_steps,
-                call,
-            })
+            Some(NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call })
         }
         _ => None,
     }
@@ -1493,11 +1481,9 @@ fn direct_projection_value_from_kernel(
             })
         }
         crate::exec::pipeline::BodyKernel::Array(_)
-        | crate::exec::pipeline::BodyKernel::Object(_) => {
-            direct_container_plan_from_kernel(kernel)
-                .map(Box::new)
-                .map(NdjsonDirectProjectionValue::Nested)
-        }
+        | crate::exec::pipeline::BodyKernel::Object(_) => direct_container_plan_from_kernel(kernel)
+            .map(Box::new)
+            .map(NdjsonDirectProjectionValue::Nested),
         crate::exec::pipeline::BodyKernel::ArraySelect { .. } => {
             let (source_steps, element, suffix_steps) =
                 direct_array_element_path_from_kernel(kernel)?;
@@ -1520,8 +1506,7 @@ fn direct_composed_projection_value_from_kernel(
     first: &crate::exec::pipeline::BodyKernel,
     then: &crate::exec::pipeline::BodyKernel,
 ) -> Option<NdjsonDirectProjectionValue> {
-    let (source_steps, element, mut suffix_steps) =
-        direct_array_element_path_from_kernel(first)?;
+    let (source_steps, element, mut suffix_steps) = direct_array_element_path_from_kernel(first)?;
     if let Some(next_steps) = kernel_to_physical_path(then) {
         suffix_steps.extend(next_steps);
         return Some(NdjsonDirectProjectionValue::Nested(Box::new(
@@ -1696,10 +1681,8 @@ fn direct_array_element_source(
             crate::builtins::BuiltinArgs::I64(n) => Some(*n),
             _ => None,
         };
-        let selection = SingleElementSelection::from_array_selector(
-            builtin_array_selector(call.id())?,
-            arg,
-        )?;
+        let selection =
+            SingleElementSelection::from_array_selector(builtin_array_selector(call.id())?, arg)?;
         return Some((node_path_steps(plan, *receiver)?, selection.into()));
     }
 
@@ -1917,8 +1900,8 @@ mod tests {
 
     #[test]
     fn recognizes_array_find_on_bare_row_local_source() {
-        let expr = crate::parse::parser::parse(r#"custom_attributes.find(value == "z")"#)
-            .expect("parse");
+        let expr =
+            crate::parse::parser::parse(r#"custom_attributes.find(value == "z")"#).expect("parse");
         let Some(NdjsonDirectPredicate::ArrayAny { source_steps, .. }) =
             direct_array_any_predicate_expr(&expr)
         else {
@@ -1932,8 +1915,8 @@ mod tests {
 
     #[test]
     fn recognizes_array_find_item_view_scalar_predicate_from_kernel_metadata() {
-        let expr = crate::parse::parser::parse(r#"custom_attributes.find(value.len())"#)
-            .expect("parse");
+        let expr =
+            crate::parse::parser::parse(r#"custom_attributes.find(value.len())"#).expect("parse");
         let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
             direct_array_any_predicate_expr(&expr)
         else {
@@ -2059,10 +2042,8 @@ mod tests {
         let raw_methods: Vec<_> = crate::builtins::registry::all_method_entries()
             .into_iter()
             .filter_map(|(method, name, _)| {
-                let call = crate::builtins::BuiltinCall::new(
-                    method,
-                    crate::builtins::BuiltinArgs::None,
-                );
+                let call =
+                    crate::builtins::BuiltinCall::new(method, crate::builtins::BuiltinArgs::None);
                 call.is_raw_json_scalar_call().then_some(name)
             })
             .collect();
@@ -2086,9 +2067,9 @@ mod tests {
         let map = NdjsonDirectStreamMap::Object(vec![
             NdjsonDirectObjectField {
                 key: Arc::from("id"),
-                value: NdjsonDirectProjectionValue::Path(vec![PhysicalPathStep::Field(
-                    Arc::from("id"),
-                )]),
+                value: NdjsonDirectProjectionValue::Path(vec![PhysicalPathStep::Field(Arc::from(
+                    "id",
+                ))]),
                 optional: false,
             },
             NdjsonDirectObjectField {

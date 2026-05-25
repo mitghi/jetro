@@ -126,11 +126,7 @@ fn group_by_entries_pick_keys() {
             {"k": "a"}, {"k": "b"}, {"k": "a"}, {"k": "c"}
         ]
     });
-    let out = vm_query(
-        "$.items.group_by(@.k).entries().map(e => e[0])",
-        &doc,
-    )
-    .unwrap();
+    let out = vm_query("$.items.group_by(@.k).entries().map(e => e[0])", &doc).unwrap();
     assert_eq!(out, json!(["a", "b", "c"]));
 }
 
@@ -160,11 +156,7 @@ fn count_by_entries_to_csv_pipeline() {
 #[test]
 fn entries_then_filter() {
     let doc = json!({"o": {"a": 1, "b": 5, "c": 10}});
-    let out = vm_query(
-        "$.o.entries().filter(e => e[1] > 3)",
-        &doc,
-    )
-    .unwrap();
+    let out = vm_query("$.o.entries().filter(e => e[1] > 3)", &doc).unwrap();
     assert_eq!(out, json!([["b", 5], ["c", 10]]));
 }
 
@@ -172,11 +164,7 @@ fn entries_then_filter() {
 fn entries_inside_comprehension() {
     // Comprehension over entries works (existing fixed iter path).
     let doc = json!({"o": {"a": 1, "b": 2}});
-    let out = vm_query(
-        "[v for [k, v] in $.o.entries()]",
-        &doc,
-    )
-    .unwrap();
+    let out = vm_query("[v for [k, v] in $.o.entries()]", &doc).unwrap();
     assert_eq!(out, json!([1, 2]));
 }
 
@@ -184,10 +172,6 @@ fn entries_inside_comprehension() {
 fn entries_on_literal_object_via_let() {
     // Object literal as receiver works through a let binding (object
     // literal directly is parsed as inline filter — separate concern).
-    let out = vm_query(
-        "let o = {x: 1, y: 2} in o.entries()",
-        &json!(null),
-    )
-    .unwrap();
+    let out = vm_query("let o = {x: 1, y: 2} in o.entries()", &json!(null)).unwrap();
     assert_eq!(out, json!([["x", 1], ["y", 2]]));
 }

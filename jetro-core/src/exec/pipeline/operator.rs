@@ -8,11 +8,10 @@ use crate::builtins::registry::{
     arg_extreme_sink_demand as builtin_arg_extreme_sink_demand,
     membership_sink as builtin_membership_sink,
     membership_sink_demand as builtin_membership_sink_demand,
-    membership_sink_result_demand as builtin_membership_sink_result_demand,
-    numeric_reducer, predicate_sink as builtin_predicate_sink,
+    membership_sink_result_demand as builtin_membership_sink_result_demand, numeric_reducer,
+    predicate_sink as builtin_predicate_sink,
     predicate_sink_demand as builtin_predicate_sink_demand,
-    predicate_sink_result_demand as builtin_predicate_sink_result_demand,
-    BuiltinId,
+    predicate_sink_result_demand as builtin_predicate_sink_result_demand, BuiltinId,
 };
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,

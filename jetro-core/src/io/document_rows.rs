@@ -235,7 +235,10 @@ mod tests {
         let out = collect_document_rows(&engine, &document, "$.rows().find_one($.active)")
             .unwrap()
             .unwrap();
-        assert_eq!(serde_json::Value::from(out), json!({"active": true, "id": 2}));
+        assert_eq!(
+            serde_json::Value::from(out),
+            json!({"active": true, "id": 2})
+        );
 
         let none = engine.parse_value(json!([{"active": false}]));
         let err = collect_document_rows(&engine, &none, "$.rows().find_one($.active)")

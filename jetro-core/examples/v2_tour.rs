@@ -1,5 +1,3 @@
-
-
 use jetro_core::Jetro;
 use serde_json::json;
 
@@ -29,7 +27,6 @@ fn main() {
 
     let j = Jetro::from_bytes(serde_json::to_vec(&doc).unwrap()).unwrap();
 
-    
     show(
         "find — first match (alias of filter + [0])",
         &j.collect(r#"$.store.books.find(title == "Dune")"#).unwrap(),
@@ -58,7 +55,6 @@ fn main() {
         &j.collect("$.store.books[0].tags.collect()").unwrap(),
     );
 
-    
     show(
         "$..find — every descendant satisfying pred",
         &j.collect("$..find(@ kind number and @ < 10)").unwrap(),
@@ -74,7 +70,6 @@ fn main() {
         &j.collect(r#"$..like({status: "paid"})"#).unwrap(),
     );
 
-    
     show(
         ".set — replace a single leaf (returns full doc)",
         &j.collect("$.store.currency.set(\"EUR\")").unwrap(),
@@ -90,7 +85,6 @@ fn main() {
         &j.collect("$.store.books[0].unset(ratings)").unwrap(),
     );
 
-    
     show(
         "ternary — chained right-assoc",
         &j.collect(
@@ -111,7 +105,6 @@ fn main() {
         &j.collect("42 if true else 0/0").unwrap(),
     );
 
-    
     show(
         "shape via pick + ternary — analyst view",
         &j.collect(

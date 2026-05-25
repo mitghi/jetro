@@ -3244,8 +3244,8 @@ mod tests {
         );
         assert_eq!(call.call.method, crate::builtins::BuiltinMethod::Len);
 
-        let expr = parse(r#"profile.get_path("author.name").len()"#)
-            .expect("parse get_path scalar call");
+        let expr =
+            parse(r#"profile.get_path("author.name").len()"#).expect("parse get_path scalar call");
         let kernel = BodyKernel::classify_expr(&expr);
         let call = kernel
             .path_scalar_call()
@@ -3319,15 +3319,17 @@ mod tests {
     #[test]
     fn nested_array_reducer_field_demand_prefixes_child_payload() {
         let kernel = BodyKernel::classify_expr(
-            &parse("items.filter(price > 6).map(qty * price).sum()")
-                .expect("parse nested reducer"),
+            &parse("items.filter(price > 6).map(qty * price).sum()").expect("parse nested reducer"),
         );
 
         assert!(
             matches!(kernel, BodyKernel::NestedArrayReducer { .. }),
             "{kernel:#?}"
         );
-        assert_eq!(field_paths(&kernel), vec!["items", "items.price", "items.qty"]);
+        assert_eq!(
+            field_paths(&kernel),
+            vec!["items", "items.price", "items.qty"]
+        );
 
         let count = BodyKernel::classify_expr(
             &parse("items.filter(price > 6).count()").expect("parse nested count"),

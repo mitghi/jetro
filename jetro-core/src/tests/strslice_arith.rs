@@ -42,11 +42,7 @@ fn path_str_plus_path_str() {
 #[test]
 fn email_with_brackets() {
     assert_eq!(
-        vm_query(
-            r#"$.user.first + " <" + $.user.email + ">""#,
-            &user()
-        )
-        .unwrap(),
+        vm_query(r#"$.user.first + " <" + $.user.email + ">""#, &user()).unwrap(),
         json!("Ada <ada@x.com>")
     );
 }
@@ -64,10 +60,7 @@ fn fstring_interp_with_path_str() {
 #[test]
 fn pure_literal_concat_unchanged() {
     // Hot path: pure literal-string add.
-    assert_eq!(
-        vm_query(r#""a" + "b""#, &json!(null)).unwrap(),
-        json!("ab")
-    );
+    assert_eq!(vm_query(r#""a" + "b""#, &json!(null)).unwrap(), json!("ab"));
 }
 
 #[test]

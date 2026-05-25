@@ -4,9 +4,7 @@
 //! builtin identities and the small amount of argument shape needed by demand
 //! propagation without tying the executor to parser syntax.
 
-use crate::{
-    builtins::registry::{BuiltinDemandArg, BuiltinId},
-};
+use crate::builtins::registry::{BuiltinDemandArg, BuiltinId};
 #[cfg(test)]
 use crate::builtins::BuiltinMethod;
 

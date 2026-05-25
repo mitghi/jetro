@@ -1,5 +1,3 @@
-
-
 use jetro_core::Jetro;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -9,7 +7,6 @@ use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
 use jaq_json::{read as jaq_read, Val as JaqVal};
 
 const ITERS: usize = 8;
-
 
 fn build_corpus(
     n_regions: usize,
@@ -142,7 +139,6 @@ fn build_corpus(
     })
 }
 
-
 #[derive(Clone, Copy)]
 struct Stats {
     best: u128,
@@ -151,7 +147,7 @@ struct Stats {
 }
 
 fn sample<F: FnMut()>(mut f: F) -> Stats {
-    let _ = f(); 
+    let _ = f();
     let mut samples = Vec::with_capacity(ITERS);
     for _ in 0..ITERS {
         let t = Instant::now();
@@ -172,7 +168,6 @@ fn show(label: &str, s: Stats) {
         label, s.best, s.median, s.mean
     );
 }
-
 
 fn compile_jaq(
     code: &str,
@@ -201,7 +196,6 @@ fn run_jaq(
     filter.id.run((ctx, input.clone())).map(unwrap_valr).count()
 }
 
-
 fn bench(
     label: &str,
     desc: &str,
@@ -216,7 +210,6 @@ fn bench(
     println!("  jetro: {}", jetro_q);
     println!("  jq   : {}", jaq_q);
 
-    
     let t = sample(|| {
         let _ = jetro_tree.collect(jetro_q).unwrap();
     });
@@ -253,8 +246,6 @@ fn bench(
 }
 
 fn main() {
-    
-    
     let doc = build_corpus(5, 4, 4, 6, 3, 4, 3);
     let bytes = serde_json::to_vec(&doc).unwrap();
     let mb = bytes.len() as f64 / 1_048_576.0;
@@ -264,7 +255,6 @@ fn main() {
     let j_scan = Jetro::from_bytes(bytes.clone()).unwrap();
     let jaq_input: JaqVal = jaq_read::parse_single(&bytes).unwrap();
 
-    
     bench(
         "Q1  4-level shape projection — region → office → team → name",
         "Project team names across every region/office without any filter.",
@@ -275,7 +265,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q2  multi-level filter chain (open office → active project → critical task)",
         "Only open offices, only active projects, only critical tasks — project task ids.",
@@ -286,7 +275,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q3  deep $..find with two predicates",
         "Every descendant object whose status==in_review AND severity==high.",
@@ -297,7 +285,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q4  deep key sum — every `cost` anywhere in tree",
         "Fold every numeric `cost` leaf. Heavy recursion for jaq.",
@@ -308,7 +295,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q5  deep shape + pick rename",
         "Every task: pick id → task_id, severity → sev, total_cost → cost.",
@@ -318,7 +304,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q6  nested aggregate: per-task event cost sum, then mean across tasks",
         "Evaluate a sub-aggregate (map(events).flatten().map(cost).sum()) inside outer map.",
@@ -328,7 +313,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q7  5-level filter + count blocked tasks in active projects",
         "Counts blocked tasks belonging to active projects — FilterCount fusion path.",
@@ -339,7 +323,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q8  largest 10 project budgets (map + sort + slice)",
         "map(budget), sort ascending, take last 10 — exercises TopN fusion.",
@@ -349,7 +332,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q9  group regions by continent",
         "group_by over regions.continent — partitioning test.",
@@ -360,7 +342,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q10 events.cost > 400 deep filter + project",
         "Drill into every task's events, filter costly ones, project `id`.",
@@ -370,7 +351,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q11 deep extract `kind` unique across tree",
         "Collect every `kind` leaf anywhere, dedup. Hits DescendantChain + unique.",
@@ -381,7 +361,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q12 task with actual > estimate (over-run)",
         "Predicate compares two fields of same item — typical complex filter.",
@@ -391,7 +370,6 @@ fn main() {
         &jaq_input,
     );
 
-    
     bench(
         "Q13 deep $..find narrow (single-hit)",
         "Pick one specific task id anywhere in tree.",

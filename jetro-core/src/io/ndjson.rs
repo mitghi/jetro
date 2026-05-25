@@ -7,22 +7,22 @@ pub(super) use super::ndjson_direct::{
     direct_byte_plan, direct_writer_plan_kind, NdjsonDirectPlanKind,
 };
 pub(super) use super::ndjson_direct::{
-    direct_tape_plan, direct_tape_predicate, direct_view_call_cmp_lit,
-    direct_view_call_truthy, direct_writer_plans, NdjsonDirectBytePlan, NdjsonDirectElement,
-    NdjsonDirectItemPredicate, NdjsonDirectPredicate, NdjsonDirectProjectionValue,
-    NdjsonDirectStreamMap, NdjsonDirectStreamPlan, NdjsonDirectStreamSink,
-    NdjsonDirectTapePlan,
+    direct_tape_plan, direct_tape_predicate, direct_view_call_cmp_lit, direct_view_call_truthy,
+    direct_writer_plans, NdjsonDirectBytePlan, NdjsonDirectElement, NdjsonDirectItemPredicate,
+    NdjsonDirectPredicate, NdjsonDirectProjectionValue, NdjsonDirectStreamMap,
+    NdjsonDirectStreamPlan, NdjsonDirectStreamSink, NdjsonDirectTapePlan,
 };
+pub use super::ndjson_driver::NdjsonPerRowDriver;
 use super::ndjson_frame::{frame_payload, FramePayload, NdjsonRowFrame};
 use super::ndjson_hint::{
     NdjsonHintAccessPlan, NdjsonHintConfig, NdjsonHintDecision, NdjsonHintState,
 };
-pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, row_parse_error};
-use super::ndjson_rows::NdjsonRowsFilePlan;
 use super::ndjson_route::{
     ndjson_route_plan, NdjsonExecutionReport, NdjsonExecutionStats, NdjsonRouteExplain,
     NdjsonRoutePlan, NdjsonSourceCaps, NdjsonSourceMode,
 };
+pub(super) use super::ndjson_row::{collect_row_val, parse_row, row_eval_error, row_parse_error};
+use super::ndjson_rows::NdjsonRowsFilePlan;
 use super::ndjson_stream_cache::NdjsonConstantStreamCache;
 pub(super) use super::ndjson_write::{
     ndjson_writer_with_options, write_json_bytes_line_with_options, write_val_line,
@@ -38,9 +38,8 @@ use super::stream_plan::{RowStreamDirection, RowStreamPlan};
 use super::stream_subquery::{RowStreamSubqueryPlan, STREAM_BINDING};
 use super::stream_types::{RowStreamRowResult, RowStreamStats};
 use super::{NdjsonSource, RowError};
-pub use super::ndjson_driver::NdjsonPerRowDriver;
-use crate::compile::compiler::Compiler;
 use crate::builtins::BuiltinViewObjectProjection;
+use crate::compile::compiler::Compiler;
 use crate::data::context::Env;
 use crate::data::value::Val;
 use crate::plan::physical::PlanningContext;
@@ -83,10 +82,7 @@ pub(super) fn direct_writer_path_kind(
     ndjson_writer_path_kind(engine, query)
 }
 
-pub fn ndjson_writer_path_kind(
-    engine: &JetroEngine,
-    query: &str,
-) -> Option<NdjsonWriterPathKind> {
+pub fn ndjson_writer_path_kind(engine: &JetroEngine, query: &str) -> Option<NdjsonWriterPathKind> {
     let (byte, tape) = direct_writer_plans(engine, query)?;
     if byte.is_some() {
         return Some(NdjsonWriterPathKind::ByteExpr);
@@ -592,8 +588,9 @@ where
             explain,
             plan: NdjsonRowsFilePlan::Stream(plan),
         } => {
-            let (_, stats) =
-                drive_ndjson_rows_stream_file_with_stats(engine, path, &plan, None, options, writer)?;
+            let (_, stats) = drive_ndjson_rows_stream_file_with_stats(
+                engine, path, &plan, None, options, writer,
+            )?;
             Ok(row_stream_report(explain, stats))
         }
         NdjsonRoutePlan::Rows {
@@ -682,8 +679,9 @@ where
             explain,
             plan: NdjsonRowsFilePlan::Stream(plan),
         } => {
-            let (_, stats) =
-                drive_ndjson_rows_stream_reader_with_stats(engine, reader, &plan, None, options, writer)?;
+            let (_, stats) = drive_ndjson_rows_stream_reader_with_stats(
+                engine, reader, &plan, None, options, writer,
+            )?;
             Ok(row_stream_report(explain, stats))
         }
         NdjsonRoutePlan::Rows { explain, .. } | NdjsonRoutePlan::Unsupported { explain } => {
@@ -1012,7 +1010,13 @@ pub fn run_ndjson_source_with_report<W>(
 where
     W: Write,
 {
-    run_ndjson_source_with_report_and_options(engine, source, query, writer, NdjsonOptions::default())
+    run_ndjson_source_with_report_and_options(
+        engine,
+        source,
+        query,
+        writer,
+        NdjsonOptions::default(),
+    )
 }
 
 pub fn run_ndjson_source_with_report_and_options<W>(
@@ -1108,9 +1112,9 @@ where
     W: Write,
 {
     match source {
-        NdjsonSource::File(path) => {
-            run_ndjson_file_limit_with_report_and_options(engine, path, query, limit, writer, options)
-        }
+        NdjsonSource::File(path) => run_ndjson_file_limit_with_report_and_options(
+            engine, path, query, limit, writer, options,
+        ),
         NdjsonSource::Reader(reader) => {
             run_ndjson_limit_with_report_and_options(engine, reader, query, limit, writer, options)
         }
@@ -1482,9 +1486,12 @@ fn collect_ndjson_rows_stream_file_with_stats<P>(
 where
     P: AsRef<Path>,
 {
-    if let Some(result) =
-        super::ndjson_parallel::collect_rows_stream_file_with_stats(engine, path.as_ref(), plan, options)?
-    {
+    if let Some(result) = super::ndjson_parallel::collect_rows_stream_file_with_stats(
+        engine,
+        path.as_ref(),
+        plan,
+        options,
+    )? {
         return Ok((result.value, result.stats));
     }
 
@@ -2558,10 +2565,10 @@ where
     R: BufRead,
     W: Write,
 {
-    Ok(drive_ndjson_matches_writer_with_stats(
-        engine, reader, predicate, limit, options, writer,
-    )?
-    .0)
+    Ok(
+        drive_ndjson_matches_writer_with_stats(engine, reader, predicate, limit, options, writer)?
+            .0,
+    )
 }
 
 fn drive_ndjson_matches_writer_with_stats<R, W>(
@@ -4761,9 +4768,8 @@ not-json
             engine
                 .run_ndjson(std::io::Cursor::new(row), query, &mut direct)
                 .unwrap_or_else(|err| panic!("{query}: {err}"));
-            let direct: serde_json::Value =
-                serde_json::from_slice(direct.trim_ascii_end())
-                    .unwrap_or_else(|err| panic!("{query}: {err}"));
+            let direct: serde_json::Value = serde_json::from_slice(direct.trim_ascii_end())
+                .unwrap_or_else(|err| panic!("{query}: {err}"));
             let engine_value = crate::Jetro::from_bytes(row.to_vec())
                 .unwrap()
                 .collect(query.to_string())

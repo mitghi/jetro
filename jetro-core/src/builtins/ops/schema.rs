@@ -279,16 +279,34 @@ mod spec_tests {
 
     #[test]
     fn builtin_specs_drive_view_stage_lowering() {
-        assert_eq!(view_stage(id(BuiltinMethod::Filter)), Some(BuiltinViewStage::Filter));
-        assert_eq!(view_stage(id(BuiltinMethod::Compact)), Some(BuiltinViewStage::Compact));
-        assert_eq!(view_stage(id(BuiltinMethod::Map)), Some(BuiltinViewStage::Map));
-        assert_eq!(view_stage(id(BuiltinMethod::FlatMap)), Some(BuiltinViewStage::FlatMap));
-        assert_eq!(view_stage(id(BuiltinMethod::Take)), Some(BuiltinViewStage::Take));
+        assert_eq!(
+            view_stage(id(BuiltinMethod::Filter)),
+            Some(BuiltinViewStage::Filter)
+        );
+        assert_eq!(
+            view_stage(id(BuiltinMethod::Compact)),
+            Some(BuiltinViewStage::Compact)
+        );
+        assert_eq!(
+            view_stage(id(BuiltinMethod::Map)),
+            Some(BuiltinViewStage::Map)
+        );
+        assert_eq!(
+            view_stage(id(BuiltinMethod::FlatMap)),
+            Some(BuiltinViewStage::FlatMap)
+        );
+        assert_eq!(
+            view_stage(id(BuiltinMethod::Take)),
+            Some(BuiltinViewStage::Take)
+        );
         assert_eq!(
             stage_merge(id(BuiltinMethod::Take)),
             Some(BuiltinStageMerge::UsizeMin)
         );
-        assert_eq!(view_stage(id(BuiltinMethod::Skip)), Some(BuiltinViewStage::Skip));
+        assert_eq!(
+            view_stage(id(BuiltinMethod::Skip)),
+            Some(BuiltinViewStage::Skip)
+        );
         assert_eq!(
             stage_merge(id(BuiltinMethod::Skip)),
             Some(BuiltinStageMerge::UsizeSaturatingAdd)

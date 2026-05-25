@@ -187,4 +187,3 @@ pub fn contains_all_apply(recv: &Val, needles: &[Arc<str>]) -> Option<Val> {
     let s = recv.as_str_ref()?;
     Some(Val::Bool(needles.iter().all(|n| s.contains(n.as_ref()))))
 }
-

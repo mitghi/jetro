@@ -59,16 +59,11 @@ pub(crate) fn is_pipeline_fusion_terminal(name: &str) -> bool {
 /// Wildcards and inline filters are valid for rooted parser rewrites. Planner
 /// fusion uses the same lowering conservatively with `allow_selective = false`
 /// so it does not speculate across per-element selectors it cannot yet batch.
-pub(crate) fn steps_to_path(
-    steps: &[Step],
-    allow_selective: bool,
-) -> Option<Vec<PathStep>> {
+pub(crate) fn steps_to_path(steps: &[Step], allow_selective: bool) -> Option<Vec<PathStep>> {
     let mut out = Vec::with_capacity(steps.len());
     for step in steps {
         match step {
-            Step::Field(field) | Step::OptField(field) => {
-                out.push(PathStep::Field(field.clone()))
-            }
+            Step::Field(field) | Step::OptField(field) => out.push(PathStep::Field(field.clone())),
             Step::Index(index) => out.push(PathStep::Index(*index)),
             Step::Descendant(field) => out.push(PathStep::Descendant(field.clone())),
             Step::DynIndex(expr) => out.push(PathStep::DynIndex((**expr).clone())),

@@ -40,8 +40,6 @@ mod tests {
 
     #[test]
     fn simd_scan_vm_path_aggregate() {
-        
-        
         use crate::Jetro;
         let raw = br#"{"rows":[{"p":10},{"p":20},{"p":30}]}"#.to_vec();
         let j = Jetro::from_bytes(raw).unwrap();
@@ -50,8 +48,6 @@ mod tests {
 
     #[test]
     fn simd_scan_literal_eq_int() {
-        
-        
         use crate::Jetro;
         let doc = json!({"xs":[{"n":10},{"n":42},{"n":10},{"n":42},{"n":7}]});
         let raw = serde_json::to_vec(&doc).unwrap();
@@ -93,8 +89,6 @@ mod tests {
 
     #[test]
     fn route_c_chained_descendants_match_tree_walker() {
-        
-        
         use crate::Jetro;
         let doc = json!({
             "outer":[
@@ -112,7 +106,6 @@ mod tests {
 
     #[test]
     fn route_c_descendant_after_filter_eq() {
-        
         use crate::Jetro;
         let doc = json!({
             "items":[
@@ -130,7 +123,6 @@ mod tests {
 
     #[test]
     fn route_c_quantifier_scalar_result() {
-        
         use crate::Jetro;
         let doc = json!({"xs":[{"id":7},{"id":8}]});
         let raw = serde_json::to_vec(&doc).unwrap();
@@ -140,8 +132,6 @@ mod tests {
 
     #[test]
     fn deep_find_field_eq_scan_matches_tree_walker() {
-        
-        
         use crate::Jetro;
         let doc = json!({
             "a":[
@@ -176,8 +166,6 @@ mod tests {
 
     #[test]
     fn deep_find_field_eq_chains_further() {
-        
-        
         use crate::Jetro;
         let doc = json!({
             "items":[
@@ -196,7 +184,6 @@ mod tests {
 
     #[test]
     fn find_shallow_multi_pred_and() {
-
         use crate::Jetro;
         let doc = json!({"xs":[
             {"t":"a","v":1},
@@ -220,7 +207,6 @@ mod tests {
 
     #[test]
     fn deep_find_multi_pred_matches_scan_and_tree() {
-        
         use crate::Jetro;
         let doc = json!({
             "rows":[
@@ -242,8 +228,6 @@ mod tests {
 
     #[test]
     fn deep_find_then_filter_eq_refines_spans() {
-        
-        
         use crate::Jetro;
         let doc = json!({
             "rows":[
@@ -264,7 +248,6 @@ mod tests {
 
     #[test]
     fn deep_find_then_filter_cmp_refines_spans() {
-        
         use crate::Jetro;
         let doc = json!({
             "rows":[
@@ -286,7 +269,6 @@ mod tests {
 
     #[test]
     fn deep_find_then_filter_then_count() {
-        
         use crate::Jetro;
         let doc = json!({
             "rows":[
@@ -304,8 +286,6 @@ mod tests {
 
     #[test]
     fn deep_find_then_fused_filter_map_sum() {
-        
-        
         use crate::Jetro;
         let doc = json!({
             "rows":[
@@ -338,11 +318,8 @@ mod tests {
         assert_eq!(j_b.collect(q).unwrap(), json!([10]));
     }
 
-    
     #[test]
     fn route_c_one_mismatch_errors_via_fallthrough() {
-        
-        
         use crate::Jetro;
         let doc = json!({"xs":[{"id":1},{"id":2}]});
         let raw = serde_json::to_vec(&doc).unwrap();

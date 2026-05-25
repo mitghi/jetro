@@ -21,7 +21,10 @@ mod parse_int_radix {
 
     #[test]
     fn no_arg_base10_unchanged() {
-        assert_eq!(vm_query(r#""42".parse_int()"#, &json!(null)).unwrap(), json!(42));
+        assert_eq!(
+            vm_query(r#""42".parse_int()"#, &json!(null)).unwrap(),
+            json!(42)
+        );
     }
 
     #[test]
@@ -125,41 +128,25 @@ mod to_csv_headers {
 
     #[test]
     fn explicit_header_order() {
-        let out = vm_query(
-            r#"$.records.to_csv(["id", "name", "email"])"#,
-            &records(),
-        )
-        .unwrap();
+        let out = vm_query(r#"$.records.to_csv(["id", "name", "email"])"#, &records()).unwrap();
         assert_eq!(out, json!("id,name,email\n1,a,x@y.com\n2,b,u@v.com"));
     }
 
     #[test]
     fn header_subset_reorder() {
-        let out = vm_query(
-            r#"$.records.to_csv(["name", "id"])"#,
-            &records(),
-        )
-        .unwrap();
+        let out = vm_query(r#"$.records.to_csv(["name", "id"])"#, &records()).unwrap();
         assert_eq!(out, json!("name,id\na,1\nb,2"));
     }
 
     #[test]
     fn missing_header_yields_empty_cell() {
-        let out = vm_query(
-            r#"$.records.to_csv(["id", "missing"])"#,
-            &records(),
-        )
-        .unwrap();
+        let out = vm_query(r#"$.records.to_csv(["id", "missing"])"#, &records()).unwrap();
         assert_eq!(out, json!("id,missing\n1,\n2,"));
     }
 
     #[test]
     fn tsv_with_headers() {
-        let out = vm_query(
-            r#"$.records.to_tsv(["id", "email"])"#,
-            &records(),
-        )
-        .unwrap();
+        let out = vm_query(r#"$.records.to_tsv(["id", "email"])"#, &records()).unwrap();
         assert_eq!(out, json!("id\temail\n1\tx@y.com\n2\tu@v.com"));
     }
 }
@@ -174,11 +161,7 @@ mod accumulate_init {
     #[test]
     fn cumsum_with_init_zero() {
         assert_eq!(
-            vm_query(
-                "[1,2,3,4,5].accumulate(0, (a, x) => a + x)",
-                &json!(null),
-            )
-            .unwrap(),
+            vm_query("[1,2,3,4,5].accumulate(0, (a, x) => a + x)", &json!(null),).unwrap(),
             json!([1, 3, 6, 10, 15])
         );
     }
@@ -186,11 +169,7 @@ mod accumulate_init {
     #[test]
     fn cumprod_with_init_one() {
         assert_eq!(
-            vm_query(
-                "[1,2,3,4].accumulate(1, (a, x) => a * x)",
-                &json!(null),
-            )
-            .unwrap(),
+            vm_query("[1,2,3,4].accumulate(1, (a, x) => a * x)", &json!(null),).unwrap(),
             json!([1, 2, 6, 24])
         );
     }
@@ -210,11 +189,7 @@ mod accumulate_init {
     #[test]
     fn empty_input_yields_empty_array() {
         assert_eq!(
-            vm_query(
-                "[].accumulate(99, (a, x) => a + x)",
-                &json!(null),
-            )
-            .unwrap(),
+            vm_query("[].accumulate(99, (a, x) => a + x)", &json!(null),).unwrap(),
             json!([])
         );
     }
@@ -224,11 +199,7 @@ mod accumulate_init {
         // Existing (no-init) form keeps prior semantics: acc seeded from
         // items[0], output starts at items[0] (not at the seed + items[0]).
         assert_eq!(
-            vm_query(
-                "[1,2,3,4].accumulate((a, x) => a + x)",
-                &json!(null),
-            )
-            .unwrap(),
+            vm_query("[1,2,3,4].accumulate((a, x) => a + x)", &json!(null),).unwrap(),
             json!([1, 3, 6, 10])
         );
     }
@@ -236,11 +207,7 @@ mod accumulate_init {
     #[test]
     fn path_source_int_vec() {
         let doc = json!({"xs": [10, 20, 30]});
-        let out = vm_query(
-            "$.xs.accumulate(0, (a, x) => a + x)",
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query("$.xs.accumulate(0, (a, x) => a + x)", &doc).unwrap();
         assert_eq!(out, json!([10, 30, 60]));
     }
 }
@@ -264,11 +231,7 @@ mod rec_fixpoint {
     #[test]
     fn idempotent_merge_converges_after_one_iter() {
         let doc = json!({"o": {"type": "v1", "name": "a"}});
-        let out = vm_query(
-            r#"$.o.rec(d => d.merge({type: "v2"}))"#,
-            &doc,
-        )
-        .unwrap();
+        let out = vm_query(r#"$.o.rec(d => d.merge({type: "v2"}))"#, &doc).unwrap();
         assert_eq!(out, json!({"type": "v2", "name": "a"}));
     }
 
@@ -282,20 +245,13 @@ mod rec_fixpoint {
     #[test]
     fn scalar_bounded_converges() {
         // Numeric input that genuinely needs to iterate.
-        let out = vm_query(
-            "0.rec(n => n + 1 if n < 10 else n)",
-            &json!(null),
-        )
-        .unwrap();
+        let out = vm_query("0.rec(n => n + 1 if n < 10 else n)", &json!(null)).unwrap();
         assert_eq!(out, json!(10));
     }
 
     #[test]
     fn scalar_identity_converges() {
-        assert_eq!(
-            vm_query("42.rec(n => n)", &json!(null)).unwrap(),
-            json!(42)
-        );
+        assert_eq!(vm_query("42.rec(n => n)", &json!(null)).unwrap(), json!(42));
     }
 
     #[test]

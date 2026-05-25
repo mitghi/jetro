@@ -114,17 +114,11 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
             Some((source, stages, exprs, sink))
         }
 
-        LogicalPlan::GroupBy { input, key } => {
-            collect_expr_builtin_stage(*input, id?, key)
-        }
+        LogicalPlan::GroupBy { input, key } => collect_expr_builtin_stage(*input, id?, key),
 
-        LogicalPlan::CountBy { input, key } => {
-            collect_expr_builtin_stage(*input, id?, key)
-        }
+        LogicalPlan::CountBy { input, key } => collect_expr_builtin_stage(*input, id?, key),
 
-        LogicalPlan::IndexBy { input, key } => {
-            collect_expr_builtin_stage(*input, id?, key)
-        }
+        LogicalPlan::IndexBy { input, key } => collect_expr_builtin_stage(*input, id?, key),
 
         // Terminal sinks strip the default Collect and install the real sink.
         LogicalPlan::First(inner) => {
@@ -145,7 +139,12 @@ fn collect(plan: LogicalPlan) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr
         | LogicalPlan::Max(inner) => collect_numeric_sink(*inner, id?),
         LogicalPlan::ApproxCountDistinct(inner) => {
             let (source, stages, exprs, _) = collect(*inner)?;
-            Some((source, stages, exprs, Sink::approx_distinct_builtin_id(id?)?))
+            Some((
+                source,
+                stages,
+                exprs,
+                Sink::approx_distinct_builtin_id(id?)?,
+            ))
         }
 
         LogicalPlan::ScalarExpr => None,
@@ -171,7 +170,12 @@ fn collect_numeric_sink(
     id: BuiltinId,
 ) -> Option<(Source, Vec<Stage>, Vec<Option<Arc<Expr>>>, Sink)> {
     let (source, stages, exprs, _) = collect(inner)?;
-    Some((source, stages, exprs, Sink::numeric_builtin_id(id, None, None)?))
+    Some((
+        source,
+        stages,
+        exprs,
+        Sink::numeric_builtin_id(id, None, None)?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
