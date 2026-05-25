@@ -2085,13 +2085,10 @@ where
 {
     let idx = match selector {
         ArraySelector::First => Some(0),
-        ArraySelector::Last => match array.scalar() {
-            JsonView::ArrayLen(len) => len.checked_sub(1),
-            _ => None,
-        },
+        ArraySelector::Last => array.array_len().and_then(|len| len.checked_sub(1)),
         ArraySelector::Nth(idx) => Some(idx),
     };
-    idx.map(|idx| array.index(idx as i64))
+    idx.map(|idx| array.array_child(idx))
         .unwrap_or_else(|| array.index(-1))
 }
 
@@ -2204,10 +2201,7 @@ where
         }
     };
     let Some(predicate) = predicate else {
-        return match source.scalar() {
-            JsonView::ArrayLen(len) => Some(Val::Int(len as i64)),
-            _ => Some(Val::Int(0)),
-        };
+        return Some(Val::Int(source.array_len().unwrap_or(0) as i64));
     };
     let mut count = 0i64;
     let mut iter = source.array_iter()?;
