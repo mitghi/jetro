@@ -1072,6 +1072,27 @@ mod tests {
     }
 
     #[test]
+    fn view_zip_shape_projects_from_tape_without_materializing_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"docs":[{"shape":{"id":[0],"name":["old"],"kind":"book"}},{"shape":{"id":[1,2],"name":["ada","bob"],"kind":"book"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.docs.map(@.shape.zip_shape()).last()"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"id": 1, "name": "ada", "kind": "book"},
+                {"id": 2, "name": "bob", "kind": "book"}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

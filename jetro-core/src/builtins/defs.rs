@@ -2503,6 +2503,10 @@ impl Builtin for ZipShape {
     const NAME: &'static str = "zip_shape";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::ZipShape)
+            .demand_law(BuiltinViewValueProjection::ZipShape.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {

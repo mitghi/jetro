@@ -1424,8 +1424,51 @@ where
                 _ => return None,
             }
         }
+        BuiltinViewValueProjection::ZipShape => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return Some(match view_zip_shape(&view) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn view_zip_shape<'a, V>(view: &V) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let field_count = view.object_len()?;
+    if field_count == 0 {
+        return Some(Val::arr(Vec::new()));
+    }
+
+    let fields: Vec<_> = view.object_iter()?.collect();
+    let mut min_len: Option<usize> = None;
+    for (_key, value) in fields.iter() {
+        if let Some(len) = value.array_len() {
+            min_len = Some(min_len.map_or(len, |current| current.min(len)));
+        }
+    }
+
+    let rows = min_len.unwrap_or(0);
+    let mut out = Vec::with_capacity(rows);
+    for idx in 0..rows {
+        let mut row = indexmap::IndexMap::with_capacity(field_count);
+        for (key, value) in fields.iter() {
+            let cell = if value.array_len().is_some() {
+                view_to_owned(value.array_child(idx))
+            } else {
+                view_to_owned(value.clone())
+            };
+            row.insert(Arc::clone(key), cell);
+        }
+        out.push(Val::obj(row));
+    }
+    Some(Val::arr(out))
 }
 
 fn write_view_delimited<'a, V>(view: &V, sep: &str, out: &mut String) -> Option<()>
@@ -5015,6 +5058,7 @@ mod tests {
                 BuiltinMethod::UrlEncode,
                 BuiltinViewValueProjection::UrlEncode,
             ),
+            (BuiltinMethod::ZipShape, BuiltinViewValueProjection::ZipShape),
         ];
 
         let registered: Vec<_> = all_method_entries()

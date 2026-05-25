@@ -1000,6 +1000,8 @@ pub enum BuiltinViewValueProjection {
     ToCsv,
     /// Serialize the value to TSV text.
     ToTsv,
+    /// Convert an object of parallel arrays into row objects.
+    ZipShape,
     /// Title-case whitespace-delimited words.
     TitleCase,
     /// Encode string bytes as Base64 text.
@@ -1058,7 +1060,8 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::StripPrefix
             | BuiltinViewValueProjection::StripSuffix
             | BuiltinViewValueProjection::UrlDecode
-            | BuiltinViewValueProjection::UrlEncode => BuiltinDemandLaw::MapLike,
+            | BuiltinViewValueProjection::UrlEncode
+            | BuiltinViewValueProjection::ZipShape => BuiltinDemandLaw::MapLike,
             BuiltinViewValueProjection::Includes => BuiltinDemandLaw::PredicateMapLike,
         }
     }
