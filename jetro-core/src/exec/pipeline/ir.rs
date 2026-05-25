@@ -1181,6 +1181,12 @@ impl Stage {
                             op: *op,
                             values: values.clone(),
                         }),
+                        (
+                            crate::builtins::BuiltinViewStage::SetUnion,
+                            crate::builtins::BuiltinArgs::ValVec(values),
+                        ) => Some(ViewStageCapability::SetUnion {
+                            values: values.clone(),
+                        }),
                         _ => None,
                     },
                     _ => None,

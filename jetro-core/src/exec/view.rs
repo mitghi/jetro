@@ -2526,6 +2526,24 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::SetUnion { .. } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let key = eval_frontier_structural_view_key_with_vm(&item, None, vm)?;
+        op_state.get_mut(stage_idx)?.keys().insert(key);
+        return drive_view_item(
+            item,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Lag { offset } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4456,6 +4474,19 @@ where
                     continue;
                 }
                 vec![value.clone()]
+            }
+            pipeline::ViewStageCapability::SetUnion { ref values } => {
+                let seen = op_state.get_mut(stage_idx)?.keys();
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        if seen.insert(ViewKey::from_structural_owned(value.clone())) {
+                            Some(value.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
             }
             _ => continue,
         };
@@ -8004,6 +8035,11 @@ mod tests {
                 vec![Val::Int(2)],
                 serde_json::json!([2, 2]),
             ),
+            (
+                crate::builtins::BuiltinMethod::Union,
+                vec![Val::Int(2), Val::Int(3), Val::Int(3), Val::Int(4)],
+                serde_json::json!([1, 2, 2, 3, 4]),
+            ),
         ];
 
         for (method, values, expected) in cases {
@@ -8050,6 +8086,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([{"a":1}]));
+    }
+
+    #[test]
+    fn union_matches_structural_object_values() {
+        let mut present = IndexMap::new();
+        present.insert(Arc::from("a"), Val::Int(1));
+        let mut missing = IndexMap::new();
+        missing.insert(Arc::from("a"), Val::Int(3));
+        let tape = crate::data::tape::TapeData::parse(br#"[{"a":1},{"a":2}]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Union,
+                crate::builtins::BuiltinArgs::ValVec(vec![Val::obj(present), Val::obj(missing)]),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"a":1}, {"a":2}, {"a":3}])
+        );
     }
 
     #[test]

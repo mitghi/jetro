@@ -83,7 +83,7 @@ impl ViewStageState {
     }
 
     // Returns a mutable reference to the inner `HashSet<ViewKey>`, initialising to an empty set the first time it is accessed.
-    fn keys(&mut self) -> &mut HashSet<ViewKey> {
+    pub(super) fn keys(&mut self) -> &mut HashSet<ViewKey> {
         if !matches!(self, Self::Keys(_)) {
             *self = Self::Keys(HashSet::new());
         }
@@ -341,6 +341,7 @@ where
         pipeline::ViewStageCapability::BuiltinProjection { .. } => None,
         pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
+        pipeline::ViewStageCapability::SetUnion { .. } => None,
         // FlatMap expands one input into many borrowed child views and is
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,

@@ -2413,6 +2413,8 @@ impl Builtin for Union {
     const NAME: &'static str = "union";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::SetUnion)
     }
     #[inline]
     fn apply_args(

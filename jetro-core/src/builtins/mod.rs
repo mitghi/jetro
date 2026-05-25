@@ -1577,6 +1577,8 @@ pub enum BuiltinViewStage {
     KeyedReduce,
     /// Set membership filter against a static argument list.
     SetFilter(BuiltinViewSetFilter),
+    /// Set union with a static argument list.
+    SetUnion,
     /// Append one static value after all receiver rows.
     AppendValue,
     /// Prepend one static value before receiver rows.
@@ -2425,6 +2427,7 @@ impl BuiltinViewStage {
             | Self::Distinct
             | Self::KeyedReduce
             | Self::SetFilter(_)
+            | Self::SetUnion
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -2448,6 +2451,7 @@ impl BuiltinViewStage {
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce
+            | Self::SetUnion
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
@@ -2474,7 +2478,7 @@ impl BuiltinViewStage {
         match self {
             Self::RemoveValue => BuiltinViewCapabilityShape::RemoveValueTarget,
             Self::AppendValue | Self::PrependValue => BuiltinViewCapabilityShape::ValueArg,
-            Self::SetFilter(_) => BuiltinViewCapabilityShape::ValVecArg,
+            Self::SetFilter(_) | Self::SetUnion => BuiltinViewCapabilityShape::ValVecArg,
             Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
             Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
             _ => BuiltinViewCapabilityShape::Generic,
@@ -2499,7 +2503,9 @@ impl BuiltinViewStage {
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
-            Self::AppendValue | Self::PrependValue => BuiltinCardinality::Barrier,
+            Self::SetUnion | Self::AppendValue | Self::PrependValue => {
+                BuiltinCardinality::Barrier
+            }
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
         }
     }
@@ -2535,6 +2541,7 @@ impl BuiltinViewStage {
             | Self::DropWhile
             | Self::Distinct
             | Self::SetFilter(_)
+            | Self::SetUnion
             | Self::AppendValue
             | Self::PrependValue
             | Self::Take
@@ -2572,6 +2579,7 @@ impl BuiltinViewStage {
             | Self::DropWhile
             | Self::Distinct
             | Self::SetFilter(_)
+            | Self::SetUnion
             | Self::KeyedReduce
             | Self::AppendValue
             | Self::PrependValue => 10.0,
@@ -2604,6 +2612,7 @@ impl BuiltinViewStage {
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce
+            | Self::SetUnion
             | Self::AppendValue
             | Self::PrependValue => 1.0,
             Self::Take | Self::Skip => 0.5,

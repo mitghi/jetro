@@ -844,6 +844,11 @@ pub(crate) enum ViewStageCapability {
         /// Static argument values used to build the membership set.
         values: Vec<Val>,
     },
+    /// Set union stage; forwards receiver rows and emits unseen static argument values at tail.
+    SetUnion {
+        /// Static argument values appended when absent from the receiver.
+        values: Vec<Val>,
+    },
     /// Append one owned literal after all input rows.
     AppendValue(Val),
     /// Prepend one owned literal before input rows.
@@ -908,6 +913,7 @@ impl ViewStageCapability {
                 op,
                 values: Vec::new(),
             }),
+            BuiltinViewStage::SetUnion => Some(Self::SetUnion { values: Vec::new() }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -940,6 +946,7 @@ impl ViewStageCapability {
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
             Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
+            Self::SetUnion { .. } => BuiltinViewStage::SetUnion,
             Self::AppendValue(_) => BuiltinViewStage::AppendValue,
             Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,
@@ -1102,6 +1109,7 @@ impl ViewStageCapability {
             | Self::Distinct { .. }
             | Self::KeyedReduce { .. }
             | Self::SetFilter { .. }
+            | Self::SetUnion { .. }
             | Self::AppendValue(_)
             | Self::PrependValue(_) => None,
         }
@@ -1184,6 +1192,7 @@ impl ViewStageCapability {
                 | Self::Distinct { .. }
                 | Self::KeyedReduce { .. }
                 | Self::SetFilter { .. }
+                | Self::SetUnion { .. }
                 | Self::AppendValue(_)
                 | Self::PrependValue(_) => return false,
             }
