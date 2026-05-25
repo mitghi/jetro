@@ -500,32 +500,31 @@ fn push_select_suffix_projection(body: &mut PipelineBody, suffix: &[PhysicalChai
     if body.sink.single_element_selection().is_none() {
         return false;
     }
-    let Some((expr, keys)) = field_suffix_projection(suffix) else {
+    let Some((expr, kernel)) = static_suffix_projection(suffix) else {
         return false;
     };
     let program = Arc::new(Compiler::compile(&expr, "<select-suffix-projection>"));
     body.stages.push(Stage::Map(program, BuiltinViewStage::Map));
     body.stage_exprs.push(Some(Arc::new(expr)));
-    body.stage_kernels.push(BodyKernel::FieldChain(keys));
+    body.stage_kernels.push(kernel);
     true
 }
 
-fn field_suffix_projection(
-    suffix: &[PhysicalChainStep],
-) -> Option<(Expr, Arc<[Arc<str>]>)> {
+fn static_suffix_projection(suffix: &[PhysicalChainStep]) -> Option<(Expr, BodyKernel)> {
     let mut steps = Vec::with_capacity(suffix.len());
-    let mut keys = Vec::with_capacity(suffix.len());
     for step in suffix {
-        let PhysicalChainStep::Field(key) = step else {
-            return None;
-        };
-        keys.push(Arc::clone(key));
-        steps.push(Step::Field(key.to_string()));
+        match step {
+            PhysicalChainStep::Field(key) => steps.push(Step::Field(key.to_string())),
+            PhysicalChainStep::Index(index) => steps.push(Step::Index(*index)),
+            _ => return None,
+        }
     }
     if steps.is_empty() {
         return None;
     }
-    Some((Expr::Chain(Box::new(Expr::Current), steps), keys.into()))
+    let expr = Expr::Chain(Box::new(Expr::Current), steps);
+    let kernel = BodyKernel::classify_expr(&expr);
+    kernel.is_view_native().then_some((expr, kernel))
 }
 
 /// Returns `true` when the pipeline has no stages and sinks straight to `Collect`,
@@ -2155,6 +2154,57 @@ mod tests {
                 assert!(matches!(body.sink, crate::exec::pipeline::Sink::Terminal(_)));
             }
             _ => panic!("suffix projection must stay inside the root-path pipeline"),
+        }
+    }
+
+    #[test]
+    fn indexed_array_pipeline_index_suffix_keeps_root_path_pipeline_prefix() {
+        let plan = plan_query(r#"$.groups[0].items.first().tags[0].name"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::RootPath { steps },
+                body,
+            } => {
+                assert!(matches!(
+                    steps.as_ref(),
+                    [
+                        PhysicalPathStep::Field(groups),
+                        PhysicalPathStep::Index(0),
+                        PhysicalPathStep::Field(items)
+                    ] if groups.as_ref() == "groups" && items.as_ref() == "items"
+                ));
+                assert!(matches!(
+                    body.stages.last(),
+                    Some(crate::exec::pipeline::Stage::Map(_, _))
+                ));
+                let Some((source_keys, selector, suffix_keys)) = body
+                    .stage_kernels
+                    .last()
+                    .and_then(BodyKernel::array_element_path)
+                else {
+                    panic!("expected static array-element suffix kernel");
+                };
+                assert_eq!(
+                    source_keys
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>(),
+                    ["tags"]
+                );
+                assert_eq!(selector, crate::exec::pipeline::ArraySelector::Nth(0));
+                assert_eq!(
+                    suffix_keys
+                        .iter()
+                        .map(|key| key.as_ref())
+                        .collect::<Vec<_>>(),
+                    ["name"]
+                );
+                assert!(matches!(body.sink, crate::exec::pipeline::Sink::Terminal(_)));
+            }
+            _ => panic!("indexed suffix projection must stay inside the root-path pipeline"),
         }
     }
 

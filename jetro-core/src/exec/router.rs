@@ -666,6 +666,25 @@ mod tests {
         assert_eq!(out, json!(["a"]));
         assert!(!j.root_val_is_materialized());
     }
+
+    #[test]
+    fn indexed_root_path_first_index_suffix_stays_tape_native() {
+        let j = Jetro::from_bytes(
+            br#"{"groups":[{"items":[{"id":"a","tags":[{"name":"sf"},{"name":"classic"}]},{"id":"b","tags":[{"name":"fantasy"}]}]}],"unused":{"large":[1,2,3]}}"#
+                .to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.groups[0].items.first().tags[0].name"#)
+            .unwrap();
+
+        assert_eq!(out, json!("sf"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn view_fstring_map_reads_from_tape_without_materializing_root_val() {
         let j = Jetro::from_bytes(
