@@ -3423,7 +3423,12 @@ where
                 }
                 FrontierRow::Owned(value) => {
                     let value = plan.run(value.clone()).ok()?;
-                    value.as_vals()?.into_owned().into_iter().map(FrontierRow::Owned).collect()
+                    value
+                        .into_vals()
+                        .ok()?
+                        .into_iter()
+                        .map(FrontierRow::Owned)
+                        .collect()
                 }
             };
             return Some(Box::new(rows.into_iter()));
@@ -3431,10 +3436,34 @@ where
     }
     match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => view.array_iter(),
-        pipeline::ViewKernelValue::Owned(value) => {
-            let items = value.as_vals()?.into_owned();
-            Some(Box::new(items.into_iter().map(FrontierRow::Owned)))
-        }
+        pipeline::ViewKernelValue::Owned(value) => owned_array_rows(value),
+    }
+}
+
+fn owned_array_rows<'a, V>(value: Val) -> Option<Box<dyn Iterator<Item = FrontierRow<V>> + 'a>>
+where
+    V: FrontierBaseView<'a>,
+{
+    match value {
+        Val::Arr(values) => Some(Box::new(
+            (0..values.len()).map(move |idx| FrontierRow::Owned(values[idx].clone())),
+        )),
+        Val::IntVec(values) => Some(Box::new(
+            (0..values.len()).map(move |idx| FrontierRow::Owned(Val::Int(values[idx]))),
+        )),
+        Val::FloatVec(values) => Some(Box::new(
+            (0..values.len()).map(move |idx| FrontierRow::Owned(Val::Float(values[idx]))),
+        )),
+        Val::StrVec(values) => Some(Box::new((0..values.len()).map(move |idx| {
+            FrontierRow::Owned(Val::Str(Arc::clone(&values[idx])))
+        }))),
+        Val::StrSliceVec(values) => Some(Box::new((0..values.len()).map(move |idx| {
+            FrontierRow::Owned(Val::StrSlice(values[idx].clone()))
+        }))),
+        Val::ObjVec(rows) => Some(Box::new(
+            (0..rows.nrows()).map(move |row| FrontierRow::Owned(rows.row_val(row))),
+        )),
+        _ => None,
     }
 }
 
@@ -6535,6 +6564,46 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
+    }
+
+    #[test]
+    fn view_flat_map_owned_array_result_obeys_downstream_demand() {
+        let source = CountingView::root(&[10, 20, 30]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::FlatMap(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::FlatMap,
+                ),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::Array(Arc::from([
+                    BodyKernel::Current,
+                    BodyKernel::Binary {
+                        op: BinOp::Add,
+                        lhs: Box::new(BodyKernel::Current),
+                        rhs: Box::new(BodyKernel::Const(Val::Int(1))),
+                    },
+                ])),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let mut vm = VM::new();
+        let out = super::run_full_with_env(source.clone(), &body, None, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        let out_json: serde_json::Value = out.into();
+        assert_eq!(out_json, serde_json::json!([10, 11]));
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
