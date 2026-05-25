@@ -2,9 +2,9 @@
 //! Tracks running sum, count, min, and max in a single pass so `avg`, `sum`,
 //! `min`, `max`, and `count` share one loop over the source elements.
 
-use crate::data::value::Val;
+use crate::{data::value::Val, util::JsonView};
 
-use super::{num_finalise, num_fold, ReducerOp, ReducerSpec};
+use super::{num_finalise, num_fold, num_fold_json_view, ReducerOp, ReducerSpec};
 
 /// Single-pass accumulator for numeric aggregate sinks (`sum`, `avg`, `min`, `max`, `count`).
 #[derive(Debug, Clone)]
@@ -53,6 +53,28 @@ impl ReducerAccumulator {
                     &mut self.n_obs,
                     op,
                     item,
+                );
+            }
+        }
+    }
+
+    /// Folds a borrowed JSON scalar into numeric reducer state without
+    /// constructing a temporary `Val`.
+    pub(crate) fn push_json_view(&mut self, scalar: JsonView<'_>) {
+        match self.spec.op {
+            ReducerOp::Count => {
+                self.count += 1;
+            }
+            ReducerOp::Numeric(op) => {
+                num_fold_json_view(
+                    &mut self.sum_i,
+                    &mut self.sum_f,
+                    &mut self.sum_floated,
+                    &mut self.min_f,
+                    &mut self.max_f,
+                    &mut self.n_obs,
+                    op,
+                    scalar,
                 );
             }
         }

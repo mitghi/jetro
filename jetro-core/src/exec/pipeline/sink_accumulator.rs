@@ -12,6 +12,7 @@ use crate::{
     },
     data::{context::EvalError, value::Val},
     plan::demand::SinkResultDemand,
+    util::JsonView,
 };
 
 use super::{cmp_val_total, ReducerAccumulator, Sink};
@@ -406,6 +407,14 @@ impl<'a> SinkAccumulator<'a> {
     /// Feeds an already-projected numeric value directly into the reducer, skipping re-evaluation.
     pub(crate) fn push_projected_numeric(&mut self, numeric_item: &Val) {
         self.observe_reducer(numeric_item);
+    }
+
+    /// Feeds an already-projected borrowed numeric scalar into the reducer,
+    /// skipping temporary `Val` construction.
+    pub(crate) fn push_projected_numeric_view(&mut self, scalar: JsonView<'_>) {
+        if let Some(reducer) = &mut self.reducer {
+            reducer.push_json_view(scalar);
+        }
     }
 
     /// Consumes the accumulator and produces the final `Val` according to the sink kind.

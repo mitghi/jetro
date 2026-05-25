@@ -1619,6 +1619,27 @@ where
             if !view_sink_predicate_matches(item, *predicate_kernel, sink_kernels, vm)? {
                 return Some(Ok(ViewRowAction::Skip));
             }
+            if matches!(
+                accumulator,
+                crate::builtins::BuiltinSinkAccumulator::Numeric
+            ) {
+                let value = match project_kernel {
+                    Some(kernel) => {
+                        let kernel = sink_kernels.get(*kernel)?;
+                        eval_frontier_kernel_with_vm(item, kernel, vm)?
+                    }
+                    None => pipeline::ViewKernelValue::View(item.clone()),
+                };
+                match value {
+                    pipeline::ViewKernelValue::View(view) => {
+                        sink_acc.push_projected_numeric_view(view.scalar());
+                    }
+                    pipeline::ViewKernelValue::Owned(value) => {
+                        sink_acc.push_projected_numeric(&value);
+                    }
+                }
+                return Some(Ok(ViewRowAction::Emit));
+            }
             let sink_done = sink_acc.observe_builtin_lazy(
                 *accumulator,
                 || pipeline::view_kernel_view_to_owned(item.clone()),
@@ -5855,6 +5876,29 @@ mod tests {
         );
         assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.materialize_reads(), 2);
+    }
+
+    #[test]
+    fn numeric_sink_folds_projected_view_scalars_without_materializing() {
+        let source = CountingKeyedObjectView::root(&[(1, 20), (2, 10), (3, 30)]);
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::numeric_builtin(
+                crate::builtins::BuiltinMethod::Sum,
+                Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                None,
+            )
+            .unwrap(),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("v"))],
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(60));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
