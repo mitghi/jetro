@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::data::context::{Env, EvalError};
 use crate::data::value::Val;
-use crate::data::view::{scalar_view_to_owned_val, view_matches_value, ValueView};
+use crate::data::view::{view_matches_value, ValueView};
 use crate::exec::pipeline;
 use crate::plan::demand::PullDemand;
 use crate::util::JsonView;
@@ -607,7 +607,7 @@ where
 {
     match key_kernel {
         Some(kernel) => eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm),
-        None => scalar_view_to_owned_val(item.scalar()).or_else(|| Some(item.materialize())),
+        None => Some(pipeline::view_kernel_view_to_owned(item.clone())),
     }
 }
 
@@ -2380,7 +2380,7 @@ where
             }
             pipeline::ViewKernelValue::Owned(value) => Some(value),
         },
-        None => scalar_view_to_owned_val(item.scalar()).or_else(|| Some(item.materialize())),
+        None => Some(pipeline::view_kernel_view_to_owned(item.clone())),
     }
 }
 
