@@ -332,6 +332,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
+        .or_else(|| try_lower_object_items_pipeline(builder, expr))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
         .or_else(|| try_lower_pipeline_path_suffix(builder, expr))
@@ -1868,6 +1869,29 @@ mod tests {
                 ))
             )),
             _ => panic!("entries().first() must stream object items from a field-chain source"),
+        }
+    }
+
+    #[test]
+    fn nested_object_item_projection_lowers_as_field_chain_pipeline() {
+        let plan = plan_query(r#"{first: $.profile.values().first()}"#);
+        let PlanNode::Object(fields) = root_node(&plan) else {
+            panic!("expected object plan");
+        };
+        let PhysicalObjField::Kv { val, .. } = &fields[0] else {
+            panic!("expected object field");
+        };
+        match plan.node(*val) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::FieldChain { .. },
+                body,
+            } => assert!(matches!(
+                body.stages.first(),
+                Some(crate::exec::pipeline::Stage::ObjectItems(
+                    crate::builtins::BuiltinViewObjectProjection::Values
+                ))
+            )),
+            _ => panic!("nested values().first() must stream object items from a field-chain source"),
         }
     }
 
