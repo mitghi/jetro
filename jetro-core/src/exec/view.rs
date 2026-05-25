@@ -2696,7 +2696,9 @@ where
     {
         return Some(out);
     }
-    let boundary_rows: Vec<Val> = winners.into_iter().map(|row| row.materialize()).collect();
+    let source_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[suffix_start..], &body.sink);
+    let boundary_rows = materialize_sorted_boundary_rows(winners, source_demand);
 
     Some(run_materialized_suffix(
         body,
@@ -2706,6 +2708,35 @@ where
         base_env,
         vm,
     ))
+}
+
+fn materialize_sorted_boundary_rows<'a, V>(
+    rows: Vec<FrontierRow<V>>,
+    source_demand: PullDemand,
+) -> Vec<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    match source_demand {
+        PullDemand::FirstInput(limit) | PullDemand::UntilOutput(limit) if limit == 0 => {
+            Vec::new()
+        }
+        PullDemand::FirstInput(limit) => rows
+            .into_iter()
+            .take(limit)
+            .map(|row| row.materialize())
+            .collect(),
+        PullDemand::LastInput(limit) => {
+            let len = rows.len();
+            rows.into_iter()
+                .skip(len.saturating_sub(limit))
+                .map(|row| row.materialize())
+                .collect()
+        }
+        PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::NthInput(_) => {
+            rows.into_iter().map(|row| row.materialize()).collect()
+        }
+    }
 }
 
 /// Feeds a pre-sorted vec of view rows through the terminal-collect plan,
@@ -6386,6 +6417,30 @@ mod tests {
             serde_json::json!({"id": 4, "score": 4})
         );
         assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn sorted_materialized_fallback_obeys_propagated_pull_demand() {
+        let source = CountingView::root(&[1, 2, 3, 4]);
+        let rows: Vec<_> = source
+            .array_iter()
+            .expect("rows")
+            .map(super::FrontierRow::Borrowed)
+            .collect();
+
+        let prefix =
+            super::materialize_sorted_boundary_rows(rows.clone(), PullDemand::FirstInput(2));
+        assert_eq!(prefix, vec![Val::Int(1), Val::Int(2)]);
+        assert_eq!(source.materialize_reads(), 2);
+
+        let suffix =
+            super::materialize_sorted_boundary_rows(rows.clone(), PullDemand::LastInput(1));
+        assert_eq!(suffix, vec![Val::Int(4)]);
+        assert_eq!(source.materialize_reads(), 3);
+
+        let all = super::materialize_sorted_boundary_rows(rows, PullDemand::All);
+        assert_eq!(all, vec![Val::Int(1), Val::Int(2), Val::Int(3), Val::Int(4)]);
+        assert_eq!(source.materialize_reads(), 7);
     }
 
     #[test]
