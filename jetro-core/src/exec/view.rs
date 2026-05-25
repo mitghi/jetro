@@ -1776,7 +1776,8 @@ where
         source_demand,
         vm,
         |item, vm| {
-            plan.reducer.observe(item, &body.stage_kernels, vm)?;
+            plan.reducer
+                .observe(item, &body.stage_kernels, vm, eval_frontier_view_key_with_vm)?;
             Some(Ok(ViewRowAction::Emit))
         },
     )? {
@@ -2449,23 +2450,6 @@ where
     }
 }
 
-fn eval_view_key_with_vm<'a, V>(
-    item: &V,
-    kernel: Option<&pipeline::BodyKernel>,
-    vm: &mut VM,
-) -> Option<ViewKey>
-where
-    V: ValueView<'a> + 'a,
-{
-    match kernel {
-        Some(kernel) => match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
-            pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
-            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
-        },
-        None => eval_view_key_scalar(item),
-    }
-}
-
 fn eval_frontier_structural_view_key_with_vm<'a, V>(
     item: &FrontierRow<V>,
     kernel: Option<&pipeline::BodyKernel>,
@@ -2480,6 +2464,23 @@ where
             pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_structural_owned(value)),
         },
         None => ViewKey::from_structural_value_view(item),
+    }
+}
+
+fn eval_frontier_view_key_with_vm<'a, V>(
+    item: &FrontierRow<V>,
+    kernel: Option<&pipeline::BodyKernel>,
+    vm: &mut VM,
+) -> Option<ViewKey>
+where
+    V: FrontierBaseView<'a>,
+{
+    match kernel {
+        Some(kernel) => match eval_frontier_kernel_with_vm(item, kernel, vm)? {
+            pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
+            pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
+        },
+        None => eval_view_key_scalar(item),
     }
 }
 
@@ -6520,6 +6521,49 @@ mod tests {
             serde_json::json!({"1": {"id": 1, "score": 3}})
         );
         assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn reducing_count_by_nested_key_avoids_row_materialization() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[1,"a"],[1,"b"],[2,"c"]]"#.to_vec())
+                .unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::ExprBuiltin {
+                method: crate::builtins::BuiltinMethod::CountBy,
+                body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!({"1": 2, "2": 1}));
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]

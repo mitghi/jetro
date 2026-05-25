@@ -85,14 +85,16 @@ where
     /// Processes one view row: extracts the group key via the configured kernel
     /// and updates the appropriate `KeyedEntry` for that key. Returns `None`
     /// when the kernel index is out of bounds or the key cannot be extracted.
-    pub(super) fn observe<'a, V>(
+    pub(super) fn observe<'a, V, F>(
         &mut self,
         item: &V,
         stage_kernels: &[pipeline::BodyKernel],
         vm: &mut crate::vm::VM,
+        mut eval_key: F,
     ) -> Option<()>
     where
         V: ValueView<'a> + Clone + Into<Row> + 'a,
+        F: FnMut(&V, Option<&pipeline::BodyKernel>, &mut crate::vm::VM) -> Option<ViewKey>,
     {
         match self {
             Self::Keyed {
@@ -101,8 +103,7 @@ where
                 value_need,
                 entries,
             } => {
-                let key =
-                    super::eval_view_key_with_vm(item, Some(stage_kernels.get(*kernel)?), vm)?;
+                let key = eval_key(item, Some(stage_kernels.get(*kernel)?), vm)?;
                 match kind {
                     BuiltinKeyedReducer::Count => match entries.entry(key) {
                         indexmap::map::Entry::Occupied(mut entry) => {
