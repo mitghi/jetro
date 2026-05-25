@@ -870,7 +870,127 @@ where
             vm,
         );
     }
+    if matches!(sink, pipeline::ViewSinkCapability::SelectMany { .. }) {
+        return run_frontier_rows_select_many_suffix(
+            rows,
+            stages,
+            &sink,
+            source_demand,
+            stage_kernels,
+            vm,
+        );
+    }
     None
+}
+
+fn run_frontier_rows_select_many_suffix<'a, V, I>(
+    rows: I,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+    stage_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    I: IntoIterator<Item = FrontierRow<V>>,
+{
+    let pipeline::ViewSinkCapability::SelectMany {
+        n,
+        from_end,
+        source_reversed,
+    } = *sink
+    else {
+        return None;
+    };
+    let mut select_many = FrontierSelectMany::new(n, from_end, source_reversed);
+
+    if let Err(err) = drive_frontier_iter(
+        rows,
+        stages,
+        stage_kernels,
+        source_demand,
+        vm,
+        |item, _vm| Some(Ok(select_many.observe(item))),
+    )? {
+        return Some(Err(err));
+    }
+
+    Some(Ok(select_many.finish()))
+}
+
+struct FrontierSelectMany<V> {
+    n: usize,
+    from_end: bool,
+    source_reversed: bool,
+    selected: VecDeque<FrontierRow<V>>,
+}
+
+impl<V> FrontierSelectMany<V> {
+    fn new(n: usize, from_end: bool, source_reversed: bool) -> Self {
+        Self {
+            n,
+            from_end,
+            source_reversed,
+            selected: VecDeque::new(),
+        }
+    }
+}
+
+impl<'a, V> FrontierSelectMany<V>
+where
+    V: FrontierBaseView<'a>,
+{
+    fn observe(&mut self, item: &FrontierRow<V>) -> ViewRowAction {
+        if self.n == 0 {
+            return ViewRowAction::Stop;
+        }
+        if self.source_reversed {
+            if self.selected.len() == self.n {
+                self.selected.pop_back();
+            }
+            self.selected.push_front(item.clone());
+            return if self.selected.len() >= self.n {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
+            };
+        }
+        if self.from_end {
+            if self.selected.len() == self.n {
+                self.selected.pop_front();
+            }
+            self.selected.push_back(item.clone());
+            ViewRowAction::Emit
+        } else {
+            self.selected.push_back(item.clone());
+            if self.selected.len() >= self.n {
+                ViewRowAction::Stop
+            } else {
+                ViewRowAction::Emit
+            }
+        }
+    }
+
+    fn finish(self) -> Val {
+        if self.n == 0 {
+            return Val::Null;
+        }
+        if self.n == 1 {
+            return self
+                .selected
+                .into_iter()
+                .next()
+                .map(pipeline::view_kernel_view_to_owned)
+                .unwrap_or(Val::Null);
+        }
+        Val::arr(
+            self.selected
+                .into_iter()
+                .map(pipeline::view_kernel_view_to_owned)
+                .collect(),
+        )
+    }
 }
 
 fn run_frontier_rows_select_one_suffix<'a, V, I>(
@@ -5053,6 +5173,43 @@ mod tests {
         let last_json: serde_json::Value = last.into();
         assert_eq!(last_json, serde_json::json!([3, 4]));
         assert_eq!(last_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn select_many_suffix_materializes_only_retained_compound_rows() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1},{"id":2},{"id":3},{"id":4}]"#.to_vec(),
+        )
+        .unwrap();
+        let rows: Vec<_> = TapeView::root(&tape)
+            .array_iter()
+            .unwrap()
+            .map(super::FrontierRow::Borrowed)
+            .collect();
+        let mut vm = VM::new();
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_frontier_rows_specialized_sink_suffix(
+            rows,
+            &[],
+            ViewSinkCapability::SelectMany {
+                n: 2,
+                from_end: true,
+                source_reversed: false,
+            },
+            PullDemand::All,
+            &[],
+            &[],
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"id": 3}, {"id": 4}])
+        );
+        assert_eq!(tape.materialized_subtrees(), 2);
     }
 
     #[test]
