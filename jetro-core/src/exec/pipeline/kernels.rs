@@ -299,8 +299,8 @@ pub struct ObjectKernel {
 /// A single key/value entry in an `ObjectKernel`.
 #[derive(Debug, Clone)]
 pub struct ObjectKernelEntry {
-    // key name in the produced object
-    key: Arc<str>,
+    // key expression in the produced object
+    key: ObjectKernelKey,
     // kernel used to compute the value for this key
     value: BodyKernel,
     // optional guard; falsy skips this entry
@@ -309,6 +309,15 @@ pub struct ObjectKernelEntry {
     optional: bool,
     // when true, null values are omitted regardless of the optional flag
     omit_null: bool,
+}
+
+/// Static or computed object-key expression for `ObjectKernel`.
+#[derive(Debug, Clone)]
+pub enum ObjectKernelKey {
+    /// A statically known key, eligible for uniform columnar output.
+    Static(Arc<str>),
+    /// A computed key evaluated against the current row and coerced via `val_to_key`.
+    Dynamic(BodyKernel),
 }
 
 /// Positional selector used by `BodyKernel::ArraySelect`.
@@ -388,13 +397,22 @@ impl ObjectKernel {
     pub(crate) fn keys(&self) -> Arc<[Arc<str>]> {
         self.entries
             .iter()
-            .map(|entry| Arc::clone(&entry.key))
+            .filter_map(|entry| entry.static_key().cloned())
             .collect::<Vec<_>>()
             .into()
     }
 
     pub(crate) fn entries(&self) -> &[ObjectKernelEntry] {
         &self.entries
+    }
+
+    #[inline]
+    pub(crate) fn has_static_layout(&self) -> bool {
+        !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.key, ObjectKernelKey::Static(_)))
     }
 
     /// Evaluates each entry against `item` using caller-owned VM state, appending to `cells`;
@@ -416,6 +434,10 @@ impl ObjectKernel {
                     return false;
                 }
             }
+            if !matches!(entry.key, ObjectKernelKey::Static(_)) {
+                cells.truncate(start);
+                return false;
+            }
             let value = eval_native_kernel_with_vm(&entry.value, item, vm).unwrap_or(Val::Null);
             if (entry.optional || entry.omit_null) && value.is_null() {
                 cells.truncate(start);
@@ -436,19 +458,33 @@ impl ObjectKernel {
     /// Returns the source-row field payload needed to evaluate every value entry.
     pub(crate) fn field_demand(&self) -> FieldDemand {
         self.entries.iter().fold(FieldDemand::None, |need, entry| {
-            need.merge(entry.value.field_demand()).merge(
-                entry
-                    .cond
-                    .as_ref()
-                    .map(BodyKernel::field_demand)
-                    .unwrap_or(FieldDemand::None),
-            )
+            need.merge(entry.key.field_demand())
+                .merge(entry.value.field_demand())
+                .merge(
+                    entry
+                        .cond
+                        .as_ref()
+                        .map(BodyKernel::field_demand)
+                        .unwrap_or(FieldDemand::None),
+                )
         })
     }
 }
 
 impl ObjectKernelEntry {
+    pub(crate) fn static_key(&self) -> Option<&Arc<str>> {
+        match &self.key {
+            ObjectKernelKey::Static(key) => Some(key),
+            ObjectKernelKey::Dynamic(_) => None,
+        }
+    }
+
     pub(crate) fn key(&self) -> &Arc<str> {
+        self.static_key()
+            .expect("dynamic object keys do not have a static key")
+    }
+
+    pub(crate) fn key_kernel(&self) -> &ObjectKernelKey {
         &self.key
     }
 
@@ -473,12 +509,35 @@ impl ObjectKernelEntry {
     }
 }
 
+impl ObjectKernelKey {
+    fn field_demand(&self) -> FieldDemand {
+        match self {
+            Self::Static(_) => FieldDemand::None,
+            Self::Dynamic(kernel) => kernel.field_demand(),
+        }
+    }
+
+    fn is_view_native(&self) -> bool {
+        match self {
+            Self::Static(_) => true,
+            Self::Dynamic(kernel) => kernel.is_view_native(),
+        }
+    }
+
+    fn mentions_any_field_like_ident(&self, names: &[Arc<str>]) -> bool {
+        match self {
+            Self::Static(_) => false,
+            Self::Dynamic(kernel) => kernel.mentions_any_field_like_ident(names),
+        }
+    }
+}
+
 fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
     let mut entries = Vec::with_capacity(fields.len());
     for field in fields {
         let (key, value, cond, optional, omit_null) = match field {
             ObjField::Short(name) => (
-                Arc::from(name.as_str()),
+                ObjectKernelKey::Static(Arc::from(name.as_str())),
                 BodyKernel::FieldRead(Arc::from(name.as_str())),
                 None,
                 false,
@@ -504,7 +563,21 @@ fn classify_object_expr(fields: &[ObjField]) -> BodyKernel {
                     }
                     None => None,
                 };
-                (Arc::from(key.as_str()), value, cond, *optional, false)
+                (
+                    ObjectKernelKey::Static(Arc::from(key.as_str())),
+                    value,
+                    cond,
+                    *optional,
+                    false,
+                )
+            }
+            ObjField::Dynamic { key, val } => {
+                let key = BodyKernel::classify_expr(key);
+                let value = BodyKernel::classify_expr(val);
+                if matches!(key, BodyKernel::Generic) || matches!(value, BodyKernel::Generic) {
+                    return BodyKernel::Generic;
+                }
+                (ObjectKernelKey::Dynamic(key), value, None, false, false)
             }
             _ => return BodyKernel::Generic,
         };
@@ -964,16 +1037,14 @@ impl BodyKernel {
                 FStringKernelPart::Lit(_) => false,
                 FStringKernelPart::Interp(kernel) => kernel.mentions_any_field_like_ident(names),
             }),
-            Self::Object(object) => object
-                .entries
-                .iter()
-                .any(|entry| {
-                    entry.value.mentions_any_field_like_ident(names)
-                        || entry
-                            .cond
-                            .as_ref()
-                            .is_some_and(|cond| cond.mentions_any_field_like_ident(names))
-                }),
+            Self::Object(object) => object.entries.iter().any(|entry| {
+                entry.key.mentions_any_field_like_ident(names)
+                    || entry.value.mentions_any_field_like_ident(names)
+                    || entry
+                        .cond
+                        .as_ref()
+                        .is_some_and(|cond| cond.mentions_any_field_like_ident(names))
+            }),
             Self::Array(items) => items
                 .iter()
                 .any(|item| item.mentions_any_field_like_ident(names)),
@@ -1022,13 +1093,11 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
             }
-            Self::Object(object) => object
-                .entries
-                .iter()
-                .all(|entry| {
-                    entry.value.is_view_native()
-                        && entry.cond.as_ref().is_none_or(BodyKernel::is_view_native)
-                }),
+            Self::Object(object) => object.entries.iter().all(|entry| {
+                entry.key.is_view_native()
+                    && entry.value.is_view_native()
+                    && entry.cond.as_ref().is_none_or(BodyKernel::is_view_native)
+            }),
             Self::Array(items) => items.iter().all(Self::is_view_native),
             Self::NestedArrayReducer {
                 source,
@@ -1085,7 +1154,9 @@ impl BodyKernel {
     /// Returns the `CollectLayout` hint indicating whether outputs form a uniform-object or generic collection.
     pub(crate) fn collect_layout(&self) -> CollectLayout<'_> {
         match self {
-            Self::Object(object) if object.len() > 0 => CollectLayout::UniformObject(object),
+            Self::Object(object) if object.has_static_layout() => {
+                CollectLayout::UniformObject(object)
+            }
             _ => CollectLayout::Values,
         }
     }
@@ -1144,7 +1215,7 @@ impl BodyKernel {
                 for entry in entries.iter() {
                     let (key, value, cond, optional, omit_null) = match entry {
                         crate::vm::CompiledObjEntry::Short { name, .. } => (
-                            Arc::clone(name),
+                            ObjectKernelKey::Static(Arc::clone(name)),
                             BodyKernel::FieldRead(Arc::clone(name)),
                             None,
                             false,
@@ -1170,7 +1241,13 @@ impl BodyKernel {
                                 }
                                 None => None,
                             };
-                            (Arc::clone(key), value, cond, *optional, false)
+                            (
+                                ObjectKernelKey::Static(Arc::clone(key)),
+                                value,
+                                cond,
+                                *optional,
+                                false,
+                            )
                         }
                         crate::vm::CompiledObjEntry::KvPath {
                             key,
@@ -1181,7 +1258,23 @@ impl BodyKernel {
                             let Some(value) = classify_kv_path(steps) else {
                                 return Self::Generic;
                             };
-                            (Arc::clone(key), value, None, *optional, false)
+                            (
+                                ObjectKernelKey::Static(Arc::clone(key)),
+                                value,
+                                None,
+                                *optional,
+                                false,
+                            )
+                        }
+                        crate::vm::CompiledObjEntry::Dynamic { key, val } => {
+                            let key = BodyKernel::classify(key);
+                            let value = BodyKernel::classify(val);
+                            if matches!(key, BodyKernel::Generic)
+                                || matches!(value, BodyKernel::Generic)
+                            {
+                                return Self::Generic;
+                            }
+                            (ObjectKernelKey::Dynamic(key), value, None, false, false)
                         }
                         _ => return Self::Generic,
                     };
@@ -2090,11 +2183,17 @@ where
                 continue;
             }
         }
+        let key = match &entry.key {
+            ObjectKernelKey::Static(key) => Arc::clone(key),
+            ObjectKernelKey::Dynamic(kernel) => {
+                Arc::from(crate::util::val_to_key(&eval(kernel)?).as_str())
+            }
+        };
         let value = eval(&entry.value)?;
         if (entry.optional || entry.omit_null) && value.is_null() {
             continue;
         }
-        pairs.push((Arc::clone(&entry.key), value));
+        pairs.push((key, value));
     }
     Ok(Val::ObjSmall(pairs.into()))
 }
@@ -2752,6 +2851,14 @@ where
                         continue;
                     }
                 }
+                let key = match &entry.key {
+                    ObjectKernelKey::Static(key) => Arc::clone(key),
+                    ObjectKernelKey::Dynamic(kernel) => {
+                        let value =
+                            view_kernel_value_to_owned(eval_view_kernel_inner(kernel, item, vm)?);
+                        Arc::from(crate::util::val_to_key(&value).as_str())
+                    }
+                };
                 let value = match eval_view_kernel_inner(&entry.value, item, vm)? {
                     ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
                     ViewKernelValue::Owned(value) => value,
@@ -2759,7 +2866,7 @@ where
                 if (entry.optional || entry.omit_null) && value.is_null() {
                     continue;
                 }
-                pairs.push((Arc::clone(&entry.key), value));
+                pairs.push((key, value));
             }
             Some(ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }
@@ -2947,7 +3054,10 @@ mod tests {
     use crate::parse::ast::BinOp;
     use crate::parse::parser::parse;
 
-    use super::{eval_view_kernel, BodyKernel, FStringKernel, FStringKernelPart, ViewKernelValue};
+    use super::{
+        eval_view_kernel, BodyKernel, CollectLayout, FStringKernel, FStringKernelPart,
+        ObjectKernelKey, ViewKernelValue,
+    };
 
     fn key_call(method: BuiltinMethod, key: &str) -> BodyKernel {
         BodyKernel::BuiltinCall {
@@ -3430,7 +3540,37 @@ mod tests {
         let val = Val::from(&json);
         let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
             .expect("object projection output");
-        assert_eq!(serde_json::Value::from(out), serde_json::json!({"tag":"sf"}));
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"tag":"sf"})
+        );
+    }
+
+    #[test]
+    fn dynamic_object_key_projection_stays_view_native() {
+        let expr = parse(r#"{[@.kind]: value}"#).expect("parse dynamic object key projection");
+        let program = Compiler::compile(&expr, "dynamic-object-key");
+        let kernel = BodyKernel::classify(&program);
+
+        let BodyKernel::Object(object) = &kernel else {
+            panic!("expected object kernel, got {kernel:#?}");
+        };
+        assert!(!object.has_static_layout());
+        assert!(matches!(
+            object.entries()[0].key_kernel(),
+            ObjectKernelKey::Dynamic(_)
+        ));
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+        assert!(matches!(kernel.collect_layout(), CollectLayout::Values));
+
+        let json = serde_json::json!({"kind":"isbn","value":"978"});
+        let val = Val::from(&json);
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
+            .expect("dynamic object projection output");
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"isbn":"978"})
+        );
     }
 
     #[test]
@@ -3546,7 +3686,10 @@ mod tests {
             .expect("field-chain nested plan should expose cached view plan");
 
         assert!(std::ptr::eq(first, second));
-        assert!(matches!(first.source(), super::NestedViewSource::FieldChain(_)));
+        assert!(matches!(
+            first.source(),
+            super::NestedViewSource::FieldChain(_)
+        ));
         assert!(first.body().can_run_with_view());
     }
 

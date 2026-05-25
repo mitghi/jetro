@@ -3825,11 +3825,18 @@ where
                         continue;
                     }
                 }
+                let key = match entry.key_kernel() {
+                    pipeline::ObjectKernelKey::Static(key) => Arc::clone(key),
+                    pipeline::ObjectKernelKey::Dynamic(kernel) => {
+                        let value = eval_frontier_value_kernel_with_vm(kernel, item, vm)?;
+                        Arc::from(crate::util::val_to_key(&value).as_str())
+                    }
+                };
                 let value = eval_frontier_value_kernel_with_vm(entry.value(), item, vm)?;
                 if entry.omits_null() && value.is_null() {
                     continue;
                 }
-                pairs.push((Arc::clone(entry.key()), value));
+                pairs.push((key, value));
             }
             Some(pipeline::ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
         }

@@ -73,7 +73,7 @@ pub(crate) use kernels::{
     eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm,
     eval_view_numeric_kernel_value, view_kernel_view_to_owned, ArraySelector, CollectLayout,
     FStringKernelPart, NestedPlanKernel, NestedViewPlan, NestedViewSource, ObjectKernel,
-    ViewKernelValue,
+    ObjectKernelKey, ViewKernelValue,
 };
 pub use kernels::{eval_cmp_op, BodyKernel};
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};

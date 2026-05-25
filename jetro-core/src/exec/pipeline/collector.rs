@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::data::value::{ObjVecData, Val};
 use crate::data::view::ValueView;
 
-use super::{BodyKernel, CollectLayout, ObjectKernel, RowProgram};
+use super::{BodyKernel, CollectLayout, ObjectKernel, ObjectKernelKey, RowProgram};
 
 /// Output collector for the terminal stage of a pipeline.
 pub(crate) enum TerminalCollector<'a> {
@@ -191,11 +191,18 @@ where
                 continue;
             }
         }
+        let key = match entry.key_kernel() {
+            ObjectKernelKey::Static(key) => Arc::clone(key),
+            ObjectKernelKey::Dynamic(kernel) => {
+                let value = eval(kernel, item, vm)?;
+                Arc::from(crate::util::val_to_key(&value).as_str())
+            }
+        };
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
             continue;
         }
-        pairs.push((Arc::clone(entry.key()), value));
+        pairs.push((key, value));
     }
     Some(Val::ObjSmall(pairs.into()))
 }
@@ -222,6 +229,10 @@ where
         }
         let value = eval(entry.value(), item, vm)?;
         if entry.omits_null() && value.is_null() {
+            cells.truncate(start);
+            return Some(false);
+        }
+        if !matches!(entry.key_kernel(), ObjectKernelKey::Static(_)) {
             cells.truncate(start);
             return Some(false);
         }
