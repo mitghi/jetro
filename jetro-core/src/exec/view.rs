@@ -356,6 +356,46 @@ where
         return Some(Ok(result));
     }
 
+    if let Some(predicate_kernel) = find_one_predicate_kernel(&sink) {
+        let mut find_one = FrontierFindOne::new(predicate_kernel);
+        let result = if source_reversed {
+            if let Some(result) = drive_reversed_direct_position(
+                &source,
+                &suffix.stages,
+                &body.stage_kernels,
+                drive_demand,
+                vm,
+                |item, vm| find_one.observe(item, &body.sink_kernels, vm),
+            ) {
+                result
+            } else {
+                let items = source.array_iter_rev()?;
+                drive_view_iter(
+                    items,
+                    &suffix.stages,
+                    &body.stage_kernels,
+                    drive_demand,
+                    vm,
+                    |item, vm| find_one.observe(item, &body.sink_kernels, vm),
+                )?
+            }
+        } else {
+            drive_view_frontier(
+                source,
+                pipeline::SourceCapabilities::VIEW_ARRAY,
+                &suffix.stages,
+                &body.stage_kernels,
+                source_demand,
+                vm,
+                |item, vm| find_one.observe(item, &body.sink_kernels, vm),
+            )?
+        };
+        if let Err(err) = result {
+            return Some(Err(err));
+        }
+        return Some(find_one.finish_result());
+    }
+
     if let Some((op, key_kernel)) = sink.arg_extreme_contract() {
         let mut extreme = FrontierArgExtreme::new(op, key_kernel);
         let result = if source_reversed {
@@ -578,6 +618,17 @@ fn run_buffered_rows_view_suffix<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
+    if let Some(out) = run_frontier_rows_find_one_suffix(
+        rows.iter().cloned(),
+        &suffix.stages,
+        &sink,
+        source_demand,
+        &body.stage_kernels,
+        &body.sink_kernels,
+        vm,
+    ) {
+        return Some(out);
+    }
     if let Some(out) = run_frontier_rows_arg_extreme_suffix(
         rows.iter().cloned(),
         &suffix.stages,
@@ -744,6 +795,91 @@ where
     Some(Ok(extreme.finish()))
 }
 
+fn run_frontier_rows_find_one_suffix<'a, V, I>(
+    rows: I,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+    source_demand: PullDemand,
+    stage_kernels: &[pipeline::BodyKernel],
+    sink_kernels: &[pipeline::BodyKernel],
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    I: IntoIterator<Item = FrontierRow<V>>,
+{
+    let predicate_kernel = find_one_predicate_kernel(sink)?;
+    let mut find_one = FrontierFindOne::new(predicate_kernel);
+
+    if let Err(err) = drive_frontier_iter(
+        rows,
+        stages,
+        stage_kernels,
+        source_demand,
+        vm,
+        |item, vm| find_one.observe(item, sink_kernels, vm),
+    )? {
+        return Some(Err(err));
+    }
+
+    Some(find_one.finish_result())
+}
+
+fn find_one_predicate_kernel(sink: &pipeline::ViewSinkCapability) -> Option<usize> {
+    match sink {
+        pipeline::ViewSinkCapability::Predicate {
+            op: crate::builtins::BuiltinPredicateSink::FindOne,
+            predicate_kernel,
+        } => Some(*predicate_kernel),
+        _ => None,
+    }
+}
+
+struct FrontierFindOne<V> {
+    predicate_kernel: usize,
+    matched_row: Option<FrontierRow<V>>,
+}
+
+impl<V> FrontierFindOne<V> {
+    fn new(predicate_kernel: usize) -> Self {
+        Self {
+            predicate_kernel,
+            matched_row: None,
+        }
+    }
+}
+
+impl<'a, V> FrontierFindOne<V>
+where
+    V: FrontierBaseView<'a>,
+{
+    fn finish_result(self) -> Result<Val, EvalError> {
+        self.matched_row
+            .map(pipeline::view_kernel_view_to_owned)
+            .ok_or_else(|| EvalError("find_one: expected exactly one element, got 0".into()))
+    }
+
+    fn observe(
+        &mut self,
+        item: &FrontierRow<V>,
+        sink_kernels: &[pipeline::BodyKernel],
+        vm: &mut VM,
+    ) -> Option<Result<ViewRowAction, EvalError>> {
+        let kernel = sink_kernels.get(self.predicate_kernel)?;
+        let matched = eval_frontier_filter_kernel_with_vm(item, kernel, vm)?;
+        if !matched {
+            return Some(Ok(ViewRowAction::Skip));
+        }
+        if self.matched_row.is_some() {
+            return Some(Err(EvalError(
+                "find_one: expected exactly one element, got multiple".into(),
+            )));
+        }
+        self.matched_row = Some(item.clone());
+        Some(Ok(ViewRowAction::Emit))
+    }
+}
+
 struct FrontierArgExtreme<V> {
     op: crate::builtins::BuiltinArgExtremeSink,
     key_kernel: usize,
@@ -877,6 +1013,22 @@ where
         &body.sink,
     ) {
         return Some(Ok(result));
+    }
+
+    if let Some(predicate_kernel) = find_one_predicate_kernel(&sink) {
+        let mut find_one = FrontierFindOne::new(predicate_kernel);
+        if let Err(err) = drive_view_frontier(
+            source,
+            pipeline::SourceCapabilities::VIEW_ARRAY,
+            &capabilities.stages,
+            &body.stage_kernels,
+            source_demand,
+            vm,
+            |item, vm| find_one.observe(item, &body.sink_kernels, vm),
+        )? {
+            return Some(Err(err));
+        }
+        return Some(find_one.finish_result());
     }
 
     if let Err(err) = drive_view_frontier(
@@ -2170,6 +2322,17 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
+    if let Some(out) = run_frontier_rows_find_one_suffix(
+        rows.iter().cloned(),
+        &suffix.stages,
+        &sink,
+        source_demand,
+        &body.stage_kernels,
+        &body.sink_kernels,
+        vm,
+    ) {
+        return Some(out);
+    }
     if let Some(out) = run_frontier_rows_arg_extreme_suffix(
         rows.iter().cloned(),
         &suffix.stages,
@@ -2297,6 +2460,17 @@ where
         ordered.iter().cloned(),
         &suffix.stages,
         sink.clone(),
+        source_demand,
+        &body.stage_kernels,
+        &body.sink_kernels,
+        vm,
+    ) {
+        return Some(out);
+    }
+    if let Some(out) = run_frontier_rows_find_one_suffix(
+        ordered.iter().cloned(),
+        &suffix.stages,
+        &sink,
         source_demand,
         &body.stage_kernels,
         &body.sink_kernels,
@@ -4411,6 +4585,66 @@ mod tests {
             "find_one: expected exactly one element, got multiple"
         );
         assert_eq!(multi_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_find_one_keeps_compound_match_borrowed_until_finish() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"hit":true},{"id":2,"hit":false}]"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::FindOne,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("hit"))],
+        };
+
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"id": 1, "hit": true})
+        );
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn view_find_one_does_not_materialize_compound_before_multiple_error() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"hit":true},{"id":2,"hit":true}]"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Predicate(PredicateSinkSpec {
+                op: BuiltinPredicateSink::FindOne,
+                predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                predicate_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::FieldRead(Arc::from("hit"))],
+        };
+
+        let err = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap_err();
+
+        assert_eq!(
+            err.0,
+            "find_one: expected exactly one element, got multiple"
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
