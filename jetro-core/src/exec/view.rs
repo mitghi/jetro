@@ -2991,10 +2991,15 @@ where
             }
         }
         pipeline::BodyKernel::CmpLit { lhs, op, lit } => {
-            let lhs = eval_frontier_value_kernel_with_vm(lhs, item, vm)?;
-            Some(pipeline::ViewKernelValue::Owned(Val::Bool(
-                pipeline::eval_cmp_op(&lhs, *op, lit),
-            )))
+            let passes = match eval_frontier_kernel_with_vm(item, lhs, vm)? {
+                pipeline::ViewKernelValue::View(view) => crate::util::json_cmp_binop(
+                    view.scalar(),
+                    *op,
+                    crate::util::JsonView::from_val(lit),
+                ),
+                pipeline::ViewKernelValue::Owned(value) => pipeline::eval_cmp_op(&value, *op, lit),
+            };
+            Some(pipeline::ViewKernelValue::Owned(Val::Bool(passes)))
         }
         pipeline::BodyKernel::Binary { lhs, op, rhs } => {
             if let Some(value) = pipeline::eval_view_numeric_kernel_value(kernel, item, vm) {
@@ -6290,6 +6295,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([21, 23]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_literal_comparison_uses_tape_scalar_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"score":9,"name":"a"},{"score":4,"name":"b"},{"score":8,"name":"c"}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Filter(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Filter,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::CmpLit {
+                lhs: Box::new(BodyKernel::FieldRead(Arc::from("score"))),
+                op: BinOp::Gt,
+                lit: Val::Int(5),
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(2));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
