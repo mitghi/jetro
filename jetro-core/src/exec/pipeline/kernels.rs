@@ -162,8 +162,16 @@ pub enum BodyKernel {
     And(Arc<[BodyKernel]>),
     /// Short-circuits through a list of predicates, returning `true` on the first success.
     Or(Arc<[BodyKernel]>),
+    /// Arithmetic negation of a view-native numeric expression.
+    Neg(Box<BodyKernel>),
     /// Boolean negation of a view-native expression.
     Not(Box<BodyKernel>),
+    /// Runtime type check over a view-native expression.
+    KindCheck {
+        expr: Box<BodyKernel>,
+        ty: crate::parse::ast::KindType,
+        negate: bool,
+    },
     /// Null coalescing: returns the first non-null expression.
     Coalesce {
         lhs: Box<BodyKernel>,
@@ -941,12 +949,32 @@ impl BodyKernel {
             Expr::FString(parts) => classify_fstring_expr(parts),
             Expr::Object(fields) => classify_object_expr(fields),
             Expr::Array(elems) => classify_array_expr(elems),
+            Expr::UnaryNeg(expr) => {
+                let kernel = Self::classify_expr(expr);
+                if matches!(kernel, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::Neg(Box::new(kernel))
+                }
+            }
             Expr::Not(expr) => {
                 let kernel = Self::classify_expr(expr);
                 if matches!(kernel, Self::Generic) {
                     Self::Generic
                 } else {
                     Self::Not(Box::new(kernel))
+                }
+            }
+            Expr::Kind { expr, ty, negate } => {
+                let kernel = Self::classify_expr(expr);
+                if matches!(kernel, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::KindCheck {
+                        expr: Box::new(kernel),
+                        ty: *ty,
+                        negate: *negate,
+                    }
                 }
             }
             Expr::Coalesce(lhs, rhs) => {
@@ -1109,7 +1137,9 @@ impl BodyKernel {
                 .fold(FieldDemand::None, |need, predicate| {
                     need.merge(predicate.field_demand())
                 }),
+            Self::Neg(kernel) => kernel.field_demand(),
             Self::Not(kernel) => kernel.field_demand(),
+            Self::KindCheck { expr, .. } => expr.field_demand(),
             Self::Coalesce { lhs, rhs } => lhs.field_demand().merge(rhs.field_demand()),
             Self::IfElse { cond, then_, else_ } => cond
                 .field_demand()
@@ -1172,7 +1202,9 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
                 .any(|predicate| predicate.mentions_any_field_like_ident(names)),
+            Self::Neg(kernel) => kernel.mentions_any_field_like_ident(names),
             Self::Not(kernel) => kernel.mentions_any_field_like_ident(names),
+            Self::KindCheck { expr, .. } => expr.mentions_any_field_like_ident(names),
             Self::Coalesce { lhs, rhs } => {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
@@ -1244,7 +1276,9 @@ impl BodyKernel {
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
             }
+            Self::Neg(kernel) => kernel.is_view_native(),
             Self::Not(kernel) => kernel.is_view_native(),
+            Self::KindCheck { expr, .. } => expr.is_view_native(),
             Self::Coalesce { lhs, rhs } => lhs.is_view_native() && rhs.is_view_native(),
             Self::IfElse { cond, then_, else_ } => {
                 cond.is_view_native() && then_.is_view_native() && else_.is_view_native()
@@ -1302,7 +1336,9 @@ impl BodyKernel {
             | Self::Match { .. }
             | Self::And(_)
             | Self::Or(_)
+            | Self::Neg(_)
             | Self::Not(_)
+            | Self::KindCheck { .. }
             | Self::IfElse { .. }
             | Self::CurrentCmpLit(_, _)
             | Self::FieldCmpLit(_, _, _)
@@ -1535,6 +1571,26 @@ impl BodyKernel {
                     BodyKernel::classify(&crate::vm::Program::new(body.to_vec(), "<not-kernel>"));
                 if !matches!(body, BodyKernel::Generic) && body.is_view_native() {
                     return Self::Not(Box::new(body));
+                }
+            }
+            [body @ .., Opcode::Neg] => {
+                let body =
+                    BodyKernel::classify(&crate::vm::Program::new(body.to_vec(), "<neg-kernel>"));
+                if !matches!(body, BodyKernel::Generic) && body.is_view_native() {
+                    return Self::Neg(Box::new(body));
+                }
+            }
+            [body @ .., Opcode::KindCheck { ty, negate }] => {
+                let body = BodyKernel::classify(&crate::vm::Program::new(
+                    body.to_vec(),
+                    "<kind-check-kernel>",
+                ));
+                if !matches!(body, BodyKernel::Generic) && body.is_view_native() {
+                    return Self::KindCheck {
+                        expr: Box::new(body),
+                        ty: *ty,
+                        negate: *negate,
+                    };
                 }
             }
             [lhs @ .., Opcode::CoalesceOp(rhs)] => {
@@ -2329,9 +2385,18 @@ fn eval_native_kernel_with_vm(
             }
             Ok(Val::Bool(false))
         }
+        BodyKernel::Neg(kernel) => match eval_native_numeric_kernel(kernel, item) {
+            Some(value) => Ok(numeric_kernel_value_to_val(neg_numeric(value))),
+            None => Err(EvalError("unary minus requires a number".into())),
+        },
         BodyKernel::Not(kernel) => Ok(Val::Bool(!crate::util::is_truthy(
             &eval_native_kernel_with_vm(kernel, item, vm)?,
         ))),
+        BodyKernel::KindCheck { expr, ty, negate } => {
+            let value = eval_native_kernel_with_vm(expr, item, vm)?;
+            let matches = crate::util::kind_matches(&value, *ty);
+            Ok(Val::Bool(if *negate { !matches } else { matches }))
+        }
         BodyKernel::Coalesce { lhs, rhs } => {
             let value = eval_native_kernel_with_vm(lhs, item, vm)?;
             if value.is_null() {
@@ -2837,6 +2902,7 @@ where
             let rhs = eval_view_numeric_kernel(rhs, item, vm)?;
             eval_numeric_binary(lhs, *op, rhs)
         }
+        BodyKernel::Neg(kernel) => eval_view_numeric_kernel(kernel, item, vm).map(neg_numeric),
         BodyKernel::Compose { first, then } => match eval_view_kernel_inner(first, item, vm)? {
             ViewKernelValue::View(view) => eval_view_numeric_kernel(then, &view, vm),
             ViewKernelValue::Owned(value) => eval_native_numeric_kernel(then, &value),
@@ -2884,6 +2950,7 @@ fn eval_native_numeric_kernel(kernel: &BodyKernel, item: &Val) -> Option<Numeric
             let rhs = eval_native_numeric_kernel(rhs, item)?;
             eval_numeric_binary(lhs, *op, rhs)
         }
+        BodyKernel::Neg(kernel) => eval_native_numeric_kernel(kernel, item).map(neg_numeric),
         _ => None,
     }
 }
@@ -2908,6 +2975,28 @@ fn numeric_from_val(value: &Val) -> Option<NumericKernelValue> {
         Val::Float(value) => Some(NumericKernelValue::Float(*value)),
         _ => None,
     }
+}
+
+#[inline]
+fn neg_numeric(value: NumericKernelValue) -> NumericKernelValue {
+    match value {
+        NumericKernelValue::Int(value) => NumericKernelValue::Int(-value),
+        NumericKernelValue::Float(value) => NumericKernelValue::Float(-value),
+    }
+}
+
+#[inline]
+fn json_view_matches_kind(view: JsonView<'_>, ty: crate::parse::ast::KindType) -> bool {
+    use crate::parse::ast::KindType;
+    matches!(
+        (view, ty),
+        (JsonView::Null, KindType::Null)
+            | (JsonView::Bool(_), KindType::Bool)
+            | (JsonView::Int(_) | JsonView::UInt(_) | JsonView::Float(_), KindType::Number)
+            | (JsonView::Str(_), KindType::Str)
+            | (JsonView::ArrayLen(_), KindType::Array)
+            | (JsonView::ObjectLen(_), KindType::Object)
+    )
 }
 
 fn eval_numeric_binary(
@@ -3383,12 +3472,27 @@ where
             }
             Some(ViewKernelValue::Owned(Val::Bool(false)))
         }
+        BodyKernel::Neg(kernel) => eval_view_numeric_kernel(kernel, item, vm)
+            .map(neg_numeric)
+            .map(numeric_kernel_value_to_val)
+            .map(ViewKernelValue::Owned),
         BodyKernel::Not(kernel) => {
             let passes = match eval_view_kernel_inner(kernel, item, vm)? {
                 ViewKernelValue::View(view) => view.scalar().truthy(),
                 ViewKernelValue::Owned(value) => crate::util::is_truthy(&value),
             };
             Some(ViewKernelValue::Owned(Val::Bool(!passes)))
+        }
+        BodyKernel::KindCheck { expr, ty, negate } => {
+            let matches = match eval_view_kernel_inner(expr, item, vm)? {
+                ViewKernelValue::View(view) => json_view_matches_kind(view.scalar(), *ty),
+                ViewKernelValue::Owned(value) => crate::util::kind_matches(&value, *ty),
+            };
+            Some(ViewKernelValue::Owned(Val::Bool(if *negate {
+                !matches
+            } else {
+                matches
+            })))
         }
         BodyKernel::Coalesce { lhs, rhs } => match eval_view_kernel_inner(lhs, item, vm)? {
             ViewKernelValue::View(view) if !matches!(view.scalar(), JsonView::Null) => {
@@ -3875,6 +3979,27 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"ok": true, "label": "Ada", "tier": "high"})
+        );
+    }
+
+    #[test]
+    fn neg_and_kind_kernels_run_on_value_views() {
+        let expr =
+            parse(r#"{sort_key: -score, numeric: score kind number, named: name kind string}"#)
+                .expect("parse neg and kind projection");
+        let program = Compiler::compile(&expr, "neg-kind");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"score": 42, "name": "Ada"}));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("neg and kind projection output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"sort_key": -42, "numeric": true, "named": true})
         );
     }
 

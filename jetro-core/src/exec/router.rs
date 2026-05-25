@@ -2520,6 +2520,29 @@ mod tests {
     }
 
     #[test]
+    fn view_neg_and_kind_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"score":42,"name":"Ada"},{"score":7,"name":null}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.map({sort_key: -score, numeric: score kind number, named: name kind string})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"sort_key": -42, "numeric": true, "named": true},
+                {"sort_key": -7, "numeric": true, "named": false}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_sort_string_predicate_map_last_stays_borrowed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"name":"prod","score":100},{"name":"skip_test","score":90},{"name":"answer","score":80}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
