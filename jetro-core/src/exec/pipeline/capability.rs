@@ -965,6 +965,15 @@ impl ViewSinkCapability {
             _ => None,
         }
     }
+
+    /// Returns the arg-extreme sink contract when this sink selects a row by a
+    /// view-native key program.
+    pub(crate) fn arg_extreme_contract(&self) -> Option<(BuiltinArgExtremeSink, usize)> {
+        match self {
+            Self::ArgExtreme { op, key_kernel } => Some((*op, *key_kernel)),
+            _ => None,
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -1408,6 +1417,27 @@ mod tests {
             ViewSinkCapability::Collect.constant_predicate_cardinality_contract(),
             None
         );
+    }
+
+    #[test]
+    fn view_sink_capability_describes_arg_extreme_contract() {
+        assert_eq!(
+            ViewSinkCapability::ArgExtreme {
+                op: BuiltinArgExtremeSink::MaxBy,
+                key_kernel: 7,
+            }
+            .arg_extreme_contract(),
+            Some((BuiltinArgExtremeSink::MaxBy, 7))
+        );
+        assert_eq!(
+            ViewSinkCapability::ArgExtreme {
+                op: BuiltinArgExtremeSink::MinBy,
+                key_kernel: 8,
+            }
+            .arg_extreme_contract(),
+            Some((BuiltinArgExtremeSink::MinBy, 8))
+        );
+        assert_eq!(ViewSinkCapability::Collect.arg_extreme_contract(), None);
     }
 
     #[test]

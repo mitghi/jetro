@@ -750,9 +750,7 @@ where
     V: FrontierBaseView<'a>,
 {
     let capabilities = pipeline::view_capabilities(body)?;
-    let pipeline::ViewSinkCapability::ArgExtreme { op, key_kernel } = capabilities.sink else {
-        return None;
-    };
+    let (op, key_kernel) = capabilities.sink.arg_extreme_contract()?;
     if deterministic_prefix_is_empty(&source, &capabilities.stages, &body.stage_kernels) {
         return Some(Ok(Val::Null));
     }
