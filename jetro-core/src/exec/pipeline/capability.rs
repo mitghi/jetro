@@ -229,6 +229,12 @@ pub(crate) enum SourceIndexedAccess {
 }
 
 impl SourceAccessMode {
+    /// Returns true when this access mode traverses source rows in reverse
+    /// physical order.
+    pub(crate) fn is_reverse(self) -> bool {
+        matches!(self, Self::Reverse { .. })
+    }
+
     /// Demand that should be handed to a row iterator after this access mode has been selected.
     pub(crate) fn iterator_demand(self, requested: PullDemand) -> PullDemand {
         match self {
@@ -555,6 +561,8 @@ mod source_capability_tests {
 
     #[test]
     fn access_mode_rewrites_iterator_demand_after_fallback_choice() {
+        assert!(SourceAccessMode::Reverse { outputs: 2 }.is_reverse());
+        assert!(!SourceAccessMode::Forward.is_reverse());
         assert_eq!(
             SourceAccessMode::Reverse { outputs: 2 }.iterator_demand(PullDemand::LastInput(10)),
             PullDemand::LastInput(2)

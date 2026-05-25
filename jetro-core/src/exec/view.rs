@@ -676,7 +676,7 @@ where
     );
     let sink = capabilities.sink.for_source_demand(
         source_demand,
-        matches!(source_access, pipeline::SourceAccessMode::Reverse { .. }),
+        source_access.is_reverse(),
     );
     let sink = match resolve_view_sink(sink, base_env, vm) {
         Some(Ok(sink)) => sink,
