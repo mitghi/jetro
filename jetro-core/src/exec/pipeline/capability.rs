@@ -1179,7 +1179,7 @@ impl ViewSinkCapability {
             Self::Nth { .. } => ViewMaterialization::SinkFinalRow,
             Self::Predicate { op, .. } => op.view_materialization(),
             Self::Membership { target, .. } => {
-                if target.is_scalar_literal() {
+                if target.is_literal() {
                     ViewMaterialization::Never
                 } else {
                     ViewMaterialization::SinkInputRows
@@ -1409,11 +1409,8 @@ pub(crate) enum ViewMembershipTarget {
 }
 
 impl ViewMembershipTarget {
-    pub(crate) fn is_scalar_literal(&self) -> bool {
-        match self {
-            Self::Literal(value) => target_is_scalar(value),
-            Self::Program(_) => false,
-        }
+    pub(crate) fn is_literal(&self) -> bool {
+        matches!(self, Self::Literal(_))
     }
 }
 
@@ -1424,13 +1421,6 @@ impl From<&MembershipSinkTarget> for ViewMembershipTarget {
             MembershipSinkTarget::Program(program) => Self::Program(std::sync::Arc::clone(program)),
         }
     }
-}
-
-fn target_is_scalar(value: &Val) -> bool {
-    matches!(
-        value,
-        Val::Null | Val::Bool(_) | Val::Int(_) | Val::Float(_) | Val::Str(_) | Val::StrSlice(_)
-    )
 }
 
 /// Computes `ViewPipelineCapabilities` for `body`; returns `None` when any stage or the sink is incompatible.
@@ -1678,7 +1668,7 @@ mod tests {
                 target: ViewMembershipTarget::Literal(Val::arr(vec![Val::Int(3)])),
             }
             .materialization(),
-            ViewMaterialization::SinkInputRows
+            ViewMaterialization::Never
         );
         assert_eq!(
             ViewSinkCapability::ArgExtreme {
@@ -1987,6 +1977,15 @@ mod tests {
                 target: ViewMembershipTarget::Literal(Val::Int(9)),
             }
         ));
+        assert_eq!(
+            ViewSinkCapability::Membership {
+                op: BuiltinMembershipSink::Includes,
+                target: ViewMembershipTarget::Program(program),
+            }
+            .with_resolved_membership_target(Val::arr(vec![Val::Int(9)]))
+            .materialization(),
+            ViewMaterialization::Never
+        );
         assert!(ViewSinkCapability::Membership {
             op: BuiltinMembershipSink::Index,
             target: ViewMembershipTarget::Literal(Val::Int(1)),
