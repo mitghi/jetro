@@ -762,6 +762,37 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_root_path_advertises_view_and_source_backends() {
+        let node = PlanNode::Pipeline {
+            source: PipelinePlanSource::RootPath {
+                steps: Arc::from([
+                    PhysicalPathStep::Field(Arc::from("groups")),
+                    PhysicalPathStep::Index(0),
+                    PhysicalPathStep::Field(Arc::from("rows")),
+                ]),
+            },
+            body: empty_body(),
+        };
+        let backends = node.backends();
+        assert!(backends.contains(BackendSet::TAPE_VIEW));
+        assert!(backends.contains(BackendSet::TAPE_ROWS));
+        assert!(backends.contains(BackendSet::VAL_VIEW));
+        assert!(backends.contains(BackendSet::MATERIALIZED_SOURCE));
+        assert!(backends.contains(BackendSet::INTERPRETED));
+        assert!(!backends.contains(BackendSet::FAST_CHILDREN));
+        assert_eq!(
+            node.backend_preferences(),
+            &[
+                BackendPreference::TapeView,
+                BackendPreference::TapeRows,
+                BackendPreference::MaterializedSource,
+                BackendPreference::ValView,
+                BackendPreference::Interpreted,
+            ]
+        );
+    }
+
+    #[test]
     fn query_plan_stores_backend_preferences_per_node() {
         let plan = QueryPlan::from_nodes(
             NodeId(0),

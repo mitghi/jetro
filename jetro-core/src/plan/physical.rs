@@ -1509,6 +1509,37 @@ mod tests {
     }
 
     #[test]
+    fn val_context_prefers_val_backend_for_top_level_root_path_pipeline() {
+        let plan =
+            plan_query_with_context(r#"$.groups[0].rows.map(id)"#, PlanningContext::val());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[BackendPreference::ValView, BackendPreference::Interpreted]
+        );
+    }
+
+    #[test]
+    fn byte_context_prefers_tape_rows_for_root_path_pipeline() {
+        let plan =
+            plan_query_with_context(r#"$.groups[0].rows.map(id)"#, PlanningContext::bytes());
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        assert_eq!(
+            plan.backend_preferences(*root),
+            &[
+                BackendPreference::TapeView,
+                BackendPreference::TapeRows,
+                BackendPreference::MaterializedSource,
+                BackendPreference::ValView,
+            ]
+        );
+    }
+
+    #[test]
     fn object_shape_facts_aggregate_tape_pipeline_and_root_path_children() {
         let plan = plan_query_with_context(
             r#"{"a": $.rows.filter(score > 10).take(1), "b": $.meta.version}"#,
