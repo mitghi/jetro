@@ -1208,50 +1208,45 @@ where
     }
     let access =
         source_capabilities.choose_view_access_for_kernels(source_demand, stages, stage_kernels);
-    match access {
-        pipeline::SourceAccessMode::Reverse { .. } => {
-            let items = source.array_iter_rev()?;
-            return drive_view_iter(
-                items,
-                stages,
-                stage_kernels,
-                access.iterator_demand(source_demand),
-                vm,
-                observe,
-            );
-        }
-        pipeline::SourceAccessMode::Indexed(_)
-        | pipeline::SourceAccessMode::IndexedFromEnd(_)
-        | pipeline::SourceAccessMode::IndexedSuffix(_) => {
-            let len = match source.scalar() {
-                JsonView::ArrayLen(len) => len,
-                _ => return None,
-            };
-            return match access.indexed_access(len)? {
-                pipeline::SourceIndexedAccess::Single(idx) => {
-                    let items = std::iter::once(source.index(idx as i64));
-                    drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
-                }
-                pipeline::SourceIndexedAccess::Range { start, end } => {
-                    let indexed_source = source.clone();
-                    let items = (start..end).map(move |idx| indexed_source.index(idx as i64));
-                    drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
-                }
-                pipeline::SourceIndexedAccess::Empty => Some(Ok(())),
-            };
-        }
-        pipeline::SourceAccessMode::ForwardBounded(inputs) => {
-            let items = source.array_iter()?;
-            return drive_view_iter(
-                items,
-                stages,
-                stage_kernels,
-                PullDemand::FirstInput(inputs),
-                vm,
-                observe,
-            );
-        }
-        pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback => {}
+    if access.is_reverse() {
+        let items = source.array_iter_rev()?;
+        return drive_view_iter(
+            items,
+            stages,
+            stage_kernels,
+            access.iterator_demand(source_demand),
+            vm,
+            observe,
+        );
+    }
+    if access.is_direct_indexed() {
+        let len = match source.scalar() {
+            JsonView::ArrayLen(len) => len,
+            _ => return None,
+        };
+        return match access.indexed_access(len)? {
+            pipeline::SourceIndexedAccess::Single(idx) => {
+                let items = std::iter::once(source.index(idx as i64));
+                drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
+            }
+            pipeline::SourceIndexedAccess::Range { start, end } => {
+                let indexed_source = source.clone();
+                let items = (start..end).map(move |idx| indexed_source.index(idx as i64));
+                drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
+            }
+            pipeline::SourceIndexedAccess::Empty => Some(Ok(())),
+        };
+    }
+    if let Some(inputs) = access.forward_bound() {
+        let items = source.array_iter()?;
+        return drive_view_iter(
+            items,
+            stages,
+            stage_kernels,
+            PullDemand::FirstInput(inputs),
+            vm,
+            observe,
+        );
     }
     let items = source.array_iter()?;
     let iter_demand = access.iterator_demand(source_demand);

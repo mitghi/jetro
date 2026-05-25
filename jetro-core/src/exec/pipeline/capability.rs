@@ -235,6 +235,23 @@ impl SourceAccessMode {
         matches!(self, Self::Reverse { .. })
     }
 
+    /// Returns true when this access mode needs source cardinality to resolve
+    /// one or more direct child indexes.
+    pub(crate) fn is_direct_indexed(self) -> bool {
+        matches!(
+            self,
+            Self::Indexed(_) | Self::IndexedFromEnd(_) | Self::IndexedSuffix(_)
+        )
+    }
+
+    /// Returns the bounded forward input count selected by this access mode.
+    pub(crate) fn forward_bound(self) -> Option<usize> {
+        match self {
+            Self::ForwardBounded(inputs) => Some(inputs),
+            _ => None,
+        }
+    }
+
     /// Demand that should be handed to a row iterator after this access mode has been selected.
     pub(crate) fn iterator_demand(self, requested: PullDemand) -> PullDemand {
         match self {
@@ -563,6 +580,11 @@ mod source_capability_tests {
     fn access_mode_rewrites_iterator_demand_after_fallback_choice() {
         assert!(SourceAccessMode::Reverse { outputs: 2 }.is_reverse());
         assert!(!SourceAccessMode::Forward.is_reverse());
+        assert!(SourceAccessMode::IndexedFromEnd(0).is_direct_indexed());
+        assert!(SourceAccessMode::IndexedSuffix(2).is_direct_indexed());
+        assert!(!SourceAccessMode::ForwardBounded(2).is_direct_indexed());
+        assert_eq!(SourceAccessMode::ForwardBounded(3).forward_bound(), Some(3));
+        assert_eq!(SourceAccessMode::Forward.forward_bound(), None);
         assert_eq!(
             SourceAccessMode::Reverse { outputs: 2 }.iterator_demand(PullDemand::LastInput(10)),
             PullDemand::LastInput(2)
