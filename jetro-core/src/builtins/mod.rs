@@ -932,6 +932,8 @@ pub enum BuiltinViewValueProjection {
     Invert,
     /// Recursively merge an owned value argument into the receiver value.
     DeepMerge,
+    /// Delete a nested dot/bracket path from an object or array value.
+    DelPath,
     /// Flatten nested object keys into a separator-joined object.
     FlattenKeys,
     /// Rebuild nested object keys from a separator-joined object.
@@ -1010,6 +1012,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Capitalize
             | BuiltinViewValueProjection::Center
             | BuiltinViewValueProjection::Dedent
+            | BuiltinViewValueProjection::DelPath
             | BuiltinViewValueProjection::DeepMerge
             | BuiltinViewValueProjection::Defaults
             | BuiltinViewValueProjection::FlattenKeys

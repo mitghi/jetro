@@ -3036,7 +3036,12 @@ impl Builtin for DelPath {
     const METHOD: BuiltinMethod = BuiltinMethod::DelPath;
     const NAME: &'static str = "del_path";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewValueProjection::DelPath;
         path_element_spec()
+            .view_native()
+            .view_value_projection(projection)
+            .demand_law(projection.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

@@ -1334,6 +1334,20 @@ where
             };
             return Some(ViewProjectionResult::Owned(view_deep_merge(&view, other)));
         }
+        BuiltinViewValueProjection::DelPath => {
+            let path = match args {
+                BuiltinArgs::Str(path) => super::parse_path_segs(path.as_ref()),
+                BuiltinArgs::Path(path) => path.to_vec(),
+                _ => return None,
+            };
+            if path.is_empty() {
+                return Some(ViewProjectionResult::Owned(Val::Null));
+            }
+            return Some(match view_del_path(&view, &path) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::FlattenKeys => {
             let BuiltinArgs::Str(sep) = args else {
                 return None;
@@ -1491,6 +1505,57 @@ where
         out.insert(Arc::clone(key), merged);
     }
     Some(Val::obj(out))
+}
+
+fn view_del_path<'a, V>(view: &V, path: &[super::PathSeg]) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let (first, rest) = path.split_first()?;
+    match first {
+        super::PathSeg::Field(field) => {
+            let mut found = false;
+            let len = view.object_len().unwrap_or(0);
+            let mut out = indexmap::IndexMap::with_capacity(len.saturating_sub(1));
+            for (key, child) in view.object_iter()? {
+                if key.as_ref() == field.as_str() {
+                    found = true;
+                    if !rest.is_empty() {
+                        let value = view_del_path(&child.clone(), rest)
+                            .unwrap_or_else(|| view_to_owned(child));
+                        out.insert(key, value);
+                    }
+                } else {
+                    out.insert(key, view_to_owned(child));
+                }
+            }
+            found.then(|| Val::obj(out))
+        }
+        super::PathSeg::Index(index) => {
+            let len = view.array_len()?;
+            let idx = resolve_view_path_index(*index, len)?;
+            let mut out = Vec::with_capacity(len.saturating_sub(1));
+            for (pos, child) in view.array_iter()?.enumerate() {
+                if pos == idx {
+                    if !rest.is_empty() {
+                        out.push(
+                            view_del_path(&child.clone(), rest)
+                                .unwrap_or_else(|| view_to_owned(child)),
+                        );
+                    }
+                } else {
+                    out.push(view_to_owned(child));
+                }
+            }
+            Some(Val::arr(out))
+        }
+    }
+}
+
+fn resolve_view_path_index(index: i64, len: usize) -> Option<usize> {
+    let len = len as i64;
+    let idx = if index < 0 { len + index } else { index };
+    (0..len).contains(&idx).then_some(idx as usize)
 }
 
 fn view_flatten_keys<'a, V>(view: &V, sep: &str) -> Val
@@ -4587,6 +4652,7 @@ mod tests {
                 BuiltinMethod::Defaults,
                 BuiltinViewValueProjection::Defaults,
             ),
+            (BuiltinMethod::DelPath, BuiltinViewValueProjection::DelPath),
             (
                 BuiltinMethod::FlattenKeys,
                 BuiltinViewValueProjection::FlattenKeys,
