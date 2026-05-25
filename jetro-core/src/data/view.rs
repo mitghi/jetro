@@ -177,10 +177,11 @@ where
             }
             Some(item_iter.next().is_none())
         }
-        (JsonView::ObjectLen(len), _) => {
+        (JsonView::ObjectLen(_), _) => {
             let Some(target_len) = target_object_len(target) else {
                 return Some(false);
             };
+            let len = item.object_len()?;
             if len != target_len {
                 return Some(false);
             }
@@ -362,6 +363,13 @@ pub(crate) trait ValueView<'a>: Clone {
     fn array_len(&self) -> Option<usize> {
         match self.scalar() {
             JsonView::ArrayLen(len) => Some(len),
+            _ => None,
+        }
+    }
+    /// Return the current object field count without iterating or materialising.
+    fn object_len(&self) -> Option<usize> {
+        match self.scalar() {
+            JsonView::ObjectLen(len) => Some(len),
             _ => None,
         }
     }
