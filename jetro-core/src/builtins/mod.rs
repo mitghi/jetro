@@ -996,6 +996,10 @@ pub enum BuiltinViewValueProjection {
     ToString,
     /// Serialize the value to compact JSON text.
     ToJson,
+    /// Serialize the value to CSV text.
+    ToCsv,
+    /// Serialize the value to TSV text.
+    ToTsv,
     /// Title-case whitespace-delimited words.
     TitleCase,
     /// Encode string bytes as Base64 text.
@@ -1045,8 +1049,10 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::SetPath
             | BuiltinViewValueProjection::SnakeCase
             | BuiltinViewValueProjection::TitleCase
+            | BuiltinViewValueProjection::ToCsv
             | BuiltinViewValueProjection::ToString
             | BuiltinViewValueProjection::ToJson
+            | BuiltinViewValueProjection::ToTsv
             | BuiltinViewValueProjection::ToBase64
             | BuiltinViewValueProjection::UnflattenKeys
             | BuiltinViewValueProjection::StripPrefix
@@ -3850,6 +3856,9 @@ impl BuiltinCall {
                 },
             ),
             BuiltinMethod::ContainsAny | BuiltinMethod::ContainsAll => {
+                Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
+            }
+            BuiltinMethod::ToCsv | BuiltinMethod::ToTsv if arg_len > 0 => {
                 Self::new(method, BuiltinArgs::StrVec(args.str_vec(0)?))
             }
             BuiltinMethod::Pick | BuiltinMethod::Omit => {

@@ -1410,8 +1410,171 @@ where
             }
             write_json_view(&view, &mut out)?;
         }
+        BuiltinViewValueProjection::ToCsv | BuiltinViewValueProjection::ToTsv => {
+            let sep = if matches!(projection, BuiltinViewValueProjection::ToCsv) {
+                ","
+            } else {
+                "\t"
+            };
+            match args {
+                BuiltinArgs::None => write_view_delimited(&view, sep, &mut out)?,
+                BuiltinArgs::StrVec(headers) => {
+                    write_view_delimited_with_headers(&view, sep, headers, &mut out)?
+                }
+                _ => return None,
+            }
+        }
     }
     Some(ViewProjectionResult::Owned(Val::Str(Arc::from(out))))
+}
+
+fn write_view_delimited<'a, V>(view: &V, sep: &str, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match view.scalar() {
+        JsonView::ArrayLen(_) => {
+            let mut first_row = true;
+            for row in view.array_iter()? {
+                if first_row {
+                    first_row = false;
+                } else {
+                    out.push('\n');
+                }
+                write_view_delimited_row(&row, sep, out)?;
+            }
+        }
+        JsonView::ObjectLen(_) => write_view_delimited_object_values(view, sep, out)?,
+        _ => write_view_delimited_cell(view, sep, out)?,
+    }
+    Some(())
+}
+
+fn write_view_delimited_row<'a, V>(row: &V, sep: &str, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    match row.scalar() {
+        JsonView::ArrayLen(_) => {
+            let mut first = true;
+            for cell in row.array_iter()? {
+                if first {
+                    first = false;
+                } else {
+                    out.push_str(sep);
+                }
+                write_view_delimited_cell(&cell, sep, out)?;
+            }
+        }
+        JsonView::ObjectLen(_) => write_view_delimited_object_values(row, sep, out)?,
+        _ => write_view_delimited_cell(row, sep, out)?,
+    }
+    Some(())
+}
+
+fn write_view_delimited_object_values<'a, V>(view: &V, sep: &str, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut first = true;
+    for (_key, cell) in view.object_iter()? {
+        if first {
+            first = false;
+        } else {
+            out.push_str(sep);
+        }
+        write_view_delimited_cell(&cell, sep, out)?;
+    }
+    Some(())
+}
+
+fn write_view_delimited_with_headers<'a, V>(
+    view: &V,
+    sep: &str,
+    headers: &[Arc<str>],
+    out: &mut String,
+) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut first = true;
+    for header in headers {
+        if first {
+            first = false;
+        } else {
+            out.push_str(sep);
+        }
+        write_delimited_str(header.as_ref(), sep, out);
+    }
+
+    match view.scalar() {
+        JsonView::ArrayLen(_) => {
+            for row in view.array_iter()? {
+                out.push('\n');
+                write_view_delimited_header_row(&row, sep, headers, out)?;
+            }
+        }
+        _ => {
+            out.push('\n');
+            write_view_delimited_header_row(view, sep, headers, out)?;
+        }
+    }
+    Some(())
+}
+
+fn write_view_delimited_header_row<'a, V>(
+    row: &V,
+    sep: &str,
+    headers: &[Arc<str>],
+    out: &mut String,
+) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let is_object = row.object_len().is_some();
+    let mut first = true;
+    for header in headers {
+        if first {
+            first = false;
+        } else {
+            out.push_str(sep);
+        }
+        if is_object {
+            let cell = row.field(header.as_ref());
+            if !matches!(cell.scalar(), JsonView::Null) {
+                write_view_delimited_cell(&cell, sep, out)?;
+            }
+        } else {
+            write_view_delimited_cell(row, sep, out)?;
+        }
+    }
+    Some(())
+}
+
+fn write_view_delimited_cell<'a, V>(view: &V, sep: &str, out: &mut String) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    let start = out.len();
+    write_view_string_value(view, out)?;
+    if out[start..].contains('\n') || out[start..].contains('"') || out[start..].contains(sep) {
+        let cell = out[start..].replace('"', "\"\"");
+        out.truncate(start);
+        out.push('"');
+        out.push_str(&cell);
+        out.push('"');
+    }
+    Some(())
+}
+
+fn write_delimited_str(value: &str, sep: &str, out: &mut String) {
+    if value.contains('\n') || value.contains('"') || value.contains(sep) {
+        out.push('"');
+        out.push_str(&value.replace('"', "\"\""));
+        out.push('"');
+    } else {
+        out.push_str(value);
+    }
 }
 
 fn view_from_pairs<'a, V>(view: &V) -> Option<Val>
@@ -4833,11 +4996,13 @@ mod tests {
                 BuiltinMethod::ToBase64,
                 BuiltinViewValueProjection::ToBase64,
             ),
+            (BuiltinMethod::ToCsv, BuiltinViewValueProjection::ToCsv),
             (BuiltinMethod::ToJson, BuiltinViewValueProjection::ToJson),
             (
                 BuiltinMethod::ToString,
                 BuiltinViewValueProjection::ToString,
             ),
+            (BuiltinMethod::ToTsv, BuiltinViewValueProjection::ToTsv),
             (
                 BuiltinMethod::UnflattenKeys,
                 BuiltinViewValueProjection::UnflattenKeys,

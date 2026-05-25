@@ -1052,6 +1052,26 @@ mod tests {
     }
 
     #[test]
+    fn view_delimited_serializers_write_from_tape_without_materializing_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"docs":[{"rows":[[0,"old"]],"objects":[{"id":0,"name":"old"}]},{"rows":[[1,"a,b"],[2,"plain"]],"objects":[{"id":1,"name":"ada"},{"id":2,"name":"bob"}]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let csv = j.collect(r#"$.docs.map(@.rows.to_csv()).last()"#).unwrap();
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+        let tsv = j
+            .collect(r#"$.docs.map(@.objects.to_tsv(["id", "name"])).last()"#)
+            .unwrap();
+
+        assert_eq!(csv, json!("1,\"a,b\"\n2,plain"));
+        assert_eq!(tsv, json!("id\tname\n1\tada\n2\tbob"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

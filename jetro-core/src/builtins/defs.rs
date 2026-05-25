@@ -3266,6 +3266,15 @@ fn serialization_spec() -> BuiltinSpec {
         .cost(20.0)
 }
 
+#[inline]
+fn view_serialization_spec(projection: BuiltinViewValueProjection) -> BuiltinSpec {
+    serialization_spec()
+        .view_native()
+        .view_value_projection(projection)
+        .demand_law(projection.demand_law())
+        .order_effect(BuiltinPipelineOrderEffect::Preserves)
+}
+
 /// `to_csv(headers?)` — CSV serialiser. Optional header-array argument
 /// drives explicit column ordering with the headers as the first row.
 pub(crate) struct ToCsv;
@@ -3273,7 +3282,7 @@ impl Builtin for ToCsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToCsv;
     const NAME: &'static str = "to_csv";
     fn spec() -> BuiltinSpec {
-        serialization_spec()
+        view_serialization_spec(BuiltinViewValueProjection::ToCsv)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
@@ -3297,7 +3306,7 @@ impl Builtin for ToTsv {
     const METHOD: BuiltinMethod = BuiltinMethod::ToTsv;
     const NAME: &'static str = "to_tsv";
     fn spec() -> BuiltinSpec {
-        serialization_spec()
+        view_serialization_spec(BuiltinViewValueProjection::ToTsv)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
