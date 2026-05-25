@@ -2020,7 +2020,11 @@ fn numeric_kernel_value_to_val(value: NumericKernelValue) -> Val {
     }
 }
 
-fn eval_binary_op(lhs: Val, op: crate::parse::ast::BinOp, rhs: Val) -> Result<Val, EvalError> {
+pub(crate) fn eval_binary_op(
+    lhs: Val,
+    op: crate::parse::ast::BinOp,
+    rhs: Val,
+) -> Result<Val, EvalError> {
     use crate::parse::ast::BinOp;
     match op {
         BinOp::Add => crate::util::add_vals(lhs, rhs),

@@ -2370,18 +2370,81 @@ fn eval_frontier_kernel_with_vm<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
-    if let pipeline::BodyKernel::NestedPlan(plan) = kernel {
-        if let Some(body) = plan.receiver_view_body() {
+    match kernel {
+        pipeline::BodyKernel::NestedPlan(plan) => {
+            let Some(body) = plan.receiver_view_body() else {
+                return pipeline::eval_view_kernel_with_vm(kernel, item, vm);
+            };
             let value = match item {
                 FrontierRow::Borrowed(view) => {
                     run_receiver_nested_body_with_vm(view.clone(), &body, vm)?.ok()?
                 }
                 FrontierRow::Owned(value) => plan.run(value.clone()).ok()?,
             };
-            return Some(pipeline::ViewKernelValue::Owned(value));
+            Some(pipeline::ViewKernelValue::Owned(value))
         }
+        pipeline::BodyKernel::Object(object) => {
+            let mut pairs = Vec::with_capacity(object.entries().len());
+            for entry in object.entries() {
+                let value = eval_frontier_value_kernel_with_vm(entry.value(), item, vm)?;
+                if entry.omits_null() && value.is_null() {
+                    continue;
+                }
+                pairs.push((Arc::clone(entry.key()), value));
+            }
+            Some(pipeline::ViewKernelValue::Owned(Val::ObjSmall(pairs.into())))
+        }
+        pipeline::BodyKernel::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item_kernel in items.iter() {
+                out.push(eval_frontier_value_kernel_with_vm(item_kernel, item, vm)?);
+            }
+            Some(pipeline::ViewKernelValue::Owned(Val::arr(out)))
+        }
+        pipeline::BodyKernel::CmpLit { lhs, op, lit } => {
+            let lhs = eval_frontier_value_kernel_with_vm(lhs, item, vm)?;
+            Some(pipeline::ViewKernelValue::Owned(Val::Bool(
+                pipeline::eval_cmp_op(&lhs, *op, lit),
+            )))
+        }
+        pipeline::BodyKernel::Binary { lhs, op, rhs } => {
+            let lhs = eval_frontier_value_kernel_with_vm(lhs, item, vm)?;
+            let rhs = eval_frontier_value_kernel_with_vm(rhs, item, vm)?;
+            pipeline::eval_binary_op(lhs, *op, rhs)
+                .ok()
+                .map(pipeline::ViewKernelValue::Owned)
+        }
+        pipeline::BodyKernel::ArraySelect { array, selector } => {
+            match eval_frontier_kernel_with_vm(item, array, vm)? {
+                pipeline::ViewKernelValue::View(view) => {
+                    let idx = selector.index_for_len(view.array_len()?)?;
+                    Some(pipeline::ViewKernelValue::View(view.array_child(idx)))
+                }
+                pipeline::ViewKernelValue::Owned(value) => {
+                    let values = value.as_vals()?;
+                    let idx = selector.index_for_len(values.len())?;
+                    Some(pipeline::ViewKernelValue::Owned(values.get(idx).cloned()?))
+                }
+            }
+        }
+        pipeline::BodyKernel::And(predicates) => {
+            for predicate in predicates.iter() {
+                if !eval_frontier_filter_kernel_with_vm(item, predicate, vm)? {
+                    return Some(pipeline::ViewKernelValue::Owned(Val::Bool(false)));
+                }
+            }
+            Some(pipeline::ViewKernelValue::Owned(Val::Bool(true)))
+        }
+        pipeline::BodyKernel::Or(predicates) => {
+            for predicate in predicates.iter() {
+                if eval_frontier_filter_kernel_with_vm(item, predicate, vm)? {
+                    return Some(pipeline::ViewKernelValue::Owned(Val::Bool(true)));
+                }
+            }
+            Some(pipeline::ViewKernelValue::Owned(Val::Bool(false)))
+        }
+        _ => pipeline::eval_view_kernel_with_vm(kernel, item, vm),
     }
-    pipeline::eval_view_kernel_with_vm(kernel, item, vm)
 }
 
 fn eval_frontier_map_kernel<'a, V>(
@@ -6567,6 +6630,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!(["a", "b", "c"]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_array_projection_recurses_into_nested_receiver_kernels() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[2,"b"],[1,"a"],[3,"c"]]"#.to_vec())
+                .unwrap();
+        let first = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let second = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(1),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Array(
+                vec![
+                    BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(second)))),
+                    BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(first)))),
+                ]
+                .into(),
+            )],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_terminal_collect(TapeView::root(&tape), &body, &mut VM::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([["b", 2], ["a", 1], ["c", 3]])
+        );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
