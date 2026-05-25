@@ -1171,6 +1171,21 @@ impl Stage {
                     _ => None,
                 };
             }
+            BuiltinViewCapabilityShape::ValVecArg => {
+                return match self {
+                    Stage::Builtin(call) => match (&stage, &call.args) {
+                        (
+                            crate::builtins::BuiltinViewStage::SetFilter(op),
+                            crate::builtins::BuiltinArgs::ValVec(values),
+                        ) => Some(ViewStageCapability::SetFilter {
+                            op: *op,
+                            values: values.clone(),
+                        }),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
             BuiltinViewCapabilityShape::OptionalKeyBody => {
                 return match desc.body {
                     Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {

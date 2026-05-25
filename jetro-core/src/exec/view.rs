@@ -7992,6 +7992,67 @@ mod tests {
     }
 
     #[test]
+    fn terminal_collect_set_filters_tape_rows_without_materializing_receiver() {
+        let cases = [
+            (
+                crate::builtins::BuiltinMethod::Diff,
+                vec![Val::Int(2)],
+                serde_json::json!([1, 3]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::Intersect,
+                vec![Val::Int(2)],
+                serde_json::json!([2, 2]),
+            ),
+        ];
+
+        for (method, values, expected) in cases {
+            let tape = crate::data::tape::TapeData::parse(br#"[1,2,2,3]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::ValVec(values),
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn set_filters_match_structural_object_values() {
+        let mut obj = IndexMap::new();
+        obj.insert(Arc::from("a"), Val::Int(1));
+        let tape = crate::data::tape::TapeData::parse(br#"[{"a":1},{"a":2}]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Intersect,
+                crate::builtins::BuiltinArgs::ValVec(vec![Val::obj(obj)]),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([{"a":1}]));
+    }
+
+    #[test]
     fn terminal_collect_chunks_tape_rows_without_materializing_receiver() {
         let tape = crate::data::tape::TapeData::parse(br#"[1,2,3,4,5]"#.to_vec()).unwrap();
         let body = PipelineBody {

@@ -24,6 +24,12 @@ pub(super) struct NumericFullInputState {
     pub count: usize,
 }
 
+#[derive(Default)]
+pub(super) struct StaticStructuralSetState {
+    keys: HashSet<ViewKey>,
+    initialized: bool,
+}
+
 /// Per-element control flow for the view-domain stage loop, parameterised by
 /// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
@@ -60,6 +66,8 @@ pub(super) enum ViewStageState {
     Rolling(Box<RollingNumericState>),
     /// Full-input numeric transform state.
     NumericFullInput(Box<NumericFullInputState>),
+    /// Lazily built structural-key set for static set-filter stages.
+    StaticStructuralSet(Box<StaticStructuralSetState>),
 }
 
 impl ViewStageState {
@@ -150,6 +158,24 @@ impl ViewStageState {
         match self {
             Self::NumericFullInput(value) => value,
             _ => unreachable!("numeric full-input state was initialized"),
+        }
+    }
+
+    fn static_structural_keys(&mut self, values: &[Val]) -> &HashSet<ViewKey> {
+        if !matches!(self, Self::StaticStructuralSet(_)) {
+            *self = Self::StaticStructuralSet(Box::default());
+        }
+        match self {
+            Self::StaticStructuralSet(value) => {
+                if !value.initialized {
+                    value
+                        .keys
+                        .extend(values.iter().cloned().map(ViewKey::from_structural_owned));
+                    value.initialized = true;
+                }
+                &value.keys
+            }
+            _ => unreachable!("static structural set state was initialized"),
         }
     }
 }
@@ -287,6 +313,27 @@ where
                 Some(ViewStageFlow::Keep(item))
             } else {
                 Some(ViewStageFlow::Drop)
+            }
+        }
+        pipeline::ViewStageCapability::SetFilter { op, ref values } => {
+            debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+            debug_assert_eq!(
+                stage.output_mode(),
+                pipeline::ViewOutputMode::PreservesInputView
+            );
+            let key = eval_structural_key(&item, None, vm)?;
+            let contains = op_state
+                .get_mut(op_idx)?
+                .static_structural_keys(values)
+                .contains(&key);
+            match op {
+                crate::builtins::BuiltinViewSetFilter::Diff if !contains => {
+                    Some(ViewStageFlow::Keep(item))
+                }
+                crate::builtins::BuiltinViewSetFilter::Intersect if contains => {
+                    Some(ViewStageFlow::Keep(item))
+                }
+                _ => Some(ViewStageFlow::Drop),
             }
         }
         // Builtin projections and map can emit either a borrowed subview or an

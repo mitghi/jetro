@@ -16,7 +16,7 @@ use super::{
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
     BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericFullInput,
     BuiltinViewNumericScan, BuiltinViewRolling, BuiltinViewObjectProjection, BuiltinViewScalarOp,
-    BuiltinViewStage, BuiltinViewStringExpand, BuiltinViewValueProjection,
+    BuiltinViewSetFilter, BuiltinViewStage, BuiltinViewStringExpand, BuiltinViewValueProjection,
 };
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
@@ -2299,6 +2299,19 @@ fn barrier_simple_spec() -> BuiltinSpec {
         .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
 }
 
+#[inline]
+fn set_filter_spec(op: BuiltinViewSetFilter) -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingFilter,
+        BuiltinCardinality::Filtering,
+    )
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::FullInputOrder)
+    .view_native()
+    .view_stage(BuiltinViewStage::SetFilter(op))
+}
+
 /// `append(arr)` — concatenates barrier.
 pub(crate) struct Append;
 impl Builtin for Append {
@@ -2353,7 +2366,7 @@ impl Builtin for Diff {
     const METHOD: BuiltinMethod = BuiltinMethod::Diff;
     const NAME: &'static str = "diff";
     fn spec() -> BuiltinSpec {
-        barrier_simple_spec()
+        set_filter_spec(BuiltinViewSetFilter::Diff)
     }
     #[inline]
     fn apply_args(
@@ -2376,7 +2389,7 @@ impl Builtin for Intersect {
     const METHOD: BuiltinMethod = BuiltinMethod::Intersect;
     const NAME: &'static str = "intersect";
     fn spec() -> BuiltinSpec {
-        barrier_simple_spec()
+        set_filter_spec(BuiltinViewSetFilter::Intersect)
     }
     #[inline]
     fn apply_args(

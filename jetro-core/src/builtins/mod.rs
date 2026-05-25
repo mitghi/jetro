@@ -1575,6 +1575,8 @@ pub enum BuiltinViewStage {
     Distinct,
     /// Keyed reduce stage (groups, counts, or indexes by key).
     KeyedReduce,
+    /// Set membership filter against a static argument list.
+    SetFilter(BuiltinViewSetFilter),
     /// Append one static value after all receiver rows.
     AppendValue,
     /// Prepend one static value before receiver rows.
@@ -1640,6 +1642,15 @@ pub enum BuiltinViewRolling {
     Max,
 }
 
+/// Set-filter operation for borrowed view rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewSetFilter {
+    /// Keep rows absent from the static set.
+    Diff,
+    /// Keep rows present in the static set.
+    Intersect,
+}
+
 /// Extra executor data required to construct a borrowed-view stage capability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinViewCapabilityShape {
@@ -1649,6 +1660,8 @@ pub enum BuiltinViewCapabilityShape {
     RemoveValueTarget,
     /// Stage carries one literal value argument.
     ValueArg,
+    /// Stage carries a static list of literal values.
+    ValVecArg,
     /// Stage may carry an optional distinct key body.
     OptionalKeyBody,
     /// Stage requires keyed-reducer metadata plus a key body.
@@ -2411,6 +2424,7 @@ impl BuiltinViewStage {
             | Self::DropWhile
             | Self::Distinct
             | Self::KeyedReduce
+            | Self::SetFilter(_)
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -2442,6 +2456,7 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
+            | Self::SetFilter(_)
             | Self::Take
             | Self::Skip => BuiltinViewOutputMode::PreservesInputView,
         }
@@ -2459,6 +2474,7 @@ impl BuiltinViewStage {
         match self {
             Self::RemoveValue => BuiltinViewCapabilityShape::RemoveValueTarget,
             Self::AppendValue | Self::PrependValue => BuiltinViewCapabilityShape::ValueArg,
+            Self::SetFilter(_) => BuiltinViewCapabilityShape::ValVecArg,
             Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
             Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
             _ => BuiltinViewCapabilityShape::Generic,
@@ -2469,7 +2485,9 @@ impl BuiltinViewStage {
     #[inline]
     pub fn cardinality(self) -> BuiltinCardinality {
         match self {
-            Self::Filter | Self::Compact | Self::RemoveValue => BuiltinCardinality::Filtering,
+            Self::Filter | Self::Compact | Self::RemoveValue | Self::SetFilter(_) => {
+                BuiltinCardinality::Filtering
+            }
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap | Self::Flatten | Self::Explode => BuiltinCardinality::Expanding,
             Self::Enumerate => BuiltinCardinality::OneToOne,
@@ -2516,6 +2534,7 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
+            | Self::SetFilter(_)
             | Self::AppendValue
             | Self::PrependValue
             | Self::Take
@@ -2552,6 +2571,7 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
+            | Self::SetFilter(_)
             | Self::KeyedReduce
             | Self::AppendValue
             | Self::PrependValue => 10.0,
@@ -2567,7 +2587,8 @@ impl BuiltinViewStage {
             | Self::Compact
             | Self::RemoveValue
             | Self::TakeWhile
-            | Self::DropWhile => 0.5,
+            | Self::DropWhile
+            | Self::SetFilter(_) => 0.5,
             Self::Distinct => 1.0,
             Self::Map
             | Self::FlatMap

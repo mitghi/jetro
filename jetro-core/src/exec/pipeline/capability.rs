@@ -14,7 +14,7 @@ use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
     BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
     BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling,
-    BuiltinViewStringExpand,
+    BuiltinViewSetFilter, BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -837,6 +837,13 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the key kernel.
         kernel: usize,
     },
+    /// Filter rows by structural membership in a static set.
+    SetFilter {
+        /// The set operation to apply.
+        op: BuiltinViewSetFilter,
+        /// Static argument values used to build the membership set.
+        values: Vec<Val>,
+    },
     /// Append one owned literal after all input rows.
     AppendValue(Val),
     /// Prepend one owned literal before input rows.
@@ -897,6 +904,10 @@ impl ViewStageCapability {
             BuiltinViewStage::DropWhile if kernel_is_view_native => Some(Self::DropWhile {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::SetFilter(op) => Some(Self::SetFilter {
+                op,
+                values: Vec::new(),
+            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -928,6 +939,7 @@ impl ViewStageCapability {
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
+            Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
             Self::AppendValue(_) => BuiltinViewStage::AppendValue,
             Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,
@@ -1089,6 +1101,7 @@ impl ViewStageCapability {
             | Self::StringExpand { .. }
             | Self::Distinct { .. }
             | Self::KeyedReduce { .. }
+            | Self::SetFilter { .. }
             | Self::AppendValue(_)
             | Self::PrependValue(_) => None,
         }
@@ -1170,6 +1183,7 @@ impl ViewStageCapability {
                 | Self::StringExpand { .. }
                 | Self::Distinct { .. }
                 | Self::KeyedReduce { .. }
+                | Self::SetFilter { .. }
                 | Self::AppendValue(_)
                 | Self::PrependValue(_) => return false,
             }
