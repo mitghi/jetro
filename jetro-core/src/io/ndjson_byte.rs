@@ -1297,6 +1297,21 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
                 raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectPredicate::ArrayElementCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            op,
+            lit,
+        } => {
+            let value =
+                raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
+            Some(crate::util::json_cmp_binop(
+                value,
+                *op,
+                JsonView::from_val(lit),
+            ))
+        }
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -1308,6 +1323,12 @@ fn eval_raw_predicate(row: &[u8], predicate: &NdjsonDirectPredicate) -> Option<b
             let value = raw_json_path_view(element, suffix_steps)?;
             direct_view_call_truthy(value, call)
         }
+        NdjsonDirectPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)
+            .map(JsonView::truthy),
         NdjsonDirectPredicate::ArrayAny {
             source_steps,
             predicate,
@@ -2682,6 +2703,14 @@ fn collect_stream_predicate_root_fields<'a>(
             suffix_steps: steps,
             ..
         }
+        | NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps: steps,
+            ..
+        }
+        | NdjsonDirectItemPredicate::ArrayElementCmpLit {
+            source_steps: steps,
+            ..
+        }
         | NdjsonDirectItemPredicate::ArrayElementViewScalarCmpLit {
             source_steps: steps,
             ..
@@ -3265,6 +3294,27 @@ fn eval_raw_item_predicate_from_root_fields<'a>(
             )?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectItemPredicate::ArrayElementCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            op,
+            lit,
+        } => {
+            let value = raw_json_array_element_path_view_from_root(
+                item,
+                root_fields,
+                spans,
+                source_steps,
+                *element,
+                suffix_steps,
+            )?;
+            Some(crate::util::json_cmp_binop(
+                value,
+                *op,
+                JsonView::from_val(lit),
+            ))
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_projection_view_from_root(item, root_fields, spans, suffix_steps)?;
             direct_view_call_truthy(value, call)
@@ -3285,6 +3335,19 @@ fn eval_raw_item_predicate_from_root_fields<'a>(
             )?;
             direct_view_call_truthy(value, call)
         }
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view_from_root(
+            item,
+            root_fields,
+            spans,
+            source_steps,
+            *element,
+            suffix_steps,
+        )
+        .map(JsonView::truthy),
     }
 }
 
@@ -3299,6 +3362,18 @@ fn eval_raw_item_predicate_scalar_from_root_fields<'a>(
             raw_json_projection_view_from_root(item, root_fields, spans, steps)
         }
         NdjsonDirectItemPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view_from_root(
+            item,
+            root_fields,
+            spans,
+            source_steps,
+            *element,
+            suffix_steps,
+        ),
         _ => None,
     }
 }
@@ -3805,6 +3880,21 @@ fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) ->
                 raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
             direct_view_call_cmp_lit(value, call, *op, lit)
         }
+        NdjsonDirectItemPredicate::ArrayElementCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            op,
+            lit,
+        } => {
+            let value =
+                raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
+            Some(crate::util::json_cmp_binop(
+                value,
+                *op,
+                JsonView::from_val(lit),
+            ))
+        }
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => {
             let value = raw_json_path_view(row, suffix_steps)?;
             direct_view_call_truthy(value, call)
@@ -3819,6 +3909,12 @@ fn eval_raw_item_predicate(row: &[u8], predicate: &NdjsonDirectItemPredicate) ->
                 raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)?;
             direct_view_call_truthy(value, call)
         }
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view(row, source_steps, *element, suffix_steps)
+            .map(JsonView::truthy),
     }
 }
 
@@ -3841,6 +3937,11 @@ fn eval_raw_item_predicate_scalar<'a>(
     match predicate {
         NdjsonDirectItemPredicate::Path(steps) => raw_json_path_view(row, steps),
         NdjsonDirectItemPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view(row, source_steps, *element, suffix_steps),
         _ => None,
     }
 }
@@ -3852,6 +3953,11 @@ fn eval_raw_predicate_scalar<'a>(
     match predicate {
         NdjsonDirectPredicate::Path(steps) => raw_json_path_view(row, steps),
         NdjsonDirectPredicate::Literal(value) => Some(JsonView::from_val(value)),
+        NdjsonDirectPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => raw_json_array_element_path_view(row, source_steps, *element, suffix_steps),
         _ => None,
     }
 }

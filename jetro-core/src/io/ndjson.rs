@@ -2910,6 +2910,19 @@ pub(super) fn eval_tape_predicate(
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| direct_view_call_cmp_lit(value, call, *op, lit))
             .unwrap_or(false),
+        NdjsonDirectPredicate::ArrayElementCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            op,
+            lit,
+        } => json_tape_path_index(tape, source_steps)
+            .and_then(|idx| json_tape_array_element(tape, idx, *element))
+            .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
+            .map(|idx| json_tape_scalar(tape, idx))
+            .is_some_and(|value| {
+                crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
+            }),
         NdjsonDirectPredicate::ArrayElementViewScalarCall {
             source_steps,
             element,
@@ -2920,6 +2933,15 @@ pub(super) fn eval_tape_predicate(
             .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
             .map(|idx| json_tape_scalar(tape, idx))
             .and_then(|value| direct_view_call_truthy(value, call))
+            .unwrap_or(false),
+        NdjsonDirectPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => json_tape_path_index(tape, source_steps)
+            .and_then(|idx| json_tape_array_element(tape, idx, *element))
+            .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
+            .map(|idx| json_tape_scalar(tape, idx).truthy())
             .unwrap_or(false),
         NdjsonDirectPredicate::ArrayAny { .. } => {
             return Err(crate::EvalError(
@@ -2952,6 +2974,8 @@ pub(super) fn predicate_needs_vm(predicate: &NdjsonDirectPredicate) -> bool {
         | NdjsonDirectPredicate::Literal(_)
         | NdjsonDirectPredicate::ViewScalarCall { .. }
         | NdjsonDirectPredicate::ViewScalarCmpLit { .. }
+        | NdjsonDirectPredicate::ArrayElementPath { .. }
+        | NdjsonDirectPredicate::ArrayElementCmpLit { .. }
         | NdjsonDirectPredicate::ArrayElementViewScalarCmpLit { .. }
         | NdjsonDirectPredicate::ArrayElementViewScalarCall { .. } => false,
     }
@@ -2966,6 +2990,14 @@ fn eval_tape_scalar<'a>(
             .index(tape, 0, steps)
             .map(|idx| json_tape_scalar(tape, idx)),
         NdjsonDirectPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
+        NdjsonDirectPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => json_tape_path_index(tape, source_steps)
+            .and_then(|idx| json_tape_array_element(tape, idx, *element))
+            .and_then(|idx| json_tape_path_index_from(tape, idx, suffix_steps))
+            .map(|idx| json_tape_scalar(tape, idx)),
         _ => None,
     }
 }
@@ -3859,6 +3891,23 @@ fn eval_json_tape_item_predicate_cached<T: JsonTape>(
         )
         .and_then(|value| direct_view_call_cmp_lit(value, call, *op, lit))
         .unwrap_or(false),
+        NdjsonDirectItemPredicate::ArrayElementCmpLit {
+            source_steps,
+            element,
+            suffix_steps,
+            op,
+            lit,
+        } => json_tape_array_element_scalar_cached(
+            tape,
+            item_idx,
+            source_steps,
+            *element,
+            suffix_steps,
+            cache,
+        )
+        .is_some_and(|value| {
+            crate::util::json_cmp_binop(value, *op, crate::util::JsonView::from_val(lit))
+        }),
         NdjsonDirectItemPredicate::ViewScalarCall { suffix_steps, call } => cache
             .index(tape, item_idx, suffix_steps)
             .map(|idx| json_tape_scalar(tape, idx))
@@ -3879,6 +3928,19 @@ fn eval_json_tape_item_predicate_cached<T: JsonTape>(
         )
         .and_then(|value| direct_view_call_truthy(value, call))
         .unwrap_or(false),
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => json_tape_array_element_scalar_cached(
+            tape,
+            item_idx,
+            source_steps,
+            *element,
+            suffix_steps,
+            cache,
+        )
+        .is_some_and(crate::util::JsonView::truthy),
     }
 }
 
@@ -3908,6 +3970,18 @@ fn eval_json_tape_item_scalar_cached<'a, T: JsonTape>(
             .index(tape, item_idx, steps)
             .map(|idx| json_tape_scalar(tape, idx)),
         NdjsonDirectItemPredicate::Literal(value) => Some(crate::util::JsonView::from_val(value)),
+        NdjsonDirectItemPredicate::ArrayElementPath {
+            source_steps,
+            element,
+            suffix_steps,
+        } => json_tape_array_element_scalar_cached(
+            tape,
+            item_idx,
+            source_steps,
+            *element,
+            suffix_steps,
+            cache,
+        ),
         _ => None,
     }
 }
