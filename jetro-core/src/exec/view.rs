@@ -2376,6 +2376,23 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::Explode { ref field } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_explode_frontier_row(
+            item,
+            Arc::clone(field),
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::StringExpand { op, arg } = stage {
         let JsonView::Str(value) = item.scalar() else {
             return Some(Ok(ViewDriveFlow::Continue));
@@ -3627,6 +3644,95 @@ where
         }
     }
     Some(Ok(ViewDriveFlow::Continue))
+}
+
+fn drive_explode_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    field: Arc<str>,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    if item.object_len().is_none() {
+        return drive_view_item(
+            item,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
+    let field_view = item.field(field.as_ref());
+    let Some(children) = field_view.array_iter() else {
+        return drive_view_item(
+            item,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    };
+
+    for child in children {
+        let row = explode_frontier_object_row(&item, field.as_ref(), child)?;
+        let flow = match drive_view_item(
+            FrontierRow::Owned(row),
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        )? {
+            Ok(flow) => flow,
+            Err(err) => return Some(Err(err)),
+        };
+        if matches!(flow, ViewDriveFlow::Stop) {
+            return Some(Ok(ViewDriveFlow::Stop));
+        }
+    }
+    Some(Ok(ViewDriveFlow::Continue))
+}
+
+fn explode_frontier_object_row<'a, V>(
+    item: &FrontierRow<V>,
+    field: &str,
+    replacement: FrontierRow<V>,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    let len = item.object_len()?;
+    let mut out = indexmap::IndexMap::with_capacity(len);
+    for (key, value) in item.object_iter()? {
+        let value = if key.as_ref() == field {
+            pipeline::view_kernel_view_to_owned(replacement.clone())
+        } else {
+            pipeline::view_kernel_view_to_owned(value)
+        };
+        out.insert(key, value);
+    }
+    Some(Val::obj(out))
 }
 
 fn eval_frontier_nested_array_count_with_vm<'a, V>(
@@ -6781,6 +6887,46 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!([1, 2, 3])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_explodes_tape_objects_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"g":"a","xs":[1,2,3]},{"g":"b","xs":[9]},{"g":"c"}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::StringBuiltin {
+                    method: crate::builtins::BuiltinMethod::Explode,
+                    value: Arc::from("xs"),
+                },
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 4,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([
+                {"g": "a", "xs": 1},
+                {"g": "a", "xs": 2},
+                {"g": "a", "xs": 3},
+                {"g": "b", "xs": 9}
+            ])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
     }

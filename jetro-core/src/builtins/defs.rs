@@ -1176,6 +1176,9 @@ impl Builtin for Explode {
     const NAME: &'static str = "explode";
     fn spec() -> BuiltinSpec {
         expand_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::Explode)
+            .lowering(BuiltinPipelineLowering::StringArg)
     }
     #[inline]
     fn apply_args(

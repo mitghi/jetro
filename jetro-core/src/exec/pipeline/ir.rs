@@ -1092,6 +1092,14 @@ impl Stage {
                     arg: Some(Arc::clone(value)),
                 });
             }
+            if matches!(
+                crate::builtins::registry::view_stage(id),
+                Some(crate::builtins::BuiltinViewStage::Explode)
+            ) {
+                return Some(ViewStageCapability::Explode {
+                    field: Arc::clone(value),
+                });
+            }
         }
         if let Stage::Builtin(call) = self {
             if let Some(op) = crate::builtins::registry::view_string_expand(call.id()) {

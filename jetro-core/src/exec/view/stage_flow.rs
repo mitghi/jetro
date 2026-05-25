@@ -215,6 +215,7 @@ where
         // handled by `drive_view_item` before row-local stage flow dispatch.
         pipeline::ViewStageCapability::FlatMap { .. } => None,
         pipeline::ViewStageCapability::Flatten { .. } => None,
+        pipeline::ViewStageCapability::Explode { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,
     }
 }

@@ -767,6 +767,11 @@ pub(crate) enum ViewStageCapability {
         /// Maximum nested array depth to flatten.
         depth: usize,
     },
+    /// Explode an array-valued object field into owned output rows.
+    Explode {
+        /// Field to replace with each array element.
+        field: std::sync::Arc<str>,
+    },
     /// Expand a string row into owned rows without materialising the receiver.
     StringExpand {
         /// Expansion operation declared by builtin metadata.
@@ -856,6 +861,7 @@ impl ViewStageCapability {
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::Flatten { .. } => BuiltinViewStage::Flatten,
+            Self::Explode { .. } => BuiltinViewStage::Explode,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
@@ -997,6 +1003,7 @@ impl ViewStageCapability {
             | Self::RemoveValue(_)
             | Self::FlatMap { .. }
             | Self::Flatten { .. }
+            | Self::Explode { .. }
             | Self::StringExpand { .. }
             | Self::Distinct { .. }
             | Self::KeyedReduce { .. } => None,
@@ -1066,6 +1073,7 @@ impl ViewStageCapability {
                 | Self::RemoveValue(_)
                 | Self::FlatMap { .. }
                 | Self::Flatten { .. }
+                | Self::Explode { .. }
                 | Self::StringExpand { .. }
                 | Self::Distinct { .. }
                 | Self::KeyedReduce { .. } => return false,
@@ -1563,17 +1571,23 @@ mod tests {
         }
         .view_capability(7, None)
         .unwrap();
+        let explode = Stage::StringBuiltin {
+            method: BuiltinMethod::Explode,
+            value: Arc::from("items"),
+        }
+        .view_capability(8, None)
+        .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(8, None)
+        .view_capability(9, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(9, None)
+        .view_capability(10, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1593,6 +1607,8 @@ mod tests {
         assert_eq!(flat_map.output_mode(), ViewOutputMode::BorrowedSubviews);
         assert!(matches!(flatten, ViewStageCapability::Flatten { depth: 1 }));
         assert_eq!(flatten.output_mode(), ViewOutputMode::BorrowedSubviews);
+        assert!(matches!(explode, ViewStageCapability::Explode { .. }));
+        assert_eq!(explode.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
         assert!(matches!(compact, ViewStageCapability::Compact));
