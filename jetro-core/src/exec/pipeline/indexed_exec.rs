@@ -9,9 +9,7 @@ use crate::{
     vm::VM,
 };
 
-use super::{
-    index_from_end, nested::PreparedPlan, row_source, Pipeline, Position, SourceAccessMode, Stage,
-};
+use super::{nested::PreparedPlan, row_source, Pipeline, Position, SourceAccessMode, Stage};
 
 /// Executes a positional (`first`/`last`) pipeline by directly indexing the source; returns `None` when the pipeline does not qualify.
 pub(super) fn run(
@@ -28,10 +26,15 @@ pub(super) fn run(
         return run_select_many(pipeline, base_env, vm, &recv, len, n, from_end);
     }
 
-    let idx = match pipeline.source_access() {
-        SourceAccessMode::Indexed(idx) => idx,
-        SourceAccessMode::IndexedFromEnd(offset) => index_from_end(len, offset)?,
-        SourceAccessMode::IndexedSuffix(count) => len.saturating_sub(count),
+    let source_access = pipeline.source_access();
+    let idx = match source_access {
+        SourceAccessMode::Indexed(_)
+        | SourceAccessMode::IndexedFromEnd(_)
+        | SourceAccessMode::IndexedSuffix(_) => match source_access.indexed_access(len)? {
+            super::SourceIndexedAccess::Single(idx) => idx,
+            super::SourceIndexedAccess::Range { start, .. } => start,
+            super::SourceIndexedAccess::Empty => return Some(Ok(Val::Null)),
+        },
         SourceAccessMode::ForwardBounded(_) => 0,
         SourceAccessMode::Reverse { .. } => len.checked_sub(1)?,
         SourceAccessMode::Forward | SourceAccessMode::MaterializedFallback => {
@@ -68,8 +71,21 @@ fn run_select_many(
         return Some(Ok(Val::Null));
     }
 
-    let start = if from_end { len.saturating_sub(n) } else { 0 };
-    let end = if from_end { len } else { n.min(len) };
+    let access = if from_end {
+        SourceAccessMode::IndexedSuffix(n)
+    } else {
+        SourceAccessMode::ForwardBounded(n)
+    };
+    let start = if from_end {
+        access.suffix_start(len).unwrap_or(0)
+    } else {
+        0
+    };
+    let end = if from_end {
+        len
+    } else {
+        access.bounded_forward_end(len).unwrap_or(len)
+    };
     let mut out = Vec::with_capacity(end.saturating_sub(start));
     let prepared = prepare_nested_stages(pipeline);
     for idx in start..end {
