@@ -214,6 +214,27 @@ pub struct FStringKernel {
     base_capacity: usize,
 }
 
+impl FStringKernel {
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn new(parts: Arc<[FStringKernelPart]>, base_capacity: usize) -> Self {
+        Self {
+            parts,
+            base_capacity,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn parts(&self) -> &[FStringKernelPart] {
+        &self.parts
+    }
+
+    #[inline]
+    pub(crate) fn base_capacity(&self) -> usize {
+        self.base_capacity
+    }
+}
+
 /// A single part of an `FStringKernel`: either a fixed literal or a dynamic interpolation.
 #[derive(Debug, Clone)]
 pub enum FStringKernelPart {
@@ -1950,7 +1971,7 @@ where
 }
 
 // uses itoa/ryu for numeric fast paths; val_to_string only for compound types
-fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> {
+pub(crate) fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> {
     match value {
         Val::Str(value) => out.push_str(value),
         Val::StrSlice(value) => out.push_str(value.as_str()),
@@ -1964,7 +1985,7 @@ fn append_val_to_string(out: &mut String, value: &Val) -> Result<(), EvalError> 
     Ok(())
 }
 
-fn append_json_view_to_string<'a, V>(
+pub(crate) fn append_json_view_to_string<'a, V>(
     out: &mut String,
     view: &V,
     scalar: JsonView<'_>,

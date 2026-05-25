@@ -68,10 +68,13 @@ pub(crate) use kernels::eval_kernel;
 pub(crate) use kernels::eval_view_kernel;
 pub use kernels::{eval_cmp_op, BodyKernel};
 pub(crate) use kernels::{
+    append_json_view_to_string, append_val_to_string,
     eval_binary_op, eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm,
     view_kernel_view_to_owned, ArraySelector, CollectLayout, NestedPlanKernel, ObjectKernel,
-    ViewKernelValue,
+    FStringKernelPart, ViewKernelValue,
 };
+#[cfg(test)]
+pub(crate) use kernels::FStringKernel;
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerOp,
