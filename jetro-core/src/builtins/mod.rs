@@ -1575,6 +1575,10 @@ pub enum BuiltinViewStage {
     Distinct,
     /// Keyed reduce stage (groups, counts, or indexes by key).
     KeyedReduce,
+    /// Append one static value after all receiver rows.
+    AppendValue,
+    /// Prepend one static value before receiver rows.
+    PrependValue,
     /// Positional limit stage.
     Take,
     /// Positional skip stage.
@@ -1643,6 +1647,8 @@ pub enum BuiltinViewCapabilityShape {
     Generic,
     /// Stage removes rows matching a literal target value.
     RemoveValueTarget,
+    /// Stage carries one literal value argument.
+    ValueArg,
     /// Stage may carry an optional distinct key body.
     OptionalKeyBody,
     /// Stage requires keyed-reducer metadata plus a key body.
@@ -2404,7 +2410,9 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
-            | Self::KeyedReduce => BuiltinViewInputMode::ReadsView,
+            | Self::KeyedReduce
+            | Self::AppendValue
+            | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
         }
     }
@@ -2425,7 +2433,9 @@ impl BuiltinViewStage {
             | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
-            | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
+            | Self::KeyedReduce
+            | Self::AppendValue
+            | Self::PrependValue => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
             | Self::Compact
             | Self::RemoveValue
@@ -2448,6 +2458,7 @@ impl BuiltinViewStage {
     pub fn capability_shape(self) -> BuiltinViewCapabilityShape {
         match self {
             Self::RemoveValue => BuiltinViewCapabilityShape::RemoveValueTarget,
+            Self::AppendValue | Self::PrependValue => BuiltinViewCapabilityShape::ValueArg,
             Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
             Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
             _ => BuiltinViewCapabilityShape::Generic,
@@ -2470,6 +2481,7 @@ impl BuiltinViewStage {
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
+            Self::AppendValue | Self::PrependValue => BuiltinCardinality::Barrier,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
         }
     }
@@ -2504,6 +2516,8 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
+            | Self::AppendValue
+            | Self::PrependValue
             | Self::Take
             | Self::Skip => BuiltinViewMaterialization::Never,
         }
@@ -2538,7 +2552,9 @@ impl BuiltinViewStage {
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
-            | Self::KeyedReduce => 10.0,
+            | Self::KeyedReduce
+            | Self::AppendValue
+            | Self::PrependValue => 10.0,
             Self::Take | Self::Skip => 0.5,
         }
     }
@@ -2566,7 +2582,9 @@ impl BuiltinViewStage {
             | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
-            | Self::KeyedReduce => 1.0,
+            | Self::KeyedReduce
+            | Self::AppendValue
+            | Self::PrependValue => 1.0,
             Self::Take | Self::Skip => 0.5,
         }
     }

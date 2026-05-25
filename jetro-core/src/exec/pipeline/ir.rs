@@ -1155,6 +1155,22 @@ impl Stage {
                     _ => None,
                 };
             }
+            BuiltinViewCapabilityShape::ValueArg => {
+                return match self {
+                    Stage::Builtin(call) => match (&stage, &call.args) {
+                        (
+                            crate::builtins::BuiltinViewStage::AppendValue,
+                            crate::builtins::BuiltinArgs::Val(value),
+                        ) => Some(ViewStageCapability::AppendValue(value.clone())),
+                        (
+                            crate::builtins::BuiltinViewStage::PrependValue,
+                            crate::builtins::BuiltinArgs::Val(value),
+                        ) => Some(ViewStageCapability::PrependValue(value.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
             BuiltinViewCapabilityShape::OptionalKeyBody => {
                 return match desc.body {
                     Some(_) if kernel.is_some_and(BodyKernel::is_view_native) => {

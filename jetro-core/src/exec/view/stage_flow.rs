@@ -309,5 +309,7 @@ where
         pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,
+        pipeline::ViewStageCapability::AppendValue(_) => None,
+        pipeline::ViewStageCapability::PrependValue(_) => None,
     }
 }

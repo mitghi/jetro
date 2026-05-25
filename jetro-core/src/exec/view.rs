@@ -2472,6 +2472,60 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
+    if let pipeline::ViewStageCapability::AppendValue(_) = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_view_item(
+            item,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
+    if let pipeline::ViewStageCapability::PrependValue(ref value) = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let seen = op_state.get_mut(stage_idx)?.next_index();
+        if seen == 0 {
+            let flow = match drive_owned_child(
+                value.clone(),
+                stage_idx + 1,
+                stages,
+                op_state,
+                stage_kernels,
+                source_demand,
+                emitted_outputs,
+                vm,
+                observe,
+            )? {
+                Ok(flow) => flow,
+                Err(err) => return Some(Err(err)),
+            };
+            if matches!(flow, ViewDriveFlow::Stop)
+                || source_demand.output_satisfied_by(*emitted_outputs)
+            {
+                return Some(Ok(ViewDriveFlow::Stop));
+            }
+        }
+        return drive_view_item(
+            item,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Lag { offset } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4391,6 +4445,17 @@ where
             pipeline::ViewStageCapability::NumericFullInput(op) => {
                 let state = op_state.get_mut(stage_idx)?.numeric_full_input();
                 numeric_full_input_tail_values(op, state)
+            }
+            pipeline::ViewStageCapability::AppendValue(ref value) => vec![value.clone()],
+            pipeline::ViewStageCapability::PrependValue(ref value) => {
+                let emitted = matches!(
+                    op_state.get(stage_idx),
+                    Some(ViewStageState::Counter(count)) if *count > 0
+                );
+                if emitted {
+                    continue;
+                }
+                vec![value.clone()]
             }
             _ => continue,
         };
@@ -7862,6 +7927,67 @@ mod tests {
             serde_json::Value::from(out),
             serde_json::Value::from(expected)
         );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_append_prepend_tape_rows_without_materializing_receiver() {
+        let cases = [
+            (
+                crate::builtins::BuiltinMethod::Append,
+                Val::Int(9),
+                serde_json::json!([1, 2, 3, 9]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::Prepend,
+                Val::Int(0),
+                serde_json::json!([0, 1, 2, 3]),
+            ),
+        ];
+
+        for (method, value, expected) in cases {
+            let tape = crate::data::tape::TapeData::parse(br#"[1,2,3]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    method,
+                    crate::builtins::BuiltinArgs::Val(value),
+                ))],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_collect_prepend_tape_empty_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Prepend,
+                crate::builtins::BuiltinArgs::Val(Val::Int(1)),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([1]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 

@@ -2306,6 +2306,8 @@ impl Builtin for Append {
     const NAME: &'static str = "append";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::AppendValue)
     }
     #[inline]
     fn apply_args(
@@ -2328,6 +2330,8 @@ impl Builtin for Prepend {
     const NAME: &'static str = "prepend";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::PrependValue)
     }
     #[inline]
     fn apply_args(

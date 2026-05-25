@@ -837,6 +837,10 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the key kernel.
         kernel: usize,
     },
+    /// Append one owned literal after all input rows.
+    AppendValue(Val),
+    /// Prepend one owned literal before input rows.
+    PrependValue(Val),
     /// Take the first `n` elements without reading their content.
     Take(usize),
     /// Skip the first `n` elements without reading their content.
@@ -924,6 +928,8 @@ impl ViewStageCapability {
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
             Self::Distinct { .. } => BuiltinViewStage::Distinct,
             Self::KeyedReduce { .. } => BuiltinViewStage::KeyedReduce,
+            Self::AppendValue(_) => BuiltinViewStage::AppendValue,
+            Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,
             Self::Skip(_) => BuiltinViewStage::Skip,
         }
@@ -1082,7 +1088,9 @@ impl ViewStageCapability {
             | Self::Window { .. }
             | Self::StringExpand { .. }
             | Self::Distinct { .. }
-            | Self::KeyedReduce { .. } => None,
+            | Self::KeyedReduce { .. }
+            | Self::AppendValue(_)
+            | Self::PrependValue(_) => None,
         }
     }
 
@@ -1161,7 +1169,9 @@ impl ViewStageCapability {
                 | Self::Window { .. }
                 | Self::StringExpand { .. }
                 | Self::Distinct { .. }
-                | Self::KeyedReduce { .. } => return false,
+                | Self::KeyedReduce { .. }
+                | Self::AppendValue(_)
+                | Self::PrependValue(_) => return false,
             }
         }
         false
