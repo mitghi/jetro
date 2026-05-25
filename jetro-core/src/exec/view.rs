@@ -3284,20 +3284,40 @@ where
             .map(|predicate| eval_frontier_filter_kernel_with_vm(&child, predicate, vm))
             .unwrap_or(Some(true))?
         {
-            let value = match map {
-                Some(map) => eval_frontier_value_kernel_with_vm(map, &child, vm)?,
-                None => pipeline::view_kernel_view_to_owned(child),
+            match map {
+                Some(map) => match eval_frontier_kernel_with_vm(&child, map, vm)? {
+                    pipeline::ViewKernelValue::View(view) => pipeline::num_fold_json_view(
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                        op,
+                        view.scalar(),
+                    ),
+                    pipeline::ViewKernelValue::Owned(value) => pipeline::num_fold(
+                        &mut acc_i,
+                        &mut acc_f,
+                        &mut floated,
+                        &mut min_f,
+                        &mut max_f,
+                        &mut n_obs,
+                        op,
+                        &value,
+                    ),
+                },
+                None => pipeline::num_fold_json_view(
+                    &mut acc_i,
+                    &mut acc_f,
+                    &mut floated,
+                    &mut min_f,
+                    &mut max_f,
+                    &mut n_obs,
+                    op,
+                    child.scalar(),
+                ),
             };
-            pipeline::num_fold(
-                &mut acc_i,
-                &mut acc_f,
-                &mut floated,
-                &mut min_f,
-                &mut max_f,
-                &mut n_obs,
-                op,
-                &value,
-            );
         }
         Some(())
     };
@@ -8024,6 +8044,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([[2, 4], [1, 4]]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_array_numeric_reducer_folds_tape_scalars_without_materializing() {
+        let tape = crate::data::tape::TapeData::parse(br#"[[1,2,3],[4,5]]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::NestedArrayReducer {
+                source: Box::new(BodyKernel::Current),
+                predicate: None,
+                map: None,
+                op: NumOp::Sum,
+            }],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_terminal_collect(TapeView::root(&tape), &body, &mut VM::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([6, 9]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 

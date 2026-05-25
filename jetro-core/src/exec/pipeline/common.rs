@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use crate::{data::context::EvalError, data::value::Val};
+use crate::{data::context::EvalError, data::value::Val, util::JsonView};
 
 use super::{NumOp, StageStrategy};
 
@@ -26,6 +26,49 @@ pub(crate) fn num_fold(
         Val::Int(n) => num_fold_i64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, *n),
         Val::Float(x) => num_fold_f64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, *x),
         _ => return,
+    }
+}
+
+/// Accumulates one borrowed JSON scalar into numeric aggregate state without
+/// allocating a temporary `Val`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn num_fold_json_view(
+    acc_i: &mut i64,
+    acc_f: &mut f64,
+    floated: &mut bool,
+    min_f: &mut f64,
+    max_f: &mut f64,
+    n_obs: &mut usize,
+    op: NumOp,
+    scalar: JsonView<'_>,
+) {
+    match scalar {
+        JsonView::Int(value) => num_fold_i64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, value),
+        JsonView::UInt(value) if value <= i64::MAX as u64 => num_fold_i64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as i64,
+        ),
+        JsonView::UInt(value) => num_fold_f64(
+            acc_i,
+            acc_f,
+            floated,
+            min_f,
+            max_f,
+            n_obs,
+            op,
+            value as f64,
+        ),
+        JsonView::Float(value) => {
+            num_fold_f64(acc_i, acc_f, floated, min_f, max_f, n_obs, op, value)
+        }
+        _ => {}
     }
 }
 
