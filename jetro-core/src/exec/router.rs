@@ -1123,6 +1123,23 @@ mod tests {
     }
 
     #[test]
+    fn view_group_shape_projects_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"docs":[{"rows":[{"old":true}]},{"rows":[{"a":1,"b":2},{"b":3,"a":4},{"a":5},7]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.docs.map(@.rows.group_shape()).last()"#).unwrap();
+
+        assert_eq!(
+            out,
+            json!({"a,b":[{"a":1,"b":2},{"b":3,"a":4}],"a":[{"a":5}],"<scalar>":[7]})
+        );
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

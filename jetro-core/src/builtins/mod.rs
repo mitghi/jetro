@@ -934,6 +934,8 @@ pub enum BuiltinViewValueProjection {
     FromPairs,
     /// Parse a JSON string into a value.
     FromJson,
+    /// Bucket array rows by object key shape.
+    GroupShape,
     /// Group row objects by all fields except one, collecting that field into arrays.
     Implode,
     /// Swap object keys and values, coercing values to object keys.
@@ -1038,6 +1040,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::FromJson
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
+            | BuiltinViewValueProjection::GroupShape
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
             | BuiltinViewValueProjection::Implode

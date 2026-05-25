@@ -1328,6 +1328,15 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::GroupShape => {
+            if !matches!(args, BuiltinArgs::None) {
+                return None;
+            }
+            return Some(match view_group_shape(&view) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Implode => {
             let BuiltinArgs::Str(field) = args else {
                 return None;
@@ -1724,6 +1733,41 @@ where
         out.push(Val::obj(rest));
     }
     Some(Val::arr(out))
+}
+
+fn view_group_shape<'a, V>(view: &V) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let len = view.array_len()?;
+    let mut buckets: indexmap::IndexMap<Arc<str>, Vec<Val>> =
+        indexmap::IndexMap::with_capacity(len);
+    for item in view.array_iter()? {
+        let key = match item.object_iter() {
+            Some(fields) => {
+                let mut keys = fields.map(|(key, _)| key).collect::<Vec<_>>();
+                keys.sort_unstable_by(|left, right| left.as_ref().cmp(right.as_ref()));
+                let total_len =
+                    keys.iter().map(|key| key.len()).sum::<usize>() + keys.len().saturating_sub(1);
+                let mut shape = String::with_capacity(total_len);
+                for (idx, key) in keys.iter().enumerate() {
+                    if idx > 0 {
+                        shape.push(',');
+                    }
+                    shape.push_str(key);
+                }
+                Arc::<str>::from(shape)
+            }
+            None => Arc::from("<scalar>"),
+        };
+        buckets.entry(key).or_default().push(item.materialize());
+    }
+    Some(Val::obj(
+        buckets
+            .into_iter()
+            .map(|(key, values)| (key, Val::arr(values)))
+            .collect(),
+    ))
 }
 
 fn view_shallow_merge<'a, V>(
@@ -5052,6 +5096,10 @@ mod tests {
                 BuiltinViewValueProjection::FromPairs,
             ),
             (
+                BuiltinMethod::GroupShape,
+                BuiltinViewValueProjection::GroupShape,
+            ),
+            (
                 BuiltinMethod::HtmlEscape,
                 BuiltinViewValueProjection::HtmlEscape,
             ),
@@ -7184,6 +7232,10 @@ mod tests {
             (
                 BuiltinMethod::FromPairs,
                 BuiltinViewValueProjection::FromPairs,
+            ),
+            (
+                BuiltinMethod::GroupShape,
+                BuiltinViewValueProjection::GroupShape,
             ),
             (
                 BuiltinMethod::HtmlEscape,

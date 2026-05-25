@@ -1575,6 +1575,10 @@ impl Builtin for GroupShape {
     const NAME: &'static str = "group_shape";
     fn spec() -> BuiltinSpec {
         barrier_default_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::GroupShape)
+            .demand_law(BuiltinViewValueProjection::GroupShape.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_one(recv: &crate::data::value::Val) -> Option<crate::data::value::Val> {
