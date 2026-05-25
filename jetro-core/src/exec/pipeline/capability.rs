@@ -252,6 +252,33 @@ impl SourceAccessMode {
             | Self::MaterializedFallback => None,
         }
     }
+
+    /// Converts a positional pull against a reversed source into the concrete
+    /// original source row that satisfies it. Returns `None` for non-single-row
+    /// pull forms.
+    pub(crate) fn reversed_single_access_for_demand(
+        demand: PullDemand,
+        len: usize,
+    ) -> Option<SourceIndexedAccess> {
+        match demand {
+            PullDemand::FirstInput(1) => Some(
+                index_from_end(len, 0)
+                    .map(SourceIndexedAccess::Single)
+                    .unwrap_or(SourceIndexedAccess::Empty),
+            ),
+            PullDemand::NthInput(offset) => Some(
+                index_from_end(len, offset)
+                    .map(SourceIndexedAccess::Single)
+                    .unwrap_or(SourceIndexedAccess::Empty),
+            ),
+            PullDemand::LastInput(1) => Some(if len == 0 {
+                SourceIndexedAccess::Empty
+            } else {
+                SourceIndexedAccess::Single(0)
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Return the absolute index for `offset` counted from the end of a sequence.
@@ -533,6 +560,34 @@ mod source_capability_tests {
             Some(SourceIndexedAccess::Range { start: 0, end: 5 })
         );
         assert_eq!(SourceAccessMode::Forward.indexed_access(5), None);
+    }
+
+    #[test]
+    fn access_mode_resolves_reversed_single_positional_reads() {
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::FirstInput(1), 5),
+            Some(SourceIndexedAccess::Single(4))
+        );
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::NthInput(2), 5),
+            Some(SourceIndexedAccess::Single(2))
+        );
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::LastInput(1), 5),
+            Some(SourceIndexedAccess::Single(0))
+        );
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::LastInput(1), 0),
+            Some(SourceIndexedAccess::Empty)
+        );
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::FirstInput(2), 5),
+            None
+        );
+        assert_eq!(
+            SourceAccessMode::reversed_single_access_for_demand(PullDemand::NthInput(5), 5),
+            Some(SourceIndexedAccess::Empty)
+        );
     }
 
     #[test]

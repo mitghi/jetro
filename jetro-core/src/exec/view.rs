@@ -629,17 +629,12 @@ where
     let JsonView::ArrayLen(len) = source.scalar() else {
         return None;
     };
-    let idx = match source_demand {
-        PullDemand::FirstInput(1) => pipeline::index_from_end(len, 0)?,
-        PullDemand::NthInput(offset) => pipeline::index_from_end(len, offset)?,
-        PullDemand::LastInput(1) => {
-            if len == 0 {
-                return Some(Ok(()));
-            }
-            0
-        }
-        _ => return None,
-    };
+    let idx =
+        match pipeline::SourceAccessMode::reversed_single_access_for_demand(source_demand, len)? {
+            pipeline::SourceIndexedAccess::Single(idx) => idx,
+            pipeline::SourceIndexedAccess::Empty => return Some(Ok(())),
+            pipeline::SourceIndexedAccess::Range { .. } => return None,
+        };
     let items = std::iter::once(source.index(idx as i64));
     drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
 }
