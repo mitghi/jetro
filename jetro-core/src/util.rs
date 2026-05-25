@@ -8,8 +8,7 @@ use std::sync::Arc;
 
 use crate::data::context::EvalError;
 use crate::data::value::Val;
-use crate::parse::ast::BinOp;
-use crate::parse::ast::KindType;
+use crate::parse::ast::{BinOp, CastType, KindType};
 
 /// Borrowed scalar view — used by `ValueView` implementations so scalar
 /// reads return a stack value without allocating a `Val`.
@@ -171,6 +170,123 @@ pub fn json_cmp_binop(lhs: JsonView<'_>, op: BinOp, rhs: JsonView<'_>) -> bool {
 #[inline]
 pub fn is_truthy(v: &Val) -> bool {
     JsonView::from_val(v).truthy()
+}
+
+/// Perform an explicit type cast on an owned value.
+pub(crate) fn cast_val(v: &Val, ty: CastType) -> Result<Val, EvalError> {
+    match ty {
+        CastType::Str => Ok(Val::Str(Arc::from(
+            match v {
+                Val::Null => "null".to_string(),
+                Val::Bool(b) => b.to_string(),
+                Val::Int(n) => n.to_string(),
+                Val::Float(f) => f.to_string(),
+                Val::Str(s) => s.to_string(),
+                other => val_to_string(other),
+            }
+            .as_str(),
+        ))),
+        CastType::Bool => Ok(Val::Bool(is_truthy(v))),
+        CastType::Number | CastType::Float => match v {
+            Val::Int(n) => Ok(Val::Float(*n as f64)),
+            Val::Float(_) => Ok(v.clone()),
+            Val::Str(s) => s
+                .parse::<f64>()
+                .map(Val::Float)
+                .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::StrSlice(s) => s
+                .as_str()
+                .parse::<f64>()
+                .map(Val::Float)
+                .map_err(|e| EvalError(format!("as float: {}", e))),
+            Val::Bool(b) => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
+            Val::Null => Ok(Val::Float(0.0)),
+            _ => Err(EvalError("as float: cannot convert".into())),
+        },
+        CastType::Int => match v {
+            Val::Int(_) => Ok(v.clone()),
+            Val::Float(f) => Ok(Val::Int(*f as i64)),
+            Val::Str(s) => cast_str_to_int(s),
+            Val::StrSlice(s) => cast_str_to_int(s.as_str()),
+            Val::Bool(b) => Ok(Val::Int(if *b { 1 } else { 0 })),
+            Val::Null => Ok(Val::Int(0)),
+            _ => Err(EvalError("as int: cannot convert".into())),
+        },
+        CastType::Array => match v {
+            Val::Arr(_) => Ok(v.clone()),
+            Val::Null => Ok(Val::arr(Vec::new())),
+            other => Ok(Val::arr(vec![other.clone()])),
+        },
+        CastType::Object => match v {
+            Val::Obj(_) => Ok(v.clone()),
+            _ => Err(EvalError("as object: cannot convert non-object".into())),
+        },
+        CastType::Null => Ok(Val::Null),
+    }
+}
+
+/// Cast a borrowed scalar view without materialising it when semantics do not
+/// require compound contents. Returns `None` when the caller must materialise.
+pub(crate) fn cast_json_view(view: JsonView<'_>, ty: CastType) -> Option<Result<Val, EvalError>> {
+    Some(match ty {
+        CastType::Str => match view {
+            JsonView::Null => Ok(Val::Str(Arc::from("null"))),
+            JsonView::Bool(value) => Ok(Val::Str(Arc::from(value.to_string().as_str()))),
+            JsonView::Int(value) => Ok(Val::Str(Arc::from(value.to_string().as_str()))),
+            JsonView::UInt(value) => Ok(Val::Str(Arc::from(value.to_string().as_str()))),
+            JsonView::Float(value) => Ok(Val::Str(Arc::from(value.to_string().as_str()))),
+            JsonView::Str(value) => Ok(Val::Str(Arc::from(value))),
+            JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => return None,
+        },
+        CastType::Bool => Ok(Val::Bool(view.truthy())),
+        CastType::Number | CastType::Float => match view {
+            JsonView::Int(value) => Ok(Val::Float(value as f64)),
+            JsonView::UInt(value) => Ok(Val::Float(value as f64)),
+            JsonView::Float(value) => Ok(Val::Float(value)),
+            JsonView::Str(value) => value
+                .parse::<f64>()
+                .map(Val::Float)
+                .map_err(|e| EvalError(format!("as float: {}", e))),
+            JsonView::Bool(value) => Ok(Val::Float(if value { 1.0 } else { 0.0 })),
+            JsonView::Null => Ok(Val::Float(0.0)),
+            JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
+                Err(EvalError("as float: cannot convert".into()))
+            }
+        },
+        CastType::Int => match view {
+            JsonView::Int(value) => Ok(Val::Int(value)),
+            JsonView::UInt(value) if value <= i64::MAX as u64 => Ok(Val::Int(value as i64)),
+            JsonView::UInt(value) => Ok(Val::Int(value as i64)),
+            JsonView::Float(value) => Ok(Val::Int(value as i64)),
+            JsonView::Str(value) => cast_str_to_int(value),
+            JsonView::Bool(value) => Ok(Val::Int(if value { 1 } else { 0 })),
+            JsonView::Null => Ok(Val::Int(0)),
+            JsonView::ArrayLen(_) | JsonView::ObjectLen(_) => {
+                Err(EvalError("as int: cannot convert".into()))
+            }
+        },
+        CastType::Array => match view {
+            JsonView::Null => Ok(Val::arr(Vec::new())),
+            JsonView::ArrayLen(_) => return None,
+            _ => match crate::data::view::scalar_view_to_owned_val(view) {
+                Some(value) => Ok(Val::arr(vec![value])),
+                None => return None,
+            },
+        },
+        CastType::Object => match view {
+            JsonView::ObjectLen(_) => return None,
+            _ => Err(EvalError("as object: cannot convert non-object".into())),
+        },
+        CastType::Null => Ok(Val::Null),
+    })
+}
+
+fn cast_str_to_int(value: &str) -> Result<Val, EvalError> {
+    value
+        .parse::<i64>()
+        .map(Val::Int)
+        .or_else(|_| value.parse::<f64>().map(|f| Val::Int(f as i64)))
+        .map_err(|e| EvalError(format!("as int: {}", e)))
 }
 
 /// Return `true` if `v` belongs to the `KindType` category used by the `type()` builtin.

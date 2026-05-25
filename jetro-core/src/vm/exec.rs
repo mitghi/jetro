@@ -1068,7 +1068,7 @@ impl VM {
                 }
                 Opcode::CastOp(ty) => {
                     let v = pop!(stack);
-                    stack.push(exec_cast(&v, *ty)?);
+                    stack.push(crate::util::cast_val(&v, *ty)?);
                 }
 
                 Opcode::AndOp(rhs) => {
@@ -4514,74 +4514,6 @@ fn bind_comp_vars(env: &Env, vars: &[Arc<str>], item: Val) -> Env {
             e.current = b;
             e
         }
-    }
-}
-
-/// Perform an explicit type cast on `v` as specified by `ty` (`as str`, `as int`,
-/// `as float`, `as bool`, `as array`, `as object`, `as null`).
-fn exec_cast(v: &Val, ty: crate::parse::ast::CastType) -> Result<Val, EvalError> {
-    use crate::parse::ast::CastType;
-    match ty {
-        CastType::Str => Ok(Val::Str(Arc::from(
-            match v {
-                Val::Null => "null".to_string(),
-                Val::Bool(b) => b.to_string(),
-                Val::Int(n) => n.to_string(),
-                Val::Float(f) => f.to_string(),
-                Val::Str(s) => s.to_string(),
-                other => crate::util::val_to_string(other),
-            }
-            .as_str(),
-        ))),
-        CastType::Bool => Ok(Val::Bool(match v {
-            Val::Null => false,
-            Val::Bool(b) => *b,
-            Val::Int(n) => *n != 0,
-            Val::Float(f) => *f != 0.0,
-            Val::Str(s) => !s.is_empty(),
-            Val::StrSlice(r) => !r.is_empty(),
-            Val::Arr(a) => !a.is_empty(),
-            Val::IntVec(a) => !a.is_empty(),
-            Val::FloatVec(a) => !a.is_empty(),
-            Val::StrVec(a) => !a.is_empty(),
-            Val::StrSliceVec(a) => !a.is_empty(),
-            Val::ObjVec(d) => !d.cells.is_empty(),
-            Val::Obj(o) => !o.is_empty(),
-            Val::ObjSmall(p) => !p.is_empty(),
-        })),
-        CastType::Number | CastType::Float => match v {
-            Val::Int(n) => Ok(Val::Float(*n as f64)),
-            Val::Float(_) => Ok(v.clone()),
-            Val::Str(s) => s
-                .parse::<f64>()
-                .map(Val::Float)
-                .map_err(|e| EvalError(format!("as float: {}", e))),
-            Val::Bool(b) => Ok(Val::Float(if *b { 1.0 } else { 0.0 })),
-            Val::Null => Ok(Val::Float(0.0)),
-            _ => err!("as float: cannot convert"),
-        },
-        CastType::Int => match v {
-            Val::Int(_) => Ok(v.clone()),
-            Val::Float(f) => Ok(Val::Int(*f as i64)),
-            Val::Str(s) => s
-                .parse::<i64>()
-                .map(Val::Int)
-                .or_else(|_| s.parse::<f64>().map(|f| Val::Int(f as i64)))
-                .map_err(|e| EvalError(format!("as int: {}", e))),
-            Val::Bool(b) => Ok(Val::Int(if *b { 1 } else { 0 })),
-            Val::Null => Ok(Val::Int(0)),
-            _ => err!("as int: cannot convert"),
-        },
-        CastType::Array => match v {
-            Val::Arr(_) => Ok(v.clone()),
-            Val::Null => Ok(Val::arr(Vec::new())),
-            other => Ok(Val::arr(vec![other.clone()])),
-        },
-        CastType::Object => match v {
-            Val::Obj(_) => Ok(v.clone()),
-            _ => err!("as object: cannot convert non-object"),
-        },
-        CastType::Null => Ok(Val::Null),
     }
 }
 

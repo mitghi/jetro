@@ -172,6 +172,11 @@ pub enum BodyKernel {
         ty: crate::parse::ast::KindType,
         negate: bool,
     },
+    /// Error-free explicit cast over a view-native expression.
+    Cast {
+        expr: Box<BodyKernel>,
+        ty: crate::parse::ast::CastType,
+    },
     /// Null coalescing: returns the first non-null expression.
     Coalesce {
         lhs: Box<BodyKernel>,
@@ -977,6 +982,17 @@ impl BodyKernel {
                     }
                 }
             }
+            Expr::Cast { expr, ty } if safe_view_cast_type(*ty) => {
+                let kernel = Self::classify_expr(expr);
+                if matches!(kernel, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::Cast {
+                        expr: Box::new(kernel),
+                        ty: *ty,
+                    }
+                }
+            }
             Expr::Coalesce(lhs, rhs) => {
                 let lhs = Self::classify_expr(lhs);
                 let rhs = Self::classify_expr(rhs);
@@ -1140,6 +1156,7 @@ impl BodyKernel {
             Self::Neg(kernel) => kernel.field_demand(),
             Self::Not(kernel) => kernel.field_demand(),
             Self::KindCheck { expr, .. } => expr.field_demand(),
+            Self::Cast { expr, .. } => expr.field_demand(),
             Self::Coalesce { lhs, rhs } => lhs.field_demand().merge(rhs.field_demand()),
             Self::IfElse { cond, then_, else_ } => cond
                 .field_demand()
@@ -1205,6 +1222,7 @@ impl BodyKernel {
             Self::Neg(kernel) => kernel.mentions_any_field_like_ident(names),
             Self::Not(kernel) => kernel.mentions_any_field_like_ident(names),
             Self::KindCheck { expr, .. } => expr.mentions_any_field_like_ident(names),
+            Self::Cast { expr, .. } => expr.mentions_any_field_like_ident(names),
             Self::Coalesce { lhs, rhs } => {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
@@ -1279,6 +1297,7 @@ impl BodyKernel {
             Self::Neg(kernel) => kernel.is_view_native(),
             Self::Not(kernel) => kernel.is_view_native(),
             Self::KindCheck { expr, .. } => expr.is_view_native(),
+            Self::Cast { expr, .. } => expr.is_view_native(),
             Self::Coalesce { lhs, rhs } => lhs.is_view_native() && rhs.is_view_native(),
             Self::IfElse { cond, then_, else_ } => {
                 cond.is_view_native() && then_.is_view_native() && else_.is_view_native()
@@ -1339,6 +1358,7 @@ impl BodyKernel {
             | Self::Neg(_)
             | Self::Not(_)
             | Self::KindCheck { .. }
+            | Self::Cast { .. }
             | Self::IfElse { .. }
             | Self::CurrentCmpLit(_, _)
             | Self::FieldCmpLit(_, _, _)
@@ -1590,6 +1610,16 @@ impl BodyKernel {
                         expr: Box::new(body),
                         ty: *ty,
                         negate: *negate,
+                    };
+                }
+            }
+            [body @ .., Opcode::CastOp(ty)] if safe_view_cast_type(*ty) => {
+                let body =
+                    BodyKernel::classify(&crate::vm::Program::new(body.to_vec(), "<cast-kernel>"));
+                if !matches!(body, BodyKernel::Generic) && body.is_view_native() {
+                    return Self::Cast {
+                        expr: Box::new(body),
+                        ty: *ty,
                     };
                 }
             }
@@ -2397,6 +2427,10 @@ fn eval_native_kernel_with_vm(
             let matches = crate::util::kind_matches(&value, *ty);
             Ok(Val::Bool(if *negate { !matches } else { matches }))
         }
+        BodyKernel::Cast { expr, ty } => {
+            let value = eval_native_kernel_with_vm(expr, item, vm)?;
+            crate::util::cast_val(&value, *ty)
+        }
         BodyKernel::Coalesce { lhs, rhs } => {
             let value = eval_native_kernel_with_vm(lhs, item, vm)?;
             if value.is_null() {
@@ -2999,6 +3033,12 @@ fn json_view_matches_kind(view: JsonView<'_>, ty: crate::parse::ast::KindType) -
     )
 }
 
+#[inline]
+fn safe_view_cast_type(ty: crate::parse::ast::CastType) -> bool {
+    use crate::parse::ast::CastType;
+    matches!(ty, CastType::Str | CastType::Bool | CastType::Array)
+}
+
 fn eval_numeric_binary(
     lhs: NumericKernelValue,
     op: crate::parse::ast::BinOp,
@@ -3493,6 +3533,17 @@ where
             } else {
                 matches
             })))
+        }
+        BodyKernel::Cast { expr, ty } => {
+            let value = match eval_view_kernel_inner(expr, item, vm)? {
+                ViewKernelValue::View(view) => match crate::util::cast_json_view(view.scalar(), *ty)
+                {
+                    Some(result) => result.ok()?,
+                    None => crate::util::cast_val(&view_kernel_view_to_owned(view), *ty).ok()?,
+                },
+                ViewKernelValue::Owned(value) => crate::util::cast_val(&value, *ty).ok()?,
+            };
+            Some(ViewKernelValue::Owned(value))
         }
         BodyKernel::Coalesce { lhs, rhs } => match eval_view_kernel_inner(lhs, item, vm)? {
             ViewKernelValue::View(view) if !matches!(view.scalar(), JsonView::Null) => {
@@ -4000,6 +4051,26 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"sort_key": -42, "numeric": true, "named": true})
+        );
+    }
+
+    #[test]
+    fn safe_cast_kernels_run_on_value_views() {
+        let expr = parse(r#"{id: id as string, ok: score as bool, tags: tag as array}"#)
+            .expect("parse safe cast projection");
+        let program = Compiler::compile(&expr, "safe-cast");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"id": 42, "score": 1, "tag": "sf"}));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("safe cast projection output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"id": "42", "ok": true, "tags": ["sf"]})
         );
     }
 
