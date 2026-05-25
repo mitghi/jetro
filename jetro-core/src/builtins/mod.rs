@@ -930,6 +930,8 @@ pub enum BuiltinViewValueProjection {
     Invert,
     /// Recursively merge an owned value argument into the receiver value.
     DeepMerge,
+    /// Flatten nested object keys into a separator-joined object.
+    FlattenKeys,
     /// Shallow-merge an owned object argument into the receiver object.
     Merge,
     /// Fill missing or null receiver object keys from an owned defaults object.
@@ -1006,6 +1008,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Dedent
             | BuiltinViewValueProjection::DeepMerge
             | BuiltinViewValueProjection::Defaults
+            | BuiltinViewValueProjection::FlattenKeys
             | BuiltinViewValueProjection::FromPairs
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape

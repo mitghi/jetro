@@ -2898,6 +2898,10 @@ impl Builtin for FlattenKeys {
     const NAME: &'static str = "flatten_keys";
     fn spec() -> BuiltinSpec {
         path_indexed_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::FlattenKeys)
+            .demand_law(BuiltinViewValueProjection::FlattenKeys.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
     #[inline]
     fn apply_args(

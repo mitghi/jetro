@@ -1323,6 +1323,12 @@ where
             };
             return Some(ViewProjectionResult::Owned(view_deep_merge(&view, other)));
         }
+        BuiltinViewValueProjection::FlattenKeys => {
+            let BuiltinArgs::Str(sep) = args else {
+                return None;
+            };
+            return Some(ViewProjectionResult::Owned(view_flatten_keys(&view, sep)));
+        }
         BuiltinViewValueProjection::Merge | BuiltinViewValueProjection::Defaults => {
             let BuiltinArgs::Val(other) = args else {
                 return None;
@@ -1465,6 +1471,39 @@ where
         out.insert(Arc::clone(key), merged);
     }
     Some(Val::obj(out))
+}
+
+fn view_flatten_keys<'a, V>(view: &V, sep: &str) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    let mut out = indexmap::IndexMap::new();
+    view_flatten_keys_impl("", view, sep, &mut out);
+    Val::obj(out)
+}
+
+fn view_flatten_keys_impl<'a, V>(
+    prefix: &str,
+    view: &V,
+    sep: &str,
+    out: &mut indexmap::IndexMap<Arc<str>, Val>,
+) where
+    V: ValueView<'a> + 'a,
+{
+    if view.object_len().is_some() {
+        if let Some(fields) = view.object_iter() {
+            for (key, value) in fields {
+                let full = if prefix.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{prefix}{sep}{key}")
+                };
+                view_flatten_keys_impl(&full, &value, sep, out);
+            }
+        }
+        return;
+    }
+    out.insert(Arc::from(prefix), view_to_owned(view.clone()));
 }
 
 fn view_object_to_map<'a, V>(view: &V) -> Option<indexmap::IndexMap<Arc<str>, Val>>
@@ -4412,6 +4451,10 @@ mod tests {
                 BuiltinViewValueProjection::Defaults,
             ),
             (
+                BuiltinMethod::FlattenKeys,
+                BuiltinViewValueProjection::FlattenKeys,
+            ),
+            (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
@@ -6531,6 +6574,10 @@ mod tests {
                 BuiltinViewValueProjection::Defaults,
             ),
             (
+                BuiltinMethod::FlattenKeys,
+                BuiltinViewValueProjection::FlattenKeys,
+            ),
+            (
                 BuiltinMethod::FromBase64,
                 BuiltinViewValueProjection::FromBase64,
             ),
@@ -6666,6 +6713,7 @@ mod tests {
                 "pairs": [["a", 1], {"key": "b", "value": 2}, {"k": "c"}],
                 "invertible": {"a": "one", "b": 2, "c": true, "d": ["x"]},
                 "deep_merge_base": {"a": {"x": 1}, "b": 2},
+                "flatten_keys_base": {"a": {"b": {"c": 1}, "d": 2}},
                 "merge_base": {"a": 1, "b": 2},
                 "defaults_base": {"a": null, "b": 2},
                 "rename_base": {"a": 1, "b": 2, "c": 3}
@@ -6798,6 +6846,14 @@ mod tests {
                 "deep_merge_base"
             ),
             &Val::from(&serde_json::json!({"b": 2, "a": {"x": 1, "y": 3}, "c": 4}))
+        ));
+        assert!(crate::util::vals_deep_eq(
+            &apply_field(
+                BuiltinMethod::FlattenKeys,
+                BuiltinArgs::Str(std::sync::Arc::from(".")),
+                "flatten_keys_base"
+            ),
+            &Val::from(&serde_json::json!({"a.b.c": 1, "a.d": 2}))
         ));
         assert!(crate::util::vals_deep_eq(
             &apply_field(
