@@ -14,7 +14,7 @@ use crate::builtins::registry::dispatches_scalar_direct;
 use crate::builtins::registry::view_scalar_projection;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinCancellation, BuiltinMethod, BuiltinNumericReducer,
-    BuiltinViewStage,
+    BuiltinViewObjectProjection, BuiltinViewStage,
 };
 #[cfg(test)]
 use crate::builtins::{BuiltinMembershipSink, BuiltinPredicateSink};
@@ -66,16 +66,15 @@ pub use ir::{
 pub(crate) use kernels::eval_kernel;
 #[cfg(test)]
 pub(crate) use kernels::eval_view_kernel;
-pub use kernels::{eval_cmp_op, BodyKernel};
-pub(crate) use kernels::{
-    append_json_view_to_string, append_val_to_string,
-    eval_binary_op, eval_kernel_view_first_with_vm, eval_kernel_with_vm,
-    eval_view_kernel_with_vm, eval_view_numeric_kernel_value, view_kernel_view_to_owned,
-    ArraySelector, CollectLayout, NestedPlanKernel, ObjectKernel, FStringKernelPart,
-    ViewKernelValue,
-};
 #[cfg(test)]
 pub(crate) use kernels::FStringKernel;
+pub(crate) use kernels::{
+    append_json_view_to_string, append_val_to_string, eval_binary_op,
+    eval_kernel_view_first_with_vm, eval_kernel_with_vm, eval_view_kernel_with_vm,
+    eval_view_numeric_kernel_value, view_kernel_view_to_owned, ArraySelector, CollectLayout,
+    FStringKernelPart, NestedPlanKernel, ObjectKernel, ViewKernelValue,
+};
+pub use kernels::{eval_cmp_op, BodyKernel};
 pub(crate) use lower::{compile_pipeline_expr_body, compile_sort_spec};
 pub use operator::{
     ArgExtremeSinkSpec, MembershipSinkSpec, MembershipSinkTarget, PredicateSinkSpec, ReducerOp,
@@ -279,6 +278,9 @@ pub enum Stage {
 
     /// Delegates each element to a pure built-in method call with pre-resolved literal arguments.
     Builtin(PipelineBuiltinCall),
+
+    /// Expands a single object receiver into keys, values, entries, or pairs.
+    ObjectItems(BuiltinViewObjectProjection),
 
     /// `usize`-argument builtin stage identified by the registry.
     UsizeBuiltin {

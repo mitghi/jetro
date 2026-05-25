@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use crate::builtins::registry::by_name as builtin_by_name;
+use crate::builtins::registry::{by_name as builtin_by_name, view_object_items_projection_call};
 use crate::builtins::BuiltinCall;
 use crate::compile::compiler::Compiler;
 use crate::data::value::Val;
@@ -1092,6 +1092,9 @@ pub(crate) fn plan_ast_with_context(ast: Expr, context: PlanningContext) -> Quer
         context,
         locals: Vec::new(),
     };
+    if let Some(node) = try_lower_object_items_pipeline(&mut builder, &ast) {
+        return builder.finish(node);
+    }
     let top_level_pipeline = if should_skip_field_chain_pipeline(&ast) {
         None
     } else {
@@ -1130,6 +1133,55 @@ fn expr_is_direct_view_projection_chain(expr: &Expr) -> bool {
             Step::Field(_) | Step::OptField(_) | Step::Index(_) | Step::DynIndex(_)
         )
     })
+}
+
+fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Root) {
+        return None;
+    }
+
+    let mut field_end = 0;
+    for step in steps {
+        match step {
+            Step::Field(_) => field_end += 1,
+            _ => break,
+        }
+    }
+    if field_end == 0 || field_end >= steps.len() {
+        return None;
+    }
+    let Step::Method(name, args) = &steps[field_end] else {
+        return None;
+    };
+    let call = BuiltinCall::from_literal_ast_args(name.as_str(), args)?;
+    let projection = view_object_items_projection_call(call.id(), &call.args)?;
+
+    let keys: Arc<[Arc<str>]> = steps[..field_end]
+        .iter()
+        .map(|step| match step {
+            Step::Field(key) => Arc::from(key.as_str()),
+            _ => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let mut stages = vec![crate::exec::pipeline::Stage::ObjectItems(projection)];
+    let mut stage_exprs = vec![None];
+    let sink = if field_end + 1 < steps.len() {
+        let tail = Pipeline::lower_body_from_steps(&steps[field_end + 1..])?;
+        stages.extend(tail.stages);
+        stage_exprs.extend(tail.stage_exprs);
+        tail.sink
+    } else {
+        crate::exec::pipeline::Sink::Collect
+    };
+    let body = crate::exec::pipeline::PipelineBody::planned(stages, stage_exprs, sink);
+    Some(builder.push(PlanNode::Pipeline {
+        source: PipelinePlanSource::FieldChain { keys },
+        body,
+    }))
 }
 
 #[cfg(test)]
@@ -1800,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_view_projection_prefix_does_not_lower_as_field_chain_pipeline() {
+    fn object_item_projection_prefix_lowers_as_field_chain_pipeline() {
         let plan = plan_query(r#"$.profile.entries().first()"#);
         let QueryRoot::Node(root) = plan.root() else {
             panic!("expected physical plan");
@@ -1808,9 +1860,14 @@ mod tests {
         match plan.node(*root) {
             PlanNode::Pipeline {
                 source: PipelinePlanSource::FieldChain { .. },
-                ..
-            } => panic!("entries().first() must not stream the object as one pipeline row"),
-            _ => {}
+                body,
+            } => assert!(matches!(
+                body.stages.first(),
+                Some(crate::exec::pipeline::Stage::ObjectItems(
+                    crate::builtins::BuiltinViewObjectProjection::Entries
+                ))
+            )),
+            _ => panic!("entries().first() must stream object items from a field-chain source"),
         }
     }
 

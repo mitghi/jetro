@@ -13,8 +13,8 @@ pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
     BuiltinObjectLambda, BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec,
-    BuiltinViewStage, BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling,
-    BuiltinViewSetFilter, BuiltinViewStringExpand,
+    BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling, BuiltinViewSetFilter,
+    BuiltinViewStage, BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -629,7 +629,10 @@ mod source_capability_tests {
         );
         assert_eq!(SourceAccessMode::Forward.bounded_forward_end(10), None);
         assert_eq!(SourceAccessMode::IndexedSuffix(3).suffix_start(10), Some(7));
-        assert_eq!(SourceAccessMode::IndexedSuffix(30).suffix_start(10), Some(0));
+        assert_eq!(
+            SourceAccessMode::IndexedSuffix(30).suffix_start(10),
+            Some(0)
+        );
         assert_eq!(SourceAccessMode::Indexed(1).suffix_start(10), None);
     }
 
@@ -769,6 +772,11 @@ pub(crate) enum ViewStageCapability {
     FlatMap {
         /// Index into `stage_kernels` for the body kernel.
         kernel: usize,
+    },
+    /// Expands object fields into keys, values, entries, or `{key,val}` pairs.
+    ObjectItems {
+        /// Object item projection to emit.
+        projection: crate::builtins::BuiltinViewObjectProjection,
     },
     /// Flatten array rows up to `depth`, emitting borrowed child views.
     Flatten {
@@ -914,6 +922,7 @@ impl ViewStageCapability {
             BuiltinViewStage::FlatMap if kernel_is_view_native => Some(Self::FlatMap {
                 kernel: kernel_index,
             }),
+            BuiltinViewStage::ObjectItems(projection) => Some(Self::ObjectItems { projection }),
             BuiltinViewStage::Flatten => Some(Self::Flatten { depth: usize_arg? }),
             BuiltinViewStage::Enumerate => Some(Self::Enumerate),
             BuiltinViewStage::Pairwise => Some(Self::Pairwise),
@@ -968,6 +977,7 @@ impl ViewStageCapability {
             Self::Map { .. } => BuiltinViewStage::Map,
             Self::ObjectLambda { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
+            Self::ObjectItems { projection } => BuiltinViewStage::ObjectItems(*projection),
             Self::Flatten { .. } => BuiltinViewStage::Flatten,
             Self::Explode { .. } => BuiltinViewStage::Explode,
             Self::Enumerate => BuiltinViewStage::Enumerate,
@@ -1039,8 +1049,7 @@ impl ViewStageCapability {
                 | Self::Lag { .. }
                 | Self::Lead { .. }
                 | Self::Rolling { .. }
-        )
-            && self.view_stage().preserves_cardinality()
+        ) && self.view_stage().preserves_cardinality()
     }
 
     /// Returns true when every stage in a prefix preserves input/output cardinality.
@@ -1152,6 +1161,7 @@ impl ViewStageCapability {
             Self::Compact
             | Self::RemoveValue(_)
             | Self::FlatMap { .. }
+            | Self::ObjectItems { .. }
             | Self::Flatten { .. }
             | Self::Explode { .. }
             | Self::Enumerate
@@ -1238,6 +1248,7 @@ impl ViewStageCapability {
                 Self::Compact
                 | Self::RemoveValue(_)
                 | Self::FlatMap { .. }
+                | Self::ObjectItems { .. }
                 | Self::Flatten { .. }
                 | Self::Explode { .. }
                 | Self::Enumerate
@@ -1687,8 +1698,8 @@ mod tests {
     use crate::data::value::Val;
     use crate::exec::pipeline::{
         ArgExtremeSinkSpec, BodyKernel, MembershipSinkSpec, MembershipSinkTarget, NumOp,
-        PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, Stage, ViewInputMode,
-        SourceIndexedAccess, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
+        PipelineBody, PredicateSinkSpec, ReducerOp, ReducerSpec, Sink, SourceIndexedAccess, Stage,
+        ViewInputMode, ViewMaterialization, ViewMembershipTarget, ViewOutputMode,
         ViewSinkCapability, ViewStageCapability,
     };
     use crate::parse::ast::BinOp;
@@ -2491,18 +2502,24 @@ mod tests {
             ),
             None
         );
-        assert!(ViewStageCapability::can_use_reversed_single_access_after_prefix(
-            PullDemand::LastInput(1),
-            &preserving
-        ));
-        assert!(!ViewStageCapability::can_use_reversed_single_access_after_prefix(
-            PullDemand::LastInput(1),
-            &selective
-        ));
-        assert!(!ViewStageCapability::can_use_reversed_single_access_after_prefix(
-            PullDemand::FirstInput(2),
-            &preserving
-        ));
+        assert!(
+            ViewStageCapability::can_use_reversed_single_access_after_prefix(
+                PullDemand::LastInput(1),
+                &preserving
+            )
+        );
+        assert!(
+            !ViewStageCapability::can_use_reversed_single_access_after_prefix(
+                PullDemand::LastInput(1),
+                &selective
+            )
+        );
+        assert!(
+            !ViewStageCapability::can_use_reversed_single_access_after_prefix(
+                PullDemand::FirstInput(2),
+                &preserving
+            )
+        );
     }
 
     #[test]

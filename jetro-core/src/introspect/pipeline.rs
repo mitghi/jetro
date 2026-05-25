@@ -116,6 +116,7 @@ fn stage_label(stage: &Stage) -> (&'static str, Option<String>) {
             )),
         ),
         Stage::Builtin(call) => ("builtin", Some(format!("{:?}", call.method))),
+        Stage::ObjectItems(projection) => ("object-items", Some(format!("{projection:?}"))),
         Stage::UsizeBuiltin { method, value } => {
             ("builtin-usize", Some(format!("{method:?}({value})")))
         }

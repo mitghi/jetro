@@ -30,7 +30,7 @@ use crate::builtins::registry::{
 };
 use crate::builtins::{
     replace_apply, BuiltinArgs, BuiltinCall, BuiltinMembershipSink, BuiltinObjectLambda,
-    BuiltinStringPairStage,
+    BuiltinStringPairStage, BuiltinViewObjectProjection,
 };
 use crate::plan::demand::PullDemand;
 
@@ -633,6 +633,14 @@ fn apply_adapter_materialized(
             *buf = out;
             Some(Ok(()))
         }
+        Stage::ObjectItems(projection) => {
+            let mut out: Vec<Val> = Vec::new();
+            for v in std::mem::take(buf) {
+                apply_object_items_adapter(*projection, &v, &mut out);
+            }
+            *buf = out;
+            Some(Ok(()))
+        }
         // Sorted-dedup barrier — pre-sorted dedup, optionally keyed.
         Stage::SortedDedup(opt_prog) => {
             match opt_prog {
@@ -697,6 +705,36 @@ pub(super) fn apply_element_adapter(stage: &Stage, v: Val) -> Val {
         },
         Stage::Builtin(call) => call.apply(&v).unwrap_or(v),
         _ => v,
+    }
+}
+
+pub(super) fn apply_object_items_adapter(
+    projection: BuiltinViewObjectProjection,
+    v: &Val,
+    out: &mut Vec<Val>,
+) {
+    match projection {
+        BuiltinViewObjectProjection::Keys => {
+            if let Val::Arr(items) = crate::builtins::keys_apply(v) {
+                out.extend(Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()));
+            }
+        }
+        BuiltinViewObjectProjection::Values => {
+            if let Val::Arr(items) = crate::builtins::values_apply(v) {
+                out.extend(Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()));
+            }
+        }
+        BuiltinViewObjectProjection::Entries => {
+            if let Val::Arr(items) = crate::builtins::entries_apply(v) {
+                out.extend(Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()));
+            }
+        }
+        BuiltinViewObjectProjection::ToPairs => {
+            if let Some(Val::Arr(items)) = crate::builtins::to_pairs_apply(v) {
+                out.extend(Arc::try_unwrap(items).unwrap_or_else(|items| (*items).clone()));
+            }
+        }
+        _ => {}
     }
 }
 

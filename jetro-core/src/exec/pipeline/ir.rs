@@ -1120,6 +1120,11 @@ impl Stage {
                 });
             }
         }
+        if let Stage::ObjectItems(projection) = self {
+            return Some(ViewStageCapability::ObjectItems {
+                projection: *projection,
+            });
+        }
         if let Stage::IntRangeBuiltin { method, start, end } = self {
             let id = BuiltinId::from_method(*method);
             if crate::builtins::registry::view_projection(id) {
@@ -1284,6 +1289,10 @@ impl Stage {
         }
 
         match self {
+            Stage::ObjectItems(projection) => Some(
+                StageDescriptor::special()
+                    .with_view_stage(BuiltinViewStage::ObjectItems(*projection)),
+            ),
             Stage::UniqueBy(Some(prog)) => {
                 Some(StageDescriptor::new_id(BuiltinId::UNIQUE_BY).body(prog))
             }

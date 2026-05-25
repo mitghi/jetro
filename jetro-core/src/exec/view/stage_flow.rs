@@ -344,7 +344,8 @@ where
                 stage.output_mode(),
                 pipeline::ViewOutputMode::PreservesInputView
             );
-            let key = eval_structural_key(&item, kernel.and_then(|idx| stage_kernels.get(idx)), vm)?;
+            let key =
+                eval_structural_key(&item, kernel.and_then(|idx| stage_kernels.get(idx)), vm)?;
             if op_state.get_mut(op_idx)?.keys().insert(key) {
                 Some(ViewStageFlow::Keep(item))
             } else {
@@ -377,6 +378,7 @@ where
         pipeline::ViewStageCapability::BuiltinProjection { .. } => None,
         pipeline::ViewStageCapability::Map { .. } => None,
         pipeline::ViewStageCapability::ObjectLambda { .. } => None,
+        pipeline::ViewStageCapability::ObjectItems { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::Partition { .. } => None,
         pipeline::ViewStageCapability::SetUnion { .. } => None,

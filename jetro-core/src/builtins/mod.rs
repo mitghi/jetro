@@ -1580,6 +1580,8 @@ pub enum BuiltinViewStage {
     Map,
     /// Per-row expansion stage (one-to-many).
     FlatMap,
+    /// Object key/value/entry expansion stage.
+    ObjectItems(BuiltinViewObjectProjection),
     /// Array flattening expansion stage.
     Flatten,
     /// Object-field array explosion stage.
@@ -2454,6 +2456,7 @@ impl BuiltinViewStage {
             | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
+            | Self::ObjectItems(_)
             | Self::Flatten
             | Self::Explode
             | Self::Enumerate
@@ -2486,6 +2489,10 @@ impl BuiltinViewStage {
     pub fn output_mode(self) -> BuiltinViewOutputMode {
         match self {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
+            Self::ObjectItems(BuiltinViewObjectProjection::Values) => {
+                BuiltinViewOutputMode::BorrowedSubviews
+            }
+            Self::ObjectItems(_) => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::FlatMap | Self::Flatten => BuiltinViewOutputMode::BorrowedSubviews,
             Self::Explode
             | Self::Enumerate
@@ -2547,7 +2554,9 @@ impl BuiltinViewStage {
                 BuiltinCardinality::Filtering
             }
             Self::Map => BuiltinCardinality::OneToOne,
-            Self::FlatMap | Self::Flatten | Self::Explode => BuiltinCardinality::Expanding,
+            Self::FlatMap | Self::ObjectItems(_) | Self::Flatten | Self::Explode => {
+                BuiltinCardinality::Expanding
+            }
             Self::Enumerate => BuiltinCardinality::OneToOne,
             Self::Pairwise => BuiltinCardinality::Filtering,
             Self::NumericScan(_) => BuiltinCardinality::OneToOne,
@@ -2584,6 +2593,7 @@ impl BuiltinViewStage {
             | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
+            | Self::ObjectItems(_)
             | Self::Flatten
             | Self::Explode
             | Self::Enumerate
@@ -2625,6 +2635,7 @@ impl BuiltinViewStage {
             | Self::RemoveValue
             | Self::Map
             | Self::FlatMap
+            | Self::ObjectItems(_)
             | Self::Flatten
             | Self::Explode
             | Self::Enumerate
@@ -2665,6 +2676,7 @@ impl BuiltinViewStage {
             Self::Distinct => 1.0,
             Self::Map
             | Self::FlatMap
+            | Self::ObjectItems(_)
             | Self::Flatten
             | Self::Explode
             | Self::Enumerate
@@ -4769,10 +4781,7 @@ where
         BuiltinMethod::Pivot
             if args.len() >= 2
                 && args.iter().all(|arg| {
-                    matches!(
-                        arg,
-                        Arg::Pos(Expr::Str(_)) | Arg::Named(_, Expr::Str(_))
-                    )
+                    matches!(arg, Arg::Pos(Expr::Str(_)) | Arg::Named(_, Expr::Str(_)))
                 }) =>
         {
             let fields = args

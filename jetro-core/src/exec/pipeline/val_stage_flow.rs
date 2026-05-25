@@ -104,6 +104,11 @@ fn fallback_streaming(stage: &Stage, item: Val) -> Result<StageFlow<Val>, EvalEr
                 None => StageFlow::Continue(item),
             })
         }
+        Stage::ObjectItems(projection) => {
+            let mut out = Vec::new();
+            materialized_exec::apply_object_items_adapter(*projection, &item, &mut out);
+            Ok(StageFlow::Expand(out))
+        }
         _ => Ok(StageFlow::Continue(item)),
     }
 }

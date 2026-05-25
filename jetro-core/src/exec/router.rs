@@ -1079,7 +1079,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.docs.map(@.shape.zip_shape()).last()"#).unwrap();
+        let out = j
+            .collect(r#"$.docs.map(@.shape.zip_shape()).last()"#)
+            .unwrap();
 
         assert_eq!(
             out,
@@ -1100,7 +1102,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.docs.map(@.raw.from_json()).last()"#).unwrap();
+        let out = j
+            .collect(r#"$.docs.map(@.raw.from_json()).last()"#)
+            .unwrap();
 
         assert_eq!(out, json!({"id": 2, "name": "bob"}));
         assert!(!j.root_val_is_materialized());
@@ -1115,7 +1119,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.docs.map(@.rows.implode(x)).last()"#).unwrap();
+        let out = j
+            .collect(r#"$.docs.map(@.rows.implode(x)).last()"#)
+            .unwrap();
 
         assert_eq!(out, json!([{"g":"a","x":[1,2]},{"g":"b","x":[3]}]));
         assert!(!j.root_val_is_materialized());
@@ -1130,7 +1136,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.docs.map(@.rows.group_shape()).last()"#).unwrap();
+        let out = j
+            .collect(r#"$.docs.map(@.rows.group_shape()).last()"#)
+            .unwrap();
 
         assert_eq!(
             out,
@@ -1151,10 +1159,7 @@ mod tests {
             .collect(r#"$.docs.map(@.rows.pivot("region", "product", "sales")).last()"#)
             .unwrap();
 
-        assert_eq!(
-            out,
-            json!({"north":{"A":100,"B":120},"south":{"A":150}})
-        );
+        assert_eq!(out, json!({"north":{"A":100,"B":120},"south":{"A":150}}));
         assert!(!j.root_val_is_materialized());
     }
 
@@ -1242,6 +1247,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, json!(["dune"]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_object_values_first_streams_object_items_from_tape() {
+        let j = Jetro::from_bytes(
+            br#"{"profile":{"name":"Ada","bio":{"large":[1,2,3,4]},"city":"London"},"unused":{"large":[5,6,7,8]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.profile.values().first()"#).unwrap();
+
+        assert_eq!(out, json!("Ada"));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn view_object_entries_first_streams_only_selected_entry_from_tape() {
+        let j = Jetro::from_bytes(
+            br#"{"profile":{"name":"Ada","bio":{"large":[1,2,3,4]},"city":"London"},"unused":{"large":[5,6,7,8]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.profile.entries().first()"#).unwrap();
+
+        assert_eq!(out, json!(["name", "Ada"]));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }

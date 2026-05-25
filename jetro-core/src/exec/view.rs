@@ -2072,6 +2072,19 @@ where
     if source_demand.is_zero() {
         return Some(Ok(()));
     }
+    if matches!(
+        stages.first(),
+        Some(pipeline::ViewStageCapability::ObjectItems { .. })
+    ) {
+        return drive_frontier_iter(
+            std::iter::once(FrontierRow::Borrowed(source)),
+            stages,
+            stage_kernels,
+            PullDemand::FirstInput(1),
+            vm,
+            observe,
+        );
+    }
     let access =
         source_capabilities.choose_view_access_for_kernels(source_demand, stages, stage_kernels);
     if access.is_reverse() {
@@ -2374,6 +2387,22 @@ where
             }
         }
         return Some(Ok(ViewDriveFlow::Continue));
+    }
+
+    if let pipeline::ViewStageCapability::ObjectItems { projection } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        return drive_object_items_frontier_row(
+            item,
+            projection,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
     }
 
     if let pipeline::ViewStageCapability::Flatten { depth } = stage {
@@ -3940,6 +3969,66 @@ where
         )),
         _ => None,
     }
+}
+
+fn drive_object_items_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    projection: crate::builtins::BuiltinViewObjectProjection,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let Some(fields) = item.object_iter() else {
+        return Some(Ok(ViewDriveFlow::Continue));
+    };
+
+    for (key, value) in fields {
+        let row = match projection {
+            crate::builtins::BuiltinViewObjectProjection::Keys => {
+                FrontierRow::Owned(Val::Str(key))
+            }
+            crate::builtins::BuiltinViewObjectProjection::Values => value,
+            crate::builtins::BuiltinViewObjectProjection::Entries => FrontierRow::Owned(Val::arr(
+                vec![Val::Str(key), pipeline::view_kernel_view_to_owned(value)],
+            )),
+            crate::builtins::BuiltinViewObjectProjection::ToPairs => FrontierRow::Owned(
+                crate::util::obj2(
+                    "key",
+                    Val::Str(key),
+                    "val",
+                    pipeline::view_kernel_view_to_owned(value),
+                ),
+            ),
+            _ => return None,
+        };
+        let flow = match drive_view_item(
+            row,
+            next_stage_idx,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        )? {
+            Ok(flow) => flow,
+            Err(err) => return Some(Err(err)),
+        };
+        if matches!(flow, ViewDriveFlow::Stop) {
+            return Some(Ok(ViewDriveFlow::Stop));
+        }
+    }
+    Some(Ok(ViewDriveFlow::Continue))
 }
 
 fn drive_flatten_frontier_row<'a, V, F>(
