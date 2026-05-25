@@ -1108,6 +1108,21 @@ mod tests {
     }
 
     #[test]
+    fn view_implode_projects_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"docs":[{"rows":[{"g":"old","x":1}]},{"rows":[{"g":"a","x":1},{"g":"a","x":2},{"g":"b","x":3}]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.docs.map(@.rows.implode(x)).last()"#).unwrap();
+
+        assert_eq!(out, json!([{"g":"a","x":[1,2]},{"g":"b","x":[3]}]));
+        assert!(!j.root_val_is_materialized());
+        assert!(j.tape_materialized_subtrees() < 8);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

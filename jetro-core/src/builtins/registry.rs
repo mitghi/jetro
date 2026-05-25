@@ -1328,6 +1328,15 @@ where
                 None => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Implode => {
+            let BuiltinArgs::Str(field) = args else {
+                return None;
+            };
+            return Some(match view_implode(&view, field) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Invert => {
             if !matches!(args, BuiltinArgs::None) {
                 return None;
@@ -1678,6 +1687,43 @@ where
         }
     };
     Val::from_json_simd(&mut bytes).ok()
+}
+
+fn view_implode<'a, V>(view: &V, field: &str) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    use crate::util::val_to_key;
+
+    let len = view.array_len()?;
+    let mut groups: indexmap::IndexMap<Arc<str>, (indexmap::IndexMap<Arc<str>, Val>, Vec<Val>)> =
+        indexmap::IndexMap::new();
+    for item in view.array_iter()? {
+        item.object_len()?;
+        let mut rest = indexmap::IndexMap::new();
+        let mut selected = Val::Null;
+        for (key, child) in item.object_iter()? {
+            let value = child.materialize();
+            if key.as_ref() == field {
+                selected = value;
+            } else {
+                rest.insert(key, value);
+            }
+        }
+        let key = Arc::<str>::from(val_to_key(&Val::obj(rest.clone())));
+        groups
+            .entry(key)
+            .or_insert_with(|| (rest, Vec::new()))
+            .1
+            .push(selected);
+    }
+
+    let mut out = Vec::with_capacity(len.min(groups.len()));
+    for (_, (mut rest, values)) in groups {
+        rest.insert(Arc::from(field), Val::arr(values));
+        out.push(Val::obj(rest));
+    }
+    Some(Val::arr(out))
 }
 
 fn view_shallow_merge<'a, V>(
@@ -5013,6 +5059,7 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::Implode, BuiltinViewValueProjection::Implode),
             (
                 BuiltinMethod::Includes,
                 BuiltinViewValueProjection::Includes,
@@ -7146,6 +7193,7 @@ mod tests {
                 BuiltinMethod::HtmlUnescape,
                 BuiltinViewValueProjection::HtmlUnescape,
             ),
+            (BuiltinMethod::Implode, BuiltinViewValueProjection::Implode),
             (BuiltinMethod::Indent, BuiltinViewValueProjection::Indent),
             (BuiltinMethod::Invert, BuiltinViewValueProjection::Invert),
             (

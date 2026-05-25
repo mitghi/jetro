@@ -2795,6 +2795,9 @@ impl Builtin for Implode {
     const NAME: &'static str = "implode";
     fn spec() -> BuiltinSpec {
         object_simple_spec()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Implode)
+            .demand_law(BuiltinViewValueProjection::Implode.demand_law())
     }
     #[inline]
     fn apply_args(

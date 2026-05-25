@@ -934,6 +934,8 @@ pub enum BuiltinViewValueProjection {
     FromPairs,
     /// Parse a JSON string into a value.
     FromJson,
+    /// Group row objects by all fields except one, collecting that field into arrays.
+    Implode,
     /// Swap object keys and values, coercing values to object keys.
     Invert,
     /// Recursively merge an owned value argument into the receiver value.
@@ -1038,6 +1040,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::FromBase64
             | BuiltinViewValueProjection::HtmlEscape
             | BuiltinViewValueProjection::HtmlUnescape
+            | BuiltinViewValueProjection::Implode
             | BuiltinViewValueProjection::Invert
             | BuiltinViewValueProjection::Merge
             | BuiltinViewValueProjection::Indent
