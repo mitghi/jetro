@@ -1111,8 +1111,10 @@ where
     let mut nth_seen = 0usize;
     let nth_target = match body.sink {
         pipeline::Sink::Nth(_)
-            if source_demand.is_nth_input()
-                && pipeline::ViewStageCapability::all_preserve_cardinality(&prefix) =>
+            if pipeline::ViewStageCapability::nth_selection_already_applied_at_source(
+                source_demand,
+                &prefix,
+            ) =>
         {
             Some(0)
         }

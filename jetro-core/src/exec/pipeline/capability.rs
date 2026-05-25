@@ -828,6 +828,16 @@ impl ViewStageCapability {
         stages.iter().all(Self::preserves_cardinality)
     }
 
+    /// Returns true when an `nth` sink's positional demand has already been
+    /// applied at the source and the remaining prefix cannot change row
+    /// positions, so the terminal observer should consume the first row it sees.
+    pub(crate) fn nth_selection_already_applied_at_source(
+        source_demand: PullDemand,
+        stages: &[Self],
+    ) -> bool {
+        source_demand.is_nth_input() && Self::all_preserve_cardinality(stages)
+    }
+
     /// Returns the deterministic source-access effect for stages with
     /// compile-time constant predicate kernels.
     pub(crate) fn constant_access_effect(
@@ -1925,6 +1935,31 @@ mod tests {
             None
         );
         assert!(!ViewStageCapability::prefix_forces_empty(&unsupported, &[]));
+    }
+
+    #[test]
+    fn view_stage_capability_detects_source_applied_nth_selection() {
+        let preserving = [ViewStageCapability::Map { kernel: 0 }];
+        let selective = [ViewStageCapability::Filter { kernel: 0 }];
+
+        assert!(
+            ViewStageCapability::nth_selection_already_applied_at_source(
+                PullDemand::NthInput(4),
+                &preserving
+            )
+        );
+        assert!(
+            !ViewStageCapability::nth_selection_already_applied_at_source(
+                PullDemand::NthInput(4),
+                &selective
+            )
+        );
+        assert!(
+            !ViewStageCapability::nth_selection_already_applied_at_source(
+                PullDemand::FirstInput(1),
+                &preserving
+            )
+        );
     }
 
     #[test]
