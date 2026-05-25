@@ -867,14 +867,14 @@ fn resolve_view_sink(
 /// Returns `Some(action)` indicating whether to `Emit`, `Skip`, or `Stop`;
 /// returns `None` when a kernel lookup fails (signals the view path is unusable).
 fn observe_view_sink<'a, V>(
-    item: &V,
+    item: &FrontierRow<V>,
     sink: &pipeline::ViewSinkCapability,
     sink_acc: &mut pipeline::SinkAccumulator,
     sink_kernels: &[pipeline::BodyKernel],
     vm: &mut VM,
 ) -> Option<Result<ViewRowAction, EvalError>>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
     match sink {
         pipeline::ViewSinkCapability::Collect => {
@@ -1003,13 +1003,13 @@ where
 /// `Some(true)` when there is no predicate, `Some(bool)` for the predicate
 /// result, or `None` when the kernel index is out of bounds.
 fn view_sink_predicate_matches<'a, V>(
-    item: &V,
+    item: &FrontierRow<V>,
     predicate_kernel: Option<usize>,
     sink_kernels: &[pipeline::BodyKernel],
     vm: &mut VM,
 ) -> Option<bool>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
     let Some(kernel_idx) = predicate_kernel else {
         return Some(true);
@@ -2310,11 +2310,11 @@ where
     }
 }
 
-fn eval_frontier_map_kernel<'a, V>(
+fn eval_frontier_kernel_with_vm<'a, V>(
     item: &FrontierRow<V>,
     kernel: &pipeline::BodyKernel,
     vm: &mut VM,
-) -> Option<FrontierRow<V>>
+) -> Option<pipeline::ViewKernelValue<FrontierRow<V>>>
 where
     V: FrontierBaseView<'a>,
 {
@@ -2326,10 +2326,21 @@ where
                 }
                 FrontierRow::Owned(value) => plan.run(value.clone()).ok()?,
             };
-            return Some(FrontierRow::Owned(value));
+            return Some(pipeline::ViewKernelValue::Owned(value));
         }
     }
-    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+    pipeline::eval_view_kernel_with_vm(kernel, item, vm)
+}
+
+fn eval_frontier_map_kernel<'a, V>(
+    item: &FrontierRow<V>,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<FrontierRow<V>>
+where
+    V: FrontierBaseView<'a>,
+{
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(view),
         pipeline::ViewKernelValue::Owned(value) => Some(FrontierRow::Owned(value)),
     }
@@ -2356,14 +2367,14 @@ where
 }
 
 fn eval_owned_scalar_or_value_kernel_with_vm<'a, V>(
-    item: &V,
+    item: &FrontierRow<V>,
     kernel: &pipeline::BodyKernel,
     vm: &mut VM,
 ) -> Option<Val>
 where
-    V: ValueView<'a> + 'a,
+    V: FrontierBaseView<'a>,
 {
-    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
@@ -5988,6 +5999,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([1, 4]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_terminal_projection_runs_on_tape_view_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(br#"[[1,2,3],[4,5]]"#.to_vec()).unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out =
+            super::run_terminal_select_projection(TapeView::root(&tape), &body, &mut VM::new())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(out, Val::Int(1));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
