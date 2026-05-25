@@ -759,6 +759,38 @@ where
     Some(sink_acc.finish_result(false))
 }
 
+fn collect_receiver_nested_body_views<'a, V>(
+    source: V,
+    body: &pipeline::PipelineBody,
+    vm: &mut VM,
+) -> Option<Vec<FrontierRow<V>>>
+where
+    V: FrontierBaseView<'a>,
+{
+    if !matches!(body.sink, pipeline::Sink::Collect) {
+        return None;
+    }
+    let capabilities = pipeline::view_capabilities(body)?;
+    let mut rows = Vec::new();
+    if drive_view_frontier(
+        source,
+        pipeline::SourceCapabilities::VIEW_ARRAY,
+        &capabilities.stages,
+        &body.stage_kernels,
+        body.pull_demand(),
+        vm,
+        |item, _vm| {
+            rows.push(item.clone());
+            Some(Ok(ViewRowAction::Emit))
+        },
+    )?
+    .is_err()
+    {
+        return None;
+    }
+    Some(rows)
+}
+
 fn run_arg_extreme_view<'a, V>(
     source: V,
     body: &pipeline::PipelineBody,
@@ -2380,7 +2412,21 @@ fn eval_flat_map_kernel<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
-    match pipeline::eval_view_kernel_with_vm(kernel, item, vm)? {
+    if let pipeline::BodyKernel::NestedPlan(plan) = kernel {
+        if let Some(body) = plan.receiver_view_body() {
+            let rows = match item {
+                FrontierRow::Borrowed(view) => {
+                    collect_receiver_nested_body_views(view.clone(), &body, vm)?
+                }
+                FrontierRow::Owned(value) => {
+                    let value = plan.run(value.clone()).ok()?;
+                    value.as_vals()?.into_owned().into_iter().map(FrontierRow::Owned).collect()
+                }
+            };
+            return Some(Box::new(rows.into_iter()));
+        }
+    }
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => view.array_iter(),
         pipeline::ViewKernelValue::Owned(value) => {
             let items = value.as_vals()?.into_owned();
@@ -6125,6 +6171,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, Val::Int(2));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn nested_receiver_flat_map_body_runs_on_tape_view_without_materializing_rows() {
+        let tape = crate::data::tape::TapeData::parse(br#"[[1,2],[3],[]]"#.to_vec()).unwrap();
+        let nested = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![Stage::FlatMap(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::FlatMap,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(crate::exec::pipeline::ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(
+                Arc::new(nested),
+            )))],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(out, Val::Int(3));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
