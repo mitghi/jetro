@@ -1088,7 +1088,7 @@ where
 struct FrontierArgExtreme<V> {
     op: crate::builtins::BuiltinArgExtremeSink,
     key_kernel: usize,
-    best_key: Option<Val>,
+    best_key: Option<ViewKey>,
     best_row: Option<FrontierRow<V>>,
 }
 
@@ -1119,11 +1119,11 @@ where
         sink_kernels: &[pipeline::BodyKernel],
         vm: &mut VM,
     ) -> Option<Result<ViewRowAction, EvalError>> {
-        let key = view_arg_extreme_key_with_vm(item, sink_kernels.get(self.key_kernel)?, vm)?;
+        let key = view_arg_extreme_view_key_with_vm(item, sink_kernels.get(self.key_kernel)?, vm)?;
         let should_take = match self.best_key.as_ref() {
             None => true,
             Some(existing) => {
-                let ordering = pipeline::cmp_val_total(&key, existing);
+                let ordering = ViewKey::cmp_total(&key, existing);
                 if self.op.wants_max() {
                     ordering.is_gt()
                 } else {
@@ -1528,6 +1528,20 @@ where
     match eval_frontier_kernel_with_vm(item, kernel, vm)? {
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
+    }
+}
+
+fn view_arg_extreme_view_key_with_vm<'a, V>(
+    item: &FrontierRow<V>,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<ViewKey>
+where
+    V: FrontierBaseView<'a>,
+{
+    match eval_frontier_kernel_with_vm(item, kernel, vm)? {
+        pipeline::ViewKernelValue::View(view) => ViewKey::from_value_view(&view),
+        pipeline::ViewKernelValue::Owned(value) => Some(ViewKey::from_owned(value)),
     }
 }
 
@@ -5810,6 +5824,35 @@ mod tests {
             serde_json::Value::from(out),
             serde_json::json!({"id": 4, "score": 4})
         );
+        assert_eq!(tape.materialized_subtrees(), 1);
+    }
+
+    #[test]
+    fn arg_extreme_compound_keys_stay_view_serialized() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[[1,"a"],[2,"b"],[3,"c"],[0,"z"]]"#.to_vec(),
+        )
+        .unwrap();
+        tape.reset_materialized_subtrees();
+        let body = PipelineBody {
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::ArgExtreme(ArgExtremeSinkSpec {
+                op: crate::builtins::BuiltinArgExtremeSink::MaxBy,
+                key: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                key_expr: None,
+            }),
+            stage_kernels: Vec::new(),
+            sink_kernels: vec![BodyKernel::Current],
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        let out = super::run_with_env_and_vm(TapeView::root(&tape), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([3, "c"]));
         assert_eq!(tape.materialized_subtrees(), 1);
     }
 
