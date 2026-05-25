@@ -2401,6 +2401,39 @@ where
             }
             Some(pipeline::ViewKernelValue::Owned(Val::arr(out)))
         }
+        pipeline::BodyKernel::BuiltinCall { receiver, call } => {
+            match eval_frontier_kernel_with_vm(item, receiver, vm)? {
+                pipeline::ViewKernelValue::View(view) => {
+                    match crate::builtins::registry::apply_view_projection(
+                        call.id(),
+                        &call.args,
+                        view,
+                    )? {
+                        crate::builtins::registry::ViewProjectionResult::View(view) => {
+                            Some(pipeline::ViewKernelValue::View(view))
+                        }
+                        crate::builtins::registry::ViewProjectionResult::Owned(value) => {
+                            Some(pipeline::ViewKernelValue::Owned(value))
+                        }
+                    }
+                }
+                pipeline::ViewKernelValue::Owned(value) => call
+                    .try_apply(&value)
+                    .ok()
+                    .flatten()
+                    .map(pipeline::ViewKernelValue::Owned),
+            }
+        }
+        pipeline::BodyKernel::Compose { first, then } => {
+            match eval_frontier_kernel_with_vm(item, first, vm)? {
+                pipeline::ViewKernelValue::View(view) => {
+                    eval_frontier_kernel_with_vm(&view, then, vm)
+                }
+                pipeline::ViewKernelValue::Owned(value) => {
+                    eval_frontier_kernel_with_vm(&FrontierRow::Owned(value), then, vm)
+                }
+            }
+        }
         pipeline::BodyKernel::CmpLit { lhs, op, lit } => {
             let lhs = eval_frontier_value_kernel_with_vm(lhs, item, vm)?;
             Some(pipeline::ViewKernelValue::Owned(Val::Bool(
@@ -6679,6 +6712,68 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!([["b", 2], ["a", 1], ["c", 3]])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_builtin_and_compose_recurse_into_nested_receiver_kernels() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[2,"bb"],[1,"a"],[3,"ccc"]]"#.to_vec())
+                .unwrap();
+        let second = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(1),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let second_for_compose = second.clone();
+        let body = PipelineBody {
+            stages: vec![Stage::Map(
+                Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                crate::builtins::BuiltinViewStage::Map,
+            )],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Array(
+                vec![
+                    BodyKernel::BuiltinCall {
+                        receiver: Box::new(BodyKernel::NestedPlan(Arc::new(
+                            NestedPlanKernel::new(Arc::new(second)),
+                        ))),
+                        call: crate::builtins::BuiltinCall::new(
+                            crate::builtins::BuiltinMethod::Len,
+                            crate::builtins::BuiltinArgs::None,
+                        ),
+                    },
+                    BodyKernel::Compose {
+                        first: Box::new(BodyKernel::NestedPlan(Arc::new(
+                            NestedPlanKernel::new(Arc::new(second_for_compose)),
+                        ))),
+                        then: Box::new(BodyKernel::BuiltinCall {
+                            receiver: Box::new(BodyKernel::Current),
+                            call: crate::builtins::BuiltinCall::new(
+                                crate::builtins::BuiltinMethod::Len,
+                                crate::builtins::BuiltinArgs::None,
+                            ),
+                        }),
+                    },
+                ]
+                .into(),
+            )],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_terminal_collect(TapeView::root(&tape), &body, &mut VM::new())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([[2, 2], [1, 1], [3, 3]])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
