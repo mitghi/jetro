@@ -1323,38 +1323,25 @@ where
                 observe,
             );
         }
-        pipeline::SourceAccessMode::Indexed(idx) => {
+        pipeline::SourceAccessMode::Indexed(_)
+        | pipeline::SourceAccessMode::IndexedFromEnd(_)
+        | pipeline::SourceAccessMode::IndexedSuffix(_) => {
             let len = match source.scalar() {
                 JsonView::ArrayLen(len) => len,
                 _ => return None,
             };
-            if idx >= len {
-                return Some(Ok(()));
-            }
-            let items = std::iter::once(source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
-        }
-        pipeline::SourceAccessMode::IndexedFromEnd(offset) => {
-            let len = match source.scalar() {
-                JsonView::ArrayLen(len) => len,
-                _ => return None,
+            return match access.indexed_access(len)? {
+                pipeline::SourceIndexedAccess::Single(idx) => {
+                    let items = std::iter::once(source.index(idx as i64));
+                    drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
+                }
+                pipeline::SourceIndexedAccess::Range { start, end } => {
+                    let indexed_source = source.clone();
+                    let items = (start..end).map(move |idx| indexed_source.index(idx as i64));
+                    drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
+                }
+                pipeline::SourceIndexedAccess::Empty => Some(Ok(())),
             };
-            let Some(idx) = pipeline::index_from_end(len, offset) else {
-                return Some(Ok(()));
-            };
-            let items = std::iter::once(source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
-        }
-        pipeline::SourceAccessMode::IndexedSuffix(count) => {
-            let len = match source.scalar() {
-                JsonView::ArrayLen(len) => len,
-                _ => return None,
-            };
-            let take = count.min(len);
-            let start = len - take;
-            let indexed_source = source.clone();
-            let items = (start..len).map(move |idx| indexed_source.index(idx as i64));
-            return drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe);
         }
         pipeline::SourceAccessMode::ForwardBounded(inputs) => {
             let items = source.array_iter()?;

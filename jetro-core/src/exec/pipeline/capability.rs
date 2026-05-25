@@ -198,6 +198,23 @@ pub(crate) enum SourceAccessMode {
     MaterializedFallback,
 }
 
+/// Concrete indexed source read derived from a selected source access mode and
+/// a known source length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceIndexedAccess {
+    /// The selected indexed access is in range and targets a single row.
+    Single(usize),
+    /// The selected indexed access is in range and targets a half-open row range.
+    Range {
+        /// First row index to read.
+        start: usize,
+        /// One-past-the-last row index to read.
+        end: usize,
+    },
+    /// The selected indexed access is valid but cannot yield any row for this length.
+    Empty,
+}
+
 impl SourceAccessMode {
     /// Demand that should be handed to a row iterator after this access mode has been selected.
     pub(crate) fn iterator_demand(self, requested: PullDemand) -> PullDemand {
@@ -207,6 +224,32 @@ impl SourceAccessMode {
             Self::Indexed(_) | Self::IndexedFromEnd(_) | Self::IndexedSuffix(_) => PullDemand::All,
             Self::Forward | Self::MaterializedFallback if requested.is_suffix() => PullDemand::All,
             Self::Forward | Self::MaterializedFallback => requested,
+        }
+    }
+
+    /// Converts direct indexed access modes into concrete source indexes for a
+    /// source with `len` rows. Non-indexed traversal modes return `None`.
+    pub(crate) fn indexed_access(self, len: usize) -> Option<SourceIndexedAccess> {
+        match self {
+            Self::Indexed(idx) => Some(if idx < len {
+                SourceIndexedAccess::Single(idx)
+            } else {
+                SourceIndexedAccess::Empty
+            }),
+            Self::IndexedFromEnd(offset) => Some(
+                index_from_end(len, offset)
+                    .map(SourceIndexedAccess::Single)
+                    .unwrap_or(SourceIndexedAccess::Empty),
+            ),
+            Self::IndexedSuffix(count) => {
+                let take = count.min(len);
+                let start = len - take;
+                Some(SourceIndexedAccess::Range { start, end: len })
+            }
+            Self::Forward
+            | Self::ForwardBounded(_)
+            | Self::Reverse { .. }
+            | Self::MaterializedFallback => None,
         }
     }
 }
@@ -225,7 +268,7 @@ impl Stage {
 
 #[cfg(test)]
 mod source_capability_tests {
-    use super::{SourceAccessMode, SourceCapabilities, ViewStageCapability};
+    use super::{SourceAccessMode, SourceCapabilities, SourceIndexedAccess, ViewStageCapability};
     use crate::builtins::BuiltinViewStage;
     use crate::data::value::Val;
     use crate::exec::pipeline::Stage;
@@ -461,6 +504,35 @@ mod source_capability_tests {
             SourceAccessMode::Forward.iterator_demand(PullDemand::LastInput(1)),
             PullDemand::All
         );
+    }
+
+    #[test]
+    fn access_mode_resolves_direct_indexed_reads() {
+        assert_eq!(
+            SourceAccessMode::Indexed(2).indexed_access(5),
+            Some(SourceIndexedAccess::Single(2))
+        );
+        assert_eq!(
+            SourceAccessMode::Indexed(5).indexed_access(5),
+            Some(SourceIndexedAccess::Empty)
+        );
+        assert_eq!(
+            SourceAccessMode::IndexedFromEnd(0).indexed_access(5),
+            Some(SourceIndexedAccess::Single(4))
+        );
+        assert_eq!(
+            SourceAccessMode::IndexedFromEnd(5).indexed_access(5),
+            Some(SourceIndexedAccess::Empty)
+        );
+        assert_eq!(
+            SourceAccessMode::IndexedSuffix(3).indexed_access(5),
+            Some(SourceIndexedAccess::Range { start: 2, end: 5 })
+        );
+        assert_eq!(
+            SourceAccessMode::IndexedSuffix(8).indexed_access(5),
+            Some(SourceIndexedAccess::Range { start: 0, end: 5 })
+        );
+        assert_eq!(SourceAccessMode::Forward.indexed_access(5), None);
     }
 
     #[test]
