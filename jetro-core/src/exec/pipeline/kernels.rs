@@ -329,33 +329,6 @@ impl ObjectKernel {
         &self.entries
     }
 
-    /// Evaluates each entry against `item`, appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
-    /// Evaluates each entry against `item` using caller-owned VM state,
-    /// appending to `cells`; returns `Some(false)` on null-optional, `None` on view failure.
-    pub(crate) fn eval_view_row_cells_with_vm<'a, V>(
-        &self,
-        item: &V,
-        cells: &mut Vec<Val>,
-        vm: &mut crate::vm::VM,
-    ) -> Option<bool>
-    where
-        V: ValueView<'a> + 'a,
-    {
-        let start = cells.len();
-        for entry in self.entries.iter() {
-            let value = match eval_view_kernel_with_vm(&entry.value, item, vm)? {
-                ViewKernelValue::View(view) => view_kernel_view_to_owned(view),
-                ViewKernelValue::Owned(value) => value,
-            };
-            if (entry.optional || entry.omit_null) && value.is_null() {
-                cells.truncate(start);
-                return Some(false);
-            }
-            cells.push(value);
-        }
-        Some(true)
-    }
-
     /// Evaluates each entry against `item` using caller-owned VM state, appending to `cells`;
     /// returns `false` on null-optional skip.
     pub(crate) fn eval_val_row_cells_with_vm(
@@ -406,6 +379,10 @@ impl ObjectKernelEntry {
 
     pub(crate) fn omit_null(&self) -> bool {
         self.omit_null
+    }
+
+    pub(crate) fn omits_null(&self) -> bool {
+        self.optional || self.omit_null
     }
 }
 

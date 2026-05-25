@@ -1132,7 +1132,12 @@ where
         plan.source_demand,
         vm,
         |item, vm| {
-            collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
+            collector.push_view_program_with_evaluator(
+                item,
+                &plan.collect_program,
+                vm,
+                eval_frontier_value_kernel_with_vm,
+            )?;
             Some(Ok(ViewRowAction::Emit))
         },
     )? {
@@ -1934,7 +1939,12 @@ where
         plan.source_demand,
         vm,
         |item, vm| {
-            collector.push_view_program_with_vm(item, &plan.collect_program, vm)?;
+            collector.push_view_program_with_evaluator(
+                item,
+                &plan.collect_program,
+                vm,
+                eval_frontier_value_kernel_with_vm,
+            )?;
             Some(Ok(ViewRowAction::Emit))
         },
     )? {
@@ -2434,6 +2444,17 @@ where
         pipeline::ViewKernelValue::View(view) => Some(pipeline::view_kernel_view_to_owned(view)),
         pipeline::ViewKernelValue::Owned(value) => Some(value),
     }
+}
+
+fn eval_frontier_value_kernel_with_vm<'a, V>(
+    kernel: &pipeline::BodyKernel,
+    item: &FrontierRow<V>,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    eval_owned_scalar_or_value_kernel_with_vm(item, kernel, vm)
 }
 
 fn eval_frontier_structural_view_key_with_vm<'a, V>(
@@ -6488,6 +6509,64 @@ mod tests {
         .unwrap();
 
         assert_eq!(out, Val::Int(3));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn sorted_terminal_collect_nested_projection_stays_on_tape_view() {
+        let tape =
+            crate::data::tape::TapeData::parse(br#"[[2,"b"],[1,"a"],[3,"c"]]"#.to_vec())
+                .unwrap();
+        let key = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(0),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let projection = Plan {
+            source: Source::Receiver(Val::Null),
+            stages: Vec::new(),
+            stage_exprs: Vec::new(),
+            sink: Sink::Nth(1),
+            stage_kernels: Vec::new(),
+            sink_kernels: Vec::new(),
+        };
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Sort(crate::exec::pipeline::SortSpec {
+                    key: Some(Arc::new(crate::vm::Program::new(Vec::new(), ""))),
+                    descending: false,
+                }),
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(key)))),
+                BodyKernel::NestedPlan(Arc::new(NestedPlanKernel::new(Arc::new(projection)))),
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_sort_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!(["a", "b", "c"]));
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 

@@ -6,6 +6,7 @@
 //! already the generic row IR for field reads, scalar calls, object shaping,
 //! f-strings, arithmetic, comparisons, and match expressions.
 
+#[cfg(test)]
 use crate::data::view::ValueView;
 #[cfg(test)]
 use crate::{
@@ -14,8 +15,8 @@ use crate::{
 };
 
 #[cfg(test)]
-use super::eval_kernel;
-use super::{eval_view_kernel_with_vm, BodyKernel, ViewKernelValue};
+use super::{eval_kernel, eval_view_kernel_with_vm, ViewKernelValue};
+use super::BodyKernel;
 
 /// A compiled row-local expression that can evaluate on owned values or borrowed views.
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ impl RowProgram {
 
     /// Evaluates this row program against a borrowed row view using caller-owned
     /// VM state for nested fallback paths.
+    #[cfg(test)]
     pub(crate) fn eval_view_with_vm<'a, V>(
         &self,
         row: &V,

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::data::value::{ObjVecData, Val};
 use crate::data::view::ValueView;
 
-use super::{BodyKernel, CollectLayout, ObjectKernel, RowProgram, ViewKernelValue};
+use super::{BodyKernel, CollectLayout, ObjectKernel, RowProgram};
 
 /// Output collector for the terminal stage of a pipeline.
 pub(crate) enum TerminalCollector<'a> {
@@ -45,21 +45,23 @@ impl<'a> TerminalCollector<'a> {
         }
     }
 
-    /// Evaluates `item` via a row program on the zero-copy view path using caller-owned VM state.
-    pub(crate) fn push_view_program_with_vm<'v, V>(
+    /// Evaluates `item` via a row program using a caller-provided view evaluator.
+    pub(crate) fn push_view_program_with_evaluator<'v, V, F>(
         &mut self,
         item: &V,
         program: &RowProgram,
         vm: &mut crate::vm::VM,
+        mut eval: F,
     ) -> Option<()>
     where
         V: ValueView<'v> + 'v,
+        F: FnMut(&BodyKernel, &V, &mut crate::vm::VM) -> Option<Val>,
     {
         match self {
-            Self::Values(values) => {
-                values.push(eval_view_program_value_with_vm(item, program, vm)?)
+            Self::Values(values) => values.push(eval(program.kernel(), item, vm)?),
+            Self::UniformObject(collector) => {
+                collector.push_view_row_with_evaluator(item, vm, eval)?
             }
-            Self::UniformObject(collector) => collector.push_view_row_with_vm(item, vm)?,
         }
         Some(())
     }
@@ -97,20 +99,39 @@ impl<'a> TerminalCollector<'a> {
 pub(crate) type TerminalMapCollector<'a> = TerminalCollector<'a>;
 
 impl<'a> UniformObjectCollector<'a> {
-    fn push_view_row_with_vm<'v, V>(&mut self, item: &V, vm: &mut crate::vm::VM) -> Option<()>
+    fn push_view_row_with_evaluator<'v, V, F>(
+        &mut self,
+        item: &V,
+        vm: &mut crate::vm::VM,
+        mut eval: F,
+    ) -> Option<()>
     where
         V: ValueView<'v> + 'v,
+        F: FnMut(&BodyKernel, &V, &mut crate::vm::VM) -> Option<Val>,
     {
         if let Some(rows) = self.rows.as_mut() {
-            rows.push(eval_view_object_value_with_vm(item, self.object, vm)?);
+            rows.push(eval_view_object_value_with_evaluator(
+                item,
+                self.object,
+                vm,
+                &mut eval,
+            )?);
             return Some(());
         }
 
-        if !self
-            .object
-            .eval_view_row_cells_with_vm(item, &mut self.cells, vm)?
-        {
-            self.flush_cells_to_rows_with(eval_view_object_value_with_vm(item, self.object, vm)?);
+        if !eval_view_object_cells_with_evaluator(
+            self.object,
+            item,
+            &mut self.cells,
+            vm,
+            &mut eval,
+        )? {
+            self.flush_cells_to_rows_with(eval_view_object_value_with_evaluator(
+                item,
+                self.object,
+                vm,
+                &mut eval,
+            )?);
         }
         Some(())
     }
@@ -152,32 +173,48 @@ impl<'a> UniformObjectCollector<'a> {
     }
 }
 
-fn eval_view_program_value_with_vm<'a, V>(
-    item: &V,
-    program: &RowProgram,
-    vm: &mut crate::vm::VM,
-) -> Option<Val>
-where
-    V: ValueView<'a> + 'a,
-{
-    match program.eval_view_with_vm(item, vm)? {
-        ViewKernelValue::View(view) => Some(super::view_kernel_view_to_owned(view)),
-        ViewKernelValue::Owned(value) => Some(value),
-    }
-}
-
-fn eval_view_object_value_with_vm<'a, V>(
+fn eval_view_object_value_with_evaluator<'a, V, F>(
     item: &V,
     object: &ObjectKernel,
     vm: &mut crate::vm::VM,
+    eval: &mut F,
 ) -> Option<Val>
 where
     V: ValueView<'a> + 'a,
+    F: FnMut(&BodyKernel, &V, &mut crate::vm::VM) -> Option<Val>,
 {
-    match super::eval_view_kernel_with_vm(&BodyKernel::Object(object.clone()), item, vm)? {
-        ViewKernelValue::View(view) => Some(super::view_kernel_view_to_owned(view)),
-        ViewKernelValue::Owned(value) => Some(value),
+    let mut pairs = Vec::with_capacity(object.entries().len());
+    for entry in object.entries() {
+        let value = eval(entry.value(), item, vm)?;
+        if entry.omits_null() && value.is_null() {
+            continue;
+        }
+        pairs.push((Arc::clone(entry.key()), value));
     }
+    Some(Val::ObjSmall(pairs.into()))
+}
+
+fn eval_view_object_cells_with_evaluator<'a, V, F>(
+    object: &ObjectKernel,
+    item: &V,
+    cells: &mut Vec<Val>,
+    vm: &mut crate::vm::VM,
+    eval: &mut F,
+) -> Option<bool>
+where
+    V: ValueView<'a> + 'a,
+    F: FnMut(&BodyKernel, &V, &mut crate::vm::VM) -> Option<Val>,
+{
+    let start = cells.len();
+    for entry in object.entries() {
+        let value = eval(entry.value(), item, vm)?;
+        if entry.omits_null() && value.is_null() {
+            cells.truncate(start);
+            return Some(false);
+        }
+        cells.push(value);
+    }
+    Some(true)
 }
 
 fn row_small_object(keys: &[Arc<str>], cells: &[Val]) -> Val {
