@@ -2501,6 +2501,25 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::Rolling { op, width } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_rolling_frontier_row(
+            item,
+            op,
+            width,
+            stage_idx,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::Chunk { width } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4119,6 +4138,90 @@ where
     }
     drive_owned_child(
         current,
+        next_stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn drive_rolling_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    op: crate::builtins::BuiltinViewRolling,
+    width: usize,
+    stage_idx: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let width = width.max(1);
+    let current = numeric_view_value(&item);
+    let state = op_state.get_mut(stage_idx)?.rolling();
+    let idx = state.index;
+    state.index = state.index.saturating_add(1);
+    state.window.push_back(current);
+    if let Some(value) = current {
+        state.sum += value;
+        state.count += 1;
+        while state.min.back().is_some_and(|(_, old)| *old > value) {
+            state.min.pop_back();
+        }
+        state.min.push_back((idx, value));
+        while state.max.back().is_some_and(|(_, old)| *old < value) {
+            state.max.pop_back();
+        }
+        state.max.push_back((idx, value));
+    }
+    if state.window.len() > width {
+        let removed_idx = idx.saturating_sub(width);
+        if let Some(Some(value)) = state.window.pop_front() {
+            state.sum -= value;
+            state.count = state.count.saturating_sub(1);
+        }
+        while state.min.front().is_some_and(|(old_idx, _)| *old_idx <= removed_idx) {
+            state.min.pop_front();
+        }
+        while state.max.front().is_some_and(|(old_idx, _)| *old_idx <= removed_idx) {
+            state.max.pop_front();
+        }
+    }
+
+    let out = if idx + 1 < width {
+        Val::Null
+    } else {
+        match op {
+            crate::builtins::BuiltinViewRolling::Sum => Val::Float(state.sum),
+            crate::builtins::BuiltinViewRolling::Avg if state.count > 0 => {
+                Val::Float(state.sum / state.count as f64)
+            }
+            crate::builtins::BuiltinViewRolling::Avg => Val::Null,
+            crate::builtins::BuiltinViewRolling::Min => state
+                .min
+                .front()
+                .map(|(_, value)| Val::Float(*value))
+                .unwrap_or(Val::Null),
+            crate::builtins::BuiltinViewRolling::Max => state
+                .max
+                .front()
+                .map(|(_, value)| Val::Float(*value))
+                .unwrap_or(Val::Null),
+        }
+    };
+    drive_owned_child(
+        out,
         next_stage_idx,
         stages,
         op_state,
@@ -7617,6 +7720,48 @@ mod tests {
             serde_json::json!([null, 0.0, 5.0, null, null])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_rolling_numeric_tape_rows_without_materializing_receiver() {
+        let cases = [
+            (
+                crate::builtins::BuiltinMethod::RollingSum,
+                serde_json::json!([null, null, 4.0, 3.0, 5.0]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::RollingAvg,
+                serde_json::json!([null, null, 2.0, 1.5, 2.5]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::RollingMin,
+                serde_json::json!([null, null, 1.0, 0.0, 0.0]),
+            ),
+            (
+                crate::builtins::BuiltinMethod::RollingMax,
+                serde_json::json!([null, null, 3.0, 3.0, 5.0]),
+            ),
+        ];
+
+        for (method, expected) in cases {
+            let tape =
+                crate::data::tape::TapeData::parse(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+            let body = PipelineBody {
+                stages: vec![Stage::UsizeBuiltin { method, value: 3 }],
+                stage_exprs: Vec::new(),
+                sink: Sink::Collect,
+                stage_kernels: vec![BodyKernel::Generic],
+                sink_kernels: Vec::new(),
+            };
+
+            tape.reset_materialized_subtrees();
+            let out = super::run_full(TapeView::root(&tape), &body)
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
+            assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
+        }
     }
 
     #[test]

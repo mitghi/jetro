@@ -1318,6 +1318,10 @@ fn simd_lazy_numeric_scans_keep_public_semantics() {
     assert_eq!(j.collect("$.cummin()").unwrap(), json!([1.0, 1.0, 1.0, 0.0, 0.0]));
     assert_eq!(j.collect("$.lag(2)").unwrap(), json!([null, null, 1.0, 3.0, null]));
     assert_eq!(j.collect("$.lead(2)").unwrap(), json!([null, 0.0, 5.0, null, null]));
+    assert_eq!(j.collect("$.rolling_sum(3)").unwrap(), json!([null, null, 4.0, 3.0, 5.0]));
+    assert_eq!(j.collect("$.rolling_avg(3)").unwrap(), json!([null, null, 2.0, 1.5, 2.5]));
+    assert_eq!(j.collect("$.rolling_min(3)").unwrap(), json!([null, null, 1.0, 0.0, 0.0]));
+    assert_eq!(j.collect("$.rolling_max(3)").unwrap(), json!([null, null, 3.0, 3.0, 5.0]));
 }
 
 #[test]

@@ -3796,6 +3796,12 @@ mod tests {
             Some(BuiltinViewStage::Lead)
         );
         assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::RollingSum)),
+            Some(BuiltinViewStage::Rolling(
+                crate::builtins::BuiltinViewRolling::Sum
+            ))
+        );
+        assert_eq!(
             view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
             Some(BuiltinViewStage::Chunk)
         );

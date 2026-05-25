@@ -8,6 +8,16 @@ use crate::{data::value::Val, data::view::ValueView, exec::pipeline};
 
 use super::key::ViewKey;
 
+#[derive(Default)]
+pub(super) struct RollingNumericState {
+    pub index: usize,
+    pub window: VecDeque<Option<f64>>,
+    pub sum: f64,
+    pub count: usize,
+    pub min: VecDeque<(usize, f64)>,
+    pub max: VecDeque<(usize, f64)>,
+}
+
 /// Per-element control flow for the view-domain stage loop, parameterised by
 /// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
@@ -40,6 +50,8 @@ pub(super) enum ViewStageState {
     Deque(VecDeque<Val>),
     /// Numeric state used by one-pass numeric scan stages.
     Numeric(Option<f64>),
+    /// Rolling numeric aggregate state.
+    Rolling(Box<RollingNumericState>),
 }
 
 impl ViewStageState {
@@ -110,6 +122,16 @@ impl ViewStageState {
         match self {
             Self::Numeric(value) => value,
             _ => unreachable!("numeric state was initialized"),
+        }
+    }
+
+    pub(super) fn rolling(&mut self) -> &mut RollingNumericState {
+        if !matches!(self, Self::Rolling(_)) {
+            *self = Self::Rolling(Box::default());
+        }
+        match self {
+            Self::Rolling(value) => value,
+            _ => unreachable!("rolling state was initialized"),
         }
     }
 }
@@ -264,6 +286,7 @@ where
         pipeline::ViewStageCapability::NumericScan(_) => None,
         pipeline::ViewStageCapability::Lag { .. } => None,
         pipeline::ViewStageCapability::Lead { .. } => None,
+        pipeline::ViewStageCapability::Rolling { .. } => None,
         pipeline::ViewStageCapability::Chunk { .. } => None,
         pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,

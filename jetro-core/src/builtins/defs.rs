@@ -14,7 +14,7 @@ use super::{
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
-    BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericScan,
+    BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericScan, BuiltinViewRolling,
     BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage, BuiltinViewStringExpand,
     BuiltinViewValueProjection,
 };
@@ -1723,13 +1723,104 @@ impl Builtin for Chunk {
     }
 }
 
+#[inline]
+fn rolling_numeric_spec(op: BuiltinViewRolling) -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::Rolling(op))
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::OneToOne,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::UsizeArg { min: 1 })
+}
+
+#[inline]
+fn rolling_stream_value(
+    buffer: &mut std::collections::VecDeque<crate::data::value::Val>,
+    item: crate::data::value::Val,
+    width: usize,
+    op: BuiltinViewRolling,
+) -> crate::data::value::Val {
+    buffer.push_back(opt_float_val(numeric_val(&item)));
+    while buffer.len() > width {
+        buffer.pop_front();
+    }
+    if buffer.len() < width {
+        return crate::data::value::Val::Null;
+    }
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for value in buffer.iter().filter_map(numeric_val) {
+        sum += value;
+        count += 1;
+        min = min.min(value);
+        max = max.max(value);
+    }
+    match op {
+        BuiltinViewRolling::Sum => crate::data::value::Val::Float(sum),
+        BuiltinViewRolling::Avg if count > 0 => crate::data::value::Val::Float(sum / count as f64),
+        BuiltinViewRolling::Avg => crate::data::value::Val::Null,
+        BuiltinViewRolling::Min if min.is_finite() => crate::data::value::Val::Float(min),
+        BuiltinViewRolling::Min => crate::data::value::Val::Null,
+        BuiltinViewRolling::Max if max.is_finite() => crate::data::value::Val::Float(max),
+        BuiltinViewRolling::Max => crate::data::value::Val::Null,
+    }
+}
+
+#[inline]
+fn rolling_apply_stream(
+    ctx: &mut super::builtin::StreamCtx<'_, '_>,
+    item: crate::data::value::Val,
+    op: BuiltinViewRolling,
+) -> Result<
+    crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+    crate::data::context::EvalError,
+> {
+    let Some(width) = ctx.stage.descriptor().and_then(|d| d.usize_arg) else {
+        return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+    };
+    if width == 0 {
+        return Ok(crate::exec::pipeline::StageFlow::Continue(item));
+    }
+    let out = rolling_stream_value(
+        &mut ctx.stage_window_buffers[ctx.stage_idx],
+        item,
+        width,
+        op,
+    );
+    Ok(crate::exec::pipeline::StageFlow::Continue(out))
+}
+
 /// `rolling_sum(n)` — windowed sum barrier.
 pub(crate) struct RollingSum;
 impl Builtin for RollingSum {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingSum;
     const NAME: &'static str = "rolling_sum";
     fn spec() -> BuiltinSpec {
-        barrier_default_spec()
+        rolling_numeric_spec(BuiltinViewRolling::Sum)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        rolling_apply_stream(ctx, item, BuiltinViewRolling::Sum)
     }
     #[inline]
     fn apply_args(
@@ -1749,7 +1840,18 @@ impl Builtin for RollingAvg {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingAvg;
     const NAME: &'static str = "rolling_avg";
     fn spec() -> BuiltinSpec {
-        barrier_default_spec()
+        rolling_numeric_spec(BuiltinViewRolling::Avg)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        rolling_apply_stream(ctx, item, BuiltinViewRolling::Avg)
     }
     #[inline]
     fn apply_args(
@@ -1769,7 +1871,18 @@ impl Builtin for RollingMin {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMin;
     const NAME: &'static str = "rolling_min";
     fn spec() -> BuiltinSpec {
-        barrier_default_spec()
+        rolling_numeric_spec(BuiltinViewRolling::Min)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        rolling_apply_stream(ctx, item, BuiltinViewRolling::Min)
     }
     #[inline]
     fn apply_args(
@@ -1789,7 +1902,18 @@ impl Builtin for RollingMax {
     const METHOD: BuiltinMethod = BuiltinMethod::RollingMax;
     const NAME: &'static str = "rolling_max";
     fn spec() -> BuiltinSpec {
-        barrier_default_spec()
+        rolling_numeric_spec(BuiltinViewRolling::Max)
+    }
+    #[inline]
+    fn apply_stream(
+        ctx: &mut super::builtin::StreamCtx<'_, '_>,
+        item: crate::data::value::Val,
+        _body: Option<&crate::vm::Program>,
+    ) -> Result<
+        crate::exec::pipeline::StageFlow<crate::data::value::Val>,
+        crate::data::context::EvalError,
+    > {
+        rolling_apply_stream(ctx, item, BuiltinViewRolling::Max)
     }
     #[inline]
     fn apply_args(

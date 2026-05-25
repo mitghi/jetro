@@ -1559,6 +1559,8 @@ pub enum BuiltinViewStage {
     Lag,
     /// Numeric lead by a fixed row offset.
     Lead,
+    /// Rolling numeric aggregate over a fixed-width window.
+    Rolling(BuiltinViewRolling),
     /// Non-overlapping fixed-size chunk stage.
     Chunk,
     /// Sliding fixed-size window stage.
@@ -1610,6 +1612,19 @@ pub enum BuiltinViewNumericScan {
     CumMax,
     /// Cumulative minimum, carrying previous best over null/non-numeric rows.
     CumMin,
+}
+
+/// Rolling numeric operation for borrowed view rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewRolling {
+    /// Rolling sum over numeric rows, treating non-numeric/null rows as absent.
+    Sum,
+    /// Rolling average over numeric rows, null when the window has no numeric rows.
+    Avg,
+    /// Rolling minimum over numeric rows.
+    Min,
+    /// Rolling maximum over numeric rows.
+    Max,
 }
 
 /// Extra executor data required to construct a borrowed-view stage capability.
@@ -2373,6 +2388,7 @@ impl BuiltinViewStage {
             | Self::NumericScan(_)
             | Self::Lag
             | Self::Lead
+            | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2395,6 +2411,7 @@ impl BuiltinViewStage {
             | Self::NumericScan(_)
             | Self::Lag
             | Self::Lead
+            | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
@@ -2436,7 +2453,7 @@ impl BuiltinViewStage {
             Self::Enumerate => BuiltinCardinality::OneToOne,
             Self::Pairwise => BuiltinCardinality::Filtering,
             Self::NumericScan(_) => BuiltinCardinality::OneToOne,
-            Self::Lag | Self::Lead => BuiltinCardinality::OneToOne,
+            Self::Lag | Self::Lead | Self::Rolling(_) => BuiltinCardinality::OneToOne,
             Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
@@ -2468,6 +2485,7 @@ impl BuiltinViewStage {
             | Self::NumericScan(_)
             | Self::Lag
             | Self::Lead
+            | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2500,6 +2518,7 @@ impl BuiltinViewStage {
             | Self::NumericScan(_)
             | Self::Lag
             | Self::Lead
+            | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
             | Self::TakeWhile
@@ -2529,6 +2548,7 @@ impl BuiltinViewStage {
             | Self::NumericScan(_)
             | Self::Lag
             | Self::Lead
+            | Self::Rolling(_)
             | Self::Chunk
             | Self::Window
             | Self::KeyedReduce => 1.0,

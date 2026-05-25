@@ -13,7 +13,7 @@ pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
     BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
-    BuiltinViewNumericScan, BuiltinViewStringExpand,
+    BuiltinViewNumericScan, BuiltinViewRolling, BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -788,6 +788,13 @@ pub(crate) enum ViewStageCapability {
         /// Number of future rows to look forward.
         offset: usize,
     },
+    /// Emit rolling numeric aggregates over a bounded window.
+    Rolling {
+        /// Rolling operation.
+        op: BuiltinViewRolling,
+        /// Window width.
+        width: usize,
+    },
     /// Emit fixed-size owned chunks from a borrowed row stream.
     Chunk {
         /// Chunk width.
@@ -870,6 +877,10 @@ impl ViewStageCapability {
             BuiltinViewStage::NumericScan(op) => Some(Self::NumericScan(op)),
             BuiltinViewStage::Lag => Some(Self::Lag { offset: usize_arg? }),
             BuiltinViewStage::Lead => Some(Self::Lead { offset: usize_arg? }),
+            BuiltinViewStage::Rolling(op) => Some(Self::Rolling {
+                op,
+                width: usize_arg?,
+            }),
             BuiltinViewStage::Chunk => Some(Self::Chunk { width: usize_arg? }),
             BuiltinViewStage::Window => Some(Self::Window { width: usize_arg? }),
             BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
@@ -900,6 +911,7 @@ impl ViewStageCapability {
             Self::NumericScan(op) => BuiltinViewStage::NumericScan(*op),
             Self::Lag { .. } => BuiltinViewStage::Lag,
             Self::Lead { .. } => BuiltinViewStage::Lead,
+            Self::Rolling { op, .. } => BuiltinViewStage::Rolling(*op),
             Self::Chunk { .. } => BuiltinViewStage::Chunk,
             Self::Window { .. } => BuiltinViewStage::Window,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
@@ -939,6 +951,7 @@ impl ViewStageCapability {
                 | Self::NumericScan(_)
                 | Self::Lag { .. }
                 | Self::Lead { .. }
+                | Self::Rolling { .. }
         )
             && self.view_stage().preserves_cardinality()
     }
@@ -1057,6 +1070,7 @@ impl ViewStageCapability {
             | Self::NumericScan(_)
             | Self::Lag { .. }
             | Self::Lead { .. }
+            | Self::Rolling { .. }
             | Self::Chunk { .. }
             | Self::Window { .. }
             | Self::StringExpand { .. }
@@ -1134,6 +1148,7 @@ impl ViewStageCapability {
                 | Self::NumericScan(_)
                 | Self::Lag { .. }
                 | Self::Lead { .. }
+                | Self::Rolling { .. }
                 | Self::Chunk { .. }
                 | Self::Window { .. }
                 | Self::StringExpand { .. }
@@ -1561,7 +1576,8 @@ mod tests {
     use crate::builtins::{
         registry::{cancellation, BuiltinId},
         BuiltinArgExtremeSink, BuiltinMembershipSink, BuiltinMethod, BuiltinPredicateSink,
-        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewNumericScan, BuiltinViewStage,
+        BuiltinSelectionPosition, BuiltinSinkAccumulator, BuiltinViewNumericScan,
+        BuiltinViewRolling, BuiltinViewStage,
     };
     use crate::data::value::Val;
     use crate::exec::pipeline::{
@@ -1669,29 +1685,35 @@ mod tests {
         }
         .view_capability(13, None)
         .unwrap();
+        let rolling_sum = Stage::UsizeBuiltin {
+            method: BuiltinMethod::RollingSum,
+            value: 3,
+        }
+        .view_capability(14, None)
+        .unwrap();
         let chunk = Stage::UsizeBuiltin {
             method: BuiltinMethod::Chunk,
             value: 2,
         }
-        .view_capability(14, None)
+        .view_capability(15, None)
         .unwrap();
         let window = Stage::UsizeBuiltin {
             method: BuiltinMethod::Window,
             value: 3,
         }
-        .view_capability(15, None)
+        .view_capability(16, None)
         .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(16, None)
+        .view_capability(17, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(17, None)
+        .view_capability(18, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1730,6 +1752,15 @@ mod tests {
         assert!(matches!(lead, ViewStageCapability::Lead { offset: 2 }));
         assert_eq!(lead.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(!lead.preserves_cardinality());
+        assert!(matches!(
+            rolling_sum,
+            ViewStageCapability::Rolling {
+                op: BuiltinViewRolling::Sum,
+                width: 3
+            }
+        ));
+        assert_eq!(rolling_sum.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(!rolling_sum.preserves_cardinality());
         assert!(matches!(chunk, ViewStageCapability::Chunk { width: 2 }));
         assert_eq!(chunk.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(window, ViewStageCapability::Window { width: 3 }));
