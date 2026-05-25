@@ -2705,7 +2705,7 @@ where
         } => match eval_view_kernel_inner(scrutinee, item, vm)? {
             ViewKernelValue::View(view) => {
                 let current = if *body_needs_current {
-                    view.materialize()
+                    view_kernel_view_to_owned(view.clone())
                 } else {
                     Val::Null
                 };
