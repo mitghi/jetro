@@ -1551,11 +1551,34 @@ where
     V: FrontierBaseView<'a>,
 {
     let prefix = pipeline::view_prefix_capabilities(body)?;
-    if !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages) {
+    let view_suffix = view_suffix_capabilities(body, prefix.consumed_stages);
+    if view_suffix.is_none()
+        && !body.suffix_can_run_with_materialized_source_env(prefix.consumed_stages)
+    {
         return None;
     }
 
     if pipeline::ViewStageCapability::prefix_forces_empty(&prefix.stages, &body.stage_kernels) {
+        if let Some(suffix) = view_suffix {
+            let source_demand = pipeline::Pipeline::segment_pull_demand(
+                &body.stages[prefix.consumed_stages..],
+                &body.sink,
+            );
+            let sink = suffix.sink.clone().for_source_demand(source_demand, false);
+            let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+                Some(Ok(sink)) => sink,
+                Some(Err(err)) => return Some(Err(err)),
+                None => return None,
+            };
+            return run_buffered_rows_view_suffix(
+                Vec::<FrontierRow<V>>::new(),
+                body,
+                &suffix,
+                sink,
+                source_demand,
+                vm,
+            );
+        }
         return Some(run_materialized_suffix(
             body,
             prefix.consumed_stages,
@@ -1564,6 +1587,38 @@ where
             base_env,
             vm,
         ));
+    }
+
+    if let Some(suffix) = view_suffix {
+        let mut boundary_rows = Vec::new();
+        let source_demand = body.pull_demand();
+
+        if let Err(err) = drive_view_frontier(
+            source,
+            pipeline::SourceCapabilities::VIEW_ARRAY,
+            &prefix.stages,
+            &body.stage_kernels,
+            source_demand,
+            vm,
+            |item, _vm| {
+                boundary_rows.push(item.clone());
+                Some(Ok(ViewRowAction::Emit))
+            },
+        )? {
+            return Some(Err(err));
+        }
+
+        let suffix_demand = pipeline::Pipeline::segment_pull_demand(
+            &body.stages[prefix.consumed_stages..],
+            &body.sink,
+        );
+        let sink = suffix.sink.clone().for_source_demand(suffix_demand, false);
+        let sink = match resolve_view_sink(sink, Some(base_env), vm) {
+            Some(Ok(sink)) => sink,
+            Some(Err(err)) => return Some(Err(err)),
+            None => return None,
+        };
+        return run_buffered_rows_view_suffix(boundary_rows, body, &suffix, sink, suffix_demand, vm);
     }
 
     let mut boundary_rows = Vec::new();
@@ -7925,6 +7980,49 @@ mod tests {
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn prefix_fallback_runs_view_suffix_without_materializing_boundary_rows() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 2,
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Keys,
+                    crate::builtins::BuiltinArgs::None,
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_prefix_then_materialized_suffix(
+            TapeView::root(&tape),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([["id", "name"], ["id", "name"]])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]
