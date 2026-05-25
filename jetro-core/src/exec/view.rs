@@ -922,21 +922,14 @@ fn resolve_view_sink(
     base_env: Option<&Env>,
     vm: &mut VM,
 ) -> Option<Result<pipeline::ViewSinkCapability, EvalError>> {
-    match sink {
-        pipeline::ViewSinkCapability::Membership {
-            op,
-            target: pipeline::ViewMembershipTarget::Program(program),
-        } => {
-            let env = base_env?;
-            Some(vm.exec_in_env(&program, env).map(|target| {
-                pipeline::ViewSinkCapability::Membership {
-                    op,
-                    target: pipeline::ViewMembershipTarget::Literal(target),
-                }
-            }))
-        }
-        sink => Some(Ok(sink)),
+    if let Some(program) = sink.membership_target_program() {
+        let env = base_env?;
+        return Some(
+            vm.exec_in_env(&program, env)
+                .map(|target| sink.with_resolved_membership_target(target)),
+        );
     }
+    Some(Ok(sink))
 }
 
 /// Feeds one view row into the sink accumulator according to `sink`'s capability.

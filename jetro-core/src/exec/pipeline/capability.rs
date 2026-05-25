@@ -974,6 +974,32 @@ impl ViewSinkCapability {
             _ => None,
         }
     }
+
+    /// Returns the runtime target program for membership sinks that still need
+    /// one environment-level target evaluation before row streaming.
+    pub(crate) fn membership_target_program(&self) -> Option<std::sync::Arc<Program>> {
+        match self {
+            Self::Membership {
+                target: ViewMembershipTarget::Program(program),
+                ..
+            } => Some(std::sync::Arc::clone(program)),
+            _ => None,
+        }
+    }
+
+    /// Replaces a runtime membership target with the resolved literal target.
+    pub(crate) fn with_resolved_membership_target(self, resolved: Val) -> Self {
+        match self {
+            Self::Membership {
+                op,
+                target: ViewMembershipTarget::Program(_),
+            } => Self::Membership {
+                op,
+                target: ViewMembershipTarget::Literal(resolved),
+            },
+            sink => sink,
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -1438,6 +1464,34 @@ mod tests {
             Some((BuiltinArgExtremeSink::MinBy, 8))
         );
         assert_eq!(ViewSinkCapability::Collect.arg_extreme_contract(), None);
+    }
+
+    #[test]
+    fn view_sink_capability_describes_membership_target_resolution() {
+        let program = Arc::new(crate::vm::Program::new(Vec::new(), ""));
+        let sink = ViewSinkCapability::Membership {
+            op: BuiltinMembershipSink::Includes,
+            target: ViewMembershipTarget::Program(Arc::clone(&program)),
+        };
+
+        let resolved_program = sink.membership_target_program().unwrap();
+        assert!(Arc::ptr_eq(&resolved_program, &program));
+
+        assert!(matches!(
+            sink.with_resolved_membership_target(Val::Int(9)),
+            ViewSinkCapability::Membership {
+                op: BuiltinMembershipSink::Includes,
+                target: ViewMembershipTarget::Literal(Val::Int(9)),
+            }
+        ));
+        assert!(
+            ViewSinkCapability::Membership {
+                op: BuiltinMembershipSink::Index,
+                target: ViewMembershipTarget::Literal(Val::Int(1)),
+            }
+            .membership_target_program()
+            .is_none()
+        );
     }
 
     #[test]
