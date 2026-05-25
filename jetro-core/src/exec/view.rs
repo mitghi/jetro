@@ -1414,7 +1414,7 @@ where
                 sink.materialization(),
                 pipeline::ViewMaterialization::SinkOutputRows
             );
-            sink_acc.observe_collect(item.materialize());
+            sink_acc.observe_collect(pipeline::view_kernel_view_to_owned(item.clone()));
             Some(Ok(ViewRowAction::Emit))
         }
         pipeline::ViewSinkCapability::Builtin {
@@ -5269,7 +5269,7 @@ mod tests {
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 3]));
         assert_eq!(source.array_iter_reads(), 1);
-        assert_eq!(source.materialize_reads(), 2);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
@@ -5363,7 +5363,7 @@ mod tests {
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([4, 3]));
         assert_eq!(source.array_iter_reads(), 1);
-        assert_eq!(source.materialize_reads(), 2);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
@@ -5463,7 +5463,7 @@ mod tests {
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([2, 3]));
         assert_eq!(source.array_iter_reads(), 1);
-        assert_eq!(source.materialize_reads(), 2);
+        assert_eq!(source.materialize_reads(), 0);
     }
 
     #[test]
