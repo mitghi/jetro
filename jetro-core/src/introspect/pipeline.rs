@@ -43,6 +43,7 @@ pub(crate) fn inspect_pipeline(
 fn source_for_inspection(source: &PipelinePlanSource) -> Source {
     match source {
         PipelinePlanSource::FieldChain { keys } => Source::FieldChain { keys: keys.clone() },
+        PipelinePlanSource::RootPath { .. } => Source::Receiver(Val::Null),
         PipelinePlanSource::Expr(_) => Source::Receiver(Val::Null),
     }
 }
@@ -61,6 +62,7 @@ pub(crate) fn source_label(source: &PipelinePlanSource) -> String {
                 format!("field-chain:$.{joined}")
             }
         }
+        PipelinePlanSource::RootPath { steps } => format!("root-path:{} steps", steps.len()),
         PipelinePlanSource::Expr(id) => format!("expr:{}", id.0),
     }
 }

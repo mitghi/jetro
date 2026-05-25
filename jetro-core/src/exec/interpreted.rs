@@ -477,6 +477,12 @@ impl ExecCtx<'_, '_> {
                 | BackendPreference::MaterializedSource,
                 PipelinePlanSource::FieldChain { keys },
             ) => self.eval_field_chain_pipeline_backend(backend, keys, body),
+            (
+                BackendPreference::TapeView
+                | BackendPreference::ValView
+                | BackendPreference::MaterializedSource,
+                PipelinePlanSource::RootPath { steps },
+            ) => self.eval_root_path_pipeline_backend(backend, steps, body),
             (BackendPreference::FastChildren, PipelinePlanSource::Expr(source))
                 if body.can_run_with_materialized_receiver() =>
             {
@@ -517,6 +523,23 @@ impl ExecCtx<'_, '_> {
         }
     }
 
+    /// Dispatches a static root-path pipeline to tape/view or materialized-source backends.
+    fn eval_root_path_pipeline_backend(
+        &mut self,
+        backend: BackendPreference,
+        steps: &[PhysicalPathStep],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        match backend {
+            BackendPreference::TapeView => self.eval_tape_view_root_path_pipeline(steps, body),
+            BackendPreference::MaterializedSource => {
+                self.eval_materialized_root_path_pipeline(steps, body)
+            }
+            BackendPreference::ValView => self.eval_val_view_root_path_pipeline(steps, body),
+            _ => None,
+        }
+    }
+
     /// Runs the pipeline entirely on the simd-json tape via a zero-copy view;
     /// returns `None` when this document has no live tape.
     fn eval_tape_view_pipeline(
@@ -531,6 +554,35 @@ impl ExecCtx<'_, '_> {
             } {
                 let root = crate::data::view::TapeView::root(tape);
                 let source = view_pipeline::walk_fields(root, keys);
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
+                return view_pipeline::run_with_env_and_vm(
+                    source,
+                    body,
+                    Some(self.j),
+                    &env,
+                    self.vm,
+                );
+            }
+        }
+        None
+    }
+
+    /// Runs a pipeline entirely on a static root path selected from the simd-json tape.
+    fn eval_tape_view_root_path_pipeline(
+        &mut self,
+        steps: &[PhysicalPathStep],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                let root = crate::data::view::TapeView::root(tape);
+                let source = walk_path_view(root, steps);
                 let env = match self.view_pipeline_env(body) {
                     Ok(env) => env,
                     Err(err) => return Some(Err(err)),
@@ -605,6 +657,41 @@ impl ExecCtx<'_, '_> {
         None
     }
 
+    /// Materialises a static root-path source and runs the pipeline on that receiver.
+    fn eval_materialized_root_path_pipeline(
+        &mut self,
+        steps: &[PhysicalPathStep],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        if !body.can_run_with_materialized_source_env() {
+            return None;
+        }
+        {
+            if let Some(tape) = match self.j.lazy_tape() {
+                Ok(tape) => tape,
+                Err(err) => return Some(Err(err)),
+            } {
+                let root = crate::data::view::TapeView::root(tape);
+                let source = walk_path_view(root, steps);
+                let pipeline = body
+                    .clone()
+                    .with_source(pipeline::Source::Receiver(source.materialize()));
+                let root = Val::Null;
+                let env = match self.view_pipeline_env(body) {
+                    Ok(env) => env,
+                    Err(err) => return Some(Err(err)),
+                };
+                return Some(pipeline.run_with_env_and_vm(
+                    &root,
+                    &env,
+                    Some(self.j as &dyn pipeline::PipelineData),
+                    self.vm,
+                ));
+            }
+        }
+        None
+    }
+
     /// Runs the pipeline against a borrowed `ValView` of the already-materialised root value;
     /// used when raw bytes are unavailable or the root `Val` has already been constructed.
     fn eval_val_view_pipeline(
@@ -618,6 +705,31 @@ impl ExecCtx<'_, '_> {
                 Err(err) => return Some(Err(err)),
             };
             let source = view_pipeline::walk_fields(ValView::new(&root), keys);
+            let env = match self.view_pipeline_env(body) {
+                Ok(env) => env,
+                Err(err) => return Some(Err(err)),
+            };
+            if let Some(result) =
+                view_pipeline::run_with_env_and_vm(source, body, Some(self.j), &env, self.vm)
+            {
+                return Some(result);
+            }
+        }
+        None
+    }
+
+    /// Runs a static root-path pipeline against an already materialised root value.
+    fn eval_val_view_root_path_pipeline(
+        &mut self,
+        steps: &[PhysicalPathStep],
+        body: &pipeline::PipelineBody,
+    ) -> Option<Result<Val, EvalError>> {
+        if self.j.raw_bytes().is_none() || self.root.is_some() {
+            let root = match self.root() {
+                Ok(root) => root,
+                Err(err) => return Some(Err(err)),
+            };
+            let source = walk_path_view(ValView::new(&root), steps);
             let env = match self.view_pipeline_env(body) {
                 Ok(env) => env,
                 Err(err) => return Some(Err(err)),
@@ -1022,6 +1134,13 @@ impl PipelineSourceResolver for ExecCtx<'_, '_> {
         match source {
             PipelinePlanSource::FieldChain { keys } => {
                 Ok(ResolvedPipelineSource::ValFieldChain { keys: keys.clone() })
+            }
+            PipelinePlanSource::RootPath { steps } => {
+                let root = self.root()?;
+                Ok(ResolvedPipelineSource::ValReceiver(run_root_path(
+                    &root,
+                    steps,
+                )))
             }
             PipelinePlanSource::Expr(source) => {
                 Ok(ResolvedPipelineSource::ValReceiver(self.eval(*source)?))

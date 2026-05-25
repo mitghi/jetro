@@ -910,6 +910,7 @@ fn pipeline_source_to_steps(
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
             Some(physical_field_keys_to_path_steps(keys))
         }
+        crate::ir::physical::PipelinePlanSource::RootPath { steps } => Some(steps.to_vec()),
         crate::ir::physical::PipelinePlanSource::Expr(source) => node_path_steps(plan, *source),
     }
 }
@@ -1634,6 +1635,12 @@ fn direct_tape_predicate_source_scalar_call(
                 call,
             })
         }
+        crate::ir::physical::PipelinePlanSource::RootPath { steps } => {
+            Some(NdjsonDirectPredicate::ViewScalarCall {
+                steps: steps.to_vec(),
+                call,
+            })
+        }
         crate::ir::physical::PipelinePlanSource::Expr(receiver) => {
             direct_tape_predicate_scalar_call(plan, *receiver, call)
         }
@@ -1695,6 +1702,7 @@ fn direct_array_element_source(
     let element = body.sink.single_element_selection()?.into();
     let source_steps = match source {
         PipelinePlanSource::FieldChain { keys } => physical_field_keys_to_path_steps(keys),
+        PipelinePlanSource::RootPath { steps } => steps.to_vec(),
         PipelinePlanSource::Expr(source) => node_path_steps(plan, *source)?,
     };
     Some((source_steps, element))

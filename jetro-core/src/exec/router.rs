@@ -362,7 +362,9 @@ mod tests {
                 let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
                 assert_eq!(keys, vec!["data"]);
             }
-            PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
+            PipelinePlanSource::RootPath { .. } | PipelinePlanSource::Expr(_) => {
+                panic!("expected $.data field-chain source")
+            }
         }
         assert_eq!(body.stages.len(), 1);
         assert!(matches!(body.stages[0], Stage::Filter(_, _)));
@@ -399,7 +401,9 @@ mod tests {
                 let keys: Vec<&str> = keys.iter().map(|k| k.as_ref()).collect();
                 assert_eq!(keys, vec!["data"]);
             }
-            PipelinePlanSource::Expr(_) => panic!("expected $.data field-chain source"),
+            PipelinePlanSource::RootPath { .. } | PipelinePlanSource::Expr(_) => {
+                panic!("expected $.data field-chain source")
+            }
         }
         assert_eq!(body.stages.len(), 1);
         assert!(matches!(body.stages[0], Stage::Filter(_, _)));
@@ -1309,6 +1313,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(out, json!({"first_name":"Ada"}));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn indexed_view_object_values_first_streams_object_items_from_tape() {
+        let j = Jetro::from_bytes(
+            br#"{"profiles":[{"name":"Ada","bio":{"large":[1,2,3,4]}},{"name":"Grace"}],"unused":{"large":[5,6,7,8]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.profiles[0].values().first()"#).unwrap();
+
+        assert_eq!(out, json!("Ada"));
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }

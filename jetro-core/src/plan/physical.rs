@@ -267,7 +267,8 @@ fn select_backend_plan(
         (
             InputMode::Val,
             PlanNode::Pipeline {
-                source: PipelinePlanSource::FieldChain { .. },
+                source:
+                    PipelinePlanSource::FieldChain { .. } | PipelinePlanSource::RootPath { .. },
                 ..
             },
         ) => BackendPlan::new(&[
@@ -290,6 +291,19 @@ fn select_backend_plan(
         ) if facts.can_stream_rows => BackendPlan::new(&[
             crate::ir::physical::BackendPreference::TapeView,
             crate::ir::physical::BackendPreference::TapeRows,
+            crate::ir::physical::BackendPreference::MaterializedSource,
+            crate::ir::physical::BackendPreference::ValView,
+            crate::ir::physical::BackendPreference::Interpreted,
+        ])
+        .without_interpreted_if(facts.is_byte_native()),
+        (
+            InputMode::Bytes,
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::RootPath { .. },
+                ..
+            },
+        ) if facts.can_stream_rows => BackendPlan::new(&[
+            crate::ir::physical::BackendPreference::TapeView,
             crate::ir::physical::BackendPreference::MaterializedSource,
             crate::ir::physical::BackendPreference::ValView,
             crate::ir::physical::BackendPreference::Interpreted,
@@ -1144,34 +1158,55 @@ fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Op
         return None;
     }
 
-    let mut field_end = 0;
+    let mut path_end = 0;
+    let mut has_index = false;
     for step in steps {
         match step {
-            Step::Field(_) => field_end += 1,
+            Step::Field(_) | Step::OptField(_) => path_end += 1,
+            Step::Index(_) => {
+                has_index = true;
+                path_end += 1;
+            }
             _ => break,
         }
     }
-    if field_end >= steps.len() {
+    if path_end >= steps.len() {
         return None;
     }
-    let Step::Method(name, args) = &steps[field_end] else {
+    let Step::Method(name, args) = &steps[path_end] else {
         return None;
     };
     let call = BuiltinCall::from_literal_ast_args(name.as_str(), args)?;
     let projection = view_object_items_projection_call(call.id(), &call.args)?;
 
-    let keys: Arc<[Arc<str>]> = steps[..field_end]
-        .iter()
-        .map(|step| match step {
-            Step::Field(key) => Arc::from(key.as_str()),
-            _ => unreachable!(),
-        })
-        .collect::<Vec<_>>()
-        .into();
+    let source = if has_index {
+        let path: Arc<[PhysicalPathStep]> = steps[..path_end]
+            .iter()
+            .map(|step| match step {
+                Step::Field(key) | Step::OptField(key) => {
+                    PhysicalPathStep::Field(Arc::from(key.as_str()))
+                }
+                Step::Index(index) => PhysicalPathStep::Index(*index),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        PipelinePlanSource::RootPath { steps: path }
+    } else {
+        let keys: Arc<[Arc<str>]> = steps[..path_end]
+            .iter()
+            .map(|step| match step {
+                Step::Field(key) | Step::OptField(key) => Arc::from(key.as_str()),
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        PipelinePlanSource::FieldChain { keys }
+    };
     let mut stages = vec![crate::exec::pipeline::Stage::ObjectItems(projection)];
     let mut stage_exprs = vec![None];
-    let sink = if field_end + 1 < steps.len() {
-        let tail = Pipeline::lower_body_from_steps(&steps[field_end + 1..])?;
+    let sink = if path_end + 1 < steps.len() {
+        let tail = Pipeline::lower_body_from_steps(&steps[path_end + 1..])?;
         stages.extend(tail.stages);
         stage_exprs.extend(tail.stage_exprs);
         tail.sink
@@ -1179,10 +1214,7 @@ fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Op
         crate::exec::pipeline::Sink::Collect
     };
     let body = crate::exec::pipeline::PipelineBody::planned(stages, stage_exprs, sink);
-    Some(builder.push(PlanNode::Pipeline {
-        source: PipelinePlanSource::FieldChain { keys },
-        body,
-    }))
+    Some(builder.push(PlanNode::Pipeline { source, body }))
 }
 
 #[cfg(test)]
@@ -1915,6 +1947,33 @@ mod tests {
                 ))
             )),
             _ => panic!("nested values().first() must stream object items from a field-chain source"),
+        }
+    }
+
+    #[test]
+    fn indexed_object_item_projection_lowers_as_root_path_pipeline() {
+        let plan = plan_query(r#"$.profiles[0].values().first()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::RootPath { steps },
+                body,
+            } => {
+                assert!(matches!(
+                    steps.as_ref(),
+                    [PhysicalPathStep::Field(profile), PhysicalPathStep::Index(0)]
+                    if profile.as_ref() == "profiles"
+                ));
+                assert!(matches!(
+                    body.stages.first(),
+                    Some(crate::exec::pipeline::Stage::ObjectItems(
+                        crate::builtins::BuiltinViewObjectProjection::Values
+                    ))
+                ));
+            }
+            _ => panic!("indexed values().first() must stream from a static root path"),
         }
     }
 

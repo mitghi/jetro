@@ -160,6 +160,9 @@ fn pipeline_source_label(source: &crate::ir::physical::PipelinePlanSource) -> St
         crate::ir::physical::PipelinePlanSource::FieldChain { keys } => {
             format!("field-chain({})", keys.len())
         }
+        crate::ir::physical::PipelinePlanSource::RootPath { steps } => {
+            format!("root-path({})", steps.len())
+        }
         crate::ir::physical::PipelinePlanSource::Expr(id) => format!("expr:{}", id.0),
     }
 }

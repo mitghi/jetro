@@ -416,18 +416,21 @@ impl ExecutionFacts {
         match node {
             PlanNode::Literal(_) => Self::constant(),
             PlanNode::Pipeline { source, body } => {
-                let field_chain = matches!(source, PipelinePlanSource::FieldChain { .. });
+                let static_path = matches!(
+                    source,
+                    PipelinePlanSource::FieldChain { .. } | PipelinePlanSource::RootPath { .. }
+                );
                 let view_native = crate::exec::pipeline::view_capabilities(body).is_some();
                 let view_prefix = crate::exec::pipeline::view_prefix_capabilities(body).is_some();
                 let materialized_source =
-                    field_chain && body.can_run_with_materialized_source_env();
-                let can_complete_without_root = field_chain
+                    static_path && body.can_run_with_materialized_source_env();
+                let can_complete_without_root = static_path
                     && (view_native || materialized_source)
                     && !body.needs_materialized_source_root_env();
                 Self {
                     can_avoid_root_materialization: can_complete_without_root,
-                    can_stream_rows: field_chain && (view_native || view_prefix),
-                    can_use_tape: field_chain,
+                    can_stream_rows: static_path && (view_native || view_prefix),
+                    can_use_tape: static_path,
                     contains_vm_fallback: false,
                     may_materialize_source: materialized_source,
                 }
@@ -584,6 +587,12 @@ impl PlanNode {
                     BackendPreference::ValView,
                     BackendPreference::Interpreted,
                 ],
+                PipelinePlanSource::RootPath { .. } => &[
+                    BackendPreference::TapeView,
+                    BackendPreference::MaterializedSource,
+                    BackendPreference::ValView,
+                    BackendPreference::Interpreted,
+                ],
                 PipelinePlanSource::Expr(_) => &[
                     BackendPreference::FastChildren,
                     BackendPreference::Interpreted,
@@ -645,6 +654,8 @@ impl BackendPreference {
 pub enum PipelinePlanSource {
     /// A dot-separated key sequence rooted at `$`, eligible for tape/view backends.
     FieldChain { keys: Arc<[Arc<str>]> },
+    /// A static field/index path rooted at `$`, eligible for tape/view backends.
+    RootPath { steps: Arc<[PhysicalPathStep]> },
     /// An arbitrary expression whose result becomes the pipeline receiver at runtime.
     Expr(NodeId),
 }
