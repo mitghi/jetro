@@ -476,6 +476,51 @@ where
         return Some(Ok(extreme.finish()));
     }
 
+    if let pipeline::ViewSinkCapability::SelectMany {
+        n,
+        from_end,
+        source_reversed: sink_reversed,
+    } = sink
+    {
+        let mut select_many = FrontierSelectMany::new(n, from_end, sink_reversed);
+        let result = if source_reversed {
+            if let Some(result) = drive_reversed_direct_position(
+                &source,
+                &suffix.stages,
+                &body.stage_kernels,
+                drive_demand,
+                vm,
+                |item, _vm| Some(Ok(select_many.observe(item))),
+            ) {
+                result
+            } else {
+                let items = source.array_iter_rev()?;
+                drive_view_iter(
+                    items,
+                    &suffix.stages,
+                    &body.stage_kernels,
+                    drive_demand,
+                    vm,
+                    |item, _vm| Some(Ok(select_many.observe(item))),
+                )?
+            }
+        } else {
+            drive_view_frontier(
+                source,
+                pipeline::SourceCapabilities::VIEW_ARRAY,
+                &suffix.stages,
+                &body.stage_kernels,
+                source_demand,
+                vm,
+                |item, _vm| Some(Ok(select_many.observe(item))),
+            )?
+        };
+        if let Err(err) = result {
+            return Some(Err(err));
+        }
+        return Some(Ok(select_many.finish()));
+    }
+
     let mut sink_acc = pipeline::SinkAccumulator::new(&body.sink);
     let result = if source_reversed {
         if let Some(result) = drive_reversed_direct_position(
@@ -5286,6 +5331,37 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!([{"id": 3}, {"id": 4}])
+        );
+        assert_eq!(tape.materialized_subtrees(), 2);
+    }
+
+    #[test]
+    fn leading_reverse_select_many_materializes_only_retained_compound_rows() {
+        let tape = crate::data::tape::TapeData::parse(
+            br#"[{"id":1},{"id":2},{"id":3},{"id":4}]"#.to_vec(),
+        )
+        .unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::reverse().unwrap()],
+            stage_exprs: Vec::new(),
+            sink: Sink::SelectMany {
+                n: 2,
+                from_end: false,
+            },
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_with_env_and_vm(TapeView::root(&tape), &body, None, &env, &mut vm)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([{"id": 4}, {"id": 3}])
         );
         assert_eq!(tape.materialized_subtrees(), 2);
     }
