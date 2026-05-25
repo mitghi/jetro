@@ -1472,10 +1472,20 @@ fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKerne
                 if !receiver.is_view_native() {
                     return None;
                 }
-                stack.push(BodyKernel::ArraySelect {
-                    array: Box::new(receiver),
-                    selector: array_selector_call(call)?,
-                });
+                stack.push(compose_array_select_kernel(
+                    receiver,
+                    array_selector_call(call)?,
+                ));
+            }
+            Opcode::GetIndex(index) => {
+                let receiver = stack.pop().unwrap_or(BodyKernel::Current);
+                if !receiver.is_view_native() {
+                    return None;
+                }
+                stack.push(compose_array_select_kernel(
+                    receiver,
+                    array_selector_from_index(*index)?,
+                ));
             }
             op if trivial_lit(op).is_some() => stack.push(BodyKernel::Const(trivial_lit(op)?)),
             op if arithmetic_binop(op).is_some() => {
@@ -1535,31 +1545,45 @@ fn compose_field_chain_kernel(receiver: BodyKernel, keys: Arc<[Arc<str>]>) -> Bo
     }
 }
 
+fn compose_array_select_kernel(receiver: BodyKernel, selector: ArraySelector) -> BodyKernel {
+    BodyKernel::ArraySelect {
+        array: Box::new(receiver),
+        selector,
+    }
+}
+
+fn array_selector_from_index(index: i64) -> Option<ArraySelector> {
+    match index {
+        -1 => Some(ArraySelector::Last),
+        idx if idx >= 0 => Some(ArraySelector::Nth(idx as usize)),
+        _ => None,
+    }
+}
+
+fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
+    if steps.is_empty() {
+        return None;
+    }
+    let mut kernel = BodyKernel::Current;
+    for step in steps {
+        match step {
+            crate::vm::KvStep::Field(key) => {
+                kernel = compose_field_kernel(kernel, Arc::clone(key));
+            }
+            crate::vm::KvStep::Index(index) => {
+                kernel = compose_array_select_kernel(kernel, array_selector_from_index(*index)?);
+            }
+        }
+    }
+    Some(kernel)
+}
+
 /// Describes how a Map stage's output elements should be collected by the sink.
 pub(crate) enum CollectLayout<'a> {
     /// Output elements are heterogeneous `Val`s; collect into a plain array.
     Values,
     /// Every output element is a uniform object with the same key schema; collect into a columnar layout.
     UniformObject(&'a ObjectKernel),
-}
-
-// numeric index steps cannot be represented as a FieldChain, so return None
-fn classify_kv_path(steps: &[crate::vm::KvStep]) -> Option<BodyKernel> {
-    if steps.is_empty() {
-        return None;
-    }
-    let mut keys = Vec::with_capacity(steps.len());
-    for step in steps {
-        match step {
-            crate::vm::KvStep::Field(key) => keys.push(Arc::clone(key)),
-            crate::vm::KvStep::Index(_) => return None,
-        }
-    }
-    match keys.len() {
-        0 => None,
-        1 => Some(BodyKernel::FieldRead(keys.pop().unwrap())),
-        _ => Some(BodyKernel::FieldChain(keys.into())),
-    }
 }
 
 #[inline]
@@ -1601,6 +1625,20 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
     match ops {
         [Opcode::LoadIdent(k) | Opcode::GetField(k)] => Some(BodyKernel::FieldRead(k.clone())),
         [Opcode::FieldChain(fc)] => Some(BodyKernel::FieldChain(fc.keys.clone())),
+        [receiver @ .., Opcode::GetIndex(index)] => {
+            let receiver = if receiver.is_empty() {
+                BodyKernel::Current
+            } else {
+                classify_structural_view_kernel(receiver)?
+            };
+            if !receiver.is_view_native() {
+                return None;
+            }
+            Some(compose_array_select_kernel(
+                receiver,
+                array_selector_from_index(*index)?,
+            ))
+        }
         [Opcode::LoadIdent(k1), rest @ ..]
             if rest.iter().all(|op| matches!(op, Opcode::GetField(_))) =>
         {
@@ -3229,6 +3267,56 @@ mod tests {
         assert_eq!(super::ArraySelector::Last.index_for_len(0), None);
         assert_eq!(super::ArraySelector::Last.index_for_len(3), Some(2));
         assert_eq!(super::ArraySelector::Nth(5).index_for_len(3), Some(5));
+    }
+
+    #[test]
+    fn compiled_index_path_projection_stays_view_native() {
+        let expr = parse("tags[0].name").expect("parse indexed path projection");
+        let program = Compiler::compile(&expr, "indexed-path");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+        let Some((source_keys, selector, suffix_keys)) = kernel.array_element_path() else {
+            panic!("expected array element path kernel, got {kernel:#?}");
+        };
+        assert_eq!(
+            source_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            ["tags"]
+        );
+        assert_eq!(selector, super::ArraySelector::Nth(0));
+        assert_eq!(
+            suffix_keys
+                .iter()
+                .map(|key| key.as_ref())
+                .collect::<Vec<_>>(),
+            ["name"]
+        );
+
+        let json = serde_json::json!({"tags":[{"name":"sf"},{"name":"classic"}]});
+        let val = Val::from(&json);
+        assert_eq!(
+            owned_value(eval_view_kernel(&kernel, &ValView::new(&val))),
+            Some(Val::Str(Arc::from("sf")))
+        );
+    }
+
+    #[test]
+    fn compiled_object_index_projection_stays_view_native() {
+        let expr = parse(r#"{tag: tags[0].name}"#).expect("parse indexed object projection");
+        let program = Compiler::compile(&expr, "indexed-object");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let json = serde_json::json!({"tags":[{"name":"sf"},{"name":"classic"}]});
+        let val = Val::from(&json);
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&val)))
+            .expect("object projection output");
+        assert_eq!(serde_json::Value::from(out), serde_json::json!({"tag":"sf"}));
     }
 
     #[test]
