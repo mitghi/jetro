@@ -617,6 +617,14 @@ where
     Ok(Val::obj(map))
 }
 
+/// Literal-field pivot form used by compiled builtin calls.
+#[inline]
+pub fn pivot_fields_apply(recv: &Val, fields: &[Arc<str>]) -> Result<Val, EvalError> {
+    pivot_apply(recv.clone(), fields.len(), |item, idx| {
+        Ok(item.get_field(fields[idx].as_ref()))
+    })
+}
+
 /// DFS pre-order visitor: calls `f` on every node (parents before children).
 fn walk_pre<F: FnMut(&Val)>(value: &Val, f: &mut F) {
     f(value);

@@ -958,6 +958,8 @@ pub enum BuiltinViewValueProjection {
     Defaults,
     /// Rename receiver object keys from an owned `{old: new}` object.
     Rename,
+    /// Pivot array rows using literal field names.
+    Pivot,
     /// Convert to camelCase.
     CamelCase,
     /// Uppercase first character and lowercase the rest.
@@ -1052,6 +1054,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::PadLeft
             | BuiltinViewValueProjection::PadRight
             | BuiltinViewValueProjection::PascalCase
+            | BuiltinViewValueProjection::Pivot
             | BuiltinViewValueProjection::Replace
             | BuiltinViewValueProjection::ReplaceAll
             | BuiltinViewValueProjection::Rename
@@ -3514,6 +3517,9 @@ impl BuiltinCall {
             (BuiltinMethod::Implode, BuiltinArgs::Str(field)) => {
                 apply_or_recv!(implode_apply(recv, field))
             }
+            (BuiltinMethod::Pivot, BuiltinArgs::StrVec(fields)) => {
+                apply_or_recv!(pivot_fields_apply(recv, fields).ok())
+            }
             (BuiltinMethod::Has, BuiltinArgs::Str(k)) => {
                 apply_or_recv!(has_apply(recv, k))
             }
@@ -4751,6 +4757,26 @@ where
             let lhs_key = str_arg!(1)?;
             let rhs_key = str_arg!(2)?;
             return equi_join_apply(recv, other, &lhs_key, &rhs_key);
+        }
+        BuiltinMethod::Pivot
+            if args.len() >= 2
+                && args.iter().all(|arg| {
+                    matches!(
+                        arg,
+                        Arg::Pos(Expr::Str(_)) | Arg::Named(_, Expr::Str(_))
+                    )
+                }) =>
+        {
+            let fields = args
+                .iter()
+                .map(|arg| match arg {
+                    Arg::Pos(Expr::Str(value)) | Arg::Named(_, Expr::Str(value)) => {
+                        Ok(Arc::from(value.as_str()))
+                    }
+                    _ => unreachable!("pivot literal guard checked above"),
+                })
+                .collect::<Result<Vec<_>, EvalError>>()?;
+            BuiltinCall::new(method, BuiltinArgs::StrVec(fields))
         }
         BuiltinMethod::Pivot => {
             return pivot_apply(recv, args.len(), |item, idx| match &args[idx] {

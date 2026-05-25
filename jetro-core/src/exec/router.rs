@@ -1140,6 +1140,25 @@ mod tests {
     }
 
     #[test]
+    fn view_pivot_projects_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"docs":[{"rows":[{"region":"old","product":"X","sales":1}]},{"rows":[{"region":"north","product":"A","sales":100},{"region":"north","product":"B","sales":120},{"region":"south","product":"A","sales":150}]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.docs.map(@.rows.pivot("region", "product", "sales")).last()"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!({"north":{"A":100,"B":120},"south":{"A":150}})
+        );
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

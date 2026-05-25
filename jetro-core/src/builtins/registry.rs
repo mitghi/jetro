@@ -1302,6 +1302,15 @@ where
                 _ => ViewProjectionResult::View(view),
             });
         }
+        BuiltinViewValueProjection::Pivot => {
+            let BuiltinArgs::StrVec(fields) = args else {
+                return None;
+            };
+            return Some(match view_pivot(&view, fields) {
+                Some(value) => ViewProjectionResult::Owned(value),
+                None => ViewProjectionResult::View(view),
+            });
+        }
         BuiltinViewValueProjection::Includes => {
             let BuiltinArgs::Val(target) = args else {
                 return None;
@@ -1768,6 +1777,47 @@ where
             .map(|(key, values)| (key, Val::arr(values)))
             .collect(),
     ))
+}
+
+fn view_pivot<'a, V>(view: &V, fields: &[Arc<str>]) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    if fields.len() < 2 {
+        return None;
+    }
+
+    fn key_from_value(value: Val) -> Arc<str> {
+        match value {
+            Val::Str(value) => value,
+            other => Arc::from(crate::util::val_to_key(&other)),
+        }
+    }
+
+    let len = view.array_len()?;
+    if fields.len() >= 3 {
+        let mut out: indexmap::IndexMap<Arc<str>, indexmap::IndexMap<Arc<str>, Val>> =
+            indexmap::IndexMap::new();
+        for item in view.array_iter()? {
+            let row = key_from_value(item.field(fields[0].as_ref()).materialize());
+            let col = key_from_value(item.field(fields[1].as_ref()).materialize());
+            let value = item.field(fields[2].as_ref()).materialize();
+            out.entry(row).or_default().insert(col, value);
+        }
+        return Some(Val::obj(
+            out.into_iter()
+                .map(|(key, inner)| (key, Val::obj(inner)))
+                .collect(),
+        ));
+    }
+
+    let mut out = indexmap::IndexMap::with_capacity(len);
+    for item in view.array_iter()? {
+        let key = key_from_value(item.field(fields[0].as_ref()).materialize());
+        let value = item.field(fields[1].as_ref()).materialize();
+        out.insert(key, value);
+    }
+    Some(Val::obj(out))
 }
 
 fn view_shallow_merge<'a, V>(
@@ -5129,6 +5179,7 @@ mod tests {
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
             ),
+            (BuiltinMethod::Pivot, BuiltinViewValueProjection::Pivot),
             (BuiltinMethod::Rename, BuiltinViewValueProjection::Rename),
             (BuiltinMethod::Repeat, BuiltinViewValueProjection::Repeat),
             (BuiltinMethod::Replace, BuiltinViewValueProjection::Replace),
@@ -7258,6 +7309,7 @@ mod tests {
                 BuiltinMethod::PascalCase,
                 BuiltinViewValueProjection::PascalCase,
             ),
+            (BuiltinMethod::Pivot, BuiltinViewValueProjection::Pivot),
             (BuiltinMethod::Rename, BuiltinViewValueProjection::Rename),
             (
                 BuiltinMethod::SnakeCase,

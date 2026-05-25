@@ -2788,7 +2788,22 @@ impl Builtin for Pivot {
     const METHOD: BuiltinMethod = BuiltinMethod::Pivot;
     const NAME: &'static str = "pivot";
     fn spec() -> BuiltinSpec {
-        object_simple_spec().lambda_arg()
+        object_simple_spec()
+            .lambda_arg()
+            .view_native()
+            .view_value_projection(BuiltinViewValueProjection::Pivot)
+            .demand_law(BuiltinViewValueProjection::Pivot.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
+    }
+    #[inline]
+    fn apply_args(
+        recv: &crate::data::value::Val,
+        args: &super::BuiltinArgs,
+    ) -> Option<crate::data::value::Val> {
+        match args {
+            super::BuiltinArgs::StrVec(fields) => super::pivot_fields_apply(recv, fields).ok(),
+            _ => None,
+        }
     }
 }
 
