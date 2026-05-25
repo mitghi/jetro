@@ -347,6 +347,7 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_object_items_pipeline(builder, expr))
+        .or_else(|| try_lower_static_root_path_pipeline(builder, expr))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
         .or_else(|| try_lower_pipeline_path_suffix(builder, expr))
@@ -1148,6 +1149,45 @@ fn expr_is_direct_view_projection_chain(expr: &Expr) -> bool {
             Step::Field(_) | Step::OptField(_) | Step::Index(_) | Step::DynIndex(_)
         )
     })
+}
+
+fn static_root_path_prefix(steps: &[Step]) -> Option<(usize, Arc<[PhysicalPathStep]>)> {
+    let mut out = Vec::new();
+    for step in steps {
+        match step {
+            Step::Field(key) | Step::OptField(key) => {
+                out.push(PhysicalPathStep::Field(Arc::from(key.as_str())));
+            }
+            Step::Index(index) => out.push(PhysicalPathStep::Index(*index)),
+            _ => break,
+        }
+    }
+    let len = out.len();
+    Some((len, out.into()))
+}
+
+fn try_lower_static_root_path_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
+    let Expr::Chain(base, steps) = expr else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Root) {
+        return None;
+    }
+    let (path_end, path) = static_root_path_prefix(steps)?;
+    if path_end == 0 || path_end >= steps.len() {
+        return None;
+    }
+    if !matches!(steps[path_end], Step::Method(_, _) | Step::OptMethod(_, _)) {
+        return None;
+    }
+    let body = Pipeline::lower_body_from_steps(&steps[path_end..])?;
+    if is_scalar_unwrap_body(&body) {
+        return None;
+    }
+    Some(builder.push(PlanNode::Pipeline {
+        source: PipelinePlanSource::RootPath { steps: path },
+        body,
+    }))
 }
 
 fn try_lower_object_items_pipeline(builder: &mut PlanBuilder, expr: &Expr) -> Option<NodeId> {
@@ -1974,6 +2014,34 @@ mod tests {
                 ));
             }
             _ => panic!("indexed values().first() must stream from a static root path"),
+        }
+    }
+
+    #[test]
+    fn indexed_array_pipeline_lowers_as_root_path_pipeline() {
+        let plan = plan_query(r#"$.groups[0].items.map(id).first()"#);
+        let QueryRoot::Node(root) = plan.root() else {
+            panic!("expected physical plan");
+        };
+        match plan.node(*root) {
+            PlanNode::Pipeline {
+                source: PipelinePlanSource::RootPath { steps },
+                body,
+            } => {
+                assert!(matches!(
+                    steps.as_ref(),
+                    [
+                        PhysicalPathStep::Field(groups),
+                        PhysicalPathStep::Index(0),
+                        PhysicalPathStep::Field(items)
+                    ] if groups.as_ref() == "groups" && items.as_ref() == "items"
+                ));
+                assert!(matches!(
+                    body.stages.first(),
+                    Some(crate::exec::pipeline::Stage::Map(_, _))
+                ));
+            }
+            _ => panic!("indexed array pipeline must stream from a static root path"),
         }
     }
 
