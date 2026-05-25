@@ -1873,6 +1873,31 @@ impl BuiltinPredicateSink {
             Self::FindOne => None,
         }
     }
+
+    /// Result when every row in a stream observes the same predicate result.
+    #[inline]
+    pub(crate) fn constant_predicate_stream_result(
+        self,
+        matched: bool,
+        count: usize,
+    ) -> Option<Val> {
+        if count == 0 {
+            return self.empty_stream_result();
+        }
+        match self {
+            Self::Any => Some(Val::Bool(matched)),
+            Self::All => Some(Val::Bool(matched)),
+            Self::FindIndex => Some(if matched { Val::Int(0) } else { Val::Null }),
+            Self::IndicesWhere => {
+                if matched {
+                    Some(Val::int_vec((0..count).map(|idx| idx as i64).collect()))
+                } else {
+                    Some(Val::arr(Vec::new()))
+                }
+            }
+            Self::FindOne => None,
+        }
+    }
 }
 
 /// Membership terminal sink behavior for builtins with a target value.

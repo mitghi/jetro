@@ -853,25 +853,7 @@ where
         _ => return None,
     };
     let count = cardinality_after_deterministic_stages(source, stages, stage_kernels)?;
-    match op {
-        crate::builtins::BuiltinPredicateSink::Any => Some(Val::Bool(matched && count > 0)),
-        crate::builtins::BuiltinPredicateSink::All => Some(Val::Bool(matched || count == 0)),
-        crate::builtins::BuiltinPredicateSink::FindIndex => {
-            if matched && count > 0 {
-                Some(Val::Int(0))
-            } else {
-                Some(Val::Null)
-            }
-        }
-        crate::builtins::BuiltinPredicateSink::IndicesWhere => {
-            if matched {
-                Some(Val::int_vec((0..count).map(|idx| idx as i64).collect()))
-            } else {
-                Some(Val::arr(Vec::new()))
-            }
-        }
-        crate::builtins::BuiltinPredicateSink::FindOne => None,
-    }
+    op.constant_predicate_stream_result(matched, count)
 }
 
 fn direct_empty_cardinality_sink<'a, V>(
@@ -3807,6 +3789,47 @@ mod tests {
         assert_eq!(compound_membership_source.scalar_reads(), 0);
         assert_eq!(compound_membership_source.array_iter_reads(), 0);
         assert_eq!(compound_membership_source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_constant_predicate_sinks_use_builtin_result_metadata() {
+        fn run(op: BuiltinPredicateSink, predicate: BodyKernel) -> (Val, CountingView) {
+            let source = CountingView::root(&[1, 2, 3]);
+            let body = PipelineBody {
+                stages: Vec::new(),
+                stage_exprs: Vec::new(),
+                sink: Sink::Predicate(PredicateSinkSpec {
+                    op,
+                    predicate: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    predicate_expr: None,
+                }),
+                stage_kernels: Vec::new(),
+                sink_kernels: vec![predicate],
+            };
+
+            let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+            (out, source)
+        }
+
+        let (any_false, any_source) =
+            run(BuiltinPredicateSink::Any, BodyKernel::ConstBool(false));
+        assert_eq!(any_false, Val::Bool(false));
+        assert_eq!(any_source.array_iter_reads(), 0);
+
+        let (all_false, all_source) =
+            run(BuiltinPredicateSink::All, BodyKernel::ConstBool(false));
+        assert_eq!(all_false, Val::Bool(false));
+        assert_eq!(all_source.array_iter_reads(), 0);
+
+        let (find_index, find_source) =
+            run(BuiltinPredicateSink::FindIndex, BodyKernel::ConstBool(true));
+        assert_eq!(find_index, Val::Int(0));
+        assert_eq!(find_source.array_iter_reads(), 0);
+
+        let (indices, indices_source) =
+            run(BuiltinPredicateSink::IndicesWhere, BodyKernel::ConstBool(true));
+        assert_eq!(indices, Val::int_vec(vec![0, 1, 2]));
+        assert_eq!(indices_source.array_iter_reads(), 0);
     }
 
     #[test]
