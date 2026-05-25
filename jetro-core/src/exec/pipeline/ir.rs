@@ -1182,6 +1182,7 @@ impl Stage {
                                 .as_vals()
                                 .map(|values| values.into_owned())
                                 .unwrap_or_default(),
+                            fill: None,
                         }),
                         _ => None,
                     },
@@ -1204,6 +1205,20 @@ impl Stage {
                         ) => Some(ViewStageCapability::SetUnion {
                             values: values.clone(),
                         }),
+                        (
+                            crate::builtins::BuiltinViewStage::ZipLongestStatic,
+                            crate::builtins::BuiltinArgs::ValVec(values),
+                        ) => {
+                            let other = values
+                                .first()
+                                .and_then(Val::as_vals)
+                                .map(|values| values.into_owned())
+                                .unwrap_or_default();
+                            Some(ViewStageCapability::ZipStatic {
+                                values: other,
+                                fill: Some(values.get(1).cloned().unwrap_or(Val::Null)),
+                            })
+                        }
                         _ => None,
                     },
                     _ => None,

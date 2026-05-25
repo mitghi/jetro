@@ -1583,6 +1583,8 @@ pub enum BuiltinViewStage {
     JoinString,
     /// Zip receiver rows with a static array argument.
     ZipStatic,
+    /// Zip receiver rows with a static array argument, padding the shorter side.
+    ZipLongestStatic,
     /// Append one static value after all receiver rows.
     AppendValue,
     /// Prepend one static value before receiver rows.
@@ -2434,6 +2436,7 @@ impl BuiltinViewStage {
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewInputMode::ReadsView,
             Self::Take | Self::Skip => BuiltinViewInputMode::SkipsViewRead,
@@ -2460,6 +2463,7 @@ impl BuiltinViewStage {
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::AppendValue
             | Self::PrependValue => BuiltinViewOutputMode::EmitsOwnedValue,
             Self::Filter
@@ -2488,6 +2492,7 @@ impl BuiltinViewStage {
             Self::AppendValue | Self::PrependValue | Self::ZipStatic => {
                 BuiltinViewCapabilityShape::ValueArg
             }
+            Self::ZipLongestStatic => BuiltinViewCapabilityShape::ValVecArg,
             Self::SetFilter(_) | Self::SetUnion => BuiltinViewCapabilityShape::ValVecArg,
             Self::Distinct => BuiltinViewCapabilityShape::OptionalKeyBody,
             Self::KeyedReduce => BuiltinViewCapabilityShape::KeyedReducer,
@@ -2516,6 +2521,7 @@ impl BuiltinViewStage {
             Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::AppendValue
             | Self::PrependValue => BuiltinCardinality::Barrier,
             Self::Take | Self::Skip => BuiltinCardinality::Bounded,
@@ -2556,6 +2562,7 @@ impl BuiltinViewStage {
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::AppendValue
             | Self::PrependValue
             | Self::Take
@@ -2596,6 +2603,7 @@ impl BuiltinViewStage {
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::KeyedReduce
             | Self::AppendValue
             | Self::PrependValue => 10.0,
@@ -2631,6 +2639,7 @@ impl BuiltinViewStage {
             | Self::SetUnion
             | Self::JoinString
             | Self::ZipStatic
+            | Self::ZipLongestStatic
             | Self::AppendValue
             | Self::PrependValue => 1.0,
             Self::Take | Self::Skip => 0.5,

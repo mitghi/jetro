@@ -858,6 +858,8 @@ pub(crate) enum ViewStageCapability {
     ZipStatic {
         /// Right-hand values paired with receiver rows.
         values: Vec<Val>,
+        /// Fill value for `zip_longest`; absent for truncating `zip`.
+        fill: Option<Val>,
     },
     /// Append one owned literal after all input rows.
     AppendValue(Val),
@@ -927,7 +929,14 @@ impl ViewStageCapability {
             BuiltinViewStage::JoinString => Some(Self::JoinString {
                 sep: std::sync::Arc::from(""),
             }),
-            BuiltinViewStage::ZipStatic => Some(Self::ZipStatic { values: Vec::new() }),
+            BuiltinViewStage::ZipStatic => Some(Self::ZipStatic {
+                values: Vec::new(),
+                fill: None,
+            }),
+            BuiltinViewStage::ZipLongestStatic => Some(Self::ZipStatic {
+                values: Vec::new(),
+                fill: Some(Val::Null),
+            }),
             BuiltinViewStage::Take => Some(Self::Take(usize_arg?)),
             BuiltinViewStage::Skip => Some(Self::Skip(usize_arg?)),
             _ => None,
@@ -962,7 +971,13 @@ impl ViewStageCapability {
             Self::SetFilter { op, .. } => BuiltinViewStage::SetFilter(*op),
             Self::SetUnion { .. } => BuiltinViewStage::SetUnion,
             Self::JoinString { .. } => BuiltinViewStage::JoinString,
-            Self::ZipStatic { .. } => BuiltinViewStage::ZipStatic,
+            Self::ZipStatic { fill, .. } => {
+                if fill.is_some() {
+                    BuiltinViewStage::ZipLongestStatic
+                } else {
+                    BuiltinViewStage::ZipStatic
+                }
+            }
             Self::AppendValue(_) => BuiltinViewStage::AppendValue,
             Self::PrependValue(_) => BuiltinViewStage::PrependValue,
             Self::Take(_) => BuiltinViewStage::Take,

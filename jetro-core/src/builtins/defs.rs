@@ -2474,6 +2474,8 @@ impl Builtin for ZipLongest {
     const NAME: &'static str = "zip_longest";
     fn spec() -> BuiltinSpec {
         barrier_simple_spec()
+            .view_native()
+            .view_stage(BuiltinViewStage::ZipLongestStatic)
     }
 }
 

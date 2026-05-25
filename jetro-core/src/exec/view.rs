@@ -2556,12 +2556,20 @@ where
         return Some(Ok(ViewDriveFlow::Continue));
     }
 
-    if let pipeline::ViewStageCapability::ZipStatic { ref values } = stage {
+    if let pipeline::ViewStageCapability::ZipStatic {
+        ref values,
+        ref fill,
+    } = stage
+    {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
         let idx = op_state.get_mut(stage_idx)?.next_index();
-        let Some(right) = values.get(idx).cloned() else {
-            return Some(Ok(ViewDriveFlow::Stop));
+        let right = match values.get(idx).cloned() {
+            Some(value) => value,
+            None => match fill {
+                Some(fill) => fill.clone(),
+                None => return Some(Ok(ViewDriveFlow::Stop)),
+            },
         };
         let pair = Val::arr(vec![pipeline::view_kernel_view_to_owned(item), right]);
         return drive_owned_child(
@@ -4540,6 +4548,24 @@ where
             pipeline::ViewStageCapability::JoinString { .. } => {
                 let state = op_state.get_mut(stage_idx)?.join_string();
                 vec![Val::Str(Arc::from(std::mem::take(&mut state.out)))]
+            }
+            pipeline::ViewStageCapability::ZipStatic {
+                ref values,
+                ref fill,
+            } => {
+                let Some(fill) = fill else {
+                    continue;
+                };
+                let emitted = match op_state.get_mut(stage_idx)? {
+                    ViewStageState::Counter(value) => *value,
+                    _ => 0,
+                };
+                values
+                    .iter()
+                    .skip(emitted)
+                    .cloned()
+                    .map(|right| Val::arr(vec![fill.clone(), right]))
+                    .collect()
             }
             _ => continue,
         };
@@ -8269,6 +8295,68 @@ mod tests {
             .unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([]));
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_zip_longest_receiver_tail_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,2,3]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::ZipLongest,
+                crate::builtins::BuiltinArgs::ValVec(vec![
+                    Val::arr(vec![Val::Str(Arc::from("a"))]),
+                    Val::Str(Arc::from("x")),
+                ]),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([[1, "a"], [2, "x"], [3, "x"]])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_zip_longest_static_tail_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::ZipLongest,
+                crate::builtins::BuiltinArgs::ValVec(vec![
+                    Val::arr(vec![
+                        Val::Str(Arc::from("a")),
+                        Val::Str(Arc::from("b")),
+                        Val::Str(Arc::from("c")),
+                    ]),
+                    Val::Null,
+                ]),
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([[1, "a"], [null, "b"], [null, "c"]])
+        );
         assert_eq!(tape.materialized_subtrees(), 0);
     }
 
