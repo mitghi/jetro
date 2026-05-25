@@ -3155,26 +3155,7 @@ fn materialize_sorted_boundary_rows<'a, V>(
 where
     V: FrontierBaseView<'a>,
 {
-    match source_demand {
-        PullDemand::FirstInput(limit) | PullDemand::UntilOutput(limit) if limit == 0 => {
-            Vec::new()
-        }
-        PullDemand::FirstInput(limit) => rows
-            .into_iter()
-            .take(limit)
-            .map(|row| row.materialize())
-            .collect(),
-        PullDemand::LastInput(limit) => {
-            let len = rows.len();
-            rows.into_iter()
-                .skip(len.saturating_sub(limit))
-                .map(|row| row.materialize())
-                .collect()
-        }
-        PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::NthInput(_) => {
-            rows.into_iter().map(|row| row.materialize()).collect()
-        }
-    }
+    MaterializedBoundaryRows::collect_ordered(rows, source_demand)
 }
 
 struct MaterializedBoundaryRows {
@@ -3185,6 +3166,32 @@ struct MaterializedBoundaryRows {
 }
 
 impl MaterializedBoundaryRows {
+    fn collect_ordered<'a, V>(rows: Vec<FrontierRow<V>>, demand: PullDemand) -> Vec<Val>
+    where
+        V: FrontierBaseView<'a>,
+    {
+        match demand {
+            PullDemand::FirstInput(limit) | PullDemand::UntilOutput(limit) if limit == 0 => {
+                Vec::new()
+            }
+            PullDemand::FirstInput(limit) => rows
+                .into_iter()
+                .take(limit)
+                .map(|row| row.materialize())
+                .collect(),
+            PullDemand::LastInput(limit) => {
+                let len = rows.len();
+                rows.into_iter()
+                    .skip(len.saturating_sub(limit))
+                    .map(|row| row.materialize())
+                    .collect()
+            }
+            PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::NthInput(_) => {
+                rows.into_iter().map(|row| row.materialize()).collect()
+            }
+        }
+    }
+
     fn new(demand: PullDemand) -> Self {
         match demand {
             PullDemand::FirstInput(limit) => Self {
