@@ -3103,6 +3103,16 @@ fn run_materialized_value_suffix(
     base_env: &Env,
     vm: &mut VM,
 ) -> Result<Val, EvalError> {
+    if let Some(result) = run_borrowed_value_projection_suffix(
+        body,
+        consumed_stages,
+        &boundary_value,
+        cache,
+        base_env,
+        vm,
+    ) {
+        return result;
+    }
     let mut consumed_stages = consumed_stages;
     while let Some(pipeline::Stage::Builtin(call)) = body.stages.get(consumed_stages) {
         if !call.is_view_projection() {
@@ -3136,6 +3146,47 @@ fn run_materialized_value_suffix(
     let suffix = suffix.with_source(pipeline::Source::Receiver(boundary_value));
     let root = Val::Null;
     suffix.run_with_env_and_vm(&root, base_env, cache, vm)
+}
+
+fn run_borrowed_value_projection_suffix(
+    body: &pipeline::PipelineBody,
+    consumed_stages: usize,
+    boundary_value: &Val,
+    cache: Option<&dyn pipeline::PipelineData>,
+    base_env: &Env,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>> {
+    let mut consumed = consumed_stages;
+    let mut view = ValView::new(boundary_value);
+    let mut advanced = false;
+
+    while let Some(pipeline::Stage::Builtin(call)) = body.stages.get(consumed) {
+        if !call.is_view_projection() {
+            break;
+        }
+        match crate::builtins::registry::apply_view_projection(call.id(), &call.args, view.clone())
+        {
+            Some(crate::builtins::registry::ViewProjectionResult::View(next)) => {
+                view = next;
+                consumed += 1;
+                advanced = true;
+            }
+            Some(crate::builtins::registry::ViewProjectionResult::Owned(_)) | None => return None,
+        }
+    }
+
+    if !advanced {
+        return None;
+    }
+    if consumed >= body.stages.len() && matches!(body.sink, pipeline::Sink::Collect) {
+        return Some(Ok(view.materialize()));
+    }
+
+    let suffix = suffix_body(body, consumed);
+    if pipeline::view_capabilities(&suffix).is_some() {
+        return run_with_env_and_vm(view, &suffix, cache, base_env, vm);
+    }
+    None
 }
 
 /// Applies a single view stage to `item`, returning the control flow decision
@@ -8001,6 +8052,45 @@ mod tests {
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!({"1": 3, "2": 2, "3": 1}));
         assert_eq!(source.scalar_reads(), 6);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn reducing_stage_keeps_direct_view_projection_suffix_borrowed() {
+        let source = CountingView::root(&[1, 2, 1, 3, 2, 1]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::ExprBuiltin {
+                    method: crate::builtins::BuiltinMethod::CountBy,
+                    body: Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::GetPath,
+                    crate::builtins::BuiltinArgs::Str(Arc::from("one")),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![
+                BodyKernel::Const(Val::Str(Arc::from("one"))),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out = super::run_reducing_stage_prefix_then_materialized_suffix(
+            source.clone(),
+            &body,
+            None,
+            &env,
+            &mut vm,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(out, Val::Int(6));
         assert_eq!(source.materialize_reads(), 0);
     }
 
