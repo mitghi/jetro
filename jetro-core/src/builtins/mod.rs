@@ -622,6 +622,8 @@ pub enum BuiltinArgs {
     Str(Arc<str>),
     /// A pre-parsed dot/bracket path used by hot path helpers.
     Path(Arc<[PathSeg]>),
+    /// A pre-parsed dot/bracket path plus an owned value payload.
+    PathVal { path: Arc<[PathSeg]>, value: Val },
     /// Two string arguments (needle + replacement, pattern + replacement).
     StrPair { first: Arc<str>, second: Arc<str> },
     /// A list of string arguments (field list for `pick`, `omit`, etc.).
@@ -932,6 +934,8 @@ pub enum BuiltinViewValueProjection {
     Invert,
     /// Recursively merge an owned value argument into the receiver value.
     DeepMerge,
+    /// Set a nested dot/bracket path to an owned value.
+    SetPath,
     /// Delete a nested dot/bracket path from an object or array value.
     DelPath,
     /// Flatten nested object keys into a separator-joined object.
@@ -1033,6 +1037,7 @@ impl BuiltinViewValueProjection {
             | BuiltinViewValueProjection::Rename
             | BuiltinViewValueProjection::Repeat
             | BuiltinViewValueProjection::ReverseStr
+            | BuiltinViewValueProjection::SetPath
             | BuiltinViewValueProjection::SnakeCase
             | BuiltinViewValueProjection::TitleCase
             | BuiltinViewValueProjection::ToString
@@ -3511,6 +3516,9 @@ impl BuiltinCall {
             (BuiltinMethod::DelPath, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(del_path_apply(recv, p))
             }
+            (BuiltinMethod::SetPath, BuiltinArgs::PathVal { path, value }) => {
+                return Some(set_path_impl(recv.clone(), path, value.clone()));
+            }
             (BuiltinMethod::FlattenKeys, BuiltinArgs::Str(p)) => {
                 apply_or_recv!(flatten_keys_apply(recv, p))
             }
@@ -3731,6 +3739,16 @@ impl BuiltinCall {
             | BuiltinMethod::DeepMerge
             | BuiltinMethod::Defaults
             | BuiltinMethod::Rename => Self::new(method, BuiltinArgs::Val(args.val(0)?)),
+            BuiltinMethod::SetPath => {
+                let path = args.str(0)?;
+                Self::new(
+                    method,
+                    BuiltinArgs::PathVal {
+                        path: parse_path_segs(path.as_ref()).into(),
+                        value: args.val(1)?,
+                    },
+                )
+            }
             BuiltinMethod::Slice => {
                 let start = args.i64(0)?;
                 let end = if arg_len > 1 {
@@ -4867,10 +4885,13 @@ where
                 },
             )
         }
-        BuiltinMethod::SetPath => {
-            return set_path_apply(&recv, &str_arg!(0)?, &arg_val!(1)?)
-                .ok_or_else(|| EvalError("set_path: builtin unsupported".into()));
-        }
+        BuiltinMethod::SetPath => BuiltinCall::new(
+            method,
+            BuiltinArgs::PathVal {
+                path: parse_path_segs(str_arg!(0)?.as_ref()).into(),
+                value: arg_val!(1)?,
+            },
+        ),
         BuiltinMethod::DelPaths => {
             let mut paths = Vec::with_capacity(args.len());
             for idx in 0..args.len() {

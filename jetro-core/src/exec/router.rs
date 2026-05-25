@@ -1015,6 +1015,26 @@ mod tests {
     }
 
     #[test]
+    fn view_set_path_projects_from_tape_without_materializing_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"id":1,"user":{"name":"ada"}},{"id":2,"user":{"name":"bob"}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.books.map(@.set_path("user.reviewed", true)).last()"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!({"id": 2, "user": {"name": "bob", "reviewed": true}})
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

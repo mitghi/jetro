@@ -3095,7 +3095,12 @@ impl Builtin for SetPath {
     const METHOD: BuiltinMethod = BuiltinMethod::SetPath;
     const NAME: &'static str = "set_path";
     fn spec() -> BuiltinSpec {
+        let projection = BuiltinViewValueProjection::SetPath;
         path_indexed_spec()
+            .view_native()
+            .view_value_projection(projection)
+            .demand_law(projection.demand_law())
+            .order_effect(BuiltinPipelineOrderEffect::Preserves)
     }
 }
 

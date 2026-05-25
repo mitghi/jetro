@@ -1334,6 +1334,14 @@ where
             };
             return Some(ViewProjectionResult::Owned(view_deep_merge(&view, other)));
         }
+        BuiltinViewValueProjection::SetPath => {
+            let BuiltinArgs::PathVal { path, value } = args else {
+                return None;
+            };
+            return Some(ViewProjectionResult::Owned(view_set_path(
+                &view, path, value,
+            )));
+        }
         BuiltinViewValueProjection::DelPath => {
             let path = match args {
                 BuiltinArgs::Str(path) => super::parse_path_segs(path.as_ref()),
@@ -1505,6 +1513,79 @@ where
         out.insert(Arc::clone(key), merged);
     }
     Some(Val::obj(out))
+}
+
+fn view_set_path<'a, V>(view: &V, path: &[super::PathSeg], new_value: &Val) -> Val
+where
+    V: ValueView<'a> + 'a,
+{
+    let Some((first, rest)) = path.split_first() else {
+        return new_value.clone();
+    };
+    match first {
+        super::PathSeg::Field(field) => {
+            let (mut out, replacement) = view
+                .object_iter()
+                .map(|fields| {
+                    let len = view.object_len().unwrap_or(0);
+                    let mut out = indexmap::IndexMap::with_capacity(len.saturating_add(1));
+                    let mut replacement = None;
+                    for (key, child) in fields {
+                        if key.as_ref() == field.as_str() {
+                            replacement = Some((key, view_set_path(&child, rest, new_value)));
+                        } else {
+                            out.insert(key, view_to_owned(child));
+                        }
+                    }
+                    (out, replacement)
+                })
+                .unwrap_or_default();
+            let (key, value) = replacement.unwrap_or_else(|| {
+                (
+                    Arc::from(field.as_str()),
+                    view_set_path_missing(rest, new_value),
+                )
+            });
+            out.insert(key, value);
+            Val::obj(out)
+        }
+        super::PathSeg::Index(index) => match view.array_len() {
+            Some(len) => {
+                let Some(idx) = resolve_view_path_index(*index, len) else {
+                    return view_to_owned(view.clone());
+                };
+                let mut out = Vec::with_capacity(len);
+                if let Some(iter) = view.array_iter() {
+                    for (pos, child) in iter.enumerate() {
+                        if pos == idx {
+                            out.push(view_set_path(&child, rest, new_value));
+                        } else {
+                            out.push(view_to_owned(child));
+                        }
+                    }
+                }
+                Val::arr(out)
+            }
+            None => view_to_owned(view.clone()),
+        },
+    }
+}
+
+fn view_set_path_missing(path: &[super::PathSeg], new_value: &Val) -> Val {
+    let Some((first, rest)) = path.split_first() else {
+        return new_value.clone();
+    };
+    match first {
+        super::PathSeg::Field(field) => {
+            let mut out = indexmap::IndexMap::with_capacity(1);
+            out.insert(
+                Arc::from(field.as_str()),
+                view_set_path_missing(rest, new_value),
+            );
+            Val::obj(out)
+        }
+        super::PathSeg::Index(_) => Val::Null,
+    }
 }
 
 fn view_del_path<'a, V>(view: &V, path: &[super::PathSeg]) -> Option<Val>
@@ -4705,6 +4786,7 @@ mod tests {
                 BuiltinMethod::ReverseStr,
                 BuiltinViewValueProjection::ReverseStr,
             ),
+            (BuiltinMethod::SetPath, BuiltinViewValueProjection::SetPath),
             (BuiltinMethod::Slice, BuiltinViewValueProjection::Slice),
             (
                 BuiltinMethod::SnakeCase,
