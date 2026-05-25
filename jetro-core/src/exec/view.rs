@@ -1866,7 +1866,19 @@ where
         return run_buffered_rows_view_suffix(boundary_rows, body, &suffix, sink, suffix_demand, vm);
     }
 
-    let mut boundary_rows = Vec::new();
+    let suffix_demand =
+        pipeline::Pipeline::segment_pull_demand(&body.stages[prefix.consumed_stages..], &body.sink);
+    let mut boundary_rows = MaterializedBoundaryRows::new(suffix_demand);
+    if boundary_rows.is_zero() {
+        return Some(run_materialized_suffix(
+            body,
+            prefix.consumed_stages,
+            Vec::new(),
+            cache,
+            base_env,
+            vm,
+        ));
+    }
     let source_demand = body.pull_demand();
 
     if let Err(err) = drive_view_frontier(
@@ -1877,8 +1889,7 @@ where
         source_demand,
         vm,
         |item, _vm| {
-            boundary_rows.push(item.materialize());
-            Some(Ok(ViewRowAction::Emit))
+            Some(Ok(boundary_rows.push(item)))
         },
     )? {
         return Some(Err(err));
@@ -1887,7 +1898,7 @@ where
     Some(run_materialized_suffix(
         body,
         prefix.consumed_stages,
-        boundary_rows,
+        boundary_rows.finish(),
         cache,
         base_env,
         vm,
@@ -3162,6 +3173,82 @@ where
         }
         PullDemand::All | PullDemand::UntilOutput(_) | PullDemand::NthInput(_) => {
             rows.into_iter().map(|row| row.materialize()).collect()
+        }
+    }
+}
+
+struct MaterializedBoundaryRows {
+    demand: PullDemand,
+    rows: Vec<Val>,
+    tail: Option<VecDeque<Val>>,
+    limit: usize,
+}
+
+impl MaterializedBoundaryRows {
+    fn new(demand: PullDemand) -> Self {
+        match demand {
+            PullDemand::FirstInput(limit) => Self {
+                demand,
+                rows: Vec::with_capacity(limit),
+                tail: None,
+                limit,
+            },
+            PullDemand::LastInput(limit) => Self {
+                demand,
+                rows: Vec::new(),
+                tail: Some(VecDeque::with_capacity(limit)),
+                limit,
+            },
+            _ => Self {
+                demand,
+                rows: Vec::new(),
+                tail: None,
+                limit: 0,
+            },
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.demand.is_zero()
+    }
+
+    fn push<'a, V>(&mut self, row: &FrontierRow<V>) -> ViewRowAction
+    where
+        V: FrontierBaseView<'a>,
+    {
+        match self.demand {
+            PullDemand::FirstInput(limit) => {
+                if self.rows.len() < limit {
+                    self.rows.push(row.materialize());
+                }
+                if self.rows.len() >= limit {
+                    ViewRowAction::Stop
+                } else {
+                    ViewRowAction::Emit
+                }
+            }
+            PullDemand::LastInput(_) => {
+                if self.limit == 0 {
+                    return ViewRowAction::Stop;
+                }
+                let tail = self.tail.as_mut().expect("last-input demand has tail");
+                if tail.len() == self.limit {
+                    tail.pop_front();
+                }
+                tail.push_back(row.materialize());
+                ViewRowAction::Emit
+            }
+            _ => {
+                self.rows.push(row.materialize());
+                ViewRowAction::Emit
+            }
+        }
+    }
+
+    fn finish(self) -> Vec<Val> {
+        match self.tail {
+            Some(tail) => tail.into_iter().collect(),
+            None => self.rows,
         }
     }
 }
@@ -11061,6 +11148,44 @@ mod tests {
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn materialized_suffix_materializes_only_first_demanded_boundary_row() {
+        let source = CountingView::root(&[3, 1, 2, 1]);
+        let identity = Compiler::compile(
+            &crate::parse::parser::parse("let x = @ in x").expect("parse identity fallback"),
+            "<materialized-suffix-bound-test>",
+        );
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Filter(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Filter,
+                ),
+                Stage::Map(
+                    Arc::new(identity),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![
+                BodyKernel::CurrentCmpLit(BinOp::Gt, Val::Int(0)),
+                BodyKernel::Generic,
+            ],
+            sink_kernels: Vec::new(),
+        };
+
+        let env = Env::new(Val::Null);
+        let mut vm = crate::vm::VM::new();
+        let out =
+            super::run_prefix_then_materialized_suffix(source.clone(), &body, None, &env, &mut vm)
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(out, Val::Int(3));
+        assert_eq!(source.materialize_reads(), 1);
     }
 
     #[test]
