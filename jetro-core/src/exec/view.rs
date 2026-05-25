@@ -766,49 +766,30 @@ fn direct_sink_result_from_source_len<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    let forced_empty = deterministic_prefix_forces_empty(stages, stage_kernels);
-    if let Some(count) = if forced_empty {
-        Some(0)
-    } else if !sink.can_finish_from_known_cardinality(sink_kernels) {
-        None
-    } else {
-        cardinality_after_deterministic_stages(source, stages, stage_kernels)
-    } {
-        if let Some(result) = sink.result_from_known_cardinality(count, forced_empty, sink_kernels)
-        {
-            return Some(result);
-        }
+    if deterministic_prefix_forces_empty(stages, stage_kernels) {
+        return sink
+            .result_from_known_source_cardinality(None, stages, stage_kernels, sink_kernels)
+            .or_else(|| body_sink.empty_stream_result());
     }
-    forced_empty.then(|| body_sink.empty_stream_result())?
-}
 
-fn cardinality_after_deterministic_stages<'a, V>(
-    source: &V,
-    stages: &[pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-) -> Option<usize>
-where
-    V: ValueView<'a> + 'a,
-{
-    if !deterministic_cardinality_supported(stages, stage_kernels) {
-        return None;
-    }
-    let JsonView::ArrayLen(count) = source.scalar() else {
-        return None;
-    };
-    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(
+    let source_len = if sink.can_finish_from_known_source_cardinality(
         stages,
         stage_kernels,
-        count,
+        sink_kernels,
+    ) {
+        match source.scalar() {
+            JsonView::ArrayLen(count) => Some(count),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    sink.result_from_known_source_cardinality(
+        source_len,
+        stages,
+        stage_kernels,
+        sink_kernels,
     )
-}
-
-fn deterministic_cardinality_supported(
-    stages: &[pipeline::ViewStageCapability],
-    stage_kernels: &[pipeline::BodyKernel],
-) -> bool {
-    pipeline::ViewStageCapability::deterministic_prefix_cardinality_after(stages, stage_kernels, 0)
-        .is_some()
 }
 
 fn deterministic_prefix_forces_empty(

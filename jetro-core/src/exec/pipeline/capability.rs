@@ -909,6 +909,27 @@ impl ViewStageCapability {
         Some(count)
     }
 
+    /// Applies deterministic cardinality effects when the source cardinality is
+    /// known. Returns `None` if any prefix stage has data-dependent
+    /// cardinality.
+    pub(crate) fn deterministic_cardinality_from_source_len(
+        source_len: usize,
+        stages: &[Self],
+        stage_kernels: &[BodyKernel],
+    ) -> Option<usize> {
+        Self::deterministic_prefix_cardinality_after(stages, stage_kernels, source_len)
+    }
+
+    /// Returns true when the prefix has fully deterministic cardinality effects,
+    /// so asking a source for its cardinality can produce an exact downstream
+    /// row count without scanning.
+    pub(crate) fn can_compute_deterministic_cardinality(
+        stages: &[Self],
+        stage_kernels: &[BodyKernel],
+    ) -> bool {
+        Self::deterministic_prefix_cardinality_after(stages, stage_kernels, 0).is_some()
+    }
+
     /// Returns true when deterministic prefix analysis proves no row can survive.
     pub(crate) fn prefix_forces_empty(stages: &[Self], stage_kernels: &[BodyKernel]) -> bool {
         let mut upper_bound = None::<usize>;
@@ -1199,6 +1220,49 @@ impl ViewSinkCapability {
             .and_then(|(_, predicate_kernel)| sink_kernels.get(predicate_kernel))
             .and_then(BodyKernel::constant_truthy)
             .is_some()
+    }
+
+    /// Returns true when this sink/prefix pair can use source cardinality to
+    /// finish without row scanning. Callers can use this as a guard before
+    /// asking a tape source for length metadata.
+    pub(crate) fn can_finish_from_known_source_cardinality(
+        &self,
+        stages: &[ViewStageCapability],
+        stage_kernels: &[BodyKernel],
+        sink_kernels: &[BodyKernel],
+    ) -> bool {
+        ViewStageCapability::prefix_forces_empty(stages, stage_kernels)
+            || (self.can_finish_from_known_cardinality(sink_kernels)
+                && ViewStageCapability::can_compute_deterministic_cardinality(
+                    stages,
+                    stage_kernels,
+                ))
+    }
+
+    /// Returns a complete sink result when source cardinality plus deterministic
+    /// prefix effects prove the sink result without scanning rows.
+    pub(crate) fn result_from_known_source_cardinality(
+        &self,
+        source_len: Option<usize>,
+        stages: &[ViewStageCapability],
+        stage_kernels: &[BodyKernel],
+        sink_kernels: &[BodyKernel],
+    ) -> Option<Val> {
+        let stream_forced_empty = ViewStageCapability::prefix_forces_empty(stages, stage_kernels);
+        if stream_forced_empty {
+            return self.empty_stream_result();
+        }
+
+        if !self.can_finish_from_known_cardinality(sink_kernels) {
+            return None;
+        }
+
+        let count = ViewStageCapability::deterministic_cardinality_from_source_len(
+            source_len?,
+            stages,
+            stage_kernels,
+        )?;
+        self.result_from_known_cardinality(count, false, sink_kernels)
     }
 
     /// Returns the arg-extreme sink contract when this sink selects a row by a
@@ -1740,6 +1804,50 @@ mod tests {
             materialization: ViewMaterialization::SinkFinalRow,
         };
         assert!(!first.can_finish_from_known_cardinality(&[]));
+    }
+
+    #[test]
+    fn view_sink_capability_finishes_from_known_source_cardinality() {
+        let count = ViewSinkCapability::Builtin {
+            accumulator: BuiltinSinkAccumulator::Count,
+            predicate_kernel: None,
+            project_kernel: None,
+            materialization: ViewMaterialization::Never,
+        };
+        let stages = [ViewStageCapability::Take(3), ViewStageCapability::Skip(1)];
+        assert!(count.can_finish_from_known_source_cardinality(&stages, &[], &[]));
+        assert_eq!(
+            count.result_from_known_source_cardinality(Some(10), &stages, &[], &[]),
+            Some(Val::Int(2))
+        );
+
+        let any = ViewSinkCapability::Predicate {
+            op: BuiltinPredicateSink::Any,
+            predicate_kernel: 0,
+        };
+        assert_eq!(
+            any.result_from_known_source_cardinality(
+                Some(10),
+                &[ViewStageCapability::TakeWhile { kernel: 0 }],
+                &[BodyKernel::ConstBool(false)],
+                &[BodyKernel::Current],
+            ),
+            Some(Val::Bool(false))
+        );
+        assert!(!any.can_finish_from_known_source_cardinality(
+            &[ViewStageCapability::Filter { kernel: 0 }],
+            &[BodyKernel::Current],
+            &[BodyKernel::ConstBool(true)],
+        ));
+        assert_eq!(
+            any.result_from_known_source_cardinality(
+                Some(10),
+                &[ViewStageCapability::Filter { kernel: 0 }],
+                &[BodyKernel::Current],
+                &[BodyKernel::ConstBool(true)],
+            ),
+            None
+        );
     }
 
     #[test]
