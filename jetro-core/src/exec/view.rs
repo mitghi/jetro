@@ -805,15 +805,7 @@ fn direct_count_from_source_len<'a, V>(
 where
     V: ValueView<'a> + 'a,
 {
-    let pipeline::ViewSinkCapability::Builtin {
-        accumulator: crate::builtins::BuiltinSinkAccumulator::Count,
-        predicate_kernel,
-        project_kernel: None,
-        ..
-    } = sink
-    else {
-        return None;
-    };
+    let predicate_kernel = sink.count_from_cardinality_predicate()?;
     if deterministic_prefix_forces_empty(stages, stage_kernels) {
         return Some(0);
     }
@@ -821,7 +813,7 @@ where
     let Some(predicate_kernel) = predicate_kernel else {
         return Some(count);
     };
-    let predicate = constant_kernel_truthy(sink_kernels.get(*predicate_kernel)?)?;
+    let predicate = constant_kernel_truthy(sink_kernels.get(predicate_kernel)?)?;
     Some(if predicate { count } else { 0 })
 }
 

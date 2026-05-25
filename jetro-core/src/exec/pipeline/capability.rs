@@ -937,6 +937,20 @@ impl ViewSinkCapability {
             _ => false,
         }
     }
+
+    /// Returns the optional predicate kernel for count sinks whose result can
+    /// be derived from known source cardinality without row materialization.
+    pub(crate) fn count_from_cardinality_predicate(&self) -> Option<Option<usize>> {
+        match self {
+            Self::Builtin {
+                accumulator: BuiltinSinkAccumulator::Count,
+                predicate_kernel,
+                project_kernel: None,
+                ..
+            } => Some(*predicate_kernel),
+            _ => None,
+        }
+    }
 }
 
 /// Target for a view-native membership terminal.
@@ -1299,6 +1313,54 @@ mod tests {
             .empty_stream_result()
             .unwrap()),
             serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn view_sink_capability_describes_count_cardinality_contract() {
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Count,
+                predicate_kernel: None,
+                project_kernel: None,
+                materialization: ViewMaterialization::Never,
+            }
+            .count_from_cardinality_predicate(),
+            Some(None)
+        );
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Count,
+                predicate_kernel: Some(2),
+                project_kernel: None,
+                materialization: ViewMaterialization::Never,
+            }
+            .count_from_cardinality_predicate(),
+            Some(Some(2))
+        );
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Count,
+                predicate_kernel: None,
+                project_kernel: Some(1),
+                materialization: ViewMaterialization::SinkInputRows,
+            }
+            .count_from_cardinality_predicate(),
+            None
+        );
+        assert_eq!(
+            ViewSinkCapability::Builtin {
+                accumulator: BuiltinSinkAccumulator::Numeric,
+                predicate_kernel: None,
+                project_kernel: None,
+                materialization: ViewMaterialization::SinkNumericInput,
+            }
+            .count_from_cardinality_predicate(),
+            None
+        );
+        assert_eq!(
+            ViewSinkCapability::Collect.count_from_cardinality_predicate(),
+            None
         );
     }
 
