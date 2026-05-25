@@ -1150,6 +1150,14 @@ impl Stage {
             }
         }
         let desc = self.descriptor()?;
+        if let Some(op) = desc
+            .builtin_id()
+            .and_then(crate::builtins::registry::object_lambda)
+        {
+            return kernel
+                .is_some_and(BodyKernel::is_view_native)
+                .then_some(ViewStageCapability::ObjectLambda { op, kernel: idx });
+        }
         let stage = desc.view_stage()?;
         match stage.capability_shape() {
             BuiltinViewCapabilityShape::RemoveValueTarget => {

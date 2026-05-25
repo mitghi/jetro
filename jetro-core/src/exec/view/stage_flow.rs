@@ -358,6 +358,7 @@ where
         // owned value, so the frontier handles them before row-local dispatch.
         pipeline::ViewStageCapability::BuiltinProjection { .. } => None,
         pipeline::ViewStageCapability::Map { .. } => None,
+        pipeline::ViewStageCapability::ObjectLambda { .. } => None,
         pipeline::ViewStageCapability::KeyedReduce { .. } => None,
         pipeline::ViewStageCapability::SetUnion { .. } => None,
         pipeline::ViewStageCapability::JoinString { .. } => None,

@@ -12,8 +12,8 @@ pub(crate) use crate::builtins::BuiltinViewMaterialization as ViewMaterializatio
 pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
-    BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
-    BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling,
+    BuiltinObjectLambda, BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec,
+    BuiltinViewStage, BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling,
     BuiltinViewSetFilter, BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
@@ -758,6 +758,13 @@ pub(crate) enum ViewStageCapability {
         /// Index into `stage_kernels` for the projection kernel.
         kernel: usize,
     },
+    /// Object-key/value lambda stage over borrowed object fields.
+    ObjectLambda {
+        /// Object-lambda operation declared by builtin metadata.
+        op: BuiltinObjectLambda,
+        /// Index into `stage_kernels` for the lambda body kernel.
+        kernel: usize,
+    },
     /// FlatMap stage: evaluates the view-native body at `kernel`, yielding multiple sub-views.
     FlatMap {
         /// Index into `stage_kernels` for the body kernel.
@@ -951,6 +958,7 @@ impl ViewStageCapability {
             Self::Compact => BuiltinViewStage::Compact,
             Self::RemoveValue(_) => BuiltinViewStage::RemoveValue,
             Self::Map { .. } => BuiltinViewStage::Map,
+            Self::ObjectLambda { .. } => BuiltinViewStage::Map,
             Self::FlatMap { .. } => BuiltinViewStage::FlatMap,
             Self::Flatten { .. } => BuiltinViewStage::Flatten,
             Self::Explode { .. } => BuiltinViewStage::Explode,
@@ -987,19 +995,27 @@ impl ViewStageCapability {
 
     /// Returns whether this stage reads the input view or only acts on position.
     pub(crate) fn input_mode(&self) -> ViewInputMode {
+        if matches!(self, Self::ObjectLambda { .. }) {
+            return ViewInputMode::ReadsView;
+        }
         self.view_stage().input_mode()
     }
 
     /// Returns how this stage's output relates to the input view (same view, sub-view, or owned).
     pub(crate) fn output_mode(&self) -> ViewOutputMode {
         match self {
-            Self::StringExpand { .. } => ViewOutputMode::EmitsOwnedValue,
+            Self::StringExpand { .. } | Self::ObjectLambda { .. } => {
+                ViewOutputMode::EmitsOwnedValue
+            }
             _ => self.view_stage().output_mode(),
         }
     }
 
     /// Returns when (if ever) this stage must materialise an element into an owned `Val`.
     pub(crate) fn materialization(&self) -> ViewMaterialization {
+        if matches!(self, Self::ObjectLambda { .. }) {
+            return ViewMaterialization::Never;
+        }
         self.view_stage().materialization()
     }
 
@@ -1111,7 +1127,9 @@ impl ViewStageCapability {
         count: usize,
     ) -> Option<usize> {
         match self {
-            Self::BuiltinProjection { .. } | Self::Map { .. } => Some(count),
+            Self::BuiltinProjection { .. } | Self::Map { .. } | Self::ObjectLambda { .. } => {
+                Some(count)
+            }
             Self::Take(n) => Some(count.min(*n)),
             Self::Skip(n) => Some(count.saturating_sub(*n)),
             Self::Filter { kernel } | Self::TakeWhile { kernel } => {
@@ -1206,7 +1224,7 @@ impl ViewStageCapability {
                         return true;
                     }
                 }
-                Self::BuiltinProjection { .. } | Self::Map { .. } => {}
+                Self::BuiltinProjection { .. } | Self::Map { .. } | Self::ObjectLambda { .. } => {}
                 Self::Compact
                 | Self::RemoveValue(_)
                 | Self::FlatMap { .. }

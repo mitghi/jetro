@@ -2759,6 +2759,24 @@ where
         }
     }
 
+    if let pipeline::ViewStageCapability::ObjectLambda { op, kernel } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let kernel = stage_kernels.get(kernel)?;
+        let value = apply_object_lambda_view(item, op, kernel, vm)?;
+        return drive_owned_child(
+            value,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     match apply_view_stage(item, stage, stage_idx, op_state, stage_kernels, vm)? {
         ViewStageFlow::Keep(next) => drive_view_item(
             next,
@@ -2774,6 +2792,52 @@ where
         ViewStageFlow::Drop => Some(Ok(ViewDriveFlow::Continue)),
         ViewStageFlow::Stop => Some(Ok(ViewDriveFlow::Stop)),
     }
+}
+
+fn apply_object_lambda_view<'a, V>(
+    item: FrontierRow<V>,
+    op: crate::builtins::BuiltinObjectLambda,
+    kernel: &pipeline::BodyKernel,
+    vm: &mut VM,
+) -> Option<Val>
+where
+    V: FrontierBaseView<'a>,
+{
+    let Some(fields) = item.object_iter() else {
+        return Some(pipeline::view_kernel_view_to_owned(item));
+    };
+    let mut out = indexmap::IndexMap::with_capacity(item.object_len().unwrap_or(0));
+    for (key, value) in fields {
+        match op {
+            crate::builtins::BuiltinObjectLambda::TransformKeys => {
+                let key_row: FrontierRow<V> = FrontierRow::Owned(Val::Str(Arc::clone(&key)));
+                let new_key = eval_frontier_value_kernel_with_vm(kernel, &key_row, vm)?;
+                let new_key = match new_key {
+                    Val::Str(value) => value,
+                    other => Arc::from(crate::util::val_to_string(&other)),
+                };
+                out.insert(new_key, pipeline::view_kernel_view_to_owned(value));
+            }
+            crate::builtins::BuiltinObjectLambda::TransformValues => {
+                let value = eval_frontier_value_kernel_with_vm(kernel, &value, vm)?;
+                out.insert(key, value);
+            }
+            crate::builtins::BuiltinObjectLambda::FilterKeys => {
+                let key_row: FrontierRow<V> = FrontierRow::Owned(Val::Str(Arc::clone(&key)));
+                let keep = eval_frontier_filter_kernel_with_vm(&key_row, kernel, vm)?;
+                if keep {
+                    out.insert(key, pipeline::view_kernel_view_to_owned(value));
+                }
+            }
+            crate::builtins::BuiltinObjectLambda::FilterValues => {
+                let keep = eval_frontier_filter_kernel_with_vm(&value, kernel, vm)?;
+                if keep {
+                    out.insert(key, pipeline::view_kernel_view_to_owned(value));
+                }
+            }
+        }
+    }
+    Some(Val::obj(out))
 }
 
 /// Execution plan for the terminal-collect fast path. Contains the view-domain

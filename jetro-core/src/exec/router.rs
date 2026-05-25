@@ -1159,6 +1159,40 @@ mod tests {
     }
 
     #[test]
+    fn view_object_lambdas_project_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"profiles":[{"settings":{"_debug":true,"feature_a":1,"feature_b":null}},{"settings":{"_debug":false,"feature_a":2,"feature_b":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(
+                r#"$.profiles.map(settings.filter_keys(k => not k.starts_with("_")).transform_values(v => v.to_string())).last()"#,
+            )
+            .unwrap();
+
+        assert_eq!(out, json!({"feature_a": "2", "feature_b": "3"}));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
+    fn view_transform_keys_projects_selected_tape_receiver() {
+        let j = Jetro::from_bytes(
+            br#"{"profiles":[{"settings":{"old":1}},{"settings":{"feature_a":2,"feature_b":3}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.profiles.map(settings.transform_keys(k => k.upper())).last()"#)
+            .unwrap();
+
+        assert_eq!(out, json!({"FEATURE_A": 2, "FEATURE_B": 3}));
+        assert!(!j.root_val_is_materialized());
+    }
+
+    #[test]
     fn view_object_map_collects_scalar_cells_without_materializing_subtrees() {
         let j = Jetro::from_bytes(
             br#"{"books":[{"title":"low","score":1},{"title":"a","score":901},{"title":"b","score":902}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
