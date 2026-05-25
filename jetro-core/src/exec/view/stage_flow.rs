@@ -18,6 +18,12 @@ pub(super) struct RollingNumericState {
     pub max: VecDeque<(usize, f64)>,
 }
 
+#[derive(Default)]
+pub(super) struct NumericFullInputState {
+    pub values: Vec<Option<f64>>,
+    pub count: usize,
+}
+
 /// Per-element control flow for the view-domain stage loop, parameterised by
 /// the concrete `ValueView` type `V` to avoid materialisation.
 pub(super) enum ViewStageFlow<V> {
@@ -52,6 +58,8 @@ pub(super) enum ViewStageState {
     Numeric(Option<f64>),
     /// Rolling numeric aggregate state.
     Rolling(Box<RollingNumericState>),
+    /// Full-input numeric transform state.
+    NumericFullInput(Box<NumericFullInputState>),
 }
 
 impl ViewStageState {
@@ -132,6 +140,16 @@ impl ViewStageState {
         match self {
             Self::Rolling(value) => value,
             _ => unreachable!("rolling state was initialized"),
+        }
+    }
+
+    pub(super) fn numeric_full_input(&mut self) -> &mut NumericFullInputState {
+        if !matches!(self, Self::NumericFullInput(_)) {
+            *self = Self::NumericFullInput(Box::default());
+        }
+        match self {
+            Self::NumericFullInput(value) => value,
+            _ => unreachable!("numeric full-input state was initialized"),
         }
     }
 }
@@ -284,6 +302,7 @@ where
         pipeline::ViewStageCapability::Enumerate => None,
         pipeline::ViewStageCapability::Pairwise => None,
         pipeline::ViewStageCapability::NumericScan(_) => None,
+        pipeline::ViewStageCapability::NumericFullInput(_) => None,
         pipeline::ViewStageCapability::Lag { .. } => None,
         pipeline::ViewStageCapability::Lead { .. } => None,
         pipeline::ViewStageCapability::Rolling { .. } => None,

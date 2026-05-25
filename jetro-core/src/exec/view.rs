@@ -23,7 +23,7 @@ mod reducer_stage;
 mod stage_flow;
 
 use key::ViewKey;
-use stage_flow::{ViewStageFlow, ViewStageState};
+use stage_flow::{NumericFullInputState, ViewStageFlow, ViewStageState};
 
 #[derive(Clone)]
 enum FrontierRow<V> {
@@ -2465,6 +2465,13 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::NumericFullInput(op) = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        let _ = buffer_numeric_full_input_frontier_row(item, op, stage_idx, op_state);
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+
     if let pipeline::ViewStageCapability::Lag { offset } = stage {
         debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
         debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
@@ -4058,6 +4065,62 @@ where
     )
 }
 
+fn buffer_numeric_full_input_frontier_row<'a, V>(
+    item: FrontierRow<V>,
+    op: crate::builtins::BuiltinViewNumericFullInput,
+    stage_idx: usize,
+    op_state: &mut [ViewStageState],
+) -> Option<()>
+where
+    V: FrontierBaseView<'a>,
+{
+    match op {
+        crate::builtins::BuiltinViewNumericFullInput::Zscore => {
+            let current = numeric_view_value(&item);
+            let state = op_state.get_mut(stage_idx)?.numeric_full_input();
+            state.values.push(current);
+            if current.is_some() {
+                state.count += 1;
+            }
+            Some(())
+        }
+    }
+}
+
+fn numeric_full_input_tail_values(
+    op: crate::builtins::BuiltinViewNumericFullInput,
+    state: &mut NumericFullInputState,
+) -> Vec<Val> {
+    match op {
+        crate::builtins::BuiltinViewNumericFullInput::Zscore => {
+            if state.values.is_empty() {
+                return Vec::new();
+            }
+            let values = std::mem::take(&mut state.values);
+            if state.count == 0 {
+                return values.into_iter().map(|_| Val::Null).collect();
+            }
+            let nums: Vec<f64> = values.iter().filter_map(|value| *value).collect();
+            let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+            let variance = nums
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / nums.len() as f64;
+            let sd = variance.sqrt();
+            state.count = 0;
+            values
+                .into_iter()
+                .map(|value| match value {
+                    Some(value) if sd > 0.0 => Val::Float((value - mean) / sd),
+                    Some(_) => Val::Float(0.0),
+                    None => Val::Null,
+                })
+                .collect()
+        }
+    }
+}
+
 fn drive_lag_frontier_row<'a, V, F>(
     item: FrontierRow<V>,
     offset: usize,
@@ -4324,6 +4387,10 @@ where
                     continue;
                 }
                 vec![Val::Null; tail]
+            }
+            pipeline::ViewStageCapability::NumericFullInput(op) => {
+                let state = op_state.get_mut(stage_idx)?.numeric_full_input();
+                numeric_full_input_tail_values(op, state)
             }
             _ => continue,
         };
@@ -7762,6 +7829,40 @@ mod tests {
             assert_eq!(serde_json::Value::from(out), expected, "{method:?}");
             assert_eq!(tape.materialized_subtrees(), 0, "{method:?}");
         }
+    }
+
+    #[test]
+    fn terminal_collect_zscore_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,3,"x",0,5]"#.to_vec()).unwrap();
+        let expected = crate::builtins::zscore_apply(&Val::arr(vec![
+            Val::Int(1),
+            Val::Int(3),
+            Val::Str(Arc::from("x")),
+            Val::Int(0),
+            Val::Int(5),
+        ]))
+        .expect("expected zscore");
+        let body = PipelineBody {
+            stages: vec![Stage::Builtin(crate::builtins::BuiltinCall::new(
+                crate::builtins::BuiltinMethod::Zscore,
+                crate::builtins::BuiltinArgs::None,
+            ))],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::Value::from(expected)
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
     }
 
     #[test]

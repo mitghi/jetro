@@ -1555,6 +1555,8 @@ pub enum BuiltinViewStage {
     Pairwise,
     /// Stateful numeric one-pass scan stage.
     NumericScan(BuiltinViewNumericScan),
+    /// Numeric stage that must see all input before it can emit rows.
+    NumericFullInput(BuiltinViewNumericFullInput),
     /// Numeric lag by a fixed row offset.
     Lag,
     /// Numeric lead by a fixed row offset.
@@ -1612,6 +1614,13 @@ pub enum BuiltinViewNumericScan {
     CumMax,
     /// Cumulative minimum, carrying previous best over null/non-numeric rows.
     CumMin,
+}
+
+/// Full-input numeric operation for borrowed view rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinViewNumericFullInput {
+    /// Standardize numeric rows by full-input mean and standard deviation.
+    Zscore,
 }
 
 /// Rolling numeric operation for borrowed view rows.
@@ -2386,6 +2395,7 @@ impl BuiltinViewStage {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag
             | Self::Lead
             | Self::Rolling(_)
@@ -2409,6 +2419,7 @@ impl BuiltinViewStage {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag
             | Self::Lead
             | Self::Rolling(_)
@@ -2453,6 +2464,7 @@ impl BuiltinViewStage {
             Self::Enumerate => BuiltinCardinality::OneToOne,
             Self::Pairwise => BuiltinCardinality::Filtering,
             Self::NumericScan(_) => BuiltinCardinality::OneToOne,
+            Self::NumericFullInput(_) => BuiltinCardinality::OneToOne,
             Self::Lag | Self::Lead | Self::Rolling(_) => BuiltinCardinality::OneToOne,
             Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
@@ -2483,6 +2495,7 @@ impl BuiltinViewStage {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag
             | Self::Lead
             | Self::Rolling(_)
@@ -2516,6 +2529,7 @@ impl BuiltinViewStage {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag
             | Self::Lead
             | Self::Rolling(_)
@@ -2546,6 +2560,7 @@ impl BuiltinViewStage {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag
             | Self::Lead
             | Self::Rolling(_)

@@ -14,9 +14,9 @@ use super::{
     BuiltinPipelineMaterialization, BuiltinPipelineOrderEffect, BuiltinPipelineShape,
     BuiltinPredicateSink, BuiltinRawJsonScalar, BuiltinRowStreamOp, BuiltinRuntimeHook,
     BuiltinSelectionRewrite, BuiltinSpec, BuiltinStageMerge, BuiltinStreamingBoundary,
-    BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericScan, BuiltinViewRolling,
-    BuiltinViewObjectProjection, BuiltinViewScalarOp, BuiltinViewStage, BuiltinViewStringExpand,
-    BuiltinViewValueProjection,
+    BuiltinStringPairStage, BuiltinStructural, BuiltinViewNumericFullInput,
+    BuiltinViewNumericScan, BuiltinViewRolling, BuiltinViewObjectProjection, BuiltinViewScalarOp,
+    BuiltinViewStage, BuiltinViewStringExpand, BuiltinViewValueProjection,
 };
 
 /// Numeric reducer (sum/avg/min/max) skeleton; same demand/lowering across the four.
@@ -3323,22 +3323,6 @@ impl Builtin for Update {
 }
 
 #[inline]
-fn streaming_one_to_one_element_spec() -> BuiltinSpec {
-    // `lag`/`lead`/`cummax`/`cummin`/`diff_window`/`pct_change`/`zscore`
-    // and friends are whole-array transforms (output[i] depends on
-    // input[i] and input[i-k]), not per-element vectorisable. Marking
-    // them `.element()` made the streaming pipeline treat the receiver
-    // as a 1-element stream and discard the structural shift, returning
-    // the bare input. Same fix pattern as `enumerate`/`pairwise`.
-    BuiltinSpec::new(
-        BuiltinCategory::StreamingOneToOne,
-        BuiltinCardinality::OneToOne,
-    )
-    .cost(10.0)
-    .demand_law(BuiltinDemandLaw::OrderBarrier)
-}
-
-#[inline]
 fn numeric_scan_spec(op: BuiltinViewNumericScan) -> BuiltinSpec {
     BuiltinSpec::new(
         BuiltinCategory::StreamingOneToOne,
@@ -3350,6 +3334,27 @@ fn numeric_scan_spec(op: BuiltinViewNumericScan) -> BuiltinSpec {
     .demand_law(BuiltinDemandLaw::OrderBarrier)
     .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
     .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+    .pipeline_shape(BuiltinPipelineShape::new(
+        BuiltinCardinality::OneToOne,
+        false,
+        2.0,
+        1.0,
+    ))
+    .lowering(BuiltinPipelineLowering::Nullary)
+}
+
+#[inline]
+fn numeric_full_input_spec(op: BuiltinViewNumericFullInput) -> BuiltinSpec {
+    BuiltinSpec::new(
+        BuiltinCategory::StreamingOneToOne,
+        BuiltinCardinality::OneToOne,
+    )
+    .view_native()
+    .view_stage(BuiltinViewStage::NumericFullInput(op))
+    .cost(10.0)
+    .demand_law(BuiltinDemandLaw::OrderBarrier)
+    .runtime_hook(BuiltinRuntimeHook::StreamAndBarrier)
+    .streaming_boundary(BuiltinStreamingBoundary::FullInputState)
     .pipeline_shape(BuiltinPipelineShape::new(
         BuiltinCardinality::OneToOne,
         false,
@@ -3714,7 +3719,7 @@ impl Builtin for Zscore {
     const METHOD: BuiltinMethod = BuiltinMethod::Zscore;
     const NAME: &'static str = "zscore";
     fn spec() -> BuiltinSpec {
-        streaming_one_to_one_element_spec()
+        numeric_full_input_spec(BuiltinViewNumericFullInput::Zscore)
     }
     #[inline]
     fn apply_args(

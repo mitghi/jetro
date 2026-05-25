@@ -13,7 +13,8 @@ pub(crate) use crate::builtins::BuiltinViewOutputMode as ViewOutputMode;
 use crate::builtins::{
     BuiltinArgExtremeSink, BuiltinArgs, BuiltinKeyedReducer, BuiltinMembershipSink,
     BuiltinPredicateSink, BuiltinSinkAccumulator, BuiltinSinkSpec, BuiltinViewStage,
-    BuiltinViewNumericScan, BuiltinViewRolling, BuiltinViewStringExpand,
+    BuiltinViewNumericFullInput, BuiltinViewNumericScan, BuiltinViewRolling,
+    BuiltinViewStringExpand,
 };
 use crate::data::value::Val;
 use crate::plan::demand::{FieldDemand, PullDemand};
@@ -778,6 +779,8 @@ pub(crate) enum ViewStageCapability {
     Pairwise,
     /// Emit one-pass numeric scan outputs from a borrowed row stream.
     NumericScan(BuiltinViewNumericScan),
+    /// Buffer numeric scalars and emit a full-input numeric transform at stream end.
+    NumericFullInput(BuiltinViewNumericFullInput),
     /// Emit numeric values shifted by a bounded lag.
     Lag {
         /// Number of previous rows to look back.
@@ -875,6 +878,7 @@ impl ViewStageCapability {
             BuiltinViewStage::Enumerate => Some(Self::Enumerate),
             BuiltinViewStage::Pairwise => Some(Self::Pairwise),
             BuiltinViewStage::NumericScan(op) => Some(Self::NumericScan(op)),
+            BuiltinViewStage::NumericFullInput(op) => Some(Self::NumericFullInput(op)),
             BuiltinViewStage::Lag => Some(Self::Lag { offset: usize_arg? }),
             BuiltinViewStage::Lead => Some(Self::Lead { offset: usize_arg? }),
             BuiltinViewStage::Rolling(op) => Some(Self::Rolling {
@@ -909,6 +913,7 @@ impl ViewStageCapability {
             Self::Enumerate => BuiltinViewStage::Enumerate,
             Self::Pairwise => BuiltinViewStage::Pairwise,
             Self::NumericScan(op) => BuiltinViewStage::NumericScan(*op),
+            Self::NumericFullInput(op) => BuiltinViewStage::NumericFullInput(*op),
             Self::Lag { .. } => BuiltinViewStage::Lag,
             Self::Lead { .. } => BuiltinViewStage::Lead,
             Self::Rolling { op, .. } => BuiltinViewStage::Rolling(*op),
@@ -949,6 +954,7 @@ impl ViewStageCapability {
             Self::StringExpand { .. }
                 | Self::Enumerate
                 | Self::NumericScan(_)
+                | Self::NumericFullInput(_)
                 | Self::Lag { .. }
                 | Self::Lead { .. }
                 | Self::Rolling { .. }
@@ -1068,6 +1074,7 @@ impl ViewStageCapability {
             | Self::Enumerate
             | Self::Pairwise
             | Self::NumericScan(_)
+            | Self::NumericFullInput(_)
             | Self::Lag { .. }
             | Self::Lead { .. }
             | Self::Rolling { .. }
@@ -1146,6 +1153,7 @@ impl ViewStageCapability {
                 | Self::Enumerate
                 | Self::Pairwise
                 | Self::NumericScan(_)
+                | Self::NumericFullInput(_)
                 | Self::Lag { .. }
                 | Self::Lead { .. }
                 | Self::Rolling { .. }
