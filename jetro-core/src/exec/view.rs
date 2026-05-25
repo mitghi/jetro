@@ -2431,6 +2431,24 @@ where
         );
     }
 
+    if let pipeline::ViewStageCapability::Window { width } = stage {
+        debug_assert_eq!(stage.input_mode(), pipeline::ViewInputMode::ReadsView);
+        debug_assert_eq!(stage.output_mode(), pipeline::ViewOutputMode::EmitsOwnedValue);
+        return drive_window_frontier_row(
+            item,
+            width,
+            stage_idx,
+            stage_idx + 1,
+            stages,
+            op_state,
+            stage_kernels,
+            source_demand,
+            emitted_outputs,
+            vm,
+            observe,
+        );
+    }
+
     if let pipeline::ViewStageCapability::StringExpand { op, arg } = stage {
         let JsonView::Str(value) = item.scalar() else {
             return Some(Ok(ViewDriveFlow::Continue));
@@ -3778,6 +3796,46 @@ where
     let chunk = Val::arr(std::mem::take(buffer));
     drive_owned_child(
         chunk,
+        next_stage_idx,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn drive_window_frontier_row<'a, V, F>(
+    item: FrontierRow<V>,
+    width: usize,
+    stage_idx: usize,
+    next_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<ViewDriveFlow, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    let width = width.max(1);
+    let buffer = op_state.get_mut(stage_idx)?.deque();
+    buffer.push_back(pipeline::view_kernel_view_to_owned(item));
+    while buffer.len() > width {
+        buffer.pop_front();
+    }
+    if buffer.len() < width {
+        return Some(Ok(ViewDriveFlow::Continue));
+    }
+    let window = Val::arr(buffer.iter().cloned().collect());
+    drive_owned_child(
+        window,
         next_stage_idx,
         stages,
         op_state,
@@ -7073,6 +7131,32 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!([[1, 2], [3, 4], [5]])
+        );
+        assert_eq!(tape.materialized_subtrees(), 0);
+    }
+
+    #[test]
+    fn terminal_collect_windows_tape_rows_without_materializing_receiver() {
+        let tape = crate::data::tape::TapeData::parse(br#"[1,2,3,4,5]"#.to_vec()).unwrap();
+        let body = PipelineBody {
+            stages: vec![Stage::UsizeBuiltin {
+                method: crate::builtins::BuiltinMethod::Window,
+                value: 3,
+            }],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        tape.reset_materialized_subtrees();
+        let out = super::run_full(TapeView::root(&tape), &body)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!([[1, 2, 3], [2, 3, 4], [3, 4, 5]])
         );
         assert_eq!(tape.materialized_subtrees(), 0);
     }

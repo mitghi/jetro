@@ -2,7 +2,7 @@
 //! Mirrors `StageFlow` from the `Val` pipeline path but parameterised
 //! over the `ValueView` type to stay in the borrowed domain.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crate::{data::value::Val, data::view::ValueView, exec::pipeline};
 
@@ -36,6 +36,8 @@ pub(super) enum ViewStageState {
     Keys(HashSet<ViewKey>),
     /// Owned buffered values, used by bounded-state emitting stages.
     Values(Vec<Val>),
+    /// Owned sliding values, used by bounded-state window stages.
+    Deque(VecDeque<Val>),
 }
 
 impl ViewStageState {
@@ -79,6 +81,16 @@ impl ViewStageState {
         match self {
             Self::Values(value) => value,
             _ => unreachable!("values state was initialized"),
+        }
+    }
+
+    pub(super) fn deque(&mut self) -> &mut VecDeque<Val> {
+        if !matches!(self, Self::Deque(_)) {
+            *self = Self::Deque(VecDeque::new());
+        }
+        match self {
+            Self::Deque(value) => value,
+            _ => unreachable!("deque state was initialized"),
         }
     }
 }
@@ -229,6 +241,7 @@ where
         pipeline::ViewStageCapability::Flatten { .. } => None,
         pipeline::ViewStageCapability::Explode { .. } => None,
         pipeline::ViewStageCapability::Chunk { .. } => None,
+        pipeline::ViewStageCapability::Window { .. } => None,
         pipeline::ViewStageCapability::StringExpand { .. } => None,
     }
 }

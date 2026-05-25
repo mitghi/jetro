@@ -1549,6 +1549,8 @@ pub enum BuiltinViewStage {
     Explode,
     /// Non-overlapping fixed-size chunk stage.
     Chunk,
+    /// Sliding fixed-size window stage.
+    Window,
     /// Prefix filter that stops at the first non-matching row.
     TakeWhile,
     /// Skips leading matching rows and passes the rest.
@@ -2342,6 +2344,7 @@ impl BuiltinViewStage {
             | Self::Flatten
             | Self::Explode
             | Self::Chunk
+            | Self::Window
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -2356,7 +2359,9 @@ impl BuiltinViewStage {
         match self {
             Self::Map => BuiltinViewOutputMode::BorrowedSubview,
             Self::FlatMap | Self::Flatten => BuiltinViewOutputMode::BorrowedSubviews,
-            Self::Explode | Self::Chunk | Self::KeyedReduce => BuiltinViewOutputMode::EmitsOwnedValue,
+            Self::Explode | Self::Chunk | Self::Window | Self::KeyedReduce => {
+                BuiltinViewOutputMode::EmitsOwnedValue
+            }
             Self::Filter
             | Self::Compact
             | Self::RemoveValue
@@ -2392,7 +2397,7 @@ impl BuiltinViewStage {
             Self::Filter | Self::Compact | Self::RemoveValue => BuiltinCardinality::Filtering,
             Self::Map => BuiltinCardinality::OneToOne,
             Self::FlatMap | Self::Flatten | Self::Explode => BuiltinCardinality::Expanding,
-            Self::Chunk => BuiltinCardinality::Barrier,
+            Self::Chunk | Self::Window => BuiltinCardinality::Barrier,
             Self::TakeWhile | Self::DropWhile => BuiltinCardinality::Filtering,
             Self::Distinct => BuiltinCardinality::Filtering,
             Self::KeyedReduce => BuiltinCardinality::Reducing,
@@ -2419,6 +2424,7 @@ impl BuiltinViewStage {
             | Self::Flatten
             | Self::Explode
             | Self::Chunk
+            | Self::Window
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -2445,6 +2451,7 @@ impl BuiltinViewStage {
             | Self::Flatten
             | Self::Explode
             | Self::Chunk
+            | Self::Window
             | Self::TakeWhile
             | Self::DropWhile
             | Self::Distinct
@@ -2468,6 +2475,7 @@ impl BuiltinViewStage {
             | Self::Flatten
             | Self::Explode
             | Self::Chunk
+            | Self::Window
             | Self::KeyedReduce => 1.0,
             Self::Take | Self::Skip => 0.5,
         }

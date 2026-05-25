@@ -777,6 +777,11 @@ pub(crate) enum ViewStageCapability {
         /// Chunk width.
         width: usize,
     },
+    /// Emit sliding fixed-size owned windows from a borrowed row stream.
+    Window {
+        /// Window width.
+        width: usize,
+    },
     /// Expand a string row into owned rows without materialising the receiver.
     StringExpand {
         /// Expansion operation declared by builtin metadata.
@@ -845,6 +850,7 @@ impl ViewStageCapability {
             }),
             BuiltinViewStage::Flatten => Some(Self::Flatten { depth: usize_arg? }),
             BuiltinViewStage::Chunk => Some(Self::Chunk { width: usize_arg? }),
+            BuiltinViewStage::Window => Some(Self::Window { width: usize_arg? }),
             BuiltinViewStage::TakeWhile if kernel_is_view_native => Some(Self::TakeWhile {
                 kernel: kernel_index,
             }),
@@ -869,6 +875,7 @@ impl ViewStageCapability {
             Self::Flatten { .. } => BuiltinViewStage::Flatten,
             Self::Explode { .. } => BuiltinViewStage::Explode,
             Self::Chunk { .. } => BuiltinViewStage::Chunk,
+            Self::Window { .. } => BuiltinViewStage::Window,
             Self::StringExpand { .. } => BuiltinViewStage::FlatMap,
             Self::TakeWhile { .. } => BuiltinViewStage::TakeWhile,
             Self::DropWhile { .. } => BuiltinViewStage::DropWhile,
@@ -1012,6 +1019,7 @@ impl ViewStageCapability {
             | Self::Flatten { .. }
             | Self::Explode { .. }
             | Self::Chunk { .. }
+            | Self::Window { .. }
             | Self::StringExpand { .. }
             | Self::Distinct { .. }
             | Self::KeyedReduce { .. } => None,
@@ -1083,6 +1091,7 @@ impl ViewStageCapability {
                 | Self::Flatten { .. }
                 | Self::Explode { .. }
                 | Self::Chunk { .. }
+                | Self::Window { .. }
                 | Self::StringExpand { .. }
                 | Self::Distinct { .. }
                 | Self::KeyedReduce { .. } => return false,
@@ -1592,17 +1601,23 @@ mod tests {
         }
         .view_capability(9, None)
         .unwrap();
+        let window = Stage::UsizeBuiltin {
+            method: BuiltinMethod::Window,
+            value: 3,
+        }
+        .view_capability(10, None)
+        .unwrap();
         let take = Stage::UsizeBuiltin {
             method: BuiltinMethod::Take,
             value: 2,
         }
-        .view_capability(10, None)
+        .view_capability(11, None)
         .unwrap();
         let skip = Stage::UsizeBuiltin {
             method: BuiltinMethod::Skip,
             value: 1,
         }
-        .view_capability(11, None)
+        .view_capability(12, None)
         .unwrap();
         let compact = Stage::Builtin(crate::builtins::BuiltinCall::new(
             BuiltinMethod::Compact,
@@ -1626,6 +1641,8 @@ mod tests {
         assert_eq!(explode.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(chunk, ViewStageCapability::Chunk { width: 2 }));
         assert_eq!(chunk.output_mode(), ViewOutputMode::EmitsOwnedValue);
+        assert!(matches!(window, ViewStageCapability::Window { width: 3 }));
+        assert_eq!(window.output_mode(), ViewOutputMode::EmitsOwnedValue);
         assert!(matches!(take, ViewStageCapability::Take(2)));
         assert!(matches!(skip, ViewStageCapability::Skip(1)));
         assert!(matches!(compact, ViewStageCapability::Compact));

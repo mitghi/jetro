@@ -1547,6 +1547,8 @@ impl Builtin for Window {
         barrier_default_spec()
             .materialization(BuiltinPipelineMaterialization::ComposedBarrier)
             .streaming_boundary(BuiltinStreamingBoundary::BoundedState)
+            .view_native()
+            .view_stage(BuiltinViewStage::Window)
             .pipeline_shape(BuiltinPipelineShape::new(
                 BuiltinCardinality::Barrier,
                 false,

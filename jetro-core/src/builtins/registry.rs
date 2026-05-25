@@ -3766,6 +3766,10 @@ mod tests {
             view_stage(BuiltinId::from_method(BuiltinMethod::Chunk)),
             Some(BuiltinViewStage::Chunk)
         );
+        assert_eq!(
+            view_stage(BuiltinId::from_method(BuiltinMethod::Window)),
+            Some(BuiltinViewStage::Window)
+        );
 
         for method in [BuiltinMethod::Unique, BuiltinMethod::UniqueBy] {
             let id = BuiltinId::from_method(method);
