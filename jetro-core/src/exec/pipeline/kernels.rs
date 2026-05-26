@@ -149,6 +149,11 @@ pub enum BodyKernel {
         /// Position to select from the child array.
         selector: ArraySelector,
     },
+    /// Selects an object field or array index using a view-native key expression.
+    DynIndex {
+        receiver: Box<BodyKernel>,
+        key: Box<BodyKernel>,
+    },
     /// Runs a compiled pattern match against a view-native scrutinee.
     Match {
         /// Kernel that yields the match scrutinee.
@@ -887,6 +892,16 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     selector,
                 };
             }
+            Step::DynIndex(index) => {
+                let key = BodyKernel::classify_expr(index);
+                if !receiver.is_view_native() || matches!(key, BodyKernel::Generic) {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::DynIndex {
+                    receiver: Box::new(receiver),
+                    key: Box::new(key),
+                };
+            }
             _ => return BodyKernel::Generic,
         }
     }
@@ -1147,6 +1162,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ArraySelect { array, .. } => array.field_demand(),
+            Self::DynIndex { receiver, key } => receiver.field_demand().merge(key.field_demand()),
             Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
@@ -1215,6 +1231,10 @@ impl BodyKernel {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
+            Self::DynIndex { receiver, key } => {
+                receiver.mentions_any_field_like_ident(names)
+                    || key.mentions_any_field_like_ident(names)
+            }
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
@@ -1290,6 +1310,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
             Self::ArraySelect { array, .. } => array.is_view_native(),
+            Self::DynIndex { receiver, key } => receiver.is_view_native() && key.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
@@ -1364,7 +1385,11 @@ impl BodyKernel {
             | Self::FieldCmpLit(_, _, _)
             | Self::FieldChainCmpLit(_, _, _) => true,
             Self::Coalesce { lhs, rhs } => lhs.view_result_owned() && rhs.view_result_owned(),
-            Self::Current | Self::FieldRead(_) | Self::FieldChain(_) | Self::Generic => false,
+            Self::Current
+            | Self::FieldRead(_)
+            | Self::FieldChain(_)
+            | Self::DynIndex { .. }
+            | Self::Generic => false,
         }
     }
 
@@ -1424,6 +1449,27 @@ impl BodyKernel {
                     return Self::ArraySelect {
                         array: Box::new(array),
                         selector: array_selector_call(call).expect("selector checked"),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::DynIndex(key)] => {
+                let receiver = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<dynamic-index-receiver>",
+                    ))
+                };
+                let key = BodyKernel::classify(key);
+                if !matches!(receiver, BodyKernel::Generic)
+                    && !matches!(key, BodyKernel::Generic)
+                    && receiver.is_view_native()
+                    && key.is_view_native()
+                {
+                    return Self::DynIndex {
+                        receiver: Box::new(receiver),
+                        key: Box::new(key),
                     };
                 }
             }
@@ -2390,6 +2436,11 @@ fn eval_native_kernel_with_vm(
             let array = eval_native_kernel_with_vm(array, item, vm)?;
             Ok(eval_array_select_native(&array, *selector))
         }
+        BodyKernel::DynIndex { receiver, key } => {
+            let receiver = eval_native_kernel_with_vm(receiver, item, vm)?;
+            let key = eval_native_kernel_with_vm(key, item, vm)?;
+            Ok(eval_dyn_index_native(&receiver, &key))
+        }
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -2777,6 +2828,27 @@ where
         .unwrap_or_else(|| array.index(-1))
 }
 
+fn eval_dyn_index_native(receiver: &Val, key: &Val) -> Val {
+    match key {
+        Val::Int(index) => receiver.get_index(*index),
+        Val::Str(key) => receiver.get_field(key.as_ref()),
+        Val::StrSlice(key) => receiver.get_field(key.as_str()),
+        _ => Val::Null,
+    }
+}
+
+fn eval_dyn_index_view<'a, V>(receiver: V, key: &Val) -> Option<ViewKernelValue<V>>
+where
+    V: ValueView<'a> + 'a,
+{
+    match key {
+        Val::Int(index) => Some(ViewKernelValue::View(receiver.index(*index))),
+        Val::Str(key) => Some(ViewKernelValue::View(receiver.field(key.as_ref()))),
+        Val::StrSlice(key) => Some(ViewKernelValue::View(receiver.field(key.as_str()))),
+        _ => Some(ViewKernelValue::Owned(Val::Null)),
+    }
+}
+
 fn eval_nested_array_reducer_view<'a, V>(
     source: &BodyKernel,
     predicate: Option<&BodyKernel>,
@@ -2949,6 +3021,16 @@ where
                 ViewKernelValue::Owned(value) => {
                     numeric_from_val(&eval_array_select_native(&value, *selector))
                 }
+            }
+        }
+        BodyKernel::DynIndex { receiver, key } => {
+            let key = view_kernel_value_to_owned(eval_view_kernel_inner(key, item, vm)?);
+            match eval_view_kernel_inner(receiver, item, vm)? {
+                ViewKernelValue::View(view) => match eval_dyn_index_view(view, &key)? {
+                    ViewKernelValue::View(view) => numeric_from_json_view(view.scalar()),
+                    ViewKernelValue::Owned(value) => numeric_from_val(&value),
+                },
+                ViewKernelValue::Owned(value) => numeric_from_val(&eval_dyn_index_native(&value, &key)),
             }
         }
         _ => None,
@@ -3466,6 +3548,15 @@ where
                 ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(
                     eval_array_select_native(&value, *selector),
                 )),
+            }
+        }
+        BodyKernel::DynIndex { receiver, key } => {
+            let key = view_kernel_value_to_owned(eval_view_kernel_inner(key, item, vm)?);
+            match eval_view_kernel_inner(receiver, item, vm)? {
+                ViewKernelValue::View(view) => eval_dyn_index_view(view, &key),
+                ViewKernelValue::Owned(value) => {
+                    Some(ViewKernelValue::Owned(eval_dyn_index_native(&value, &key)))
+                }
             }
         }
         BodyKernel::Match {
@@ -4116,6 +4207,31 @@ mod tests {
         assert_eq!(
             owned_value(eval_view_kernel(&kernel, &view)),
             Some(Val::Str(Arc::from("delivered")))
+        );
+    }
+
+    #[test]
+    fn dynamic_index_kernels_run_on_value_views() {
+        let expr = parse(r#"{picked: obj[key], numbered: items[i]}"#)
+            .expect("parse dynamic index projection");
+        let program = Compiler::compile(&expr, "dynamic-index");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({
+            "obj": {"a": "alpha", "b": "beta"},
+            "key": "b",
+            "items": [10, 20, 30],
+            "i": 1
+        }));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("dynamic index output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"picked": "beta", "numbered": 20})
         );
     }
 
