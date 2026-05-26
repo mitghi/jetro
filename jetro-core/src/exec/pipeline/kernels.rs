@@ -168,6 +168,15 @@ pub enum BodyKernel {
         source: Box<BodyKernel>,
         predicate: Box<BodyKernel>,
     },
+    /// Recursively collects values stored under `key` inside a view-native source.
+    Descendant {
+        source: Box<BodyKernel>,
+        key: Arc<str>,
+    },
+    /// Recursively collects every descendant node inside a view-native source.
+    DescendAll {
+        source: Box<BodyKernel>,
+    },
     /// Runs a compiled pattern match against a view-native scrutinee.
     Match {
         /// Kernel that yields the match scrutinee.
@@ -947,6 +956,23 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     predicate: Box::new(predicate),
                 };
             }
+            Step::Descendant(key) => {
+                if !receiver.is_view_native() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::Descendant {
+                    source: Box::new(receiver),
+                    key: Arc::from(key.as_str()),
+                };
+            }
+            Step::DescendAll => {
+                if !receiver.is_view_native() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::DescendAll {
+                    source: Box::new(receiver),
+                };
+            }
             _ => return BodyKernel::Generic,
         }
     }
@@ -1226,6 +1252,7 @@ impl BodyKernel {
             Self::InlineFilter { source, predicate } => {
                 nested_array_field_demand(source, Some(predicate), None)
             }
+            Self::Descendant { source, .. } | Self::DescendAll { source } => source.field_demand(),
             Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
@@ -1303,6 +1330,9 @@ impl BodyKernel {
             Self::InlineFilter { source, predicate } => {
                 source.mentions_any_field_like_ident(names)
                     || predicate.mentions_any_field_like_ident(names)
+            }
+            Self::Descendant { source, .. } | Self::DescendAll { source } => {
+                source.mentions_any_field_like_ident(names)
             }
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
             Self::And(predicates) | Self::Or(predicates) => predicates
@@ -1388,6 +1418,7 @@ impl BodyKernel {
             Self::InlineFilter { source, predicate } => {
                 source.is_view_native() && predicate.is_view_native()
             }
+            Self::Descendant { source, .. } | Self::DescendAll { source } => source.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
@@ -1446,6 +1477,8 @@ impl BodyKernel {
             | Self::Array(_)
             | Self::ArraySpread(_)
             | Self::InlineFilter { .. }
+            | Self::Descendant { .. }
+            | Self::DescendAll { .. }
             | Self::NestedArrayReducer { .. }
             | Self::NestedArrayCount { .. }
             | Self::NestedPlan(_)
@@ -1617,6 +1650,37 @@ impl BodyKernel {
                     return Self::InlineFilter {
                         source: Box::new(source),
                         predicate: Box::new(predicate),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::Descendant(key)] => {
+                let source = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<descendant-source>",
+                    ))
+                };
+                if !matches!(source, BodyKernel::Generic) && source.is_view_native() {
+                    return Self::Descendant {
+                        source: Box::new(source),
+                        key: Arc::clone(key),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::DescendAll] => {
+                let source = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<descend-all-source>",
+                    ))
+                };
+                if !matches!(source, BodyKernel::Generic) && source.is_view_native() {
+                    return Self::DescendAll {
+                        source: Box::new(source),
                     };
                 }
             }
@@ -2646,6 +2710,18 @@ fn eval_native_kernel_with_vm(
             }
             Ok(Val::arr(out))
         }
+        BodyKernel::Descendant { source, key } => {
+            let source = eval_native_kernel_with_vm(source, item, vm)?;
+            let mut out = Vec::new();
+            collect_desc_native(&source, key, &mut out);
+            Ok(Val::arr(out))
+        }
+        BodyKernel::DescendAll { source } => {
+            let source = eval_native_kernel_with_vm(source, item, vm)?;
+            let mut out = Vec::new();
+            collect_all_native(&source, &mut out);
+            Ok(Val::arr(out))
+        }
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -2827,6 +2903,42 @@ fn eval_inline_filter_native_owned(
         }
     }
     Ok(Val::arr(out))
+}
+
+fn collect_desc_native(value: &Val, key: &str, out: &mut Vec<Val>) {
+    match value {
+        Val::Obj(map) => {
+            if let Some(found) = map.get(key) {
+                out.push(found.clone());
+            }
+            for child in map.values() {
+                collect_desc_native(child, key, out);
+            }
+        }
+        Val::Arr(items) => {
+            for child in items.iter() {
+                collect_desc_native(child, key, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_all_native(value: &Val, out: &mut Vec<Val>) {
+    match value {
+        Val::Obj(map) => {
+            out.push(value.clone());
+            for child in map.values() {
+                collect_all_native(child, out);
+            }
+        }
+        Val::Arr(items) => {
+            for child in items.iter() {
+                collect_all_native(child, out);
+            }
+        }
+        other => out.push(other.clone()),
+    }
 }
 
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
@@ -3914,6 +4026,32 @@ where
                 }
             }
         }
+        BodyKernel::Descendant { source, key } => {
+            match eval_view_kernel_inner(source, item, vm)? {
+                ViewKernelValue::View(view) => {
+                    let mut out = Vec::new();
+                    collect_desc_view(view, key, &mut out)?;
+                    Some(ViewKernelValue::Owned(Val::arr(out)))
+                }
+                ViewKernelValue::Owned(value) => {
+                    let mut out = Vec::new();
+                    collect_desc_native(&value, key, &mut out);
+                    Some(ViewKernelValue::Owned(Val::arr(out)))
+                }
+            }
+        }
+        BodyKernel::DescendAll { source } => match eval_view_kernel_inner(source, item, vm)? {
+            ViewKernelValue::View(view) => {
+                let mut out = Vec::new();
+                collect_all_view(view, &mut out)?;
+                Some(ViewKernelValue::Owned(Val::arr(out)))
+            }
+            ViewKernelValue::Owned(value) => {
+                let mut out = Vec::new();
+                collect_all_native(&value, &mut out);
+                Some(ViewKernelValue::Owned(Val::arr(out)))
+            }
+        },
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -4060,6 +4198,44 @@ where
     for (key, child) in view.object_iter()? {
         pairs.push((key, view_kernel_view_to_owned(child)));
     }
+    Some(())
+}
+
+fn collect_desc_view<'a, V>(view: V, key: &str, out: &mut Vec<Val>) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    if let Some(fields) = view.object_iter() {
+        for (field, child) in fields {
+            if field.as_ref() == key {
+                out.push(view_kernel_view_to_owned(child.clone()));
+            }
+            collect_desc_view(child, key, out)?;
+        }
+        return Some(());
+    }
+    if let Some(mut items) = view.array_iter() {
+        items.try_for_each(|child| collect_desc_view(child, key, out))?;
+    }
+    Some(())
+}
+
+fn collect_all_view<'a, V>(view: V, out: &mut Vec<Val>) -> Option<()>
+where
+    V: ValueView<'a> + 'a,
+{
+    if let Some(fields) = view.object_iter() {
+        out.push(view_kernel_view_to_owned(view.clone()));
+        for (_, child) in fields {
+            collect_all_view(child, out)?;
+        }
+        return Some(());
+    }
+    if let Some(mut items) = view.array_iter() {
+        items.try_for_each(|child| collect_all_view(child, out))?;
+        return Some(());
+    }
+    out.push(view_kernel_view_to_owned(view));
     Some(())
 }
 
@@ -4619,6 +4795,44 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"high": [11, 18], "first_high": 11})
+        );
+    }
+
+    #[test]
+    fn descendant_kernels_run_on_value_views() {
+        let expr = parse(r#"{ids: profile..id, all: profile..}"#)
+            .expect("parse descendant projection");
+        let program = Compiler::compile(&expr, "descendant");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({
+            "profile": {
+                "id": 1,
+                "children": [{"id": 2}, {"other": {"id": 3}}],
+                "name": "Ada"
+            }
+        }));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("descendant output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({
+                "ids": [2, 3, 1],
+                "all": [
+                    {"id": 1, "children": [{"id": 2}, {"other": {"id": 3}}], "name": "Ada"},
+                    {"id": 2},
+                    2,
+                    {"other": {"id": 3}},
+                    {"id": 3},
+                    3,
+                    1,
+                    "Ada"
+                ]
+            })
         );
     }
 

@@ -2661,6 +2661,21 @@ mod tests {
     }
 
     #[test]
+    fn view_descendant_projection_stays_tape_streamed_for_scalar_matches() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"profile":{"id":1,"children":[{"id":2},{"other":{"id":3}}]}},{"profile":{"children":[{"id":4}]}}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.data.map({ids: profile..id})"#).unwrap();
+
+        assert_eq!(out, json!([{"ids": [1, 2, 3]}, {"ids": [4]}]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_dynamic_index_projection_stays_tape_streamed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"obj":{"a":"alpha","b":"beta"},"key":"b","items":[10,20,30],"i":1},{"obj":{"x":"ex","y":"why"},"key":"x","items":[3,4],"i":0}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
