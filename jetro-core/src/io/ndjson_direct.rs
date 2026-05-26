@@ -1566,7 +1566,7 @@ fn kernel_to_physical_path(
             steps.extend(kernel_to_physical_path(then)?);
             Some(steps)
         }
-        BodyKernel::BuiltinCall { receiver, call } => {
+        BodyKernel::BuiltinCall { receiver, call, .. } => {
             let mut steps = kernel_to_physical_path(receiver)?;
             let result_keys = crate::builtins::registry::view_projection_result_field_path(
                 call.id(),
@@ -1702,7 +1702,7 @@ fn direct_scalar_call_from_kernel(
             call.call,
         ));
     }
-    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call } = kernel else {
+    let crate::exec::pipeline::BodyKernel::BuiltinCall { receiver, call, .. } = kernel else {
         return None;
     };
     if !call.is_direct_view_scalar_call() {

@@ -3927,7 +3927,7 @@ where
                 vm,
             )?,
         )),
-        pipeline::BodyKernel::BuiltinCall { receiver, call } => {
+        pipeline::BodyKernel::BuiltinCall { receiver, call, .. } => {
             match eval_frontier_kernel_with_vm(item, receiver, vm)? {
                 pipeline::ViewKernelValue::View(view) => {
                     match crate::builtins::registry::apply_view_projection(
@@ -9057,6 +9057,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::Len,
                     crate::builtins::BuiltinArgs::None,
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -9090,6 +9091,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::Type,
                     crate::builtins::BuiltinArgs::None,
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -9122,6 +9124,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::ParseInt,
                     crate::builtins::BuiltinArgs::Usize(16),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -9221,6 +9224,7 @@ mod tests {
                         method,
                         crate::builtins::BuiltinArgs::None,
                     ),
+                    optional: false,
                 }],
                 sink_kernels: Vec::new(),
             };
@@ -9269,6 +9273,7 @@ mod tests {
                             Arc::from("beta"),
                         ]),
                     ),
+                    optional: false,
                 }],
                 sink_kernels: Vec::new(),
             };
@@ -9352,6 +9357,7 @@ mod tests {
                         method,
                         crate::builtins::BuiltinArgs::None,
                     ),
+                    optional: false,
                 }],
                 sink_kernels: Vec::new(),
             };
@@ -9927,6 +9933,7 @@ mod tests {
                         crate::builtins::BuiltinMethod::Values,
                         crate::builtins::BuiltinArgs::None,
                     ),
+                    optional: false,
                 },
                 BodyKernel::Generic,
             ],
@@ -9959,6 +9966,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::FromPairs,
                     crate::builtins::BuiltinArgs::None,
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -9994,6 +10002,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::Invert,
                     crate::builtins::BuiltinArgs::None,
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10031,6 +10040,7 @@ mod tests {
                         &serde_json::json!({"a": {"y": 5}, "d": 6}),
                     )),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10069,6 +10079,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::FlattenKeys,
                     crate::builtins::BuiltinArgs::Str(Arc::from(".")),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10107,6 +10118,7 @@ mod tests {
                     crate::builtins::BuiltinMethod::UnflattenKeys,
                     crate::builtins::BuiltinArgs::Str(Arc::from(".")),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10145,6 +10157,7 @@ mod tests {
                         &serde_json::json!({"b": 20, "c": 4}),
                     )),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10181,6 +10194,7 @@ mod tests {
                         &serde_json::json!({"a": 10, "c": 4}),
                     )),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10217,6 +10231,7 @@ mod tests {
                         &serde_json::json!({"a": "z", "missing": "x"}),
                     )),
                 ),
+                optional: false,
             }],
             sink_kernels: Vec::new(),
         };
@@ -10798,6 +10813,7 @@ mod tests {
                             crate::builtins::BuiltinMethod::Len,
                             crate::builtins::BuiltinArgs::None,
                         ),
+                        optional: false,
                     }),
                     op: BinOp::Gt,
                     lit: Val::Int(0),
@@ -10962,6 +10978,7 @@ mod tests {
                             crate::builtins::BuiltinMethod::Len,
                             crate::builtins::BuiltinArgs::None,
                         ),
+                        optional: false,
                     },
                     BodyKernel::Compose {
                         first: Box::new(BodyKernel::NestedPlan(Arc::new(
@@ -10973,6 +10990,7 @@ mod tests {
                                 crate::builtins::BuiltinMethod::Len,
                                 crate::builtins::BuiltinArgs::None,
                             ),
+                            optional: false,
                         }),
                     },
                 ]

@@ -1021,6 +1021,7 @@ impl Stage {
                 return BodyKernel::BuiltinCall {
                     receiver: Box::new(BodyKernel::Current),
                     call: call.clone(),
+                    optional: false,
                 };
             }
         }
@@ -2021,6 +2022,7 @@ fn trailing_projection_kernel(stage: &Stage, kernel: Option<&BodyKernel>) -> Opt
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
                 call: call.clone(),
+                optional: false,
             })
         }
         _ => None,

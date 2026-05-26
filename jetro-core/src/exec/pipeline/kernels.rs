@@ -116,6 +116,8 @@ pub enum BodyKernel {
         receiver: Box<BodyKernel>,
         /// The resolved builtin method and its static arguments.
         call: BuiltinCall,
+        /// `true` for optional method calls, which return null on a null receiver.
+        optional: bool,
     },
     /// Chains two kernels: applies `first`, then feeds the result into `then`.
     Compose {
@@ -854,7 +856,8 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     },
                 };
             }
-            Step::Method(name, args) => {
+            Step::Method(name, args) | Step::OptMethod(name, args) => {
+                let optional = matches!(step, Step::OptMethod(_, _));
                 let Some(call) = BuiltinCall::from_literal_ast_args(name.as_str(), args) else {
                     return super::lower::try_decode_map_body(&nested_arg)
                         .map(|plan| {
@@ -883,6 +886,7 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                 receiver = BodyKernel::BuiltinCall {
                     receiver: Box::new(receiver),
                     call,
+                    optional,
                 };
             }
             Step::Index(index) => {
@@ -1071,7 +1075,7 @@ impl BodyKernel {
             Self::Current => Some(Vec::new()),
             Self::FieldRead(key) => Some(vec![Arc::clone(key)]),
             Self::FieldChain(keys) => Some(keys.iter().cloned().collect()),
-            Self::BuiltinCall { receiver, call } => view_result_field_path(receiver, call),
+            Self::BuiltinCall { receiver, call, .. } => view_result_field_path(receiver, call),
             Self::Compose { first, then } => {
                 let mut keys = first.field_path_keys()?;
                 keys.extend(then.field_path_keys()?);
@@ -1118,7 +1122,7 @@ impl BodyKernel {
 
     /// Returns metadata for `field_path.view_scalar_call()` kernels.
     pub(crate) fn path_scalar_call(&self) -> Option<PathScalarCall> {
-        let Self::BuiltinCall { receiver, call } = self else {
+        let Self::BuiltinCall { receiver, call, .. } = self else {
             return None;
         };
         if !call.is_direct_view_scalar_call() {
@@ -1132,7 +1136,7 @@ impl BodyKernel {
 
     /// Returns metadata for `array_selector[.suffix].view_scalar_call()` kernels.
     pub(crate) fn array_element_scalar_call(&self) -> Option<ArrayElementScalarCall> {
-        let Self::BuiltinCall { receiver, call } = self else {
+        let Self::BuiltinCall { receiver, call, .. } = self else {
             return None;
         };
         if !call.is_direct_view_scalar_call() {
@@ -1174,7 +1178,7 @@ impl BodyKernel {
             Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => {
                 FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
             }
-            Self::BuiltinCall { receiver, call } => object_key_call_field_demand(receiver, call)
+            Self::BuiltinCall { receiver, call, .. } => object_key_call_field_demand(receiver, call)
                 .unwrap_or_else(|| receiver.field_demand()),
             Self::Compose { first, then } => compose_field_demand(first, then),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
@@ -1322,7 +1326,7 @@ impl BodyKernel {
     pub(crate) fn is_view_native(&self) -> bool {
         match self {
             Self::Generic => false,
-            Self::BuiltinCall { receiver, call } => {
+            Self::BuiltinCall { receiver, call, .. } => {
                 receiver.is_view_native()
                     && (call.is_view_projection() || receiver.view_result_owned())
             }
@@ -1378,7 +1382,7 @@ impl BodyKernel {
 
     pub(crate) fn view_result_owned(&self) -> bool {
         match self {
-            Self::BuiltinCall { receiver, call } => {
+            Self::BuiltinCall { receiver, call, .. } => {
                 receiver.is_view_native() && call.view_projection_returns_owned()
             }
             Self::Compose { first, then } => first.is_view_native() && then.view_result_owned(),
@@ -2263,7 +2267,10 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             }
             Some(BodyKernel::FieldChain(keys.into()))
         }
-        [receiver @ .., Opcode::CallMethod(call)] if call.is_view_projection() => {
+        [receiver @ .., Opcode::CallMethod(call) | Opcode::CallOptMethod(call)]
+            if call.is_view_projection() =>
+        {
+            let optional = matches!(ops.last(), Some(Opcode::CallOptMethod(_)));
             let receiver = if receiver.is_empty() {
                 BodyKernel::Current
             } else {
@@ -2288,6 +2295,7 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             Some(BodyKernel::BuiltinCall {
                 receiver: Box::new(receiver),
                 call: builtin_call,
+                optional,
             })
         }
         _ => None,
@@ -2458,8 +2466,15 @@ fn eval_native_kernel_with_vm(
             eval_nested_array_count_native(source, predicate.as_deref(), item, vm)
         }
         BodyKernel::NestedPlan(plan) => plan.run(item.clone()),
-        BodyKernel::BuiltinCall { receiver, call } => {
+        BodyKernel::BuiltinCall {
+            receiver,
+            call,
+            optional,
+        } => {
             let recv = eval_native_kernel_with_vm(receiver, item, vm)?;
+            if *optional && recv.is_null() {
+                return Ok(Val::Null);
+            }
             call.try_apply(&recv)?
                 .ok_or_else(|| EvalError(format!("{:?}: unsupported receiver", call.method)))
         }
@@ -3624,13 +3639,23 @@ where
             let result = plan.run(item.materialize());
             result.ok().map(ViewKernelValue::Owned)
         }
-        BodyKernel::BuiltinCall { receiver, call } => {
+        BodyKernel::BuiltinCall {
+            receiver,
+            call,
+            optional,
+        } => {
             match eval_view_kernel_inner(receiver, item, vm)? {
+                ViewKernelValue::View(view) if *optional && matches!(view.scalar(), JsonView::Null) => {
+                    Some(ViewKernelValue::Owned(Val::Null))
+                }
                 ViewKernelValue::View(view) => {
                     match apply_view_projection(call.id(), &call.args, view)? {
                         ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
                         ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
                     }
+                }
+                ViewKernelValue::Owned(value) if *optional && value.is_null() => {
+                    Some(ViewKernelValue::Owned(Val::Null))
                 }
                 ViewKernelValue::Owned(value) => call
                     .try_apply(&value)
@@ -3899,6 +3924,7 @@ mod tests {
         BodyKernel::BuiltinCall {
             receiver: Box::new(BodyKernel::Current),
             call: BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(key))),
+            optional: false,
         }
     }
 
@@ -3909,6 +3935,7 @@ mod tests {
                 method,
                 BuiltinArgs::StrVec(keys.iter().map(|key| Arc::from(*key)).collect()),
             ),
+            optional: false,
         }
     }
 
@@ -3916,6 +3943,7 @@ mod tests {
         BodyKernel::BuiltinCall {
             receiver: Box::new(BodyKernel::Current),
             call: BuiltinCall::new(method, BuiltinArgs::Str(Arc::from(path))),
+            optional: false,
         }
     }
 
@@ -4200,7 +4228,7 @@ mod tests {
                 BodyKernel::CmpLit { lhs, .. }
                     if matches!(
                         lhs.as_ref(),
-                        BodyKernel::BuiltinCall { receiver, call }
+                        BodyKernel::BuiltinCall { receiver, call, .. }
                             if call.method == BuiltinMethod::Len
                                 && matches!(
                                     receiver.as_ref(),
@@ -4328,6 +4356,26 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"name": "Ada", "missing": null, "active": true})
+        );
+    }
+
+    #[test]
+    fn optional_method_kernels_run_on_value_views() {
+        let expr = parse(r#"{name_len: name.len()?, missing_len: missing.len()?}"#)
+            .expect("parse optional method projection");
+        let program = Compiler::compile(&expr, "optional-method");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"name": "Ada"}));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("optional method output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"name_len": 3, "missing_len": null})
         );
     }
 
@@ -5151,6 +5199,7 @@ mod tests {
                 BuiltinMethod::Pick,
                 BuiltinArgs::StrVec(vec![Arc::from("title"), Arc::from("score")]),
             ),
+            optional: false,
         };
         let picked = eval_view_kernel(&pick, &view).and_then(|value| match value {
             ViewKernelValue::Owned(value) => Some(value),
@@ -5165,6 +5214,7 @@ mod tests {
                 BuiltinMethod::Omit,
                 BuiltinArgs::StrVec(vec![Arc::from("debug")]),
             ),
+            optional: false,
         };
         let omitted = eval_view_kernel(&omit, &view).and_then(|value| match value {
             ViewKernelValue::Owned(value) => Some(value),
@@ -5181,6 +5231,7 @@ mod tests {
             let kernel = BodyKernel::BuiltinCall {
                 receiver: Box::new(BodyKernel::Current),
                 call: BuiltinCall::new(method, BuiltinArgs::None),
+                optional: false,
             };
             assert!(matches!(
                 eval_view_kernel(&kernel, &view),

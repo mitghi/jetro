@@ -1095,7 +1095,7 @@ mod tests {
             BodyKernel::CmpLit { lhs, .. }
                 if matches!(
                     lhs.as_ref(),
-                    BodyKernel::BuiltinCall { receiver, call }
+                    BodyKernel::BuiltinCall { receiver, call, .. }
                         if view_scalar_projection(call.id())
                             && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
                 )
@@ -1109,7 +1109,7 @@ mod tests {
 
         assert!(matches!(
             &p.stage_kernels[0],
-            BodyKernel::BuiltinCall { receiver, call }
+            BodyKernel::BuiltinCall { receiver, call, .. }
                 if view_scalar_projection(call.id())
                     && call.method == BuiltinMethod::StartsWith
                     && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
@@ -1123,7 +1123,7 @@ mod tests {
 
         assert!(matches!(
             &p.stage_kernels[0],
-            BodyKernel::BuiltinCall { receiver, call }
+            BodyKernel::BuiltinCall { receiver, call, .. }
                 if view_scalar_projection(call.id())
                     && call.method == BuiltinMethod::EndsWith
                     && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
@@ -1137,7 +1137,7 @@ mod tests {
 
         assert!(matches!(
             &p.stage_kernels[0],
-            BodyKernel::BuiltinCall { receiver, call }
+            BodyKernel::BuiltinCall { receiver, call, .. }
                 if view_scalar_projection(call.id())
                     && call.method == BuiltinMethod::Matches
                     && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
@@ -1155,7 +1155,7 @@ mod tests {
             BodyKernel::CmpLit { lhs, .. }
                 if matches!(
                     lhs.as_ref(),
-                    BodyKernel::BuiltinCall { receiver, call }
+                    BodyKernel::BuiltinCall { receiver, call, .. }
                         if view_scalar_projection(call.id())
                             && call.method == BuiltinMethod::IndexOf
                             && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "name")
@@ -1170,7 +1170,7 @@ mod tests {
 
         assert!(matches!(
             &p.stage_kernels[0],
-            BodyKernel::BuiltinCall { receiver, call }
+            BodyKernel::BuiltinCall { receiver, call, .. }
                 if view_scalar_projection(call.id())
                     && call.method == BuiltinMethod::IsNumeric
                     && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "code")
@@ -1187,7 +1187,7 @@ mod tests {
             BodyKernel::CmpLit { lhs, .. }
                 if matches!(
                     lhs.as_ref(),
-                    BodyKernel::BuiltinCall { receiver, call }
+                    BodyKernel::BuiltinCall { receiver, call, .. }
                         if view_scalar_projection(call.id())
                             && call.method == BuiltinMethod::ByteLen
                             && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "code")
@@ -1205,7 +1205,7 @@ mod tests {
             BodyKernel::CmpLit { lhs, .. }
                 if matches!(
                     lhs.as_ref(),
-                    BodyKernel::BuiltinCall { receiver, call }
+                    BodyKernel::BuiltinCall { receiver, call, .. }
                         if view_scalar_projection(call.id())
                             && call.method == BuiltinMethod::Abs
                             && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "score")
@@ -1223,7 +1223,7 @@ mod tests {
             BodyKernel::CmpLit { lhs, .. }
                 if matches!(
                     lhs.as_ref(),
-                    BodyKernel::BuiltinCall { receiver, call }
+                    BodyKernel::BuiltinCall { receiver, call, .. }
                         if view_scalar_projection(call.id())
                             && call.method == BuiltinMethod::Round
                             && matches!(receiver.as_ref(), BodyKernel::FieldRead(k) if k.as_ref() == "score")
