@@ -202,6 +202,11 @@ pub enum BodyKernel {
         then_: Box<BodyKernel>,
         else_: Box<BodyKernel>,
     },
+    /// Error/null fallback over view-native expressions.
+    TryDefault {
+        body: Box<BodyKernel>,
+        default: Box<BodyKernel>,
+    },
     /// Reads a single field and compares it to a literal in one fused step.
     FieldCmpLit(Arc<str>, crate::parse::ast::BinOp, Val),
     /// Traverses a field chain and compares the result to a literal in one fused step.
@@ -1059,6 +1064,18 @@ impl BodyKernel {
                     }
                 }
             }
+            Expr::Try { body, default } => {
+                let body = Self::classify_expr(body);
+                let default = Self::classify_expr(default);
+                if matches!(body, Self::Generic) || matches!(default, Self::Generic) {
+                    Self::Generic
+                } else {
+                    Self::TryDefault {
+                        body: Box::new(body),
+                        default: Box::new(default),
+                    }
+                }
+            }
             Expr::Chain(base, steps) => classify_chain_expr(base, steps),
             Expr::Match { .. } => {
                 let program = crate::compile::compiler::Compiler::compile(expr, "<match-kernel>");
@@ -1201,6 +1218,7 @@ impl BodyKernel {
                 .field_demand()
                 .merge(then_.field_demand())
                 .merge(else_.field_demand()),
+            Self::TryDefault { body, default } => body.field_demand().merge(default.field_demand()),
             Self::FString(fstring) => {
                 fstring
                     .parts
@@ -1275,6 +1293,10 @@ impl BodyKernel {
                     || then_.mentions_any_field_like_ident(names)
                     || else_.mentions_any_field_like_ident(names)
             }
+            Self::TryDefault { body, default } => {
+                body.mentions_any_field_like_ident(names)
+                    || default.mentions_any_field_like_ident(names)
+            }
             Self::FString(fstring) => fstring.parts.iter().any(|part| match part {
                 FStringKernelPart::Lit(_) => false,
                 FStringKernelPart::Interp(kernel) => kernel.mentions_any_field_like_ident(names),
@@ -1348,6 +1370,7 @@ impl BodyKernel {
             Self::IfElse { cond, then_, else_ } => {
                 cond.is_view_native() && then_.is_view_native() && else_.is_view_native()
             }
+            Self::TryDefault { body, default } => body.is_view_native() && default.is_view_native(),
             Self::Object(object) => object.entries.iter().all(|entry| {
                 entry.key.is_view_native()
                     && entry.value.is_view_native()
@@ -1411,6 +1434,9 @@ impl BodyKernel {
             | Self::FieldCmpLit(_, _, _)
             | Self::FieldChainCmpLit(_, _, _) => true,
             Self::Coalesce { lhs, rhs } => lhs.view_result_owned() && rhs.view_result_owned(),
+            Self::TryDefault { body, default } => {
+                body.view_result_owned() && default.view_result_owned()
+            }
             Self::Current
             | Self::FieldRead(_)
             | Self::FieldChain(_)
@@ -1746,6 +1772,20 @@ impl BodyKernel {
                         cond: Box::new(cond),
                         then_: Box::new(then_),
                         else_: Box::new(else_),
+                    };
+                }
+            }
+            [Opcode::TryExpr { body, default }] => {
+                let body = BodyKernel::classify(body);
+                let default = BodyKernel::classify(default);
+                if !matches!(body, BodyKernel::Generic)
+                    && !matches!(default, BodyKernel::Generic)
+                    && body.is_view_native()
+                    && default.is_view_native()
+                {
+                    return Self::TryDefault {
+                        body: Box::new(body),
+                        default: Box::new(default),
                     };
                 }
             }
@@ -2566,6 +2606,11 @@ fn eval_native_kernel_with_vm(
                 eval_native_kernel_with_vm(else_, item, vm)
             }
         }
+        BodyKernel::TryDefault { body, default } => match eval_native_kernel_with_vm(body, item, vm)
+        {
+            Ok(value) if !value.is_null() => Ok(value),
+            Ok(_) | Err(_) => eval_native_kernel_with_vm(default, item, vm),
+        },
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -3826,6 +3871,17 @@ where
                 eval_view_kernel_inner(else_, item, vm)
             }
         }
+        BodyKernel::TryDefault { body, default } => {
+            match eval_view_kernel_inner(body, item, vm) {
+                Some(ViewKernelValue::View(view)) if !matches!(view.scalar(), JsonView::Null) => {
+                    Some(ViewKernelValue::View(view))
+                }
+                Some(ViewKernelValue::Owned(value)) if !value.is_null() => {
+                    Some(ViewKernelValue::Owned(value))
+                }
+                Some(_) | None => eval_view_kernel_inner(default, item, vm),
+            }
+        }
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
             Some(ViewKernelValue::Owned(Val::Bool(
@@ -4376,6 +4432,26 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"name_len": 3, "missing_len": null})
+        );
+    }
+
+    #[test]
+    fn try_default_kernels_run_on_value_views() {
+        let expr = parse(r#"{label: try nickname else name, bonus: try bonus else 0}"#)
+            .expect("parse try default projection");
+        let program = Compiler::compile(&expr, "try-default");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"name": "Ada", "nickname": null}));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("try default output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"label": "Ada", "bonus": 0})
         );
     }
 

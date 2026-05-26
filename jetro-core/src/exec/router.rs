@@ -2613,6 +2613,29 @@ mod tests {
     }
 
     #[test]
+    fn view_try_default_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"name":"Ada","nickname":null},{"name":"Grace","nickname":"g","bonus":7}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.map({label: try nickname else name, bonus: try bonus else 0})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"label": "Ada", "bonus": 0},
+                {"label": "g", "bonus": 7}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_dynamic_index_projection_stays_tape_streamed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"obj":{"a":"alpha","b":"beta"},"key":"b","items":[10,20,30],"i":1},{"obj":{"x":"ex","y":"why"},"key":"x","items":[3,4],"i":0}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
