@@ -344,6 +344,7 @@ fn adjust_facts_for_backend_plan(
 fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
     try_lower_structural_op(expr)
         .map(|node| builder.push(node))
+        .or_else(|| try_lower_pipeline_path_suffix(builder, expr))
         .or_else(|| try_lower_pipeline(builder, expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_root_path(expr).map(|node| builder.push(node)))
         .or_else(|| try_lower_implicit_root_path(builder, expr).map(|node| builder.push(node)))
@@ -351,7 +352,6 @@ fn lower_expr(builder: &mut PlanBuilder, expr: &Expr) -> NodeId {
         .or_else(|| try_lower_static_root_path_pipeline(builder, expr))
         .or_else(|| try_lower_receiver_pipeline(builder, expr))
         .or_else(|| try_lower_structural_chain_prefix(builder, expr))
-        .or_else(|| try_lower_pipeline_path_suffix(builder, expr))
         .or_else(|| try_lower_chain(builder, expr))
         .or_else(|| try_lower_scalar(builder, expr))
         .or_else(|| try_lower_structural(builder, expr))
@@ -465,10 +465,6 @@ fn try_lower_pipeline_path_suffix(builder: &mut PlanBuilder, expr: &Expr) -> Opt
         }
         let (source, mut body) = pipeline.into_source_body();
         mask_active_local_stage_kernels(&mut body, builder);
-        if push_select_suffix_projection(&mut body, &suffix) {
-            let node = pipeline_parts_to_plan_node(source, body)?;
-            return Some(builder.push(node));
-        }
         let node = pipeline_parts_to_plan_node(source, body)?;
         builder.push(node)
     } else if let Some((source, mut body)) = static_root_path_pipeline_parts(&prefix) {
@@ -523,7 +519,17 @@ fn static_suffix_projection(suffix: &[PhysicalChainStep]) -> Option<(Expr, BodyK
         return None;
     }
     let expr = Expr::Chain(Box::new(Expr::Current), steps);
-    let kernel = BodyKernel::classify_expr(&expr);
+    let field_chain: Option<Arc<[Arc<str>]>> = suffix
+        .iter()
+        .map(|step| match step {
+            PhysicalChainStep::Field(key) => Some(Arc::clone(key)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Into::into);
+    let kernel = field_chain
+        .map(BodyKernel::FieldChain)
+        .unwrap_or_else(|| BodyKernel::classify_expr(&expr));
     kernel.is_view_native().then_some((expr, kernel))
 }
 
@@ -1229,6 +1235,9 @@ fn static_root_path_pipeline_parts(expr: &Expr) -> Option<(PipelinePlanSource, P
         return None;
     }
     if !matches!(steps[path_end], Step::Method(_, _) | Step::OptMethod(_, _)) {
+        return None;
+    }
+    if analysis::starts_with_direct_view_projection(&steps[path_end..]) {
         return None;
     }
     let body = Pipeline::lower_body_from_steps(&steps[path_end..])?;

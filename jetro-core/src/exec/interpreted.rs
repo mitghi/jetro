@@ -21,6 +21,33 @@ use crate::ir::physical::{
 use crate::parse::ast::BinOp;
 use crate::{Jetro, VM};
 
+fn plan_node_kind(node: &PlanNode) -> &'static str {
+    match node {
+        PlanNode::Literal(_) => "literal",
+        PlanNode::Root => "root",
+        PlanNode::Current => "current",
+        PlanNode::Ident(_) => "ident",
+        PlanNode::Local(_) => "local",
+        PlanNode::Pipeline { .. } => "pipeline",
+        PlanNode::Structural { .. } => "structural",
+        PlanNode::RootPath(_) => "root_path",
+        PlanNode::Chain { .. } => "chain",
+        PlanNode::Call { .. } => "call",
+        PlanNode::Object(_) => "object",
+        PlanNode::Array(_) => "array",
+        PlanNode::UnaryNeg(_) => "unary_neg",
+        PlanNode::Not(_) => "not",
+        PlanNode::Binary { .. } => "binary",
+        PlanNode::Kind { .. } => "kind",
+        PlanNode::Coalesce { .. } => "coalesce",
+        PlanNode::IfElse { .. } => "if_else",
+        PlanNode::Try { .. } => "try",
+        PlanNode::Let { .. } => "let",
+        PlanNode::UpdateBatch { .. } => "update_batch",
+        PlanNode::Vm(_) => "vm",
+    }
+}
+
 /// Entry point: constructs an `ExecCtx` and evaluates the plan DAG starting from `root_id`.
 #[cfg(test)]
 pub(crate) fn run(j: &Jetro, plan: &QueryPlan, root_id: NodeId) -> Result<Val, EvalError> {
@@ -84,8 +111,9 @@ impl ExecCtx<'_, '_> {
     fn eval(&mut self, id: NodeId) -> Result<Val, EvalError> {
         self.eval_fast(id).unwrap_or_else(|| {
             Err(EvalError(format!(
-                "no planned backend could execute physical node {}",
-                id.0
+                "no planned backend could execute physical node {} ({})",
+                id.0,
+                plan_node_kind(self.plan.node(id))
             )))
         })
     }
@@ -796,7 +824,7 @@ impl ExecCtx<'_, '_> {
                     cond,
                 } => {
                     if let Some(cond) = cond {
-                        let cond = match self.eval_fast(*cond)? {
+                        let cond = match self.eval(*cond) {
                             Ok(value) => value,
                             Err(err) => return Some(Err(err)),
                         };
@@ -804,7 +832,7 @@ impl ExecCtx<'_, '_> {
                             continue;
                         }
                     }
-                    let value = match self.eval_fast(*val)? {
+                    let value = match self.eval(*val) {
                         Ok(value) => value,
                         Err(err) => return Some(Err(err)),
                     };
@@ -814,18 +842,18 @@ impl ExecCtx<'_, '_> {
                     map.insert(Arc::clone(key), value);
                 }
                 PhysicalObjField::Dynamic { key, val } => {
-                    let key = match self.eval_fast(*key)? {
+                    let key = match self.eval(*key) {
                         Ok(value) => Arc::from(crate::util::val_to_key(&value).as_str()),
                         Err(err) => return Some(Err(err)),
                     };
-                    let value = match self.eval_fast(*val)? {
+                    let value = match self.eval(*val) {
                         Ok(value) => value,
                         Err(err) => return Some(Err(err)),
                     };
                     map.insert(key, value);
                 }
                 PhysicalObjField::Spread(expr) => {
-                    if let Val::Obj(other) = match self.eval_fast(*expr)? {
+                    if let Val::Obj(other) = match self.eval(*expr) {
                         Ok(value) => value,
                         Err(err) => return Some(Err(err)),
                     } {
@@ -836,7 +864,7 @@ impl ExecCtx<'_, '_> {
                     }
                 }
                 PhysicalObjField::SpreadDeep(expr) => {
-                    if let Val::Obj(other) = match self.eval_fast(*expr)? {
+                    if let Val::Obj(other) = match self.eval(*expr) {
                         Ok(value) => value,
                         Err(err) => return Some(Err(err)),
                     } {
@@ -952,12 +980,21 @@ impl ExecCtx<'_, '_> {
             if optional && matches!(view.scalar(), crate::util::JsonView::Null) {
                 return Some(Ok(Val::Null));
             }
-            apply_view_projection(call.id(), &call.args, view).map(|result| {
-                Ok(match result {
+            if let Some(result) = apply_view_projection(call.id(), &call.args, view.clone()) {
+                return Some(Ok(match result {
                     ViewProjectionResult::View(view) => view.materialize(),
                     ViewProjectionResult::Owned(value) => value,
+                }));
+            }
+            let receiver = view.materialize();
+            if optional && receiver.is_null() {
+                return Some(Ok(Val::Null));
+            }
+            Some(call.try_apply(&receiver).and_then(|result| {
+                result.ok_or_else(|| {
+                    EvalError(format!("{:?}: builtin unsupported", call.method))
                 })
-            })
+            }))
         }
     }
 
