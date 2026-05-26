@@ -149,6 +149,13 @@ pub enum BodyKernel {
         /// Position to select from the child array.
         selector: ArraySelector,
     },
+    /// Materialises a slice of an array-like view without materialising the receiver row.
+    Slice {
+        array: Box<BodyKernel>,
+        from: Option<i64>,
+        to: Option<i64>,
+        step: Option<i64>,
+    },
     /// Selects an object field or array index using a view-native key expression.
     DynIndex {
         receiver: Box<BodyKernel>,
@@ -902,6 +909,17 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     key: Box::new(key),
                 };
             }
+            Step::Slice(from, to, step) => {
+                if !receiver.is_view_native() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::Slice {
+                    array: Box::new(receiver),
+                    from: *from,
+                    to: *to,
+                    step: *step,
+                };
+            }
             _ => return BodyKernel::Generic,
         }
     }
@@ -1162,6 +1180,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ArraySelect { array, .. } => array.field_demand(),
+            Self::Slice { array, .. } => array.field_demand(),
             Self::DynIndex { receiver, key } => receiver.field_demand().merge(key.field_demand()),
             Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) | Self::Or(predicates) => predicates
@@ -1231,6 +1250,7 @@ impl BodyKernel {
                 lhs.mentions_any_field_like_ident(names) || rhs.mentions_any_field_like_ident(names)
             }
             Self::ArraySelect { array, .. } => array.mentions_any_field_like_ident(names),
+            Self::Slice { array, .. } => array.mentions_any_field_like_ident(names),
             Self::DynIndex { receiver, key } => {
                 receiver.mentions_any_field_like_ident(names)
                     || key.mentions_any_field_like_ident(names)
@@ -1310,6 +1330,7 @@ impl BodyKernel {
             Self::CmpLit { lhs, .. } => lhs.is_view_native(),
             Self::Binary { lhs, rhs, .. } => lhs.is_view_native() && rhs.is_view_native(),
             Self::ArraySelect { array, .. } => array.is_view_native(),
+            Self::Slice { array, .. } => array.is_view_native(),
             Self::DynIndex { receiver, key } => receiver.is_view_native() && key.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
@@ -1373,6 +1394,7 @@ impl BodyKernel {
             | Self::CmpLit { .. }
             | Self::Binary { .. }
             | Self::ArraySelect { .. }
+            | Self::Slice { .. }
             | Self::Match { .. }
             | Self::And(_)
             | Self::Or(_)
@@ -1470,6 +1492,24 @@ impl BodyKernel {
                     return Self::DynIndex {
                         receiver: Box::new(receiver),
                         key: Box::new(key),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::GetSlice(from, to, step)] => {
+                let array = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<slice-receiver>",
+                    ))
+                };
+                if !matches!(array, BodyKernel::Generic) && array.is_view_native() {
+                    return Self::Slice {
+                        array: Box::new(array),
+                        from: *from,
+                        to: *to,
+                        step: *step,
                     };
                 }
             }
@@ -2436,6 +2476,15 @@ fn eval_native_kernel_with_vm(
             let array = eval_native_kernel_with_vm(array, item, vm)?;
             Ok(eval_array_select_native(&array, *selector))
         }
+        BodyKernel::Slice {
+            array,
+            from,
+            to,
+            step,
+        } => {
+            let array = eval_native_kernel_with_vm(array, item, vm)?;
+            Ok(eval_slice_native(&array, *from, *to, *step))
+        }
         BodyKernel::DynIndex { receiver, key } => {
             let receiver = eval_native_kernel_with_vm(receiver, item, vm)?;
             let key = eval_native_kernel_with_vm(key, item, vm)?;
@@ -2849,6 +2898,82 @@ where
     }
 }
 
+fn eval_slice_native(array: &Val, from: Option<i64>, to: Option<i64>, step: Option<i64>) -> Val {
+    let Some(items) = array.as_vals() else {
+        return Val::Null;
+    };
+    Val::arr(slice_indices(items.len(), from, to, step).map(|idx| items[idx].clone()).collect())
+}
+
+fn eval_slice_view<'a, V>(
+    array: V,
+    from: Option<i64>,
+    to: Option<i64>,
+    step: Option<i64>,
+) -> Option<Val>
+where
+    V: ValueView<'a> + 'a,
+{
+    let len = array.array_len()?;
+    let mut out = Vec::new();
+    for idx in slice_indices(len, from, to, step) {
+        out.push(view_kernel_view_to_owned(array.array_child(idx)));
+    }
+    Some(Val::arr(out))
+}
+
+fn slice_indices(
+    len: usize,
+    from: Option<i64>,
+    to: Option<i64>,
+    step: Option<i64>,
+) -> impl Iterator<Item = usize> {
+    let len_i = len as i64;
+    let step = step.unwrap_or(1);
+    let mut out = Vec::new();
+    if step == 0 || len == 0 {
+        return out.into_iter();
+    }
+    if step > 0 {
+        let end_default = len_i;
+        let mut i = resolve_slice_idx(from.unwrap_or(0), len_i).min(len_i);
+        let end = resolve_slice_idx(to.unwrap_or(end_default), len_i).min(len_i);
+        while i < end {
+            out.push(i as usize);
+            i += step;
+        }
+    } else {
+        let s_raw = from.unwrap_or(len_i - 1);
+        let mut i = if s_raw < 0 {
+            (len_i + s_raw).max(-1)
+        } else {
+            s_raw.min(len_i - 1)
+        };
+        let e_raw = to.unwrap_or(-1);
+        let end = if e_raw < 0 && e_raw != -1 {
+            (len_i + e_raw).max(-1)
+        } else if e_raw == -1 && to.is_none() {
+            -1
+        } else {
+            e_raw
+        };
+        while i > end && i >= 0 {
+            out.push(i as usize);
+            i += step;
+        }
+    }
+    out.into_iter()
+}
+
+#[inline]
+fn resolve_slice_idx(idx: i64, len: i64) -> i64 {
+    if idx < 0 {
+        (len + idx).max(0)
+    } else {
+        idx
+    }
+}
+
 fn eval_nested_array_reducer_view<'a, V>(
     source: &BodyKernel,
     predicate: Option<&BodyKernel>,
@@ -3023,6 +3148,7 @@ where
                 }
             }
         }
+        BodyKernel::Slice { .. } => None,
         BodyKernel::DynIndex { receiver, key } => {
             let key = view_kernel_value_to_owned(eval_view_kernel_inner(key, item, vm)?);
             match eval_view_kernel_inner(receiver, item, vm)? {
@@ -3550,6 +3676,18 @@ where
                 )),
             }
         }
+        BodyKernel::Slice {
+            array,
+            from,
+            to,
+            step,
+        } => match eval_view_kernel_inner(array, item, vm)? {
+            ViewKernelValue::View(view) => eval_slice_view(view, *from, *to, *step)
+                .map(ViewKernelValue::Owned),
+            ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(eval_slice_native(
+                &value, *from, *to, *step,
+            ))),
+        },
         BodyKernel::DynIndex { receiver, key } => {
             let key = view_kernel_value_to_owned(eval_view_kernel_inner(key, item, vm)?);
             match eval_view_kernel_inner(receiver, item, vm)? {
@@ -4232,6 +4370,30 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"picked": "beta", "numbered": 20})
+        );
+    }
+
+    #[test]
+    fn slice_kernels_run_on_value_views() {
+        let expr = parse(r#"{prefix: items[:2], middle: items[1:4:2], reverse: items[::-1]}"#)
+            .expect("parse slice projection");
+        let program = Compiler::compile(&expr, "slice");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"items": [10, 20, 30, 40]}));
+        let out =
+            owned_value(eval_view_kernel(&kernel, &ValView::new(&value))).expect("slice output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({
+                "prefix": [10, 20],
+                "middle": [20, 40],
+                "reverse": [40, 30, 20, 10]
+            })
         );
     }
 
