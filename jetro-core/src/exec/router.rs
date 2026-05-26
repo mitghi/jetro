@@ -2551,14 +2551,14 @@ mod tests {
         j.reset_tape_materialized_subtrees();
 
         let out = j
-            .collect(r#"$.data.map({id: id as string, ok: score as bool, tags: tag as array})"#)
+            .collect(r#"$.data.map({id: id as string, ok: score as bool, tags: tag as array, gone: tag as null})"#)
             .unwrap();
 
         assert_eq!(
             out,
             json!([
-                {"id": "42", "ok": true, "tags": ["sf"]},
-                {"id": "7", "ok": false, "tags": ["hugo"]}
+                {"id": "42", "ok": true, "tags": ["sf"], "gone": null},
+                {"id": "7", "ok": false, "tags": ["hugo"], "gone": null}
             ])
         );
         assert!(!j.root_val_is_materialized());

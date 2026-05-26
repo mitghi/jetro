@@ -3036,7 +3036,10 @@ fn json_view_matches_kind(view: JsonView<'_>, ty: crate::parse::ast::KindType) -
 #[inline]
 fn safe_view_cast_type(ty: crate::parse::ast::CastType) -> bool {
     use crate::parse::ast::CastType;
-    matches!(ty, CastType::Str | CastType::Bool | CastType::Array)
+    matches!(
+        ty,
+        CastType::Str | CastType::Bool | CastType::Array | CastType::Null
+    )
 }
 
 fn eval_numeric_binary(
@@ -4056,7 +4059,8 @@ mod tests {
 
     #[test]
     fn safe_cast_kernels_run_on_value_views() {
-        let expr = parse(r#"{id: id as string, ok: score as bool, tags: tag as array}"#)
+        let expr =
+            parse(r#"{id: id as string, ok: score as bool, tags: tag as array, gone: tag as null}"#)
             .expect("parse safe cast projection");
         let program = Compiler::compile(&expr, "safe-cast");
         let kernel = BodyKernel::classify(&program);
@@ -4070,7 +4074,7 @@ mod tests {
 
         assert_eq!(
             serde_json::Value::from(out),
-            serde_json::json!({"id": "42", "ok": true, "tags": ["sf"]})
+            serde_json::json!({"id": "42", "ok": true, "tags": ["sf"], "gone": null})
         );
     }
 
