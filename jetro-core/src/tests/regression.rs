@@ -969,6 +969,9 @@ mod tests {
 
         let r = vm_query("$.store.books{price > 10}.first()", &doc).unwrap();
         assert_eq!(r["title"], json!("Dune"));
+
+        let r = vm_query("$.store.books{price > 10}?", &doc).unwrap();
+        assert_eq!(r["title"], json!("Dune"));
     }
 
     #[test]

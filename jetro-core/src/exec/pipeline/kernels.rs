@@ -16,7 +16,7 @@ use crate::builtins::{BuiltinArgs, BuiltinArraySelector, BuiltinCall, BuiltinExp
 use crate::data::context::EvalError;
 use crate::data::value::Val;
 use crate::data::view::{scalar_view_to_owned_val, write_json_view, ValView, ValueView};
-use crate::parse::ast::{Expr, ObjField, Step};
+use crate::parse::ast::{Expr, ObjField, QuantifierKind, Step};
 use crate::plan::demand::{FieldDemand, FieldSet};
 use crate::util::JsonView;
 
@@ -175,6 +175,11 @@ pub enum BodyKernel {
     },
     /// Recursively collects every descendant node inside a view-native source.
     DescendAll {
+        source: Box<BodyKernel>,
+    },
+    /// Collapses an array-like sub-kernel to its first element without
+    /// materialising the receiver row.
+    QuantifierFirst {
         source: Box<BodyKernel>,
     },
     /// Runs a compiled pattern match against a view-native scrutinee.
@@ -973,6 +978,15 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     source: Box::new(receiver),
                 };
             }
+            Step::Quantifier(QuantifierKind::First) => {
+                if !receiver.is_view_native() {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::QuantifierFirst {
+                    source: Box::new(receiver),
+                };
+            }
+            Step::Quantifier(QuantifierKind::One) => return BodyKernel::Generic,
             _ => return BodyKernel::Generic,
         }
     }
@@ -1252,7 +1266,9 @@ impl BodyKernel {
             Self::InlineFilter { source, predicate } => {
                 nested_array_field_demand(source, Some(predicate), None)
             }
-            Self::Descendant { source, .. } | Self::DescendAll { source } => source.field_demand(),
+            Self::Descendant { source, .. }
+            | Self::DescendAll { source }
+            | Self::QuantifierFirst { source } => source.field_demand(),
             Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
@@ -1331,7 +1347,9 @@ impl BodyKernel {
                 source.mentions_any_field_like_ident(names)
                     || predicate.mentions_any_field_like_ident(names)
             }
-            Self::Descendant { source, .. } | Self::DescendAll { source } => {
+            Self::Descendant { source, .. }
+            | Self::DescendAll { source }
+            | Self::QuantifierFirst { source } => {
                 source.mentions_any_field_like_ident(names)
             }
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
@@ -1418,7 +1436,9 @@ impl BodyKernel {
             Self::InlineFilter { source, predicate } => {
                 source.is_view_native() && predicate.is_view_native()
             }
-            Self::Descendant { source, .. } | Self::DescendAll { source } => source.is_view_native(),
+            Self::Descendant { source, .. }
+            | Self::DescendAll { source }
+            | Self::QuantifierFirst { source } => source.is_view_native(),
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
@@ -1505,6 +1525,7 @@ impl BodyKernel {
             | Self::FieldRead(_)
             | Self::FieldChain(_)
             | Self::DynIndex { .. }
+            | Self::QuantifierFirst { .. }
             | Self::Generic => false,
         }
     }
@@ -1680,6 +1701,21 @@ impl BodyKernel {
                 };
                 if !matches!(source, BodyKernel::Generic) && source.is_view_native() {
                     return Self::DescendAll {
+                        source: Box::new(source),
+                    };
+                }
+            }
+            [receiver @ .., Opcode::Quantifier(QuantifierKind::First)] => {
+                let source = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<first-quantifier-source>",
+                    ))
+                };
+                if !matches!(source, BodyKernel::Generic) && source.is_view_native() {
+                    return Self::QuantifierFirst {
                         source: Box::new(source),
                     };
                 }
@@ -2722,6 +2758,10 @@ fn eval_native_kernel_with_vm(
             collect_all_native(&source, &mut out);
             Ok(Val::arr(out))
         }
+        BodyKernel::QuantifierFirst { source } => {
+            let source = eval_native_kernel_with_vm(source, item, vm)?;
+            Ok(eval_quantifier_first_native(source))
+        }
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -3166,6 +3206,24 @@ where
     };
     idx.map(|idx| array.array_child(idx))
         .unwrap_or_else(|| array.index(-1))
+}
+
+fn eval_quantifier_first_native(value: Val) -> Val {
+    match value {
+        Val::Arr(items) => items.first().cloned().unwrap_or(Val::Null),
+        other => other,
+    }
+}
+
+fn eval_quantifier_first_view<'a, V>(value: V) -> V
+where
+    V: ValueView<'a> + 'a,
+{
+    match value.array_len() {
+        Some(0) => value.index(-1),
+        Some(_) => value.array_child(0),
+        None => value,
+    }
 }
 
 fn eval_dyn_index_native(receiver: &Val, key: &Val) -> Val {
@@ -4050,6 +4108,14 @@ where
                 let mut out = Vec::new();
                 collect_all_native(&value, &mut out);
                 Some(ViewKernelValue::Owned(Val::arr(out)))
+            }
+        },
+        BodyKernel::QuantifierFirst { source } => match eval_view_kernel_inner(source, item, vm)? {
+            ViewKernelValue::View(view) => {
+                Some(ViewKernelValue::View(eval_quantifier_first_view(view)))
+            }
+            ViewKernelValue::Owned(value) => {
+                Some(ViewKernelValue::Owned(eval_quantifier_first_native(value)))
             }
         },
         BodyKernel::Match {

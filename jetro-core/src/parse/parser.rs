@@ -901,8 +901,9 @@ fn parse_postfix_expr(pair: Pair<Rule>) -> Expr {
                         }
                     }
                     _ => {
-                        // No suitable predecessor; discard the quantifier to
-                        // avoid silently changing semantics.
+                        if !steps.is_empty() || !matches!(base, Expr::Ident(_)) {
+                            steps.push(Step::Quantifier(QuantifierKind::First));
+                        }
                     }
                 }
             }

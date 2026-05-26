@@ -756,6 +756,22 @@ mod tests {
         assert!(!j.root_val_is_materialized());
         assert_eq!(j.tape_materialized_subtrees(), 0);
     }
+
+    #[test]
+    fn view_inline_filter_first_quantifier_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"books":[{"scores":[1,12,30]},{"scores":[2,3]},{"scores":[30,40]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j.collect(r#"$.books.map(scores{@ > 10}?)"#).unwrap();
+
+        assert_eq!(out, json!([12, null, 30]));
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
     #[test]
     fn view_object_key_projection_last_uses_tape_native_helpers() {
         let j = Jetro::from_bytes(
