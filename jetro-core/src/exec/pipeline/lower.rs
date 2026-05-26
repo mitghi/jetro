@@ -349,7 +349,7 @@ pub(crate) fn compile_sort_spec(
     let key_arg = Arg::Pos(key_expr.clone());
     Some((
         SortSpec::keyed(compile_subexpr(&key_arg)?, descending),
-        Some(Arc::new(expr.clone())),
+        Some(Arc::new(key_expr)),
     ))
 }
 

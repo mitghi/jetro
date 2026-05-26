@@ -3196,6 +3196,7 @@ mod tests {
             (BuiltinMethod::GroupBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::CountBy, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::IndexBy, BuiltinRuntimeHook::Barrier),
+            (BuiltinMethod::Partition, BuiltinRuntimeHook::Barrier),
             (BuiltinMethod::Split, BuiltinRuntimeHook::StreamAndBarrier),
             (BuiltinMethod::Unique, BuiltinRuntimeHook::StreamAndBarrier),
             (
