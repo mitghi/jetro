@@ -163,6 +163,11 @@ pub enum BodyKernel {
         receiver: Box<BodyKernel>,
         key: Box<BodyKernel>,
     },
+    /// Filters an array-like sub-kernel with a view-native child predicate.
+    InlineFilter {
+        source: Box<BodyKernel>,
+        predicate: Box<BodyKernel>,
+    },
     /// Runs a compiled pattern match against a view-native scrutinee.
     Match {
         /// Kernel that yields the match scrutinee.
@@ -929,6 +934,19 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
                     step: *step,
                 };
             }
+            Step::InlineFilter(expr) => {
+                let predicate = BodyKernel::classify_expr(expr);
+                if !receiver.is_view_native()
+                    || matches!(predicate, BodyKernel::Generic)
+                    || !predicate.is_view_native()
+                {
+                    return BodyKernel::Generic;
+                }
+                receiver = BodyKernel::InlineFilter {
+                    source: Box::new(receiver),
+                    predicate: Box::new(predicate),
+                };
+            }
             _ => return BodyKernel::Generic,
         }
     }
@@ -1195,14 +1213,19 @@ impl BodyKernel {
             Self::FieldChain(keys) | Self::FieldChainCmpLit(keys, _, _) => {
                 FieldDemand::Fields(FieldSet::chain(Arc::clone(keys)))
             }
-            Self::BuiltinCall { receiver, call, .. } => object_key_call_field_demand(receiver, call)
-                .unwrap_or_else(|| receiver.field_demand()),
+            Self::BuiltinCall { receiver, call, .. } => {
+                object_key_call_field_demand(receiver, call)
+                    .unwrap_or_else(|| receiver.field_demand())
+            }
             Self::Compose { first, then } => compose_field_demand(first, then),
             Self::CmpLit { lhs, .. } => lhs.field_demand(),
             Self::Binary { lhs, rhs, .. } => lhs.field_demand().merge(rhs.field_demand()),
             Self::ArraySelect { array, .. } => array.field_demand(),
             Self::Slice { array, .. } => array.field_demand(),
             Self::DynIndex { receiver, key } => receiver.field_demand().merge(key.field_demand()),
+            Self::InlineFilter { source, predicate } => {
+                nested_array_field_demand(source, Some(predicate), None)
+            }
             Self::Match { .. } => FieldDemand::Whole,
             Self::And(predicates) | Self::Or(predicates) => predicates
                 .iter()
@@ -1276,6 +1299,10 @@ impl BodyKernel {
             Self::DynIndex { receiver, key } => {
                 receiver.mentions_any_field_like_ident(names)
                     || key.mentions_any_field_like_ident(names)
+            }
+            Self::InlineFilter { source, predicate } => {
+                source.mentions_any_field_like_ident(names)
+                    || predicate.mentions_any_field_like_ident(names)
             }
             Self::Match { scrutinee, .. } => scrutinee.mentions_any_field_like_ident(names),
             Self::And(predicates) | Self::Or(predicates) => predicates
@@ -1358,6 +1385,9 @@ impl BodyKernel {
             Self::ArraySelect { array, .. } => array.is_view_native(),
             Self::Slice { array, .. } => array.is_view_native(),
             Self::DynIndex { receiver, key } => receiver.is_view_native() && key.is_view_native(),
+            Self::InlineFilter { source, predicate } => {
+                source.is_view_native() && predicate.is_view_native()
+            }
             Self::Match { scrutinee, .. } => scrutinee.is_view_native(),
             Self::And(predicates) | Self::Or(predicates) => {
                 predicates.iter().all(Self::is_view_native)
@@ -1415,6 +1445,7 @@ impl BodyKernel {
             | Self::Object(_)
             | Self::Array(_)
             | Self::ArraySpread(_)
+            | Self::InlineFilter { .. }
             | Self::NestedArrayReducer { .. }
             | Self::NestedArrayCount { .. }
             | Self::NestedPlan(_)
@@ -1473,6 +1504,13 @@ impl BodyKernel {
                 };
             }
         }
+        if let [Opcode::PushCurrent, lit_op, cmp_op] = ops {
+            if let Some(lit) = trivial_lit(lit_op) {
+                if let Some(op) = cmp_to_binop(cmp_op) {
+                    return Self::CurrentCmpLit(op, lit);
+                }
+            }
+        }
         match ops {
             [Opcode::Match(cm)] if match_is_receiver_local(cm) => {
                 let scrutinee = match &cm.scrutinee {
@@ -1525,6 +1563,24 @@ impl BodyKernel {
                     };
                 }
             }
+            [receiver @ .., Opcode::GetIndex(index)] => {
+                let array = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<index-receiver>",
+                    ))
+                };
+                if let Some(selector) = array_selector_from_index(*index) {
+                    if !matches!(array, BodyKernel::Generic) && array.is_view_native() {
+                        return Self::ArraySelect {
+                            array: Box::new(array),
+                            selector,
+                        };
+                    }
+                }
+            }
             [receiver @ .., Opcode::GetSlice(from, to, step)] => {
                 let array = if receiver.is_empty() {
                     BodyKernel::Current
@@ -1540,6 +1596,27 @@ impl BodyKernel {
                         from: *from,
                         to: *to,
                         step: *step,
+                    };
+                }
+            }
+            [receiver @ .., Opcode::InlineFilter(predicate)] => {
+                let source = if receiver.is_empty() {
+                    BodyKernel::Current
+                } else {
+                    BodyKernel::classify(&crate::vm::Program::new(
+                        receiver.to_vec(),
+                        "<inline-filter-source>",
+                    ))
+                };
+                let predicate = BodyKernel::classify(predicate);
+                if !matches!(source, BodyKernel::Generic)
+                    && !matches!(predicate, BodyKernel::Generic)
+                    && source.is_view_native()
+                    && predicate.is_view_native()
+                {
+                    return Self::InlineFilter {
+                        source: Box::new(source),
+                        predicate: Box::new(predicate),
                     };
                 }
             }
@@ -1740,10 +1817,8 @@ impl BodyKernel {
                 }
             }
             [lhs @ .., Opcode::CoalesceOp(rhs)] => {
-                let lhs = BodyKernel::classify(&crate::vm::Program::new(
-                    lhs.to_vec(),
-                    "<coalesce-lhs>",
-                ));
+                let lhs =
+                    BodyKernel::classify(&crate::vm::Program::new(lhs.to_vec(), "<coalesce-lhs>"));
                 let rhs = BodyKernel::classify(rhs);
                 if !matches!(lhs, BodyKernel::Generic)
                     && !matches!(rhs, BodyKernel::Generic)
@@ -1792,11 +1867,20 @@ impl BodyKernel {
             [Opcode::PushCurrent, Opcode::GetField(k) | Opcode::OptField(k)]
             | [Opcode::GetField(k) | Opcode::OptField(k)]
             | [Opcode::LoadIdent(k)] => return Self::FieldRead(k.clone()),
+            [Opcode::PushCurrent, lit_op, cmp_op] => {
+                if let Some(lit) = trivial_lit(lit_op) {
+                    if let Some(op) = cmp_to_binop(cmp_op) {
+                        return Self::CurrentCmpLit(op, lit);
+                    }
+                }
+            }
             [Opcode::PushCurrent, Opcode::FieldChain(fc)] | [Opcode::FieldChain(fc)] => {
                 return Self::FieldChain(fc.keys.clone())
             }
             [Opcode::LoadIdent(k1), rest @ ..]
-                if rest.iter().all(|o| matches!(o, Opcode::GetField(_) | Opcode::OptField(_))) =>
+                if rest
+                    .iter()
+                    .all(|o| matches!(o, Opcode::GetField(_) | Opcode::OptField(_))) =>
             {
                 let mut keys = vec![k1.clone()];
                 for o in rest {
@@ -1829,9 +1913,7 @@ impl BodyKernel {
                 }
             }
             let single_key = match &rest[0] {
-                Opcode::LoadIdent(k) | Opcode::GetField(k) | Opcode::OptField(k) => {
-                    Some(k.clone())
-                }
+                Opcode::LoadIdent(k) | Opcode::GetField(k) | Opcode::OptField(k) => Some(k.clone()),
                 _ => None,
             };
             if let Some(k) = single_key {
@@ -2296,7 +2378,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             ))
         }
         [Opcode::LoadIdent(k1), rest @ ..]
-            if rest.iter().all(|op| matches!(op, Opcode::GetField(_) | Opcode::OptField(_))) =>
+            if rest
+                .iter()
+                .all(|op| matches!(op, Opcode::GetField(_) | Opcode::OptField(_))) =>
         {
             let mut keys = Vec::with_capacity(rest.len() + 1);
             keys.push(k1.clone());
@@ -2549,6 +2633,19 @@ fn eval_native_kernel_with_vm(
             let key = eval_native_kernel_with_vm(key, item, vm)?;
             Ok(eval_dyn_index_native(&receiver, &key))
         }
+        BodyKernel::InlineFilter { source, predicate } => {
+            let source = eval_native_kernel_with_vm(source, item, vm)?;
+            let Some(items) = source.as_vals() else {
+                return Ok(Val::arr(Vec::new()));
+            };
+            let mut out = Vec::new();
+            for child in items.iter() {
+                if native_predicate_matches(Some(predicate), child, vm)? {
+                    out.push(child.clone());
+                }
+            }
+            Ok(Val::arr(out))
+        }
         BodyKernel::Match {
             scrutinee,
             compiled,
@@ -2606,11 +2703,12 @@ fn eval_native_kernel_with_vm(
                 eval_native_kernel_with_vm(else_, item, vm)
             }
         }
-        BodyKernel::TryDefault { body, default } => match eval_native_kernel_with_vm(body, item, vm)
-        {
-            Ok(value) if !value.is_null() => Ok(value),
-            Ok(_) | Err(_) => eval_native_kernel_with_vm(default, item, vm),
-        },
+        BodyKernel::TryDefault { body, default } => {
+            match eval_native_kernel_with_vm(body, item, vm) {
+                Ok(value) if !value.is_null() => Ok(value),
+                Ok(_) | Err(_) => eval_native_kernel_with_vm(default, item, vm),
+            }
+        }
         BodyKernel::FieldCmpLit(k, op, lit) => {
             let lhs = item.get_field(k.as_ref());
             Ok(Val::Bool(eval_cmp_op(&lhs, *op, lit)))
@@ -2712,6 +2810,23 @@ fn native_predicate_matches(
         )?)),
         None => Ok(true),
     }
+}
+
+fn eval_inline_filter_native_owned(
+    source: &Val,
+    predicate: &BodyKernel,
+    vm: &mut crate::vm::VM,
+) -> Result<Val, EvalError> {
+    let Some(items) = source.as_vals() else {
+        return Ok(Val::arr(Vec::new()));
+    };
+    let mut out = Vec::new();
+    for child in items.iter() {
+        if native_predicate_matches(Some(predicate), child, vm)? {
+            out.push(child.clone());
+        }
+    }
+    Ok(Val::arr(out))
 }
 
 fn eval_object_kernel<F>(object: &ObjectKernel, mut eval: F) -> Result<Val, EvalError>
@@ -2966,7 +3081,11 @@ fn eval_slice_native(array: &Val, from: Option<i64>, to: Option<i64>, step: Opti
     let Some(items) = array.as_vals() else {
         return Val::Null;
     };
-    Val::arr(slice_indices(items.len(), from, to, step).map(|idx| items[idx].clone()).collect())
+    Val::arr(
+        slice_indices(items.len(), from, to, step)
+            .map(|idx| items[idx].clone())
+            .collect(),
+    )
 }
 
 fn eval_slice_view<'a, V>(
@@ -3220,7 +3339,9 @@ where
                     ViewKernelValue::View(view) => numeric_from_json_view(view.scalar()),
                     ViewKernelValue::Owned(value) => numeric_from_val(&value),
                 },
-                ViewKernelValue::Owned(value) => numeric_from_val(&eval_dyn_index_native(&value, &key)),
+                ViewKernelValue::Owned(value) => {
+                    numeric_from_val(&eval_dyn_index_native(&value, &key))
+                }
             }
         }
         _ => None,
@@ -3298,7 +3419,10 @@ fn json_view_matches_kind(view: JsonView<'_>, ty: crate::parse::ast::KindType) -
         (view, ty),
         (JsonView::Null, KindType::Null)
             | (JsonView::Bool(_), KindType::Bool)
-            | (JsonView::Int(_) | JsonView::UInt(_) | JsonView::Float(_), KindType::Number)
+            | (
+                JsonView::Int(_) | JsonView::UInt(_) | JsonView::Float(_),
+                KindType::Number
+            )
             | (JsonView::Str(_), KindType::Str)
             | (JsonView::ArrayLen(_), KindType::Array)
             | (JsonView::ObjectLen(_), KindType::Object)
@@ -3688,27 +3812,25 @@ where
             receiver,
             call,
             optional,
-        } => {
-            match eval_view_kernel_inner(receiver, item, vm)? {
-                ViewKernelValue::View(view) if *optional && matches!(view.scalar(), JsonView::Null) => {
-                    Some(ViewKernelValue::Owned(Val::Null))
-                }
-                ViewKernelValue::View(view) => {
-                    match apply_view_projection(call.id(), &call.args, view)? {
-                        ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
-                        ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
-                    }
-                }
-                ViewKernelValue::Owned(value) if *optional && value.is_null() => {
-                    Some(ViewKernelValue::Owned(Val::Null))
-                }
-                ViewKernelValue::Owned(value) => call
-                    .try_apply(&value)
-                    .ok()
-                    .flatten()
-                    .map(ViewKernelValue::Owned),
+        } => match eval_view_kernel_inner(receiver, item, vm)? {
+            ViewKernelValue::View(view) if *optional && matches!(view.scalar(), JsonView::Null) => {
+                Some(ViewKernelValue::Owned(Val::Null))
             }
-        }
+            ViewKernelValue::View(view) => {
+                match apply_view_projection(call.id(), &call.args, view)? {
+                    ViewProjectionResult::View(view) => Some(ViewKernelValue::View(view)),
+                    ViewProjectionResult::Owned(value) => Some(ViewKernelValue::Owned(value)),
+                }
+            }
+            ViewKernelValue::Owned(value) if *optional && value.is_null() => {
+                Some(ViewKernelValue::Owned(Val::Null))
+            }
+            ViewKernelValue::Owned(value) => call
+                .try_apply(&value)
+                .ok()
+                .flatten()
+                .map(ViewKernelValue::Owned),
+        },
         BodyKernel::Compose { first, then } => match eval_view_kernel_inner(first, item, vm)? {
             ViewKernelValue::View(view) => eval_view_kernel_inner(then, &view, vm),
             ViewKernelValue::Owned(value) => eval_native_kernel_with_vm(then, &value, vm)
@@ -3756,8 +3878,9 @@ where
             to,
             step,
         } => match eval_view_kernel_inner(array, item, vm)? {
-            ViewKernelValue::View(view) => eval_slice_view(view, *from, *to, *step)
-                .map(ViewKernelValue::Owned),
+            ViewKernelValue::View(view) => {
+                eval_slice_view(view, *from, *to, *step).map(ViewKernelValue::Owned)
+            }
             ViewKernelValue::Owned(value) => Some(ViewKernelValue::Owned(eval_slice_native(
                 &value, *from, *to, *step,
             ))),
@@ -3768,6 +3891,26 @@ where
                 ViewKernelValue::View(view) => eval_dyn_index_view(view, &key),
                 ViewKernelValue::Owned(value) => {
                     Some(ViewKernelValue::Owned(eval_dyn_index_native(&value, &key)))
+                }
+            }
+        }
+        BodyKernel::InlineFilter { source, predicate } => {
+            match eval_view_kernel_inner(source, item, vm)? {
+                ViewKernelValue::View(view) => {
+                    let mut out = Vec::new();
+                    let mut iter = view.array_iter()?;
+                    iter.try_for_each(|child| {
+                        if view_predicate_matches(Some(predicate), &child, vm)? {
+                            out.push(view_kernel_view_to_owned(child));
+                        }
+                        Some(())
+                    })?;
+                    Some(ViewKernelValue::Owned(Val::arr(out)))
+                }
+                ViewKernelValue::Owned(value) => {
+                    eval_inline_filter_native_owned(&value, predicate, vm)
+                        .ok()
+                        .map(ViewKernelValue::Owned)
                 }
             }
         }
@@ -3842,11 +3985,14 @@ where
         }
         BodyKernel::Cast { expr, ty } => {
             let value = match eval_view_kernel_inner(expr, item, vm)? {
-                ViewKernelValue::View(view) => match crate::util::cast_json_view(view.scalar(), *ty)
-                {
-                    Some(result) => result.ok()?,
-                    None => crate::util::cast_val(&view_kernel_view_to_owned(view), *ty).ok()?,
-                },
+                ViewKernelValue::View(view) => {
+                    match crate::util::cast_json_view(view.scalar(), *ty) {
+                        Some(result) => result.ok()?,
+                        None => {
+                            crate::util::cast_val(&view_kernel_view_to_owned(view), *ty).ok()?
+                        }
+                    }
+                }
                 ViewKernelValue::Owned(value) => crate::util::cast_val(&value, *ty).ok()?,
             };
             Some(ViewKernelValue::Owned(value))
@@ -3871,17 +4017,15 @@ where
                 eval_view_kernel_inner(else_, item, vm)
             }
         }
-        BodyKernel::TryDefault { body, default } => {
-            match eval_view_kernel_inner(body, item, vm) {
-                Some(ViewKernelValue::View(view)) if !matches!(view.scalar(), JsonView::Null) => {
-                    Some(ViewKernelValue::View(view))
-                }
-                Some(ViewKernelValue::Owned(value)) if !value.is_null() => {
-                    Some(ViewKernelValue::Owned(value))
-                }
-                Some(_) | None => eval_view_kernel_inner(default, item, vm),
+        BodyKernel::TryDefault { body, default } => match eval_view_kernel_inner(body, item, vm) {
+            Some(ViewKernelValue::View(view)) if !matches!(view.scalar(), JsonView::Null) => {
+                Some(ViewKernelValue::View(view))
             }
-        }
+            Some(ViewKernelValue::Owned(value)) if !value.is_null() => {
+                Some(ViewKernelValue::Owned(value))
+            }
+            Some(_) | None => eval_view_kernel_inner(default, item, vm),
+        },
         BodyKernel::FieldCmpLit(key, op, lit) => {
             let lhs = item.field(key);
             Some(ViewKernelValue::Owned(Val::Bool(
@@ -4376,9 +4520,10 @@ mod tests {
 
     #[test]
     fn safe_cast_kernels_run_on_value_views() {
-        let expr =
-            parse(r#"{id: id as string, ok: score as bool, tags: tag as array, gone: tag as null}"#)
-            .expect("parse safe cast projection");
+        let expr = parse(
+            r#"{id: id as string, ok: score as bool, tags: tag as array, gone: tag as null}"#,
+        )
+        .expect("parse safe cast projection");
         let program = Compiler::compile(&expr, "safe-cast");
         let kernel = BodyKernel::classify(&program);
 
@@ -4452,6 +4597,28 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"label": "Ada", "bonus": 0})
+        );
+    }
+
+    #[test]
+    fn inline_filter_kernels_run_on_value_views() {
+        let expr = parse(r#"{high: scores{@ > 10}, first_high: scores{@ > 10}[0]}"#)
+            .expect("parse inline filter projection");
+        let program = Compiler::compile(&expr, "inline-filter");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({
+            "scores": [3, 11, 7, 18]
+        }));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("inline filter output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"high": [11, 18], "first_high": 11})
         );
     }
 

@@ -2470,7 +2470,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.data.map({...base, ...**delta}).last()"#).unwrap();
+        let out = j
+            .collect(r#"$.data.map({...base, ...**delta}).last()"#)
+            .unwrap();
 
         assert_eq!(
             out,
@@ -2636,6 +2638,29 @@ mod tests {
     }
 
     #[test]
+    fn view_inline_filter_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"scores":[3,11,7,18]},{"scores":[1,2,30]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.map({high: scores{@ > 10}, first_high: scores{@ > 10}[0]})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"high": [11, 18], "first_high": 11},
+                {"high": [30], "first_high": 30}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_dynamic_index_projection_stays_tape_streamed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"obj":{"a":"alpha","b":"beta"},"key":"b","items":[10,20,30],"i":1},{"obj":{"x":"ex","y":"why"},"key":"x","items":[3,4],"i":0}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
@@ -2643,7 +2668,9 @@ mod tests {
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
-        let out = j.collect(r#"$.data.map({picked: obj[key], numbered: items[i]})"#).unwrap();
+        let out = j
+            .collect(r#"$.data.map({picked: obj[key], numbered: items[i]})"#)
+            .unwrap();
 
         assert_eq!(
             out,
@@ -2659,13 +2686,16 @@ mod tests {
     #[test]
     fn view_slice_projection_stays_tape_streamed() {
         let j = Jetro::from_bytes(
-            br#"{"data":[{"items":[10,20,30,40]},{"items":[1,2,3]}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+            br#"{"data":[{"items":[10,20,30,40]},{"items":[1,2,3]}],"unused":{"large":[1,2,3,4]}}"#
+                .to_vec(),
         )
         .unwrap();
         j.reset_tape_materialized_subtrees();
 
         let out = j
-            .collect(r#"$.data.map({prefix: items[:2], middle: items[1:4:2], reverse: items[::-1]})"#)
+            .collect(
+                r#"$.data.map({prefix: items[:2], middle: items[1:4:2], reverse: items[::-1]})"#,
+            )
             .unwrap();
 
         assert_eq!(
