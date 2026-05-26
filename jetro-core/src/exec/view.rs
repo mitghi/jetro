@@ -1614,6 +1614,15 @@ where
             .or_else(|| body_sink.empty_stream_result());
     }
 
+    if let Some(count) = pipeline::ViewStageCapability::deterministic_cardinality_without_source_len(
+        stages,
+        stage_kernels,
+    ) {
+        if let Some(result) = sink.result_from_known_cardinality(count, false, sink_kernels) {
+            return Some(result);
+        }
+    }
+
     let source_len = if sink.can_finish_from_known_source_cardinality(
         stages,
         stage_kernels,
@@ -6895,6 +6904,34 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(serde_json::Value::from(out), serde_json::json!([9]));
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_synthetic_count_after_empty_prefix_skips_source_len() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Append,
+                    crate::builtins::BuiltinArgs::Val(Val::Int(9)),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Reducer(ReducerSpec::count()),
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(1));
         assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);

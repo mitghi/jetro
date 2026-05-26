@@ -1242,6 +1242,34 @@ impl ViewStageCapability {
         Self::deterministic_prefix_cardinality_after(stages, stage_kernels, source_len)
     }
 
+    /// Returns exact output cardinality when a deterministic stage in the
+    /// prefix makes the remaining result independent of source cardinality.
+    pub(crate) fn deterministic_cardinality_without_source_len(
+        stages: &[Self],
+        stage_kernels: &[BodyKernel],
+    ) -> Option<usize> {
+        let mut count = None::<usize>;
+        for stage in stages {
+            if let Some(current) = count {
+                count = Some(stage.deterministic_cardinality_after(stage_kernels, current)?);
+                continue;
+            }
+            match stage {
+                Self::Take(0) => count = Some(0),
+                Self::Filter { .. } | Self::TakeWhile { .. } | Self::DropWhile { .. } => {
+                    if matches!(
+                        stage.constant_access_effect(stage_kernels),
+                        ViewStageConstantEffect::Empty
+                    ) {
+                        count = Some(0);
+                    }
+                }
+                _ => {}
+            }
+        }
+        count
+    }
+
     /// Returns true when the prefix has fully deterministic cardinality effects,
     /// so asking a source for its cardinality can produce an exact downstream
     /// row count without scanning.
@@ -2516,6 +2544,10 @@ mod tests {
         assert!(!ViewStageCapability::prefix_forces_empty(&revived, &[]));
         assert_eq!(
             ViewStageCapability::deterministic_prefix_cardinality_after(&revived, &[], 10),
+            Some(1)
+        );
+        assert_eq!(
+            ViewStageCapability::deterministic_cardinality_without_source_len(&revived, &[]),
             Some(1)
         );
 
