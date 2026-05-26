@@ -2566,6 +2566,29 @@ mod tests {
     }
 
     #[test]
+    fn view_optional_field_projection_stays_tape_streamed() {
+        let j = Jetro::from_bytes(
+            br#"{"data":[{"profile":{"name":"Ada"},"flag":true},{"profile":{},"flag":false}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),
+        )
+        .unwrap();
+        j.reset_tape_materialized_subtrees();
+
+        let out = j
+            .collect(r#"$.data.map({name: profile.name?, missing: absent.name?, active: flag? == true})"#)
+            .unwrap();
+
+        assert_eq!(
+            out,
+            json!([
+                {"name": "Ada", "missing": null, "active": true},
+                {"name": null, "missing": null, "active": false}
+            ])
+        );
+        assert!(!j.root_val_is_materialized());
+        assert_eq!(j.tape_materialized_subtrees(), 0);
+    }
+
+    #[test]
     fn view_dynamic_index_projection_stays_tape_streamed() {
         let j = Jetro::from_bytes(
             br#"{"data":[{"obj":{"a":"alpha","b":"beta"},"key":"b","items":[10,20,30],"i":1},{"obj":{"x":"ex","y":"why"},"key":"x","items":[3,4],"i":0}],"unused":{"large":[1,2,3,4]}}"#.to_vec(),

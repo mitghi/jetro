@@ -837,7 +837,7 @@ fn classify_chain_expr(base: &Expr, steps: &[Step]) -> BodyKernel {
 
     for step in steps {
         match step {
-            Step::Field(key) => {
+            Step::Field(key) | Step::OptField(key) => {
                 receiver = match receiver {
                     BodyKernel::Current => BodyKernel::FieldRead(Arc::from(key.as_str())),
                     BodyKernel::FieldRead(first) => {
@@ -1745,18 +1745,18 @@ impl BodyKernel {
                     };
                 }
             }
-            [Opcode::PushCurrent, Opcode::GetField(k)]
-            | [Opcode::GetField(k)]
+            [Opcode::PushCurrent, Opcode::GetField(k) | Opcode::OptField(k)]
+            | [Opcode::GetField(k) | Opcode::OptField(k)]
             | [Opcode::LoadIdent(k)] => return Self::FieldRead(k.clone()),
             [Opcode::PushCurrent, Opcode::FieldChain(fc)] | [Opcode::FieldChain(fc)] => {
                 return Self::FieldChain(fc.keys.clone())
             }
             [Opcode::LoadIdent(k1), rest @ ..]
-                if rest.iter().all(|o| matches!(o, Opcode::GetField(_))) =>
+                if rest.iter().all(|o| matches!(o, Opcode::GetField(_) | Opcode::OptField(_))) =>
             {
                 let mut keys = vec![k1.clone()];
                 for o in rest {
-                    if let Opcode::GetField(k) = o {
+                    if let Opcode::GetField(k) | Opcode::OptField(k) = o {
                         keys.push(k.clone());
                     }
                 }
@@ -1785,7 +1785,9 @@ impl BodyKernel {
                 }
             }
             let single_key = match &rest[0] {
-                Opcode::LoadIdent(k) | Opcode::GetField(k) => Some(k.clone()),
+                Opcode::LoadIdent(k) | Opcode::GetField(k) | Opcode::OptField(k) => {
+                    Some(k.clone())
+                }
                 _ => None,
             };
             if let Some(k) = single_key {
@@ -2064,7 +2066,7 @@ fn classify_rpn_structural_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKerne
         match op {
             Opcode::PushCurrent => stack.push(BodyKernel::Current),
             Opcode::LoadIdent(key) => stack.push(BodyKernel::FieldRead(Arc::clone(key))),
-            Opcode::GetField(key) => {
+            Opcode::GetField(key) | Opcode::OptField(key) => {
                 let receiver = stack.pop().unwrap_or(BodyKernel::Current);
                 stack.push(compose_field_kernel(receiver, Arc::clone(key)));
             }
@@ -2231,7 +2233,9 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
     }
 
     match ops {
-        [Opcode::LoadIdent(k) | Opcode::GetField(k)] => Some(BodyKernel::FieldRead(k.clone())),
+        [Opcode::LoadIdent(k) | Opcode::GetField(k) | Opcode::OptField(k)] => {
+            Some(BodyKernel::FieldRead(k.clone()))
+        }
         [Opcode::FieldChain(fc)] => Some(BodyKernel::FieldChain(fc.keys.clone())),
         [receiver @ .., Opcode::GetIndex(index)] => {
             let receiver = if receiver.is_empty() {
@@ -2248,12 +2252,12 @@ fn classify_structural_view_kernel(ops: &[crate::vm::Opcode]) -> Option<BodyKern
             ))
         }
         [Opcode::LoadIdent(k1), rest @ ..]
-            if rest.iter().all(|op| matches!(op, Opcode::GetField(_))) =>
+            if rest.iter().all(|op| matches!(op, Opcode::GetField(_) | Opcode::OptField(_))) =>
         {
             let mut keys = Vec::with_capacity(rest.len() + 1);
             keys.push(k1.clone());
             for op in rest {
-                if let Opcode::GetField(k) = op {
+                if let Opcode::GetField(k) | Opcode::OptField(k) = op {
                     keys.push(k.clone());
                 }
             }
@@ -4304,6 +4308,26 @@ mod tests {
         assert_eq!(
             serde_json::Value::from(out),
             serde_json::json!({"id": "42", "ok": true, "tags": ["sf"], "gone": null})
+        );
+    }
+
+    #[test]
+    fn optional_field_kernels_run_on_value_views() {
+        let expr = parse(r#"{name: profile.name?, missing: absent.name?, active: flag? == true}"#)
+            .expect("parse optional field projection");
+        let program = Compiler::compile(&expr, "optional-field");
+        let kernel = BodyKernel::classify(&program);
+
+        assert!(matches!(kernel, BodyKernel::Object(_)), "{kernel:#?}");
+        assert!(kernel.is_view_native(), "{kernel:#?}");
+
+        let value = Val::from(&serde_json::json!({"profile": {"name": "Ada"}, "flag": true}));
+        let out = owned_value(eval_view_kernel(&kernel, &ValView::new(&value)))
+            .expect("optional field output");
+
+        assert_eq!(
+            serde_json::Value::from(out),
+            serde_json::json!({"name": "Ada", "missing": null, "active": true})
         );
     }
 
