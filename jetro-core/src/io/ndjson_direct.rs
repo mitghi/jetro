@@ -309,6 +309,9 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             ))
         }
         PlanNode::Pipeline { source, body } => {
+            if let Some(plan) = direct_byte_object_items_pipeline_plan(plan, source, body) {
+                return Some(plan);
+            }
             direct_byte_plain_sink_pipeline_plan(plan, source, body)
         }
         _ => {
@@ -327,6 +330,29 @@ fn direct_byte_plan_from_plan(plan: &QueryPlan) -> Option<NdjsonDirectBytePlan> 
             None
         }
     }
+}
+
+fn direct_byte_object_items_pipeline_plan(
+    plan: &QueryPlan,
+    source: &crate::ir::physical::PipelinePlanSource,
+    body: &crate::exec::pipeline::PipelineBody,
+) -> Option<NdjsonDirectBytePlan> {
+    if !matches!(body.sink, crate::exec::pipeline::Sink::Collect) {
+        return None;
+    }
+    let [crate::exec::pipeline::Stage::ObjectItems(projection)] = body.stages.as_slice() else {
+        return None;
+    };
+    let steps = pipeline_source_to_steps(plan, source)?;
+    byte_path_has_root_field(&steps)
+        .then_some(())
+        .or_else(|| byte_path_is_root(&steps).then_some(()))?;
+    Some(NdjsonDirectBytePlan::Expr(
+        NdjsonDirectByteExpr::ObjectItems {
+            path: steps,
+            projection: *projection,
+        },
+    ))
 }
 
 fn direct_byte_plain_sink_pipeline_plan(
@@ -1556,7 +1582,7 @@ fn kernel_to_physical_path(
             let mut steps = kernel_to_physical_path(array)?;
             steps.push(PhysicalPathStep::Index(match selector {
                 ArraySelector::First => 0,
-                ArraySelector::Last => -1,
+                ArraySelector::Last => return None,
                 ArraySelector::Nth(index) => i64::try_from(*index).ok()?,
             }));
             Some(steps)
@@ -1966,8 +1992,7 @@ mod tests {
 
     #[test]
     fn direct_tape_predicate_accepts_array_selector_paths() {
-        let cmp = crate::parse::parser::parse(r#"tags.first().name == "sf""#)
-            .expect("parse cmp");
+        let cmp = crate::parse::parser::parse(r#"tags.first().name == "sf""#).expect("parse cmp");
         let cmp_index =
             crate::parse::parser::parse(r#"tags[0].name == "sf""#).expect("parse index cmp");
         let truthy = crate::parse::parser::parse("attrs.first().value").expect("parse path");
@@ -2080,9 +2105,8 @@ mod tests {
 
     #[test]
     fn recognizes_array_find_indexed_field_comparison_predicate() {
-        let expr =
-            crate::parse::parser::parse(r#"@.groups.find(@.tags.first().name == "sf")"#)
-                .expect("parse");
+        let expr = crate::parse::parser::parse(r#"@.groups.find(@.tags.first().name == "sf")"#)
+            .expect("parse");
         let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
             direct_array_any_predicate_expr(&expr)
         else {
@@ -2108,8 +2132,7 @@ mod tests {
 
     #[test]
     fn recognizes_array_find_indexed_truthy_path_predicate() {
-        let expr =
-            crate::parse::parser::parse(r#"@.groups.find(@.tags[0].name)"#).expect("parse");
+        let expr = crate::parse::parser::parse(r#"@.groups.find(@.tags[0].name)"#).expect("parse");
         let Some(NdjsonDirectPredicate::ArrayAny { predicate, .. }) =
             direct_array_any_predicate_expr(&expr)
         else {

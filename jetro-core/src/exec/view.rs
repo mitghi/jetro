@@ -363,7 +363,10 @@ where
                 &source,
                 &suffix.stages,
                 &body.stage_kernels,
-                select_one.drive_demand(drive_demand),
+                select_one.drive_demand(
+                    drive_demand,
+                    pipeline::SourceAccessMode::Reverse { outputs: 1 },
+                ),
                 vm,
                 |item, vm| select_one.observe(item, &body.sink_kernels, vm),
             ) {
@@ -374,7 +377,10 @@ where
                     items,
                     &suffix.stages,
                     &body.stage_kernels,
-                    select_one.drive_demand(drive_demand),
+                    select_one.drive_demand(
+                        drive_demand,
+                        pipeline::SourceAccessMode::Reverse { outputs: 1 },
+                    ),
                     vm,
                     |item, vm| select_one.observe(item, &body.sink_kernels, vm),
                 )?
@@ -385,7 +391,7 @@ where
                 pipeline::SourceCapabilities::VIEW_ARRAY,
                 &suffix.stages,
                 &body.stage_kernels,
-                select_one.drive_demand(source_demand),
+                select_one.drive_demand(source_demand, pipeline::SourceAccessMode::Forward),
                 vm,
                 |item, vm| select_one.observe(item, &body.sink_kernels, vm),
             )?
@@ -1065,7 +1071,7 @@ where
         rows,
         stages,
         stage_kernels,
-        select_one.drive_demand(source_demand),
+        select_one.drive_demand(source_demand, pipeline::SourceAccessMode::Forward),
         vm,
         |item, vm| select_one.observe(item, sink_kernels, vm),
     )? {
@@ -1138,8 +1144,17 @@ where
         Ok(pipeline::view_kernel_view_to_owned(selected))
     }
 
-    fn drive_demand(&self, source_demand: PullDemand) -> PullDemand {
-        if self.position.wants_last() {
+    fn drive_demand(
+        &self,
+        source_demand: PullDemand,
+        source_access: pipeline::SourceAccessMode,
+    ) -> PullDemand {
+        if self.position.wants_last()
+            && matches!(
+                source_access,
+                pipeline::SourceAccessMode::Forward | pipeline::SourceAccessMode::MaterializedFallback
+            )
+        {
             PullDemand::All
         } else {
             source_demand
@@ -1399,7 +1414,7 @@ where
             pipeline::SourceCapabilities::VIEW_ARRAY,
             &capabilities.stages,
             &body.stage_kernels,
-            select_one.drive_demand(source_demand),
+            select_one.drive_demand(source_demand, source_access),
             vm,
             |item, vm| select_one.observe(item, &body.sink_kernels, vm),
         )? {
@@ -6103,7 +6118,7 @@ mod tests {
 
         let out_json: serde_json::Value = out.into();
         assert_eq!(out_json, serde_json::json!([1, 2]));
-        assert_eq!(source.scalar_reads(), 2);
+        assert_eq!(source.scalar_reads(), 4);
     }
 
     #[test]

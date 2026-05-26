@@ -132,6 +132,13 @@ impl SourceCapabilities {
         stage_kernels: &[BodyKernel],
     ) -> SourceAccessMode {
         let access_stages = ViewStageCapability::source_access_stages(stages, stage_kernels);
+        if let PullDemand::UntilOutput(outputs) = demand {
+            if let Some(inputs) =
+                ViewStageCapability::bounded_inputs_for_outputs(access_stages.as_ref(), outputs)
+            {
+                return SourceAccessMode::ForwardBounded(inputs);
+            }
+        }
         self.choose_view_access(demand, access_stages.as_ref())
     }
 
@@ -1308,6 +1315,48 @@ impl ViewStageCapability {
             }
         }
         rewritten.map_or(Cow::Borrowed(stages), Cow::Owned)
+    }
+
+    /// Returns a conservative input bound that is sufficient to produce
+    /// `outputs` downstream rows for deterministic, non-expanding prefixes.
+    pub(crate) fn bounded_inputs_for_outputs(stages: &[Self], outputs: usize) -> Option<usize> {
+        let mut needed = outputs;
+        for stage in stages.iter().rev() {
+            match stage {
+                Self::BuiltinProjection { .. } | Self::Map { .. } | Self::ObjectLambda { .. } => {}
+                Self::Take(n) => needed = needed.min(*n),
+                Self::Skip(n) => needed = needed.saturating_add(*n),
+                Self::Filter { .. } | Self::TakeWhile { .. } | Self::DropWhile { .. } => {
+                    return None;
+                }
+                Self::Compact
+                | Self::RemoveValue(_)
+                | Self::FlatMap { .. }
+                | Self::ObjectItems { .. }
+                | Self::Flatten { .. }
+                | Self::Explode { .. }
+                | Self::Enumerate
+                | Self::Pairwise
+                | Self::NumericScan(_)
+                | Self::NumericFullInput(_)
+                | Self::Lag { .. }
+                | Self::Lead { .. }
+                | Self::Rolling { .. }
+                | Self::Chunk { .. }
+                | Self::Window { .. }
+                | Self::StringExpand { .. }
+                | Self::Distinct { .. }
+                | Self::KeyedReduce { .. }
+                | Self::Partition { .. }
+                | Self::SetFilter { .. }
+                | Self::SetUnion { .. }
+                | Self::JoinString { .. }
+                | Self::ZipStatic { .. }
+                | Self::AppendValue(_)
+                | Self::PrependValue(_) => return None,
+            }
+        }
+        Some(needed)
     }
 }
 
