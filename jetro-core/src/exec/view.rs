@@ -1396,6 +1396,11 @@ where
         Some(Err(err)) => return Some(Err(err)),
         None => return None,
     };
+    if let Some(result) =
+        direct_synthetic_select_one_result::<V>(body, &capabilities.stages, &sink, vm)
+    {
+        return Some(result);
+    }
     if let Some(result) = direct_sink_result_from_source_len(
         &source,
         &capabilities.stages,
@@ -1473,6 +1478,57 @@ where
     }
 
     Some(sink_acc.finish_result(false))
+}
+
+fn direct_synthetic_select_one_result<'a, V>(
+    body: &pipeline::PipelineBody,
+    stages: &[pipeline::ViewStageCapability],
+    sink: &pipeline::ViewSinkCapability,
+    vm: &mut VM,
+) -> Option<Result<Val, EvalError>>
+where
+    V: FrontierBaseView<'a>,
+{
+    let (position, predicate_kernel, _) = select_one_sink_contract(sink)?;
+    if predicate_kernel.is_some() {
+        return None;
+    }
+
+    let (synthetic_idx, value) =
+        stages
+            .iter()
+            .enumerate()
+            .rfind(|(_, stage)| match (position, *stage) {
+                (
+                    crate::builtins::BuiltinSelectionPosition::Last,
+                    pipeline::ViewStageCapability::AppendValue(_),
+                )
+                | (
+                    crate::builtins::BuiltinSelectionPosition::First,
+                    pipeline::ViewStageCapability::PrependValue(_),
+                ) => true,
+                _ => false,
+            })?;
+    let value = match value {
+        pipeline::ViewStageCapability::AppendValue(value)
+        | pipeline::ViewStageCapability::PrependValue(value) => value.clone(),
+        _ => return None,
+    };
+    let suffix = &stages[synthetic_idx + 1..];
+    if !pipeline::ViewStageCapability::all_preserve_cardinality(suffix) {
+        return None;
+    }
+
+    let rows = std::iter::once(FrontierRow::<V>::Owned(value));
+    run_frontier_rows_select_one_suffix(
+        rows,
+        suffix,
+        sink,
+        PullDemand::FirstInput(1),
+        &body.stage_kernels,
+        &body.sink_kernels,
+        vm,
+    )
 }
 
 fn collect_receiver_nested_body_views<'a, V>(
@@ -6663,6 +6719,62 @@ mod tests {
         let out = super::run_full(source.clone(), &body).unwrap().unwrap();
 
         assert_eq!(out, Val::Int(5));
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_synthetic_append_last_skips_source_prefix() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Append,
+                    crate::builtins::BuiltinArgs::Val(Val::Int(99)),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::Last),
+            stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(99));
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_synthetic_prepend_first_skips_source_prefix() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Map(
+                    Arc::new(crate::vm::Program::new(Vec::new(), "")),
+                    crate::builtins::BuiltinViewStage::Map,
+                ),
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Prepend,
+                    crate::builtins::BuiltinArgs::Val(Val::Int(7)),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Terminal(crate::builtins::BuiltinMethod::First),
+            stage_kernels: vec![BodyKernel::Current, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(out, Val::Int(7));
+        assert_eq!(source.scalar_reads(), 0);
         assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
