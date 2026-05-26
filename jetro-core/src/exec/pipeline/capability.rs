@@ -1258,15 +1258,9 @@ impl ViewStageCapability {
         for stage in stages {
             match stage {
                 Self::Take(n) => {
-                    if *n == 0 {
-                        return true;
-                    }
                     upper_bound = Some(upper_bound.map_or(*n, |bound| bound.min(*n)));
                 }
                 Self::Skip(n) => {
-                    if upper_bound.is_some_and(|bound| *n >= bound) {
-                        return true;
-                    }
                     upper_bound = upper_bound.map(|bound| bound.saturating_sub(*n));
                 }
                 Self::Filter { .. } | Self::TakeWhile { .. } | Self::DropWhile { .. } => {
@@ -1274,10 +1268,13 @@ impl ViewStageCapability {
                         stage.constant_access_effect(stage_kernels),
                         ViewStageConstantEffect::Empty
                     ) {
-                        return true;
+                        upper_bound = Some(0);
                     }
                 }
                 Self::BuiltinProjection { .. } | Self::Map { .. } | Self::ObjectLambda { .. } => {}
+                Self::AppendValue(_) | Self::PrependValue(_) => {
+                    upper_bound = upper_bound.map(|bound| bound.saturating_add(1));
+                }
                 Self::Compact
                 | Self::RemoveValue(_)
                 | Self::FlatMap { .. }
@@ -1300,12 +1297,10 @@ impl ViewStageCapability {
                 | Self::SetFilter { .. }
                 | Self::SetUnion { .. }
                 | Self::JoinString { .. }
-                | Self::ZipStatic { .. }
-                | Self::AppendValue(_)
-                | Self::PrependValue(_) => return false,
+                | Self::ZipStatic { .. } => return false,
             }
         }
-        false
+        upper_bound == Some(0)
     }
 
     /// Rewrites a view-stage prefix for source-access selection by removing
@@ -2513,6 +2508,16 @@ mod tests {
             &false_filter,
             &[BodyKernel::ConstBool(false)]
         ));
+
+        let revived = [
+            ViewStageCapability::Take(0),
+            ViewStageCapability::AppendValue(Val::Int(9)),
+        ];
+        assert!(!ViewStageCapability::prefix_forces_empty(&revived, &[]));
+        assert_eq!(
+            ViewStageCapability::deterministic_prefix_cardinality_after(&revived, &[], 10),
+            Some(1)
+        );
 
         let synthetic = [
             ViewStageCapability::PrependValue(Val::Int(0)),

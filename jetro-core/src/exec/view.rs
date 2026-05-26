@@ -2152,7 +2152,14 @@ where
     F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
     if source_demand.is_zero() {
-        return Some(Ok(()));
+        return drive_frontier_iter(
+            std::iter::empty::<FrontierRow<V>>(),
+            stages,
+            stage_kernels,
+            source_demand,
+            vm,
+            observe,
+        );
     }
     if matches!(
         stages.first(),
@@ -2191,10 +2198,27 @@ where
                 let items = source.array_child_range_iter(start, end);
                 drive_view_iter(items, stages, stage_kernels, PullDemand::All, vm, observe)
             }
-            pipeline::SourceIndexedAccess::Empty => Some(Ok(())),
+            pipeline::SourceIndexedAccess::Empty => drive_frontier_iter(
+                std::iter::empty::<FrontierRow<V>>(),
+                stages,
+                stage_kernels,
+                PullDemand::FirstInput(0),
+                vm,
+                observe,
+            ),
         };
     }
     if let Some(inputs) = access.forward_bound() {
+        if inputs == 0 {
+            return drive_frontier_iter(
+                std::iter::empty::<FrontierRow<V>>(),
+                stages,
+                stage_kernels,
+                PullDemand::FirstInput(0),
+                vm,
+                observe,
+            );
+        }
         let items = source.array_iter()?;
         return drive_view_iter(
             items,
@@ -2258,13 +2282,14 @@ where
     let mut iter = items.into_iter();
     let mut exhausted = false;
     loop {
+        if source_demand.input_satisfied_by(pulled_inputs) {
+            exhausted = true;
+            break;
+        }
         let Some(row) = iter.next() else {
             exhausted = true;
             break;
         };
-        if source_demand.input_satisfied_by(pulled_inputs) {
-            break;
-        }
         pulled_inputs += 1;
 
         let flow = match drive_view_item(
@@ -2915,7 +2940,21 @@ where
             observe,
         ),
         ViewStageFlow::Drop => Some(Ok(ViewDriveFlow::Continue)),
-        ViewStageFlow::Stop => Some(Ok(ViewDriveFlow::Stop)),
+        ViewStageFlow::Stop => {
+            if let Err(err) = flush_view_stage_tails_from(
+                stage_idx + 1,
+                stages,
+                op_state,
+                stage_kernels,
+                source_demand,
+                emitted_outputs,
+                vm,
+                observe,
+            )? {
+                return Some(Err(err));
+            }
+            Some(Ok(ViewDriveFlow::Stop))
+        }
     }
 }
 
@@ -4908,7 +4947,33 @@ where
     V: FrontierBaseView<'a>,
     F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
 {
-    for stage_idx in 0..stages.len() {
+    flush_view_stage_tails_from(
+        0,
+        stages,
+        op_state,
+        stage_kernels,
+        source_demand,
+        emitted_outputs,
+        vm,
+        observe,
+    )
+}
+
+fn flush_view_stage_tails_from<'a, V, F>(
+    start_stage_idx: usize,
+    stages: &[pipeline::ViewStageCapability],
+    op_state: &mut [ViewStageState],
+    stage_kernels: &[pipeline::BodyKernel],
+    source_demand: PullDemand,
+    emitted_outputs: &mut usize,
+    vm: &mut VM,
+    observe: &mut F,
+) -> Option<Result<(), EvalError>>
+where
+    V: FrontierBaseView<'a>,
+    F: FnMut(&FrontierRow<V>, &mut VM) -> Option<Result<ViewRowAction, EvalError>>,
+{
+    for stage_idx in start_stage_idx..stages.len() {
         let mut tail_values = match stages[stage_idx] {
             pipeline::ViewStageCapability::Chunk { .. } => {
                 let buffer = op_state.get_mut(stage_idx)?.values();
@@ -6804,6 +6869,34 @@ mod tests {
         assert_eq!(serde_json::Value::from(out), serde_json::json!([0, 1, 2]));
         assert_eq!(source.array_iter_reads(), 1);
         assert_eq!(source.scalar_reads(), 2);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
+    fn view_synthetic_append_after_empty_prefix_is_not_elided() {
+        let source = CountingView::root(&[1, 2, 3]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 0,
+                },
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Append,
+                    crate::builtins::BuiltinArgs::Val(Val::Int(9)),
+                )),
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([9]));
+        assert_eq!(source.scalar_reads(), 0);
+        assert_eq!(source.array_iter_reads(), 0);
         assert_eq!(source.materialize_reads(), 0);
     }
 
