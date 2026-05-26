@@ -6780,6 +6780,34 @@ mod tests {
     }
 
     #[test]
+    fn view_synthetic_prepend_take_bounds_source_reads() {
+        let source = CountingView::root(&[1, 2, 3, 4, 5]);
+        let body = PipelineBody {
+            stages: vec![
+                Stage::Builtin(crate::builtins::BuiltinCall::new(
+                    crate::builtins::BuiltinMethod::Prepend,
+                    crate::builtins::BuiltinArgs::Val(Val::Int(0)),
+                )),
+                Stage::UsizeBuiltin {
+                    method: crate::builtins::BuiltinMethod::Take,
+                    value: 3,
+                },
+            ],
+            stage_exprs: Vec::new(),
+            sink: Sink::Collect,
+            stage_kernels: vec![BodyKernel::Generic, BodyKernel::Generic],
+            sink_kernels: Vec::new(),
+        };
+
+        let out = super::run_full(source.clone(), &body).unwrap().unwrap();
+
+        assert_eq!(serde_json::Value::from(out), serde_json::json!([0, 1, 2]));
+        assert_eq!(source.array_iter_reads(), 1);
+        assert_eq!(source.scalar_reads(), 2);
+        assert_eq!(source.materialize_reads(), 0);
+    }
+
+    #[test]
     fn view_full_runner_find_one_avoids_materializing_scalar_match() {
         let source = CountingView::root(&[1, 2, 3, 4]);
         let body = PipelineBody {

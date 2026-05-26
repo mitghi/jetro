@@ -548,6 +548,33 @@ mod source_capability_tests {
     }
 
     #[test]
+    fn source_capabilities_bound_synthetic_prepend_and_append_prefixes() {
+        let kernels = [BodyKernel::Generic, BodyKernel::Generic];
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_view_access_for_kernels(
+                PullDemand::UntilOutput(3),
+                &[
+                    ViewStageCapability::PrependValue(Val::Int(0)),
+                    ViewStageCapability::Take(3),
+                ],
+                &kernels,
+            ),
+            SourceAccessMode::ForwardBounded(2)
+        );
+        assert_eq!(
+            SourceCapabilities::VIEW_ARRAY.choose_view_access_for_kernels(
+                PullDemand::UntilOutput(3),
+                &[
+                    ViewStageCapability::AppendValue(Val::Int(9)),
+                    ViewStageCapability::Take(3),
+                ],
+                &kernels,
+            ),
+            SourceAccessMode::ForwardBounded(3)
+        );
+    }
+
+    #[test]
     fn indexed_only_sources_seek_single_positional_demands_and_materialize_ranges() {
         let indexed_only = SourceCapabilities {
             forward_stream: false,
@@ -1165,6 +1192,7 @@ impl ViewStageCapability {
                 let drop_all = stage_kernels.get(*kernel)?.constant_truthy()?;
                 Some(if drop_all { 0 } else { count })
             }
+            Self::AppendValue(_) | Self::PrependValue(_) => Some(count.saturating_add(1)),
             Self::Compact
             | Self::RemoveValue(_)
             | Self::FlatMap { .. }
@@ -1187,9 +1215,7 @@ impl ViewStageCapability {
             | Self::SetFilter { .. }
             | Self::SetUnion { .. }
             | Self::JoinString { .. }
-            | Self::ZipStatic { .. }
-            | Self::AppendValue(_)
-            | Self::PrependValue(_) => None,
+            | Self::ZipStatic { .. } => None,
         }
     }
 
@@ -1329,6 +1355,8 @@ impl ViewStageCapability {
                 Self::Filter { .. } | Self::TakeWhile { .. } | Self::DropWhile { .. } => {
                     return None;
                 }
+                Self::AppendValue(_) => {}
+                Self::PrependValue(_) => needed = needed.saturating_sub(1),
                 Self::Compact
                 | Self::RemoveValue(_)
                 | Self::FlatMap { .. }
@@ -1351,9 +1379,7 @@ impl ViewStageCapability {
                 | Self::SetFilter { .. }
                 | Self::SetUnion { .. }
                 | Self::JoinString { .. }
-                | Self::ZipStatic { .. }
-                | Self::AppendValue(_)
-                | Self::PrependValue(_) => return None,
+                | Self::ZipStatic { .. } => return None,
             }
         }
         Some(needed)
@@ -2487,6 +2513,15 @@ mod tests {
             &false_filter,
             &[BodyKernel::ConstBool(false)]
         ));
+
+        let synthetic = [
+            ViewStageCapability::PrependValue(Val::Int(0)),
+            ViewStageCapability::AppendValue(Val::Int(9)),
+        ];
+        assert_eq!(
+            ViewStageCapability::deterministic_prefix_cardinality_after(&synthetic, &[], 10),
+            Some(12)
+        );
 
         let unsupported = [ViewStageCapability::Compact];
         assert_eq!(
